@@ -5,71 +5,120 @@ import pandas as pd
 
 
 connectome_folder = Path('/Users/mcreamer/Documents/drosophila_connectome')
-visual_neuron_file = connectome_folder / 'visual_neuron_types.csv'
-synapse_counts_file = connectome_folder / 'connections_princeton.csv'
+synapse_count_dtype = np.float64
+root_id_dtype = np.int64
+excitatory_nt = ['ACH']
+inhibitory_nt = ['GABA', 'GLUT']
+fly_eye = 'right'
 
-# each neuron has a unique "root id" which we can load from this file
-# this file only includes neurons that make a synapse in the visual system
-visual_neurons_df = pd.read_csv(visual_neuron_file, dtype={"root_id": np.int64})
-neuron_ids = visual_neurons_df.root_id.values
-neuron_cell_type = visual_neurons_df.type.values
-# category specifies whether the neuron is intrinsic (all synapses in the optic lobes)
-# or has some synapses outside the optic lobes
-category = visual_neurons_df.category.values
+# --- data sets ---
+# each neuron in the drosophila connectome has a unique "root id"
+# This data set that includes the root ID for each visual neuron, whether that neuron is intrinsic to the optic lobes
+# and whether that neuron is on the right or left side
+visual_neurons_df = pd.read_csv(connectome_folder / 'visual_neuron_types.csv', dtype={"root_id": root_id_dtype})
 
+# data set that specifies the number of synaptic contacts between one individual neuron and another
+# this also specifies the neurotransmitter used as the synapse which we'll use to estimate synapse sign
+synaptic_connections_df = pd.read_csv(connectome_folder / 'connections_princeton.csv',
+                                      dtype={"pre_root_id": root_id_dtype,
+                                             "post_root_id": root_id_dtype,
+                                             "syn_count": synapse_count_dtype}
+                                      )
 
-# keep only the intrinsic visual neurons
-is_intrinsic = category == 'intrinsic'
-neuron_ids = neuron_ids[is_intrinsic]
-neuron_cell_type = neuron_cell_type[is_intrinsic]
+# The optic lobes are organized into retinotopic visual columns and this data set specifies the column id and location
+# of each cell on a hexagonal grid
+columns_df = pd.read_csv(connectome_folder / 'column_assignment.csv', dtype={"root_id": root_id_dtype})
 
-# load synaptic connections and only include those that intrinsic to the optic lobes
-# synapse counts specifies the number of synaptic contacts between one individual neuron and another
-# we change the order of the columns so that they are [presynaptic neuron, postsynaptic neuron, synapse counts]
-synaptic_connections_df = pd.read_csv(synapse_counts_file, dtype={"pre_root_id": np.int64, "post_root_id": np.int64, "syn_count": np.int16})
-synaptic_connections_df = synaptic_connections_df[synaptic_connections_df['pre_root_id'].isin(neuron_ids)]
-synaptic_connections_df = synaptic_connections_df[synaptic_connections_df['post_root_id'].isin(neuron_ids)]
+# --- process the incoming data ---
+# restrict neurons to intrinsic visual neurons in the left eye
+intrinsic_and_left = (visual_neurons_df['category'] == 'intrinsic') & (visual_neurons_df['side'] == fly_eye)
+visual_neurons_df = visual_neurons_df[intrinsic_and_left]
 
+# take the list of synaptic connections and limit it to the neuron ids from the visual neurons
+pre_and_post_are_visual = (synaptic_connections_df.pre_root_id.isin(visual_neurons_df.root_id) &
+                           synaptic_connections_df.post_root_id.isin(visual_neurons_df.root_id))
+synaptic_connections_df = synaptic_connections_df[pre_and_post_are_visual]
+
+# now that we have limited our neurons to the visual neurons, pull out the ids and synapse counts
 presynaptic_ids = synaptic_connections_df.pre_root_id.values
 postsynaptic_ids = synaptic_connections_df.post_root_id.values
 synapse_counts = synaptic_connections_df.syn_count.values
 neurotransmitters = synaptic_connections_df.nt_type.values
 
+# change synapse sign to reflect the neurotransmitter being used. If the neurotransmitter is not in our list, set
+# the connection to 0
 synapse_sign = np.zeros_like(synapse_counts)
-synapse_sign[neurotransmitters == 'ACH'] = 1
-synapse_sign[neurotransmitters == 'GABA'] = -1
-synapse_sign[neurotransmitters == 'GLUT'] = -1
+excitatory_connections = synaptic_connections_df.nt_type.isin(excitatory_nt)
+inhibitory = synaptic_connections_df.nt_type.isin(inhibitory_nt)
+synapse_sign[excitatory_connections] = 1
+synapse_sign[inhibitory] = -1
+
+# make synapse counts signed
 synapse_counts *= synapse_sign
 
-# we will have a separate cell ID vector that links index to root id so lets make that now
-# first, get the list of all root IDs we actually use
-used_root_ids = np.unique((presynaptic_ids, postsynaptic_ids))
-num_neurons = len(used_root_ids)
+# -- make vector with (matrix row, matrix col, value). Can be used to construct a sparse or dense matrix --
+# Get the list of all root IDs we actually use
+model_root_ids = np.unique((presynaptic_ids, postsynaptic_ids))
+num_neurons = len(model_root_ids)
 
-# from this get the list of cell types for each root_id
-neuron_ids_that_are_used = np.isin(neuron_ids, used_root_ids)
-used_ids_cell_types = neuron_cell_type[neuron_ids_that_are_used]
-# this is our vector of used root_ids and the cell types they belong to
-cell_types_df = pd.DataFrame({'matrix_index': np.arange(num_neurons), 'root_id': used_root_ids, 'cell_type': used_ids_cell_types})
-
-# currently, our synapse counts uses the pre / post root ID. but this isn't useful for making a sparse matrix. Instead,
-# we will make our synapse counts matrix use the postsynaptic / presynaptic matrix index. this will be used to make
-# a sparse matrix of the synaptic connectivity
 # for speed, make a hash map that takes you from root id to matrix index
-id_mapping = {}
+id_to_index_mapping = {}
 pre_matrix_ind = np.zeros_like(presynaptic_ids)
 post_matrix_ind = np.zeros_like(postsynaptic_ids)
 for i in range(num_neurons):
-    id_mapping[used_root_ids[i]] = i
+    id_to_index_mapping[model_root_ids[i]] = i
 
 # loop through all the pre / post cells and map them from root id to matrix index
 for i in range(synapse_counts.shape[0]):
-    pre_matrix_ind[i] = id_mapping[presynaptic_ids[i]]
-    post_matrix_ind[i] = id_mapping[postsynaptic_ids[i]]
+    pre_matrix_ind[i] = id_to_index_mapping[presynaptic_ids[i]]
+    post_matrix_ind[i] = id_to_index_mapping[postsynaptic_ids[i]]
 
+# save the matrix indices and values to a data frame
 synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_ind, 'post_matrix_ind': post_matrix_ind, 'synapse_counts': synapse_counts})
-
 # Save the synapse counts and cell types to a dict to use in modeling
-cell_types_df.to_parquet(connectome_folder / 'optic_lobes_cell_types.parquet', index=False)
 synapse_counts_df.to_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet', index=False)
 
+# --- makea  data frame of cell information
+# make a dataframe that has all the information for the neurons in the model that is:
+# root_id, hemisphere, type, column_id, theta, phi
+cell_info_df = columns_df[columns_df.root_id.isin(model_root_ids)]
+
+# Calculate theta and phi from the p and q hexagonal lattice coordinates
+# first, project from p and q coordinates to cartesian space
+# these coordinates were chosen by the connectome paper
+p_q = np.vstack((cell_info_df.p.values, cell_info_df.q.values))
+angle_1 = np.pi / 6  # angle of the first basis
+angle_2 = 2 * np.pi / 3 + angle_1  # the second basis is 120 degrees off
+rot_mat = np.array([[np.cos(angle_1), np.cos(angle_2)], [np.sin(angle_1), np.sin(angle_2)]])
+# transform p and q to x and y
+x_y = rot_mat @ p_q
+x_y -= np.mean(x_y, axis=1)[:, None]
+
+# project x and y to angular spherical coordinates using Lambert azimuthal equal-area (LAEA) projection
+# assume that the north pole of the sphere is at the center of the eye in our new x y coordinates
+# in this mapping, a hemisphere lies within a radius of sqrt(2)
+# the fly eye takes up roughly 3/4rds of the angle of a hemisphere
+max_angle = np.pi / 2 * 3 / 4
+max_radius = np.sqrt(2) * np.sin(max_angle / 2)
+
+# radius is calculated as sqrt(x^2+y^2)
+# calculate a scalar for x and y such that sqrt(x^2+y^2) is less than max_radius
+x_y_scalar = np.min(np.sqrt(max_radius**2 / np.sum(x_y**2, axis=0)))
+x_y *= x_y_scalar
+
+# convert to spherical angles
+rho = np.sqrt(np.sum(x_y**2, axis=0))
+theta = 2 * np.asin(rho / np.sqrt(2))
+phi = np.atan2(x_y[1, :], x_y[0, :])
+
+x = np.sin(theta) * np.cos(phi)
+y = np.sin(theta) * np.sin(phi)
+z = np.cos(theta)
+
+cell_info_df = cell_info_df.drop(columns = ['p', 'q', 'x', 'y'])
+cell_info_df['theta'] = theta
+cell_info_df['phi'] = phi
+cell_info_df['x'] = x
+cell_info_df['y'] = y
+cell_info_df['z'] = z
+cell_info_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
