@@ -5,11 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="39311219-1185-41ff-a572-e9b4c11a8810" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/run_model.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/create_visual_connectome.py" beforeDir="false" afterPath="$PROJECT_DIR$/create_visual_connectome.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/model_utilities.py" beforeDir="false" afterPath="$PROJECT_DIR$/model_utilities.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/simple_model.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/neural_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/neural_models.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -26,9 +22,9 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 8
-}]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 8
+}</component>
   <component name="ProjectId" id="333igdq3eJt3fLw9XCgm8BmWxCy" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
@@ -39,7 +35,7 @@
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "Python.create_visual_connectome.executor": "Run",
     "Python.model_utilities.executor": "Run",
-    "Python.run_model.executor": "Debug",
+    "Python.run_model.executor": "Run",
     "Python.simple_model.executor": "Debug",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
@@ -130,25 +126,10 @@
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
   </component>
-  <component name="XDebuggerManager">
-    <breakpoint-manager>
-      <breakpoints>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/run_model.py</url>
-          <line>108</line>
-          <option name="timeStamp" value="75" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/neural_models.py</url>
-          <line>41</line>
-          <option name="timeStamp" value="86" />
-        </line-breakpoint>
-      </breakpoints>
-    </breakpoint-manager>
-  </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/drosophila_model$model_utilities.coverage" NAME="model_utilities Coverage Results" MODIFIED="1758825183063" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/drosophila_model$simple_model.coverage" NAME="run_model Coverage Results" MODIFIED="1759239878793" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/drosophila_model$simple_model.coverage" NAME="run_model Coverage Results" MODIFIED="1759246439714" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/drosophila_model$run_model.coverage" NAME="run_model Coverage Results" MODIFIED="1759246573145" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/drosophila_model$create_visual_connectome.coverage" NAME="create_visual_connectome Coverage Results" MODIFIED="1759164081043" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

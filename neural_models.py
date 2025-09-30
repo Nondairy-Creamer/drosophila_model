@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import time
 
 class SimpleRnn(torch.nn.Module):
     def __init__(self, synapse_counts, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32):
@@ -38,5 +39,8 @@ class SimpleRnn(torch.nn.Module):
         self.dynamics_matrix = coo.to_sparse_csr()  # dtype is preserved
 
     def forward(self, x_prev, u_t):
-        return self.nonlinearity(x_prev) @ self.dynamics_matrix.transpose(0, 1) + u_t * torch.exp(self.input_strength_log) + self.b
+        start = time.time()
+        out = self.nonlinearity(x_prev) @ self.dynamics_matrix.transpose(0, 1) + u_t * torch.exp(self.input_strength_log) + self.b
+        print(time.time() - start)
+        return out
 
