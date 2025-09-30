@@ -10,6 +10,7 @@ root_id_dtype = np.int64
 excitatory_nt = ['ACH']
 inhibitory_nt = ['GABA', 'GLUT']
 fly_eye = 'right'
+use_intrinsic = False
 hemisphere_coverage = 0.85  # fraction of the hemisphere the fly's vision covers
 
 # --- data sets ---
@@ -32,11 +33,10 @@ columns_df = pd.read_csv(connectome_folder / 'column_assignment.csv', dtype={"ro
 
 # --- process the incoming data ---
 # restrict neurons to intrinsic visual neurons in the left eye
-intrinsic_and_left = (visual_neurons_df['category'] == 'intrinsic') & (visual_neurons_df['side'] == fly_eye)
-visual_neurons_df = visual_neurons_df[intrinsic_and_left]
-
-# save the cell info
-visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
+restriction = visual_neurons_df['side'] == fly_eye
+if use_intrinsic:
+    restriction &= visual_neurons_df['category'] == 'intrinsic'
+visual_neurons_df = visual_neurons_df[restriction]
 
 # --- limit the connections to those found in the optic lobes ---
 # take the list of synaptic connections and limit it to the neuron ids from the visual neurons
@@ -65,6 +65,11 @@ synapse_counts *= synapse_sign
 # Get the list of all root IDs we actually use
 model_root_ids = np.unique((presynaptic_ids, postsynaptic_ids))
 num_neurons = len(model_root_ids)
+
+# limit cell info to those in the synaptic connectivity matrix and save
+visual_neurons_df = visual_neurons_df[visual_neurons_df.root_id.isin(model_root_ids)]
+# save the cell info
+visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
 
 # for speed, make a hash map that takes you from root id to matrix index
 id_to_index_mapping = {}

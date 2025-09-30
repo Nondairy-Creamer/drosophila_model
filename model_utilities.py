@@ -22,41 +22,41 @@ def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=to
     # first construct with coo, then coalesce, then convert to CSR for speed
     coo = torch.sparse_coo_tensor(indices, values, size=(num_neurons, num_neurons), device=device)
     coo = coo.coalesce()  # coalesce: sums duplicates and sorts indices (required for reliable CSR conversion)
-    csr = coo.to_sparse_csr()  # dtype is preserved
+    # csr = coo.to_sparse_csr()  # dtype is preserved
 
-    return csr
+    return coo
 
-def create_sign_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[-4], dt=0.01, max_time=1):
+def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6, temporal_frequency=[-4],
+                     dt=0.01, max_time=1, plot_figs=False):
     # positive tfs correspond to rightward. negative tfs correspond to leftward
-
     if type(temporal_frequency) is not list:
         temporal_frequency = [temporal_frequency]
 
     filter_std_base = 2.5  # degrees
-    t = torch.arange(0, max_time, step=dt)
-    phi_mesh, t_mesh = torch.meshgrid(sample_phi, t)
+    t = np.arange(0, max_time, step=dt)
+    phi_mesh, t_mesh = np.meshgrid(sample_phi, t, indexing='ij')
+
+    # smooth the sign wave according to its location in theta. For simplicity, just assume that the ommatidia applies
+    # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
+    # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
+    filter_std = filter_std_base * 1 / np.cos(np.abs(sample_theta - np.pi / 2))
+    contrast_scaling_factor = np.exp(-2 * np.pi ** 2 * filter_std ** 2 * wavelength ** 2)
+    contrast_scaling_factor /= np.max(contrast_scaling_factor)
 
     sine_wave_list = []
     for tf in temporal_frequency:
-        sine_wave = contrast * torch.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
-
-        # smooth the sign wave according to its location in theta. For simplicity, just assume that the ommatidia applies
-        # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
-        # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
-        filter_std = filter_std_base * 1 / np.cos(np.abs(sample_theta - np.pi / 2))
-        contrast_scaling_factor = np.exp(-2 * np.pi**2 * filter_std**2 * wavelength**2)
-
+        sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
         sine_wave *= contrast_scaling_factor[:, None]
-
-        # plt.figure()
-        # plt.imshow(sine_wave.numpy(), cmap='gray')
-        # plt.show()
-        #
-        # plt.figure()
-        # plt.scatter(sample_theta, contrast_scaling_factor)
-        # plt.show()
-
         sine_wave_list.append(sine_wave)
+
+        if plot_figs:
+            plt.figure()
+            plt.imshow(sine_wave.numpy(), cmap='gray')
+            plt.show()
+
+            plt.figure()
+            plt.scatter(sample_theta, contrast_scaling_factor)
+            plt.show()
 
     return sine_wave_list
 
@@ -139,3 +139,17 @@ def scatter_3d_with_origin_axes(xyz):
 
     fig.colorbar(sc, ax=ax, shrink=0.5, aspect=10, label="Z value (color)")
     plt.show()
+
+def run_rnn(cell, inputs):
+    """
+    cell: SimpleRnn instance
+    U: (batch, T, m)  # input sequences
+    h0: (batch, n) initial state, defaults to zeros
+    """
+    num_batches, num_time, num_neurons = inputs.shape
+    outputs = torch.zeros((num_batches, num_time, cell.num_neurons), device=inputs.device, dtype=inputs.dtype)
+
+    for t in range(1, num_time):
+        outputs[:, t, :] = cell(outputs[:, t-1, :], inputs[:, t-1, :])   # (B, n)
+
+    return outputs
