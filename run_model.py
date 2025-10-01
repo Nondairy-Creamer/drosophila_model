@@ -23,7 +23,7 @@ input_neurons = ('L1', 'L2', 'L3')
 output_neuron = 'HSE'
 
 # --- load in connectivity and cell info data ---
-connectome_folder = Path('/Users/mcreamer/Documents/drosophila_connectome')
+connectome_folder = Path('../connectome_data')
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
