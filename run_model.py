@@ -5,6 +5,7 @@ import pandas as pd
 from pathlib import Path
 from matplotlib import pyplot as plt
 import neural_models as nm
+import time
 
 
 device = 'cpu'
@@ -82,6 +83,7 @@ opt = torch.optim.Adam(list(model.parameters()) + [readout_weight], lr=alpha)
 mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
 
 for step in range(num_steps):
+    start = time.time()
     opt.zero_grad()
 
     # forward
@@ -99,6 +101,8 @@ for step in range(num_steps):
 
     if step % 1 == 0:
         print(f"step {step + 1} / {num_steps}: loss = {loss.item():.4f}")
+
+    print('epoch took', time.time() - start, 's')
 
 
 plt.figure()
