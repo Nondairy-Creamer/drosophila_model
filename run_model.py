@@ -8,19 +8,21 @@ import neural_models as nm
 import time
 
 
-device = 'cpu'
+device = torch.device('cpu')
 dtype = torch.float32
 dt = 0.1  # in seconds
 max_time = 1 # in seconds
-num_steps = 100
+num_steps = 2
 alpha = 1e-3
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
 temporal_frequencies = list(np.arange(2, 12, step=2))
 temporal_frequencies += [-i for i in temporal_frequencies]
 nonlinearity = torch.relu
-input_neurons = ('L1', 'L2', 'L3')
+lam_neurons = ('L1', 'L2', 'L3')
+input_neurons = lam_neurons
 output_neuron = 'HSE'
+use_sparse = False
 
 # --- load in connectivity and cell info data ---
 connectome_folder = Path('../connectome_data')
@@ -30,13 +32,16 @@ synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_cou
 num_neurons = len(cell_info_df.index)
 
 # --- define the parameters and get the sparse connectivity matrix ---
-synapse_counts = mu.create_sparse_matrix(synapse_counts_df, device=device, dtype=dtype)
-readout_weight = torch.nn.Parameter(torch.tensor(1e3, dtype=dtype, device=device))
-# readout_weight_log = torch.nn.Parameter(torch.tensor(np.log(1e3), dtype=dtype, device=device))
-# readout_weight = torch.exp(readout_weight_log)
+if use_sparse:
+    synapse_counts = mu.create_sparse_matrix(synapse_counts_df, device=device, dtype=dtype)
+else:
+    synapse_counts = torch.zeros((num_neurons, num_neurons), device=device, dtype=dtype)
+    synapse_counts_values = torch.tensor(synapse_counts_df['synapse_counts'].values, device=device, dtype=dtype)
+    synapse_counts[synapse_counts_df['post_matrix_ind'], synapse_counts_df['pre_matrix_ind']] = synapse_counts_values
+readout_weight = torch.nn.Parameter(torch.tensor(1e0, dtype=dtype, device=device))
 
 # create the model
-model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype)
+model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype, use_sparse=use_sparse)
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
@@ -57,7 +62,7 @@ num_stim = len(sine_waves)
 # to the neuron_index in the larger cell_info_df.
 
 cell_inputs = []
-lam_column_bool = column_info_df['type'].isin(('L1', 'L2', 'L3'))
+lam_column_bool = column_info_df['type'].isin(lam_neurons)
 root_id_to_column_id = column_info_df.loc[lam_column_bool, ('column_id', 'root_id')]
 root_id_to_column_id['root_ind'] = pd.Index(cell_info_df.root_id).get_indexer(root_id_to_column_id.root_id)
 
@@ -81,23 +86,28 @@ for swi, sw in enumerate(sine_waves):
 # --- train the model ---
 opt = torch.optim.Adam(list(model.parameters()) + [readout_weight], lr=alpha)
 mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
+target = torch.as_tensor(1e-3 * temporal_frequencies, device=device, dtype=dtype)
 
 for step in range(num_steps):
     start = time.time()
     opt.zero_grad()
 
     # forward
-    model.build_dynamics_matrix()
+    model.update_dynamics_matrix()
     outputs = mu.run_rnn(model, cell_inputs)            # (batch, T, n)
     readout_val = outputs[:, :, mask].mean(dim=(1, 2))  # (batch,)
     pred = readout_weight * readout_val
 
     # loss
-    loss = torch.nn.functional.mse_loss(pred, temporal_frequencies)
+    loss = torch.nn.functional.mse_loss(pred, target)
 
     # backward + update
+    back_start = time.time()
     loss.backward()
+    print('backward took', time.time() - back_start, 's')
+    step_start = time.time()
     opt.step()
+    print('step took', time.time() - step_start, 's')
 
     if step % 1 == 0:
         print(f"step {step + 1} / {num_steps}: loss = {loss.item():.4f}")
@@ -107,7 +117,7 @@ for step in range(num_steps):
 
 plt.figure()
 plt.plot(pred.detach().cpu().numpy())
-plt.plot(temporal_frequencies)
+plt.plot(target.detach().cpu().numpy())
 plt.show()
 
 a=1
