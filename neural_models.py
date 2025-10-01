@@ -30,8 +30,6 @@ class SimpleRnn(torch.nn.Module):
 
     def update_dynamics_matrix(self):
         if self.use_sparse:
-            start = time.time()
-
             indices = torch.arange(self.num_neurons, device=self.device, dtype=self.dtype)
             diag_weights = torch.sparse_coo_tensor(
                 indices=torch.stack([indices, indices]),
@@ -39,15 +37,8 @@ class SimpleRnn(torch.nn.Module):
                 size=(self.num_neurons, self.num_neurons),
             )
 
-            print('making diag', time.time() - start)
-            start = time.time()
-
             coo = torch.exp(self.synapse_strength_log) * self.synapse_counts + diag_weights
-            print('making coo', time.time() - start)
-            start = time.time()
-
             self.dynamics_matrix = coo.to_sparse_csr()
-            print('making csr', time.time() - start)
         else:
             self.dynamics_matrix = torch.exp(self.synapse_strength_log) * self.synapse_counts + torch.diag(torch.exp(self.diagonal_log))
 
