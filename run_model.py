@@ -102,12 +102,8 @@ for step in range(num_steps):
     loss = torch.nn.functional.mse_loss(pred, target)
 
     # backward + update
-    back_start = time.time()
     loss.backward()
-    print('backward took', time.time() - back_start, 's')
-    step_start = time.time()
     opt.step()
-    print('step took', time.time() - step_start, 's')
 
     if step % 1 == 0:
         print(f"step {step + 1} / {num_steps}: loss = {loss.item():.4f}")
