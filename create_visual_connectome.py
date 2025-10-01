@@ -3,8 +3,7 @@ from pathlib import Path
 import model_utilities as mu
 import pandas as pd
 
-
-connectome_folder = Path('/Users/mcreamer/Documents/drosophila_connectome')
+connectome_folder = Path('../connectome_data')
 synapse_count_dtype = np.float64
 root_id_dtype = np.int64
 excitatory_nt = ['ACH']
