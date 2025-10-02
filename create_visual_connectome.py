@@ -2,15 +2,20 @@ import numpy as np
 from pathlib import Path
 import model_utilities as mu
 import pandas as pd
+from data_utilities import load_config
 
-connectome_folder = Path('../connectome_data')
-synapse_count_dtype = np.float64
-root_id_dtype = np.int64
-excitatory_nt = ['ACH']
-inhibitory_nt = ['GABA', 'GLUT']
-fly_eye = 'right'
-use_intrinsic = False
-hemisphere_coverage = 0.85  # fraction of the hemisphere the fly's vision covers
+# Load configuration
+config = load_config("config.toml")
+
+# Extract parameters from config
+connectome_folder = Path(config["data"]["connectome_folder"])
+synapse_count_dtype = getattr(np, config["data"]["synapse_count_dtype"])
+root_id_dtype = getattr(np, config["data"]["root_id_dtype"])
+excitatory_nt = config["data"]["excitatory_nt"]
+inhibitory_nt = config["data"]["inhibitory_nt"]
+fly_eye = config["data"]["fly_eye"]
+use_intrinsic = config["data"]["use_intrinsic"]
+hemisphere_coverage = config["data"]["hemisphere_coverage"]
 
 # --- data sets ---
 # each neuron in the drosophila connectome has a unique "root id"

@@ -4,12 +4,10 @@ import time
 
 class SimpleRnn(torch.nn.Module):
     def __init__(self, synapse_counts, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32, use_sparse=False):
-        """
-        n: hidden size
-        m: input size
-        nonlinearity: callable that takes a tensor (default torch.tanh).
-                      Can also be a functools.partial with extra args.
-        """
+        diagonal_init = 0.9
+        synapse_strength_init = 0.001
+        input_strength_init = 0.01
+
         super().__init__()
         self.nonlinearity = nonlinearity
         self.device = device
@@ -17,9 +15,9 @@ class SimpleRnn(torch.nn.Module):
         self.use_sparse = use_sparse
         self.num_neurons = synapse_counts.shape[0]
         self.synapse_counts = synapse_counts
-        self.diagonal_log = torch.full((self.num_neurons,), np.log(0.9), dtype=self.dtype, device=self.device)
-        self.synapse_strength_log = torch.tensor(np.log(0.001), dtype=self.dtype, device=self.device)
-        self.input_strength_log = torch.full((self.num_neurons,), np.log(0.01), device=self.device, dtype=self.dtype)
+        self.diagonal_log = torch.full((self.num_neurons,), np.log(diagonal_init), dtype=self.dtype, device=self.device)
+        self.synapse_strength_log = torch.tensor(np.log(synapse_strength_init), dtype=self.dtype, device=self.device)
+        self.input_strength_log = torch.full((self.num_neurons,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
 
         self.diagonal_log = torch.nn.Parameter(self.diagonal_log)
         self.synapse_strength_log = torch.nn.Parameter(self.synapse_strength_log)

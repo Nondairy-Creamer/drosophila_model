@@ -6,26 +6,38 @@ from pathlib import Path
 from matplotlib import pyplot as plt
 import neural_models as nm
 import time
+import data_utilities as du
 
+# Load configuration from TOML file
+config = du.load_config("config.toml")
 
-device = torch.device('cpu')
-dtype = torch.float32
-dt = 0.1  # in seconds
-max_time = 1 # in seconds
-num_steps = 2
-alpha = 1e-3
+# Extract parameters from config
+device = torch.device(config["model"]["device"])
+dtype = getattr(torch, config["model"]["dtype"])
+dt = config["simulation"]["dt"]
+max_time = config["simulation"]["max_time"]
+num_steps = config["simulation"]["num_steps"]
+alpha = config["simulation"]["alpha"]
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
-temporal_frequencies = list(np.arange(2, 12, step=2))
-temporal_frequencies += [-i for i in temporal_frequencies]
-nonlinearity = torch.relu
-lam_neurons = ('L1', 'L2', 'L3')
-input_neurons = lam_neurons
-output_neuron = 'HSE'
-use_sparse = False
+
+# Generate temporal frequencies
+temporal_frequencies = list(np.arange(
+    config["stimulus"]["temporal_freq_start"],
+    config["stimulus"]["temporal_freq_end"],
+    config["stimulus"]["temporal_freq_step"]
+))
+if config["stimulus"]["include_negative_frequencies"]:
+    temporal_frequencies += [-f for f in temporal_frequencies]
+
+nonlinearity = getattr(torch, config["model"]["nonlinearity"])
+
+input_neurons = config["neurons"]["input_neurons"]  # Convert list to tuple for compatibility
+output_neuron = config["neurons"]["output_neuron"]
+use_sparse = config["model"]["use_sparse"]
 
 # --- load in connectivity and cell info data ---
-connectome_folder = Path('../connectome_data')
+connectome_folder = Path(config["data"]["connectome_folder"])
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
@@ -38,7 +50,7 @@ else:
     synapse_counts = torch.zeros((num_neurons, num_neurons), device=device, dtype=dtype)
     synapse_counts_values = torch.tensor(synapse_counts_df['synapse_counts'].values, device=device, dtype=dtype)
     synapse_counts[synapse_counts_df['post_matrix_ind'], synapse_counts_df['pre_matrix_ind']] = synapse_counts_values
-readout_weight = torch.nn.Parameter(torch.tensor(1e0, dtype=dtype, device=device))
+readout_weight = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_weight_init"], dtype=dtype, device=device))
 
 # create the model
 model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype, use_sparse=use_sparse)
@@ -46,7 +58,8 @@ model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype, 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
 l1_df = column_info_df[column_info_df['type'] == 'L1']
-sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), temporal_frequency=temporal_frequencies, dt=dt)
+sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
+temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
 sine_waves = [torch.tensor(i, dtype=dtype, device=device) for i in sine_waves]
 temporal_frequencies = torch.tensor(temporal_frequencies, dtype=dtype, device=device)
 num_stim = len(sine_waves)
@@ -62,7 +75,7 @@ num_stim = len(sine_waves)
 # to the neuron_index in the larger cell_info_df.
 
 cell_inputs = []
-lam_column_bool = column_info_df['type'].isin(lam_neurons)
+lam_column_bool = column_info_df['type'].isin(input_neurons)
 root_id_to_column_id = column_info_df.loc[lam_column_bool, ('column_id', 'root_id')]
 root_id_to_column_id['root_ind'] = pd.Index(cell_info_df.root_id).get_indexer(root_id_to_column_id.root_id)
 
