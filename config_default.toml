@@ -11,9 +11,9 @@ nonlinearity = 'relu'  # 'relu', 'tanh', 'sigmoid'
 
 [simulation]
 # Time parameters
-dt = 0.1  # time step in seconds
+dt = 0.01  # time step in seconds
 max_time = 0.5  # maximum simulation time in seconds
-num_steps = 2  # number of training steps
+num_steps = 10  # number of training steps
 
 # Learning parameters
 alpha = 1e-3  # learning rate
