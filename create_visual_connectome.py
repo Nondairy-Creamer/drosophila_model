@@ -5,7 +5,7 @@ import pandas as pd
 from data_utilities import load_config
 
 # Load configuration
-config = load_config("config.toml")
+config = load_config()
 
 # Extract parameters from config
 connectome_folder = Path(config["data"]["connectome_folder"])

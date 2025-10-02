@@ -1,0 +1,53 @@
+# Drosophila Neural Model Configuration
+
+[model]
+# Device and data type settings
+device = 'cpu'  # 'cpu' or 'cuda'
+dtype = 'float32'  # 'float32' or 'float64'
+use_sparse = true
+
+# Model architecture parameters
+nonlinearity = 'relu'  # 'relu', 'tanh', 'sigmoid'
+
+[simulation]
+# Time parameters
+dt = 0.1  # time step in seconds
+max_time = 0.5  # maximum simulation time in seconds
+num_steps = 2  # number of training steps
+
+# Learning parameters
+alpha = 1e-3  # learning rate
+readout_weight_init = 1e0  # initial readout weight
+
+[stimulus]
+# Temporal frequency parameters
+temporal_freq_start = 2
+temporal_freq_end = 12
+temporal_freq_step = 2
+include_negative_frequencies = true
+
+[neurons]
+# Input and output neuron specifications
+input_neurons = ['L1', 'L2', 'L3']  # lamina neurons
+output_neuron = 'HSE'  # 
+
+[data]
+# Data paths and settings
+connectome_folder = '../connectome_data'
+fly_eye = 'right'  # 'left' or 'right'
+use_intrinsic = false
+hemisphere_coverage = 0.85  # fraction of hemisphere the fly's vision covers
+
+# Neurotransmitter classifications
+excitatory_nt = ['ACH']
+inhibitory_nt = ['GABA', 'GLUT']
+
+# Data types
+synapse_count_dtype = 'float64'
+root_id_dtype = 'int64'
+
+[visualization]
+# Plotting and visualization settings
+show_plots = true
+save_plots = false
+plot_format = 'png'

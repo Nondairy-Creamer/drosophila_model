@@ -9,7 +9,7 @@ import time
 import data_utilities as du
 
 # Load configuration from TOML file
-config = du.load_config("config.toml")
+config = du.load_config()
 
 # Extract parameters from config
 device = torch.device(config["model"]["device"])
