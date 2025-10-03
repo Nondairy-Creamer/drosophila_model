@@ -26,39 +26,65 @@ def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=to
 
     return coo
 
-def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6, temporal_frequency=[-4],
+def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6, temporal_frequency=[4],
                      dt=0.01, max_time=1, plot_figs=False):
+    # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
+    # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # positive tfs correspond to rightward. negative tfs correspond to leftward
     if type(temporal_frequency) is not list:
         temporal_frequency = [temporal_frequency]
 
+    temporal_frequency = [np.abs(tf) for tf in temporal_frequency]
+
     filter_std_base = 2.5  # degrees
     t = np.arange(0, max_time, step=dt)
     phi_mesh, t_mesh = np.meshgrid(sample_phi, t, indexing='ij')
+    theta_mesh, t_mesh = np.meshgrid(sample_theta, t, indexing='ij')
 
     # smooth the sign wave according to its location in theta. For simplicity, just assume that the ommatidia applies
     # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
     # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
-    filter_std = filter_std_base * 1 / np.cos(np.abs(sample_theta - np.pi / 2))
-    contrast_scaling_factor = np.exp(-2 * np.pi ** 2 * filter_std ** 2 * wavelength ** 2)
+    filter_std = filter_std_base * 1 / np.cos(sample_theta - np.pi / 2)
+    contrast_scaling_factor = np.exp(-2 * filter_std ** 2 * wavelength ** 2)
     contrast_scaling_factor /= np.max(contrast_scaling_factor)
 
-    sine_wave_list = []
+    # length scales for vertical sine waves (since the cylinder is flat vertically)
+    vert_wavelength = 2 * np.tan(wavelength / 2) # length of sine wave in cartesian space
+    theta_to_length = np.tan(theta_mesh - np.pi / 2)
+
+    sine_wave_dict = {'right': [], 'left': [], 'up': [], 'down': []}
     for tf in temporal_frequency:
+        # rightward sine wave
         sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
         sine_wave *= contrast_scaling_factor[:, None]
-        sine_wave_list.append(sine_wave)
+        sine_wave_dict['right'].append(sine_wave)
+
+        # leftward sine wave
+        sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))
+        sine_wave *= contrast_scaling_factor[:, None]
+        sine_wave_dict['left'].append(sine_wave)
+
+        # upward sine wave
+        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength  - tf * t_mesh))
+        sine_wave *= contrast_scaling_factor[:, None]
+        sine_wave_dict['up'].append(sine_wave)
+
+        # downward sine wave
+        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength  - tf * t_mesh))
+        sine_wave *= contrast_scaling_factor[:, None]
+        sine_wave_dict['down'].append(sine_wave)
 
         if plot_figs:
-            plt.figure()
-            plt.imshow(sine_wave.numpy(), cmap='gray')
-            plt.show()
+            for direction in ['right', 'left', 'up', 'down']:
+                plt.figure()
+                plt.imshow(sine_wave_dict[direction][0], cmap='gray')
+                plt.show()
 
             plt.figure()
             plt.scatter(sample_theta, contrast_scaling_factor)
             plt.show()
 
-    return sine_wave_list
+    return sine_wave_dict
 
 def rotate_2d(xy, angle):
     # data shape should be (2, n) with n data points

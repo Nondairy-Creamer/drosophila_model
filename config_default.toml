@@ -21,10 +21,9 @@ readout_weight_init = 1e0  # initial readout weight
 
 [stimulus]
 # Temporal frequency parameters
-temporal_freq_start = 2
-temporal_freq_end = 12
-temporal_freq_step = 2
-include_negative_frequencies = true
+temporal_freq_start = 4
+temporal_freq_end = 5
+temporal_freq_step = 1
 
 [neurons]
 # Input and output neuron specifications

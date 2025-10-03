@@ -25,11 +25,8 @@ num_time = len(time_points)
 temporal_frequencies = list(np.arange(
     config["stimulus"]["temporal_freq_start"],
     config["stimulus"]["temporal_freq_end"],
-    config["stimulus"]["temporal_freq_step"]
+    config["stimulus"]["temporal_freq_step"],
 ))
-if config["stimulus"]["include_negative_frequencies"]:
-    temporal_frequencies += [-f for f in temporal_frequencies]
-
 nonlinearity = getattr(torch, config["model"]["nonlinearity"])
 
 input_neurons = config["neurons"]["input_neurons"]  # Convert list to tuple for compatibility
@@ -58,11 +55,9 @@ model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype, 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
 l1_df = column_info_df[column_info_df['type'] == 'L1']
+
 sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
-temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
-sine_waves = [torch.tensor(i, dtype=dtype, device=device) for i in sine_waves]
-temporal_frequencies = torch.tensor(temporal_frequencies, dtype=dtype, device=device)
-num_stim = len(sine_waves)
+    temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
 
 # --- define the external inputs to cells ---
 # in this case we will directly stimulate L1, L2, and L3 with negative contrast
@@ -89,17 +84,27 @@ col_to_cell_ind = (
       .to_dict()
 )
 
-cell_inputs = torch.zeros((num_stim, num_time, num_neurons), dtype=dtype, device=device)
-for swi, sw in enumerate(sine_waves):
-    for col_ind, col in enumerate(l1_df.column_id):
-        # each value in the sine wave is assigned to a specific column in the eye
-        # for each column, stimulate the L1, L2, and L3 cells
-        cell_inputs[swi, :, col_to_cell_ind[col]] = -sw[col_ind, :, None]
+cell_inputs = []
+for direction in ['right', 'left', 'up', 'down']:
+    num_waves = len(sine_waves[direction])
+    cell_inputs.append(torch.zeros((num_waves, num_time, num_neurons), dtype=dtype, device=device))
+
+    for swi, sw in enumerate(sine_waves[direction]):
+        for col_ind, col in enumerate(l1_df.column_id):
+            # each value in the sine wave is assigned to a specific column in the eye
+            # for each column, stimulate the L1, L2, and L3 cells
+            this_column_sine_wave = torch.tensor(-sw[col_ind, :, None], dtype=dtype, device=device)
+            cell_inputs[-1][swi, :, col_to_cell_ind[col]] = this_column_sine_wave
+
+cell_inputs = torch.concat(cell_inputs, dim=0)
+num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
 opt = torch.optim.Adam(list(model.parameters()) + [readout_weight], lr=alpha)
 mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
-target = torch.as_tensor(1e-3 * temporal_frequencies, device=device, dtype=dtype)
+target = torch.zeros(num_stim, device=device, dtype=dtype)
+target[0] = temporal_frequencies[0]
+target[1] = -temporal_frequencies[0]
 
 for step in range(num_steps):
     start = time.time()
@@ -123,10 +128,10 @@ for step in range(num_steps):
 
     print('epoch took', time.time() - start, 's')
 
-
-plt.figure()
-plt.plot(pred.detach().cpu().numpy())
-plt.plot(target.detach().cpu().numpy())
-plt.show()
+    plt.figure()
+    plt.plot(pred.detach().cpu().numpy())
+    plt.plot(target.detach().cpu().numpy())
+    plt.show()
 
 a=1
+
