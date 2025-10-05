@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import neural_models as nm
 import time
@@ -18,6 +20,7 @@ dt = config["simulation"]["dt"]
 max_time = config["simulation"]["max_time"]
 num_steps = config["simulation"]["num_steps"]
 alpha = config["simulation"]["alpha"]
+normalize_rows = config["data"]["normalize_rows"]
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
 
@@ -42,12 +45,13 @@ num_neurons = len(cell_info_df.index)
 
 # --- define the parameters and get the sparse connectivity matrix ---
 if use_sparse:
-    synapse_counts = mu.create_sparse_matrix(synapse_counts_df, device=device, dtype=dtype)
+    synapse_counts = mu.create_sparse_matrix(synapse_counts_df, device=device, dtype=dtype, normalize_rows=normalize_rows)
 else:
     synapse_counts = torch.zeros((num_neurons, num_neurons), device=device, dtype=dtype)
     synapse_counts_values = torch.tensor(synapse_counts_df['synapse_counts'].values, device=device, dtype=dtype)
     synapse_counts[synapse_counts_df['post_matrix_ind'], synapse_counts_df['pre_matrix_ind']] = synapse_counts_values
 readout_weight = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_weight_init"], dtype=dtype, device=device))
+readout_bias = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_bias_init"], dtype=dtype, device=device))
 
 # create the model
 model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype, use_sparse=use_sparse)
@@ -100,11 +104,13 @@ cell_inputs = torch.concat(cell_inputs, dim=0)
 num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
-opt = torch.optim.Adam(list(model.parameters()) + [readout_weight], lr=alpha)
-mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
+opt = torch.optim.SGD(list(model.parameters()) + [readout_weight, readout_bias], lr=alpha)
+# mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
+mask1 = torch.as_tensor(cell_info_df.type == 'T4a', device=device)
+mask2 = torch.as_tensor(cell_info_df.type == 'T4c', device=device)
 target = torch.zeros(num_stim, device=device, dtype=dtype)
-target[0] = temporal_frequencies[0]
-target[1] = -temporal_frequencies[0]
+target[0:len(temporal_frequencies)] = torch.tensor([i * 1e-5 for i in temporal_frequencies], device=device, dtype=dtype)
+target[len(temporal_frequencies):2*len(temporal_frequencies)] = torch.tensor([-i * 1e-5 for i in temporal_frequencies], device=device, dtype=dtype)
 
 for step in range(num_steps):
     start = time.time()
@@ -113,8 +119,9 @@ for step in range(num_steps):
     # forward
     model.update_dynamics_matrix()
     outputs = mu.run_rnn(model, cell_inputs)            # (batch, T, n)
-    readout_val = outputs[:, :, mask].mean(dim=(1, 2))  # (batch,)
-    pred = readout_weight * readout_val
+    readout_val1 = outputs[:, :, mask1].mean(dim=(1, 2))  # (batch,)
+    readout_val2 = outputs[:, :, mask2].mean(dim=(1, 2))  # (batch,)
+    pred = readout_weight * (readout_val1 - readout_val2) + readout_bias
 
     # loss
     loss = torch.nn.functional.mse_loss(pred, target)
@@ -124,14 +131,23 @@ for step in range(num_steps):
     opt.step()
 
     if step % 1 == 0:
-        print(f"step {step + 1} / {num_steps}: loss = {loss.item():.4f}")
+        print(f"step {step + 1} / {num_steps}: loss = {1e6 * loss.item():.4f}")
 
     print('epoch took', time.time() - start, 's')
 
     plt.figure()
-    plt.plot(pred.detach().cpu().numpy())
-    plt.plot(target.detach().cpu().numpy())
-    plt.show()
+    plt.plot(readout_val1.detach().cpu().numpy(), label='readout_val1')
+    plt.plot(readout_val2.detach().cpu().numpy(), label='readout_val2')
+    plt.legend()
+    plt.savefig('figures/readout_val1_vs_readout_val2_' + str(step) + '.png')
+    plt.close()
+
+    plt.figure()
+    plt.plot(pred.detach().cpu().numpy(), label='prediction')
+    plt.plot(target.detach().cpu().numpy(), label='target')
+    plt.legend()
+    plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
+    plt.close()
 
 a=1
 

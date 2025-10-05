@@ -18,6 +18,7 @@ num_steps = 10  # number of training steps
 # Learning parameters
 alpha = 1e-3  # learning rate
 readout_weight_init = 1e0  # initial readout weight
+readout_bias_init = 0e0  # initial readout weight
 
 [stimulus]
 # Temporal frequency parameters
@@ -36,6 +37,7 @@ connectome_folder = '../connectome_data'
 fly_eye = 'right'  # 'left' or 'right'
 use_intrinsic = false
 hemisphere_coverage = 0.85  # fraction of hemisphere the fly's vision covers
+normalize_rows = false
 
 # Neurotransmitter classifications
 excitatory_nt = ['ACH']

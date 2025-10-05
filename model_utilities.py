@@ -3,7 +3,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 
-def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=torch.float32):
+def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=torch.float32, normalize_rows=False):
     index_dtype = torch.int64
     num_neurons = np.max((synapse_counts_df.pre_matrix_ind.values, synapse_counts_df.post_matrix_ind.values)) + 1
 
@@ -18,9 +18,19 @@ def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=to
     # shape the indices as (2, nnz)
     indices = torch.stack([rows, cols], dim=0)
 
+    if normalize_rows:
+        # Calculate row sums from the original data
+        row_sums = torch.zeros(num_neurons, device=device, dtype=values.dtype)
+        row_sums.scatter_add_(0, indices[1], values)  # Sum by row index
+        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
+        
+        # Normalize values
+        values /= row_sums[indices[1]]
+
     # --- build sparse matrix ---
     # first construct with coo, then coalesce, then convert to CSR for speed
     coo = torch.sparse_coo_tensor(indices, values, size=(num_neurons, num_neurons), device=device)
+
     coo = coo.coalesce()  # coalesce: sums duplicates and sorts indices (required for reliable CSR conversion)
     # csr = coo.to_sparse_csr()  # dtype is preserved
 
@@ -65,12 +75,12 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6,
         sine_wave_dict['left'].append(sine_wave)
 
         # upward sine wave
-        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength  - tf * t_mesh))
+        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))
         sine_wave *= contrast_scaling_factor[:, None]
         sine_wave_dict['up'].append(sine_wave)
 
         # downward sine wave
-        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength  - tf * t_mesh))
+        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
         sine_wave *= contrast_scaling_factor[:, None]
         sine_wave_dict['down'].append(sine_wave)
 
