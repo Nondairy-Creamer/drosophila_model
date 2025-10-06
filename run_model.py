@@ -131,7 +131,7 @@ for step in range(num_steps):
     opt.step()
 
     if step % 1 == 0:
-        print(f"step {step + 1} / {num_steps}: loss = {1e6 * loss.item():.4f}")
+        print(f"step {step + 1} / {num_steps}: loss = {1e6 * loss.item()}")
 
     print('epoch took', time.time() - start, 's')
 
