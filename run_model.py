@@ -13,6 +13,13 @@ import data_utilities as du
 # Load configuration from TOML file
 config = du.load_config()
 
+# Clear previous figures (delete non-hidden files)
+fig_dir = Path('figures')
+fig_dir.mkdir(parents=True, exist_ok=True)
+for p in fig_dir.iterdir():
+    if p.is_file() and not p.name.startswith('.'):
+        p.unlink()
+
 # Extract parameters from config
 device = torch.device(config["model"]["device"])
 dtype = getattr(torch, config["model"]["dtype"])
@@ -111,36 +118,56 @@ cell_inputs = torch.concat(cell_inputs, dim=0)
 num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
-opt = torch.optim.SGD(list(model.parameters()) + [readout_weight, readout_bias], lr=alpha)
+if config["model"]["freeze_weights"]:
+    opt = torch.optim.SGD([readout_weight, readout_bias], lr=alpha)
+else:
+    opt = torch.optim.SGD(list(model.parameters()) + [readout_weight, readout_bias], lr=alpha)
+    
+# Halve the learning rate every 400 iterations
+scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=400, gamma=0.5)
 # mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
 mask1 = torch.as_tensor(cell_info_df.type == 'T4a', device=device)
 mask2 = torch.as_tensor(cell_info_df.type == 'T4b', device=device)
 target = torch.zeros(num_stim, device=device, dtype=dtype)
-target[0:len(temporal_frequencies)] = torch.tensor([i * 1e-5 for i in temporal_frequencies], device=device, dtype=dtype)
-target[len(temporal_frequencies):2*len(temporal_frequencies)] = torch.tensor([-i * 1e-5 for i in temporal_frequencies], device=device, dtype=dtype)
+target[0:len(temporal_frequencies)] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
+target[len(temporal_frequencies):2*len(temporal_frequencies)] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
+output_scale = 1e4
+loss_list = []
 
 for step in range(num_steps):
     start = time.time()
     opt.zero_grad()
 
     # forward
-    model.update_dynamics_matrix()
-    outputs = mu.run_rnn(model, cell_inputs)            # (batch, T, n)
-    readout_val1 = outputs[:, :, mask1].mean(dim=(1, 2))  # (batch,)
-    readout_val2 = outputs[:, :, mask2].mean(dim=(1, 2))  # (batch,)
-    pred = readout_weight * (readout_val1 - readout_val2) + readout_bias
+    if config["model"]["freeze_weights"]:
+        with torch.no_grad():
+            model.update_dynamics_matrix()
+            outputs = mu.run_rnn(model, cell_inputs)  
+    else:
+        model.update_dynamics_matrix()
+        outputs = mu.run_rnn(model, cell_inputs)            # (batch, T, n)
+
+    # Use last timestep and average across neurons only to preserve signal scale
+    # readout_val1 = outputs[:, :, mask1].mean(dim=(1, 2))  # (batch,)
+    # readout_val2 = outputs[:, :, mask2].mean(dim=(1, 2))  # (batch,)
+    readout_val1 = outputs[:, -1, mask1].mean(dim=1)  # (batch,)
+    readout_val2 = outputs[:, -1, mask2].mean(dim=1)  # (batch,)
+    pred = output_scale * readout_weight * (readout_val1 - readout_val2) + readout_bias
 
     # loss
     loss = torch.nn.functional.mse_loss(pred, target)
+    loss_list.append(loss.detach().cpu().numpy())
 
     # backward + update
     loss.backward()
     opt.step()
+    scheduler.step()
 
-    if step % 1 == 0:
-        print(f"step {step + 1} / {num_steps}: loss = {1e6 * loss.item()}")
+    if step % 10 == 0:
+        current_lr = opt.param_groups[0]['lr']
+        print(f"step {step + 1} / {num_steps}: lr = {current_lr} | loss = {1e6 * loss.item()}")
 
-    print('epoch took', time.time() - start, 's')
+    # print('epoch took', time.time() - start, 's')
 
     plt.figure()
     plt.plot(readout_val1.detach().cpu().numpy(), label='readout_val1')
@@ -154,6 +181,12 @@ for step in range(num_steps):
     plt.plot(target.detach().cpu().numpy(), label='target')
     plt.legend()
     plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
+    plt.close()
+
+    plt.figure()
+    plt.plot(loss_list, label='loss')
+    plt.legend()
+    plt.savefig('figures/loss.png')
     plt.close()
 
 a=1

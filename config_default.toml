@@ -5,6 +5,7 @@
 device = 'cpu'  # 'cpu' or 'cuda'
 dtype = 'float32'  # 'float32' or 'float64'
 use_sparse = true
+freeze_weights = false
 
 # Model architecture parameters
 nonlinearity = 'relu'  # 'relu', 'tanh', 'sigmoid'
