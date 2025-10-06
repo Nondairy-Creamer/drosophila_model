@@ -28,11 +28,16 @@ class SimpleRnn(torch.nn.Module):
 
     def update_dynamics_matrix(self):
         if self.use_sparse:
-            indices = torch.arange(self.num_neurons, device=self.device, dtype=self.dtype)
+            # Create diagonal matrix as sparse tensor
+            indices = torch.arange(self.num_neurons, device=self.device, dtype=torch.int64)
+            diag_indices = torch.stack([indices, indices], dim=0)
+
             diag_weights = torch.sparse_coo_tensor(
-                indices=torch.stack([indices, indices]),
+                indices=diag_indices,
                 values=torch.exp(self.diagonal_log),
                 size=(self.num_neurons, self.num_neurons),
+                device=self.device,
+                dtype=self.dtype,
             )
 
             coo = torch.exp(self.synapse_strength_log) * self.synapse_counts + diag_weights

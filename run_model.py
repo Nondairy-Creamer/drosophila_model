@@ -1,6 +1,6 @@
-import model_utilities as mu
-import torch
 import numpy as np
+import torch
+import model_utilities as mu
 import pandas as pd
 from pathlib import Path
 import matplotlib
@@ -49,7 +49,10 @@ if use_sparse:
 else:
     synapse_counts = torch.zeros((num_neurons, num_neurons), device=device, dtype=dtype)
     synapse_counts_values = torch.tensor(synapse_counts_df['synapse_counts'].values, device=device, dtype=dtype)
-    synapse_counts[synapse_counts_df['post_matrix_ind'], synapse_counts_df['pre_matrix_ind']] = synapse_counts_values
+    post_idx = torch.tensor(synapse_counts_df['post_matrix_ind'].values, device=device, dtype=torch.long)
+    pre_idx = torch.tensor(synapse_counts_df['pre_matrix_ind'].values, device=device, dtype=torch.long)
+    # Accumulate duplicate edges (to match sparse coalesce semantics)
+    synapse_counts.index_put_((post_idx, pre_idx), synapse_counts_values, accumulate=True)
 readout_weight = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_weight_init"], dtype=dtype, device=device))
 readout_bias = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_bias_init"], dtype=dtype, device=device))
 
@@ -97,8 +100,12 @@ for direction in ['right', 'left', 'up', 'down']:
         for col_ind, col in enumerate(l1_df.column_id):
             # each value in the sine wave is assigned to a specific column in the eye
             # for each column, stimulate the L1, L2, and L3 cells
-            this_column_sine_wave = torch.tensor(-sw[col_ind, :, None], dtype=dtype, device=device)
-            cell_inputs[-1][swi, :, col_to_cell_ind[col]] = this_column_sine_wave
+            # Expand the sine wave across all L1-3 cells in this column for deterministic CUDA assignment
+            idx = torch.as_tensor(col_to_cell_ind[col], dtype=torch.long)
+            k = idx.numel()
+            this_column_sine_wave = torch.tensor(-sw[col_ind, :], dtype=dtype, device=device)  # (T,)
+            this_column_sine_wave_expanded = this_column_sine_wave[:, None].expand(num_time, k)  # (T, K)
+            cell_inputs[-1][swi, :, idx] = this_column_sine_wave_expanded
 
 cell_inputs = torch.concat(cell_inputs, dim=0)
 num_stim = cell_inputs.shape[0]

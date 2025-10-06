@@ -3,7 +3,10 @@ Simple TOML configuration loader for the Drosophila neural model.
 """
 
 from pathlib import Path
-import tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 
 def load_config() -> dict:
     """
