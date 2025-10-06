@@ -167,27 +167,27 @@ for step in range(num_steps):
         current_lr = opt.param_groups[0]['lr']
         print(f"step {step + 1} / {num_steps}: lr = {current_lr} | loss = {1e6 * loss.item()}")
 
-    # print('epoch took', time.time() - start, 's')
+        # print('epoch took', time.time() - start, 's')
 
-    plt.figure()
-    plt.plot(readout_val1.detach().cpu().numpy(), label='readout_val1')
-    plt.plot(readout_val2.detach().cpu().numpy(), label='readout_val2')
-    plt.legend()
-    plt.savefig('figures/readout_val1_vs_readout_val2_' + str(step) + '.png')
-    plt.close()
+        plt.figure()
+        plt.plot(readout_val1.detach().cpu().numpy(), label='readout_val1')
+        plt.plot(readout_val2.detach().cpu().numpy(), label='readout_val2')
+        plt.legend()
+        plt.savefig('figures/readout_val1_vs_readout_val2_' + str(step) + '.png')
+        plt.close()
 
-    plt.figure()
-    plt.plot(pred.detach().cpu().numpy(), label='prediction')
-    plt.plot(target.detach().cpu().numpy(), label='target')
-    plt.legend()
-    plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
-    plt.close()
+        plt.figure()
+        plt.plot(pred.detach().cpu().numpy(), label='prediction')
+        plt.plot(target.detach().cpu().numpy(), label='target')
+        plt.legend()
+        plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
+        plt.close()
 
-    plt.figure()
-    plt.plot(loss_list, label='loss')
-    plt.legend()
-    plt.savefig('figures/loss.png')
-    plt.close()
+        plt.figure()
+        plt.plot(loss_list, label='loss')
+        plt.legend()
+        plt.savefig('figures/loss.png')
+        plt.close()
 
 a=1
 
