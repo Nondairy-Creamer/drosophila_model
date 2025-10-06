@@ -107,7 +107,7 @@ num_stim = cell_inputs.shape[0]
 opt = torch.optim.SGD(list(model.parameters()) + [readout_weight, readout_bias], lr=alpha)
 # mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
 mask1 = torch.as_tensor(cell_info_df.type == 'T4a', device=device)
-mask2 = torch.as_tensor(cell_info_df.type == 'T4c', device=device)
+mask2 = torch.as_tensor(cell_info_df.type == 'T4b', device=device)
 target = torch.zeros(num_stim, device=device, dtype=dtype)
 target[0:len(temporal_frequencies)] = torch.tensor([i * 1e-5 for i in temporal_frequencies], device=device, dtype=dtype)
 target[len(temporal_frequencies):2*len(temporal_frequencies)] = torch.tensor([-i * 1e-5 for i in temporal_frequencies], device=device, dtype=dtype)
