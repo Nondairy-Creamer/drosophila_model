@@ -64,7 +64,7 @@ readout_weight = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_w
 readout_bias = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_bias_init"], dtype=dtype, device=device))
 
 # create the model
-model = nm.SimpleRnn(synapse_counts=synapse_counts, device=device, dtype=dtype, use_sparse=use_sparse)
+model = nm.SimpleRnn(synapse_counts=synapse_counts, cell_types=cell_info_df.type, device=device, dtype=dtype, use_sparse=use_sparse)
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
@@ -129,8 +129,8 @@ scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=400, gamma=0.5)
 mask1 = torch.as_tensor(cell_info_df.type == 'T4a', device=device)
 mask2 = torch.as_tensor(cell_info_df.type == 'T4b', device=device)
 target = torch.zeros(num_stim, device=device, dtype=dtype)
-target[0:len(temporal_frequencies)] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
-target[len(temporal_frequencies):2*len(temporal_frequencies)] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
+target[0 : len(temporal_frequencies)] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
+target[len(temporal_frequencies) : 2 * len(temporal_frequencies)] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
 output_scale = 1e4
 loss_list = []
 
