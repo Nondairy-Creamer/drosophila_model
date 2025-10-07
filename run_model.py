@@ -64,7 +64,7 @@ readout_weight = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_w
 readout_bias = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_bias_init"], dtype=dtype, device=device))
 
 # create the model
-model = nm.SimpleRnn(synapse_counts=synapse_counts, cell_types=cell_info_df.type, device=device, dtype=dtype, use_sparse=use_sparse)
+model = nm.SimpleRnn(synapse_counts=synapse_counts, cell_types=cell_info_df.type.values, device=device, dtype=dtype, use_sparse=use_sparse)
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
@@ -141,10 +141,10 @@ for step in range(num_steps):
     # forward
     if config["model"]["freeze_weights"]:
         with torch.no_grad():
-            model.update_dynamics_matrix()
+            model.update_model_parameters()
             outputs = mu.run_rnn(model, cell_inputs)  
     else:
-        model.update_dynamics_matrix()
+        model.update_model_parameters()
         outputs = mu.run_rnn(model, cell_inputs)            # (batch, T, n)
 
     # Use last timestep and average across neurons only to preserve signal scale
