@@ -18,15 +18,6 @@ def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=to
     # shape the indices as (2, nnz)
     indices = torch.stack([rows, cols], dim=0)
 
-    if normalize_rows:
-        # Calculate row sums from the original data
-        row_sums = torch.zeros(num_neurons, device=device, dtype=values.dtype)
-        row_sums.scatter_add_(0, indices[1], values)  # Sum by row index
-        row_sums = torch.where(row_sums == 0, torch.ones_like(row_sums), row_sums)
-        
-        # Normalize values
-        values /= row_sums[indices[1]]
-
     # --- build sparse matrix ---
     # first construct with coo, then coalesce, then convert to CSR for speed
     coo = torch.sparse_coo_tensor(indices, values, size=(num_neurons, num_neurons), device=device)

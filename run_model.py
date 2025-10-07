@@ -60,8 +60,6 @@ else:
     pre_idx = torch.tensor(synapse_counts_df['pre_matrix_ind'].values, device=device, dtype=torch.long)
     # Accumulate duplicate edges (to match sparse coalesce semantics)
     synapse_counts.index_put_((post_idx, pre_idx), synapse_counts_values, accumulate=True)
-readout_weight = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_weight_init"], dtype=dtype, device=device))
-readout_bias = torch.nn.Parameter(torch.tensor(config["simulation"]["readout_bias_init"], dtype=dtype, device=device))
 
 # create the model
 model = nm.SimpleRnn(synapse_counts=synapse_counts, cell_types=cell_info_df.type.values, device=device, dtype=dtype, use_sparse=use_sparse)
@@ -118,43 +116,23 @@ cell_inputs = torch.concat(cell_inputs, dim=0)
 num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
-if config["model"]["freeze_weights"]:
-    opt = torch.optim.SGD([readout_weight, readout_bias], lr=alpha)
-else:
-    opt = torch.optim.SGD(list(model.parameters()) + [readout_weight, readout_bias], lr=alpha)
+opt = torch.optim.Adam(model.parameters(), lr=alpha)
     
 # Halve the learning rate every 400 iterations
 scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=400, gamma=0.5)
-# mask = torch.as_tensor(cell_info_df.type == output_neuron, device=device)
-mask1 = torch.as_tensor(cell_info_df.type == 'T4a', device=device)
-mask2 = torch.as_tensor(cell_info_df.type == 'T4b', device=device)
 target = torch.zeros(num_stim, device=device, dtype=dtype)
 target[0 : len(temporal_frequencies)] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
 target[len(temporal_frequencies) : 2 * len(temporal_frequencies)] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
-output_scale = 1e4
+
+# find a good estimate of the readout weights
+model.estimate_readout_weights(cell_inputs, target)
 loss_list = []
 
 for step in range(num_steps):
-    start = time.time()
     opt.zero_grad()
 
-    # forward
-    if config["model"]["freeze_weights"]:
-        with torch.no_grad():
-            model.update_model_parameters()
-            outputs = mu.run_rnn(model, cell_inputs)  
-    else:
-        model.update_model_parameters()
-        outputs = mu.run_rnn(model, cell_inputs)            # (batch, T, n)
-
-    # Use last timestep and average across neurons only to preserve signal scale
-    # readout_val1 = outputs[:, :, mask1].mean(dim=(1, 2))  # (batch,)
-    # readout_val2 = outputs[:, :, mask2].mean(dim=(1, 2))  # (batch,)
-    readout_val1 = outputs[:, -1, mask1].mean(dim=1)  # (batch,)
-    readout_val2 = outputs[:, -1, mask2].mean(dim=1)  # (batch,)
-    pred = output_scale * readout_weight * (readout_val1 - readout_val2) + readout_bias
-
-    # loss
+    # calculate loss
+    pred = model.readout(cell_inputs)
     loss = torch.nn.functional.mse_loss(pred, target)
     loss_list.append(loss.detach().cpu().numpy())
 
@@ -163,19 +141,11 @@ for step in range(num_steps):
     opt.step()
     scheduler.step()
 
-    if step % 10 == 0:
+    if step % config['simulation']['print_every'] == 0:
         current_lr = opt.param_groups[0]['lr']
-        print(f"step {step + 1} / {num_steps}: lr = {current_lr} | loss = {1e6 * loss.item()}")
+        print(f"step {step + 1} / {num_steps}: lr = {current_lr} | loss = {loss.item()}")
 
         # print('epoch took', time.time() - start, 's')
-
-        plt.figure()
-        plt.plot(readout_val1.detach().cpu().numpy(), label='readout_val1')
-        plt.plot(readout_val2.detach().cpu().numpy(), label='readout_val2')
-        plt.legend()
-        plt.savefig('figures/readout_val1_vs_readout_val2_' + str(step) + '.png')
-        plt.close()
-
         plt.figure()
         plt.plot(pred.detach().cpu().numpy(), label='prediction')
         plt.plot(target.detach().cpu().numpy(), label='target')
