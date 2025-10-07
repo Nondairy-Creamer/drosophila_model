@@ -50,19 +50,9 @@ cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parque
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
 num_neurons = len(cell_info_df.index)
 
-# --- define the parameters and get the sparse connectivity matrix ---
-if use_sparse:
-    synapse_counts = mu.create_sparse_matrix(synapse_counts_df, device=device, dtype=dtype, normalize_rows=normalize_rows)
-else:
-    synapse_counts = torch.zeros((num_neurons, num_neurons), device=device, dtype=dtype)
-    synapse_counts_values = torch.tensor(synapse_counts_df['synapse_counts'].values, device=device, dtype=dtype)
-    post_idx = torch.tensor(synapse_counts_df['post_matrix_ind'].values, device=device, dtype=torch.long)
-    pre_idx = torch.tensor(synapse_counts_df['pre_matrix_ind'].values, device=device, dtype=torch.long)
-    # Accumulate duplicate edges (to match sparse coalesce semantics)
-    synapse_counts.index_put_((post_idx, pre_idx), synapse_counts_values, accumulate=True)
-
 # create the model
-model = nm.SimpleRnn(synapse_counts=synapse_counts, cell_types=cell_info_df.type.values, device=device, dtype=dtype, use_sparse=use_sparse)
+model = nm.SimpleRnn(synapse_counts_df=synapse_counts_df, cell_types=cell_info_df.type.values, nonlinearity=nonlinearity,
+ device=device, dtype=dtype, use_sparse=use_sparse)
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
@@ -132,7 +122,7 @@ for step in range(num_steps):
     opt.zero_grad()
 
     # calculate loss
-    pred = model.readout(cell_inputs)
+    pred = model.predict_and_readout(cell_inputs)
     loss = torch.nn.functional.mse_loss(pred, target)
     loss_list.append(loss.detach().cpu().numpy())
 

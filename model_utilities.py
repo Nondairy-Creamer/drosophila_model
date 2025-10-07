@@ -3,30 +3,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 
-def create_sparse_matrix(synapse_counts_df, device=torch.device('cpu'), dtype=torch.float32, normalize_rows=False):
-    index_dtype = torch.int64
-    num_neurons = np.max((synapse_counts_df.pre_matrix_ind.values, synapse_counts_df.post_matrix_ind.values)) + 1
-
-    # --- choose which axis is row/col ---
-    # values → torch tensor on the right device and dtype
-    values = torch.tensor(synapse_counts_df['synapse_counts'].values, dtype=dtype, device=device)
-
-    # indices must be int64
-    rows = torch.tensor(synapse_counts_df['post_matrix_ind'].values, dtype=index_dtype, device=device)
-    cols = torch.tensor(synapse_counts_df['pre_matrix_ind'].values, dtype=index_dtype, device=device)
-
-    # shape the indices as (2, nnz)
-    indices = torch.stack([rows, cols], dim=0)
-
-    # --- build sparse matrix ---
-    # first construct with coo, then coalesce, then convert to CSR for speed
-    coo = torch.sparse_coo_tensor(indices, values, size=(num_neurons, num_neurons), device=device)
-
-    coo = coo.coalesce()  # coalesce: sums duplicates and sorts indices (required for reliable CSR conversion)
-    # csr = coo.to_sparse_csr()  # dtype is preserved
-
-    return coo
-
 def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6, temporal_frequency=[4],
                      dt=0.01, max_time=1, plot_figs=False):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
