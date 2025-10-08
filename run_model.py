@@ -123,7 +123,7 @@ loss_list = []
 
 for step in range(num_steps):
     def closure():
-        opt.zero_grad(set_to_none=True)
+        opt.zero_grad()
         pred = model.predict_and_readout(cell_inputs)
         loss = torch.nn.functional.mse_loss(pred, target)
         loss.backward()
@@ -156,6 +156,4 @@ for step in range(num_steps):
             plt.legend()
             plt.savefig('figures/loss.png')
             plt.close()
-
-a=1
 

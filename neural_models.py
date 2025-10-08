@@ -4,7 +4,8 @@ import model_utilities as mu
 
 
 class SimpleRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_df, cell_types, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32, use_sparse=False):
+    def __init__(self, synapse_counts_df, cell_types, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32,
+                 use_sparse=False, normalize_rows=False):
         super().__init__()
         diagonal_init = 0.9
         synapse_strength_init = 0.001
@@ -55,25 +56,32 @@ class SimpleRnn(torch.nn.Module):
         values = torch.tensor(synapse_counts_df.synapse_counts.values, device=device, dtype=self.dtype)
 
         if use_sparse:
-            # indices must be int64
-            indices = torch.stack([rows, cols], dim=0)
-            self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
-
             # Diag indices only used if using sparse matricies when adding the diagonal to the dynamics matrix
             self.diag_indices = torch.stack([
                 torch.arange(self.num_neurons, device=self.device, dtype=torch.int64),
                 torch.arange(self.num_neurons, device=self.device, dtype=torch.int64)
             ], dim=0)
 
+            # indices must be int64
+            indices = torch.stack([rows, cols], dim=0)
+            self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
+
+            if normalize_rows:
+                a=1
+                #TODO implement this
+
         else:
             # create a dense matrix
             self.synapse_counts = torch.zeros((self.num_neurons, self.num_neurons), device=self.device, dtype=self.dtype)
             self.synapse_counts.index_put_((rows, cols), values, accumulate=True).to(device=self.device, dtype=self.dtype)
+            
+            if normalize_rows:
+                self.synapse_counts /= torch.sum(self.synapse_counts, dim=1)[:, None]
 
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
-        self.cell_type_to_index = {}
-        for ct in self.unique_cell_types:
-            self.cell_type_to_index[ct] = np.where(self.cell_types == ct)[0]
+        self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1
+        for cti, ct in enumerate(self.unique_cell_types):
+            self.neuron_to_type_index[self.cell_types == ct] = cti
         
         # Pre-allocate tensors to avoid repeated allocation. these will be populated by shared parameters across cell types
         self.diagonal = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
@@ -91,17 +99,10 @@ class SimpleRnn(torch.nn.Module):
             return self.nonlinearity(x_prev) @ self.dynamics_matrix.T + u_t * self.input_strength + self.offset_all_neurons
 
     def construct_model_parameters(self):
-        self.diagonal = torch.zeros_like(self.diagonal)
-        self.input_strength = torch.zeros_like(self.input_strength)
-        self.offset_all_neurons = torch.zeros_like(self.offset_all_neurons)
-
         # Vectorized assignment using pre-computed mapping
-        for cti, ct in enumerate(self.unique_cell_types):
-            neuron_inds = self.cell_type_to_index[ct]
-            self.diagonal[neuron_inds] = torch.sigmoid(self.diagonal_log[cti])
-            self.input_strength[neuron_inds] = torch.exp(self.input_strength_log[cti])
-            # Offset should NOT be exponentiated - it's a bias term that can be negative
-            self.offset_all_neurons[neuron_inds] = self.offset[cti]
+        self.diagonal = torch.sigmoid(self.diagonal_log)[self.neuron_to_type_index]
+        self.input_strength = torch.exp(self.input_strength_log)[self.neuron_to_type_index]
+        self.offset_all_neurons = self.offset[self.neuron_to_type_index]
 
         if self.use_sparse:
             # Use pre-computed diagonal indices for faster sparse tensor creation
