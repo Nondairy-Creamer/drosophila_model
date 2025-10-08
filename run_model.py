@@ -13,6 +13,7 @@ import data_utilities as du
 # Load configuration from TOML file
 config = du.load_config()
 
+use_bfgs = False
 # Clear previous figures (delete non-hidden files)
 fig_dir = Path('figures')
 fig_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,7 @@ sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(),
 
 cell_inputs = []
 lam_column_bool = column_info_df['type'].isin(input_neurons)
-root_id_to_column_id = column_info_df.loc[lam_column_bool, ('column_id', 'root_id')]
+root_id_to_column_id = column_info_df.loc[lam_column_bool, ['column_id', 'root_id']]
 root_id_to_column_id['root_ind'] = pd.Index(cell_info_df.root_id).get_indexer(root_id_to_column_id.root_id)
 
 assert np.all(root_id_to_column_id['root_ind'] != -1), 'column_info has cells not found in cell_info'
@@ -106,10 +107,10 @@ cell_inputs = torch.concat(cell_inputs, dim=0)
 num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
-opt = torch.optim.Adam(model.parameters(), lr=alpha)
+# opt = torch.optim.Adam(model.parameters(), lr=alpha)
+opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
     
 # Halve the learning rate every 400 iterations
-scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=400, gamma=0.5)
 target = torch.zeros(num_stim, device=device, dtype=dtype)
 target[0 : len(temporal_frequencies)] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
 target[len(temporal_frequencies) : 2 * len(temporal_frequencies)] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
@@ -119,35 +120,36 @@ model.estimate_readout_weights(cell_inputs, target)
 loss_list = []
 
 for step in range(num_steps):
-    opt.zero_grad()
+    def closure():
+        opt.zero_grad(set_to_none=True)
+        pred = model.predict_and_readout(cell_inputs)
+        loss = torch.nn.functional.mse_loss(pred, target)
+        loss.backward()
+        return loss
 
-    # calculate loss
-    pred = model.predict_and_readout(cell_inputs)
-    loss = torch.nn.functional.mse_loss(pred, target)
-    loss_list.append(loss.detach().cpu().numpy())
+    loss = opt.step(closure)
 
-    # backward + update
-    loss.backward()
-    opt.step()
-    scheduler.step()
+    # log once per outer step
+    loss_list.append(loss.item())
 
     if step % config['simulation']['print_every'] == 0:
-        current_lr = opt.param_groups[0]['lr']
-        print(f"step {step + 1} / {num_steps}: lr = {current_lr} | loss = {loss.item()}")
+        print(f"step {step + 1} / {num_steps} | loss = {loss.item()}")
 
-        # print('epoch took', time.time() - start, 's')
-        plt.figure()
-        plt.plot(pred.detach().cpu().numpy(), label='prediction')
-        plt.plot(target.detach().cpu().numpy(), label='target')
-        plt.legend()
-        plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
-        plt.close()
+        with torch.no_grad():
+            pred = model.predict_and_readout(cell_inputs)
 
-        plt.figure()
-        plt.plot(loss_list, label='loss')
-        plt.legend()
-        plt.savefig('figures/loss.png')
-        plt.close()
+            plt.figure()
+            plt.plot(pred.detach().cpu().numpy(), label='prediction')
+            plt.plot(target.detach().cpu().numpy(), label='target')
+            plt.legend()
+            plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
+            plt.close()
+
+            plt.figure()
+            plt.plot(loss_list, label='loss')
+            plt.legend()
+            plt.savefig('figures/loss.png')
+            plt.close()
 
 a=1
 
