@@ -13,7 +13,6 @@ import data_utilities as du
 # Load configuration from TOML file
 config = du.load_config()
 
-use_bfgs = False
 # Clear previous figures (delete non-hidden files)
 fig_dir = Path('figures')
 fig_dir.mkdir(parents=True, exist_ok=True)
@@ -31,6 +30,7 @@ alpha = config["simulation"]["alpha"]
 normalize_rows = config["data"]["normalize_rows"]
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
+use_bfgs = config['simulation']['use_bfgs']
 
 # Generate temporal frequencies
 temporal_frequencies = list(np.arange(
@@ -107,8 +107,10 @@ cell_inputs = torch.concat(cell_inputs, dim=0)
 num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
-# opt = torch.optim.Adam(model.parameters(), lr=alpha)
-opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
+if use_bfgs:
+    opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
+else:
+    opt = torch.optim.Adam(model.parameters(), lr=alpha)
     
 # Halve the learning rate every 400 iterations
 target = torch.zeros(num_stim, device=device, dtype=dtype)
@@ -127,7 +129,11 @@ for step in range(num_steps):
         loss.backward()
         return loss
 
-    loss = opt.step(closure)
+    if use_bfgs:
+        loss = opt.step(closure)
+    else:
+        loss = closure()
+        opt.step()
 
     # log once per outer step
     loss_list.append(loss.item())
