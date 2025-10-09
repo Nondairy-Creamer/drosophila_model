@@ -4,7 +4,7 @@ import model_utilities as mu
 import pandas as pd
 from pathlib import Path
 import matplotlib
-# matplotlib.use('Agg')
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import neural_models as nm
 import time
@@ -52,7 +52,7 @@ synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_cou
 num_neurons = len(cell_info_df.index)
 
 # create the model
-model = nm.SimpleRnn(synapse_counts_df=synapse_counts_df, cell_types=cell_info_df.type.values, nonlinearity=nonlinearity,
+model = nm.NeuralRnn(synapse_counts_df=synapse_counts_df, cell_types=cell_info_df.type.values, nonlinearity=nonlinearity,
  device=device, dtype=dtype, use_sparse=use_sparse)
 
 # --- get a sign wave stimulus ---
@@ -111,8 +111,9 @@ else:
     
 # Halve the learning rate every 400 iterations
 target = torch.zeros(num_stim, device=device, dtype=dtype)
-target[0 : len(temporal_frequencies)] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
-target[len(temporal_frequencies) : 2 * len(temporal_frequencies)] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
+num_freq = len(temporal_frequencies)
+target[0 : num_freq] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
+target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
 
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)

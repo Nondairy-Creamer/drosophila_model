@@ -1,15 +1,16 @@
 import torch
 import numpy as np
-import model_utilities as mu
+from scipy.optimize import lsq_linear
 
 
-class SimpleRnn(torch.nn.Module):
+class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_df, cell_types, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32,
                  use_sparse=False, normalize_rows=False):
         super().__init__()
         diagonal_init = 0.9
-        synapse_strength_init = 0.001
-        input_strength_init = 0.1
+        input_strength_init = 0.2
+        output_strength_init = input_strength_init
+        stimulus_strength_init = 0.1
         readout_weight_init = 1
         readout_bias_init = 0
 
@@ -34,18 +35,22 @@ class SimpleRnn(torch.nn.Module):
             return np.log(p / (1 - p))
 
         # --- model parameters
-        self.diagonal_log = torch.full((self.num_cell_types,), np.log(diagonal_init), dtype=self.dtype, device=self.device)
-        self.synapse_strength_log = torch.tensor(logit(synapse_strength_init), dtype=self.dtype, device=self.device)
+        self.diagonal_log = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
+        self.synapse_strength_log = torch.tensor(0.1, device=self.device, dtype=self.dtype)
         self.input_strength_log = torch.full((self.num_cell_types,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
+        self.output_strength_log = torch.full((self.num_cell_types,), np.log(output_strength_init), device=self.device, dtype=self.dtype)
+        self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
         self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        self.readout_weight = torch.tensor(readout_weight_init, device=self.device, dtype=self.dtype)
+        self.readout_weight_log = torch.tensor(np.log(readout_weight_init), device=self.device, dtype=self.dtype)
         self.readout_bias = torch.tensor(readout_bias_init, device=self.device, dtype=self.dtype)
 
         self.diagonal_log = torch.nn.Parameter(self.diagonal_log)
         self.synapse_strength_log = torch.nn.Parameter(self.synapse_strength_log)
-        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        # self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        # self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
-        self.readout_weight = torch.nn.Parameter(self.readout_weight)
+        self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
         self.readout_bias = torch.nn.Parameter(self.readout_bias)
 
         # --- pre-compute some variables for efficiency ---
@@ -85,7 +90,7 @@ class SimpleRnn(torch.nn.Module):
         
         # Pre-allocate tensors to avoid repeated allocation. these will be populated by shared parameters across cell types
         self.diagonal = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
-        self.input_strength = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
+        self.stimulus_strength = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
         self.offset_all_neurons = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
 
         self.construct_model_parameters()
@@ -93,15 +98,17 @@ class SimpleRnn(torch.nn.Module):
     def forward(self, x_prev, u_t):
         if self.use_sparse:
             out = torch.sparse.mm(self.dynamics_matrix, self.nonlinearity(x_prev).transpose(-2, -1)).transpose(-2, -1)
-            out += u_t * self.input_strength + self.offset_all_neurons
+            out += u_t * self.stimulus_strength + self.offset_all_neurons
             return out
         else:
-            return self.nonlinearity(x_prev) @ self.dynamics_matrix.T + u_t * self.input_strength + self.offset_all_neurons
+            return self.nonlinearity(x_prev @ self.dynamics_matrix.T + u_t * self.stimulus_strength + self.offset_all_neurons)
 
     def construct_model_parameters(self):
         # Vectorized assignment using pre-computed mapping
         self.diagonal = torch.sigmoid(self.diagonal_log)[self.neuron_to_type_index]
         self.input_strength = torch.exp(self.input_strength_log)[self.neuron_to_type_index]
+        self.output_strength = torch.exp(self.output_strength_log)[self.neuron_to_type_index]
+        self.stimulus_strength = torch.exp(self.stimulus_strength_log)[self.neuron_to_type_index]
         self.offset_all_neurons = self.offset[self.neuron_to_type_index]
 
         if self.use_sparse:
@@ -114,21 +121,31 @@ class SimpleRnn(torch.nn.Module):
                 dtype=self.dtype,
             )
 
-            self.dynamics_matrix = torch.exp(self.synapse_strength_log) * self.synapse_counts + diag_sparse
+            self.dynamics_matrix = self.output_strength[:, None] * self.synapse_counts * self.input_strength[None, :] + diag_sparse
         else:
-            self.dynamics_matrix = torch.exp(self.synapse_strength_log) * self.synapse_counts + torch.diag(self.diagonal)
+            self.dynamics_matrix = torch.exp(self.synapse_strength_log) * self.output_strength[:, None] * self.synapse_counts * self.input_strength[None, :] + torch.diag(self.diagonal)
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
+            epsilon = 1
             # find the optimal starting readout weight and bias using least squares linear regression
             readout = self.predict_and_readout(inputs)[1]
+            # get rid of the current readout / bias
+            readout -= self.readout_bias
+            readout /= torch.exp(self.readout_weight_log)
 
-            # x, y are 1D float tensors of shape (N,)
-            X = torch.stack([readout, torch.ones_like(readout)], dim=1)  # [N, 2]
-            beta = torch.linalg.lstsq(X, target).solution         # [2]
-            slope, intercept = beta[0], beta[1]
+            # readout, target are 1D torch tensors of shape (N,)
+            readout_np = readout.detach().cpu().numpy()
+            target_np  = target.detach().cpu().numpy()
 
-            self.readout_weight.copy_(slope)
+            # fit with constraint that the slope is positive. this is to keep it from learningn to swap left and right
+            # so when give it an initial condition we need to make sure its positive
+            A = np.c_[readout_np, np.ones_like(readout_np)]
+            res = lsq_linear(A, target_np, bounds=([epsilon, -np.inf], [np.inf, np.inf]))
+            slope, intercept = res.x  # slope >= 0, intercept free
+
+            # set the initial values
+            self.readout_weight_log.copy_(np.log(slope))
             self.readout_bias.copy_(intercept)
 
     def predict(self, inputs):
@@ -146,10 +163,10 @@ class SimpleRnn(torch.nn.Module):
 
     def readout(self, outputs):
         # given some outputs of the rnn calcualte the linear decoding readout
-        neurons_pro = outputs[:, -1, self.mask_pro].mean(dim=1)  # (batch,)
-        neurons_reg = outputs[:, -1, self.mask_reg].mean(dim=1)  # (batch,)
+        neurons_pro = outputs[:, :, self.mask_pro].mean(dim=(1, 2))  # (batch,)
+        neurons_reg = outputs[:, :, self.mask_reg].mean(dim=(1, 2))  # (batch,)
 
-        return self.readout_weight * (neurons_pro - neurons_reg) + self.readout_bias
+        return torch.exp(self.readout_weight_log) * (neurons_pro - neurons_reg) + self.readout_bias
     
     def predict_and_readout(self, inputs):
         # predict the rnn outputs from an input and then read them out
