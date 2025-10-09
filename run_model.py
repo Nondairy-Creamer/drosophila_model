@@ -4,7 +4,7 @@ import model_utilities as mu
 import pandas as pd
 from pathlib import Path
 import matplotlib
-matplotlib.use('Agg')
+# matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import neural_models as nm
 import time
@@ -67,17 +67,20 @@ sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(),
 # we aren't stimulating receptors because they have a complicated relationship between location and viewing angle
 # we are using negative contrast because L1-3 are inhibited by light
 
-# find a mapping from column ID to neuron index
-# column_info_df has the column ID for the neurons. However, not all neurons are included in column_info_df
-# so we need to get the root_id for each L1-3 neuron for each column. The, we need to convert those root_ids
-# to the neuron_index in the larger cell_info_df.
+# we have a larger list of neuron ids for each neuron
+# we have a subset of that list that says for each neuron Id what column it belongs to
+# need to find the neuron_index in the larger list for each entry in the subset list
+# then we need to find the index in the stimulus that belongs to each column.
+# with those, we can assign the correct stimulus to each neuron
+column_info_df['root_ind'] = pd.Index(cell_info_df.root_id).get_indexer(column_info_df.root_id)
+column_info_df['column_ind'] = pd.Index(l1_df.column_id).get_indexer(column_info_df.column_id)
 
-cell_inputs = []
+# get rid of any entries where we have column info but not cell info, or we have L2/L3 but not L1
+column_info_df = column_info_df.query('root_ind != -1 and column_ind != -1')
+
+# get the lam neurons
 lam_column_bool = column_info_df['type'].isin(input_neurons)
-root_id_to_column_id = column_info_df.loc[lam_column_bool, ['column_id', 'root_id']]
-root_id_to_column_id['root_ind'] = pd.Index(cell_info_df.root_id).get_indexer(root_id_to_column_id.root_id)
-
-assert np.all(root_id_to_column_id['root_ind'] != -1), 'column_info has cells not found in cell_info'
+root_id_to_column_id = column_info_df[lam_column_bool].copy()
 
 # create a dictionary where the key is the column number and the output is the indices of the L1-3 cells in that column
 col_to_cell_ind = (
@@ -90,20 +93,14 @@ col_to_cell_ind = (
 cell_inputs = []
 for direction in ['right', 'left', 'up', 'down']:
     num_waves = len(sine_waves[direction])
-    cell_inputs.append(torch.zeros((num_waves, num_time, num_neurons), dtype=dtype, device=device))
+    cell_inputs.append(np.zeros((num_waves, num_time, num_neurons)))
 
     for swi, sw in enumerate(sine_waves[direction]):
-        for col_ind, col in enumerate(l1_df.column_id):
-            # each value in the sine wave is assigned to a specific column in the eye
-            # for each column, stimulate the L1, L2, and L3 cells
-            # Expand the sine wave across all L1-3 cells in this column for deterministic CUDA assignment
-            idx = torch.as_tensor(col_to_cell_ind[col], dtype=torch.long)
-            k = idx.numel()
-            this_column_sine_wave = torch.tensor(-sw[col_ind, :], dtype=dtype, device=device)  # (T,)
-            this_column_sine_wave_expanded = this_column_sine_wave[:, None].expand(num_time, k)  # (T, K)
-            cell_inputs[-1][swi, :, idx] = this_column_sine_wave_expanded
+        # each value in the sine wave is assigned to a specific column in the eye
+        # for each column, stimulate the L1, L2, and L3 cells
+        cell_inputs[-1][swi, :, root_id_to_column_id.root_ind.values] = sw[root_id_to_column_id.column_ind.values, :]
 
-cell_inputs = torch.concat(cell_inputs, dim=0)
+cell_inputs = torch.tensor(np.concatenate(cell_inputs, axis=0), device=device, dtype=dtype)
 num_stim = cell_inputs.shape[0]
 
 # --- train the model ---
@@ -124,8 +121,8 @@ loss_list = []
 for step in range(num_steps):
     def closure():
         opt.zero_grad()
-        pred = model.predict_and_readout(cell_inputs)
-        loss = torch.nn.functional.mse_loss(pred, target)
+        readout = model.predict_and_readout(cell_inputs)[1]
+        loss = torch.nn.functional.mse_loss(readout, target)
         loss.backward()
         return loss
 
@@ -142,10 +139,26 @@ for step in range(num_steps):
         print(f"step {step + 1} / {num_steps} | loss = {loss.item()}")
 
         with torch.no_grad():
-            pred = model.predict_and_readout(cell_inputs)
+            pred, readout = model.predict_and_readout(cell_inputs)
+
+            if config['visualization']['show_plots']:
+                cell_to_plot = 'L1'
+                cell_to_plot_bool = column_info_df.type == cell_to_plot
+                cell_x = column_info_df[cell_to_plot_bool].x
+                cell_z = column_info_df[cell_to_plot_bool].z
+
+                cell_activity = pred[0, 10, column_info_df[cell_to_plot_bool].root_ind.values]
+                plt.figure()
+                plt.scatter(cell_x, cell_z, c=cell_activity)
+                plt.show()
+
+                cell_activity = pred[6, 10, column_info_df[cell_to_plot_bool].root_ind.values]
+                plt.figure()
+                plt.scatter(cell_x, cell_z, c=cell_activity)
+                plt.show()
 
             plt.figure()
-            plt.plot(pred.detach().cpu().numpy(), label='prediction')
+            plt.plot(readout.detach().cpu().numpy(), label='prediction')
             plt.plot(target.detach().cpu().numpy(), label='target')
             plt.legend()
             plt.savefig('figures/pred_vs_target_' + str(step) + '.png')

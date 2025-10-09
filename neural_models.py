@@ -9,7 +9,7 @@ class SimpleRnn(torch.nn.Module):
         super().__init__()
         diagonal_init = 0.9
         synapse_strength_init = 0.001
-        input_strength_init = 0.01
+        input_strength_init = 0.1
         readout_weight_init = 1
         readout_bias_init = 0
 
@@ -121,10 +121,10 @@ class SimpleRnn(torch.nn.Module):
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
             # find the optimal starting readout weight and bias using least squares linear regression
-            prediction = self.predict_and_readout(inputs)
+            readout = self.predict_and_readout(inputs)[1]
 
             # x, y are 1D float tensors of shape (N,)
-            X = torch.stack([prediction, torch.ones_like(prediction)], dim=1)  # [N, 2]
+            X = torch.stack([readout, torch.ones_like(readout)], dim=1)  # [N, 2]
             beta = torch.linalg.lstsq(X, target).solution         # [2]
             slope, intercept = beta[0], beta[1]
 
@@ -154,4 +154,4 @@ class SimpleRnn(torch.nn.Module):
     def predict_and_readout(self, inputs):
         # predict the rnn outputs from an input and then read them out
         outputs = self.predict(inputs)
-        return self.readout(outputs)
+        return outputs, self.readout(outputs)
