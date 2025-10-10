@@ -37,7 +37,7 @@ class NeuralRnn(torch.nn.Module):
             return np.log(p / (1 - p))
 
         # --- model parameters
-        self.diagonal_log = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
+        self.diagonal_logit = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
         self.synapse_strength_log = torch.tensor(0.1, device=self.device, dtype=self.dtype)
         self.input_strength_log = torch.full((self.num_cell_types,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
         self.output_strength_log = torch.full((self.num_cell_types,), np.log(output_strength_init), device=self.device, dtype=self.dtype)
@@ -46,7 +46,7 @@ class NeuralRnn(torch.nn.Module):
         self.readout_weight_log = torch.tensor(np.log(readout_weight_init), device=self.device, dtype=self.dtype)
         self.readout_bias = torch.tensor(readout_bias_init, device=self.device, dtype=self.dtype)
 
-        self.diagonal_log = torch.nn.Parameter(self.diagonal_log)
+        self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
         self.synapse_strength_log = torch.nn.Parameter(self.synapse_strength_log)
         # self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
         # self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
@@ -107,7 +107,7 @@ class NeuralRnn(torch.nn.Module):
 
     def construct_model_parameters(self):
         # Vectorized assignment using pre-computed mapping
-        self.diagonal = torch.sigmoid(self.diagonal_log)[self.neuron_to_type_index]
+        self.diagonal = torch.sigmoid(self.diagonal_logit)[self.neuron_to_type_index]
         self.input_strength = torch.exp(self.input_strength_log)[self.neuron_to_type_index]
         self.output_strength = torch.exp(self.output_strength_log)[self.neuron_to_type_index]
         self.stimulus_strength = torch.exp(self.stimulus_strength_log)[self.neuron_to_type_index]

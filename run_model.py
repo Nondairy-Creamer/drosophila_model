@@ -119,6 +119,7 @@ target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)
 timestamp = datetime.now().strftime("%Y/%m/%d/%H_%M_%S")
+model_save_path = Path('models/' + timestamp + '/model.pkl')
 loss_list = []
 
 for step in range(num_steps):
@@ -138,12 +139,11 @@ for step in range(num_steps):
     # log once per outer step
     loss_list.append(loss.item())
 
-    if step % config['simulation']['print_every'] == 0:
-        print(f"step {step + 1} / {num_steps} | loss = {loss.item()}")
+    print(f"step {step + 1} / {num_steps} | loss = {loss.item()}")
 
+    if step % config['simulation']['save_every'] == 0:
         with torch.no_grad():
-            save_path = Path('models/' + timestamp + '/model.pkl')
-            model.save(save_path)
+            model.save(model_save_path)
 
             pred, readout = model.predict_and_readout(cell_inputs)
 
@@ -176,3 +176,4 @@ for step in range(num_steps):
             plt.savefig('figures/loss.png')
             plt.close()
 
+model.save(model_save_path)

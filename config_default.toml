@@ -14,7 +14,7 @@ nonlinearity = 'relu'  # 'relu', 'tanh', 'sigmoid'
 dt = 0.01  # time step in seconds
 max_time = 0.1  # maximum simulation time in seconds
 num_steps = 10  # number of training steps
-print_every = 1 # number of steps before printing loss
+save_every = 100 # number of steps before printing loss
 use_bfgs = true
 
 # Learning parameters
