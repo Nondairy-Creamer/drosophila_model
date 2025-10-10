@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 import neural_models as nm
 import time
 import data_utilities as du
+from datetime import datetime
 
 # Load configuration from TOML file
 config = du.load_config()
@@ -117,6 +118,7 @@ target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies
 
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)
+timestamp = datetime.now().strftime("%Y/%m/%d/%H_%M_%S")
 loss_list = []
 
 for step in range(num_steps):
@@ -140,6 +142,9 @@ for step in range(num_steps):
         print(f"step {step + 1} / {num_steps} | loss = {loss.item()}")
 
         with torch.no_grad():
+            save_path = Path('models/' + timestamp + '/model.pkl')
+            model.save(save_path)
+
             pred, readout = model.predict_and_readout(cell_inputs)
 
             if config['visualization']['show_plots']:
@@ -148,12 +153,12 @@ for step in range(num_steps):
                 cell_x = column_info_df[cell_to_plot_bool].x
                 cell_z = column_info_df[cell_to_plot_bool].z
 
-                cell_activity = pred[0, 10, column_info_df[cell_to_plot_bool].root_ind.values]
+                cell_activity = pred[0, 9, column_info_df[cell_to_plot_bool].root_ind.values]
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=cell_activity)
                 plt.show()
 
-                cell_activity = pred[6, 10, column_info_df[cell_to_plot_bool].root_ind.values]
+                cell_activity = pred[6, 9, column_info_df[cell_to_plot_bool].root_ind.values]
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=cell_activity)
                 plt.show()

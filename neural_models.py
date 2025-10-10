@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 from scipy.optimize import lsq_linear
+import pickle
+from pathlib import Path
 
 
 class NeuralRnn(torch.nn.Module):
@@ -127,7 +129,7 @@ class NeuralRnn(torch.nn.Module):
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
-            epsilon = 1
+            epsilon = 1.0
             # find the optimal starting readout weight and bias using least squares linear regression
             readout = self.predict_and_readout(inputs)[1]
             # get rid of the current readout / bias
@@ -135,12 +137,12 @@ class NeuralRnn(torch.nn.Module):
             readout /= torch.exp(self.readout_weight_log)
 
             # readout, target are 1D torch tensors of shape (N,)
-            readout_np = readout.detach().cpu().numpy()
-            target_np  = target.detach().cpu().numpy()
+            readout_np = readout.detach().cpu().numpy().astype(np.float64, copy=False)
+            target_np  = target.detach().cpu().numpy().astype(np.float64, copy=False)
 
             # fit with constraint that the slope is positive. this is to keep it from learningn to swap left and right
             # so when give it an initial condition we need to make sure its positive
-            A = np.c_[readout_np, np.ones_like(readout_np)]
+            A = np.c_[readout_np, np.ones_like(readout_np, dtype=np.float64)]
             res = lsq_linear(A, target_np, bounds=([epsilon, -np.inf], [np.inf, np.inf]))
             slope, intercept = res.x  # slope >= 0, intercept free
 
@@ -172,3 +174,10 @@ class NeuralRnn(torch.nn.Module):
         # predict the rnn outputs from an input and then read them out
         outputs = self.predict(inputs)
         return outputs, self.readout(outputs)
+
+    def save(self, path):
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open('wb') as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+
