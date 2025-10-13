@@ -3,11 +3,12 @@ import numpy as np
 from scipy.optimize import lsq_linear
 import pickle
 from pathlib import Path
+import time
 
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_df, cell_types, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32,
-                 use_sparse=False, normalize_rows=False):
+                 use_sparse=False):
         super().__init__()
         diagonal_init = 0.9
         input_strength_init = 0.2
@@ -38,7 +39,8 @@ class NeuralRnn(torch.nn.Module):
 
         # --- model parameters
         self.diagonal_logit = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
-        self.synapse_strength_log = torch.tensor(0.1, device=self.device, dtype=self.dtype)
+        self.synapse_strength_log = torch.tensor(np.log(1.1), device=self.device, dtype=self.dtype)
+        # self.synapse_strength_log = torch.tensor(np.log(1.1*0.04), device=self.device, dtype=self.dtype)
         self.input_strength_log = torch.full((self.num_cell_types,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
         self.output_strength_log = torch.full((self.num_cell_types,), np.log(output_strength_init), device=self.device, dtype=self.dtype)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
@@ -72,18 +74,10 @@ class NeuralRnn(torch.nn.Module):
             # indices must be int64
             indices = torch.stack([rows, cols], dim=0)
             self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
-
-            if normalize_rows:
-                a=1
-                #TODO implement this
-
         else:
             # create a dense matrix
             self.synapse_counts = torch.zeros((self.num_neurons, self.num_neurons), device=self.device, dtype=self.dtype)
             self.synapse_counts.index_put_((rows, cols), values, accumulate=True).to(device=self.device, dtype=self.dtype)
-            
-            if normalize_rows:
-                self.synapse_counts /= torch.sum(self.synapse_counts, dim=1)[:, None]
 
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1
@@ -98,12 +92,7 @@ class NeuralRnn(torch.nn.Module):
         self.construct_model_parameters()
 
     def forward(self, x_prev, u_t):
-        if self.use_sparse:
-            out = torch.sparse.mm(self.dynamics_matrix, self.nonlinearity(x_prev).transpose(-2, -1)).transpose(-2, -1)
-            out += u_t * self.stimulus_strength + self.offset_all_neurons
-            return out
-        else:
-            return self.nonlinearity(x_prev @ self.dynamics_matrix.T + u_t * self.stimulus_strength + self.offset_all_neurons)
+        return self.nonlinearity(x_prev @ self.dynamics_matrix.T + u_t * self.stimulus_strength + self.offset_all_neurons)
 
     def construct_model_parameters(self):
         # Vectorized assignment using pre-computed mapping
@@ -112,24 +101,25 @@ class NeuralRnn(torch.nn.Module):
         self.output_strength = torch.exp(self.output_strength_log)[self.neuron_to_type_index]
         self.stimulus_strength = torch.exp(self.stimulus_strength_log)[self.neuron_to_type_index]
         self.offset_all_neurons = self.offset[self.neuron_to_type_index]
+        synapse_strength = torch.exp(self.synapse_strength_log)
 
         if self.use_sparse:
             # Use pre-computed diagonal indices for faster sparse tensor creation
-            diag_sparse = torch.sparse_coo_tensor(
+            dynamics_diag = torch.sparse_coo_tensor(
                 indices=self.diag_indices,
                 values=self.diagonal,
                 size=(self.num_neurons, self.num_neurons),
                 device=self.device,
                 dtype=self.dtype,
             )
-
-            self.dynamics_matrix = self.output_strength[:, None] * self.synapse_counts * self.input_strength[None, :] + diag_sparse
         else:
-            self.dynamics_matrix = torch.exp(self.synapse_strength_log) * self.output_strength[:, None] * self.synapse_counts * self.input_strength[None, :] + torch.diag(self.diagonal)
+            dynamics_diag = torch.diag(self.diagonal)
+
+        self.dynamics_matrix = synapse_strength * self.output_strength[:, None] * self.synapse_counts * self.input_strength[None, :] + dynamics_diag
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
-            epsilon = 1.0
+            epsilon = 1e-6
             # find the optimal starting readout weight and bias using least squares linear regression
             readout = self.predict_and_readout(inputs)[1]
             # get rid of the current readout / bias

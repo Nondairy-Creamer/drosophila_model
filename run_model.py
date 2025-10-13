@@ -28,7 +28,6 @@ dt = config["simulation"]["dt"]
 max_time = config["simulation"]["max_time"]
 num_steps = config["simulation"]["num_steps"]
 alpha = config["simulation"]["alpha"]
-normalize_rows = config["data"]["normalize_rows"]
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
 use_bfgs = config['simulation']['use_bfgs']
@@ -143,7 +142,7 @@ for step in range(num_steps):
 
     if step % config['simulation']['save_every'] == 0:
         with torch.no_grad():
-            model.save(model_save_path)
+            # model.save(model_save_path)
 
             pred, readout = model.predict_and_readout(cell_inputs)
 
