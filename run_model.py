@@ -22,38 +22,36 @@ for p in fig_dir.iterdir():
         p.unlink()
 
 # Extract parameters from config
-device = torch.device(config["model"]["device"])
-dtype = getattr(torch, config["model"]["dtype"])
-dt = config["simulation"]["dt"]
-max_time = config["simulation"]["max_time"]
-num_steps = config["simulation"]["num_steps"]
-alpha = config["simulation"]["alpha"]
+device = torch.device(config['model']['device'])
+dtype = getattr(torch, config['model']['dtype'])
+dt = config['simulation']['dt']
+max_time = config['simulation']['max_time']
+num_steps = config['simulation']['num_steps']
+alpha = config['simulation']['alpha']
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
 use_bfgs = config['simulation']['use_bfgs']
+input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 
 # Generate temporal frequencies
 temporal_frequencies = list(np.arange(
-    config["stimulus"]["temporal_freq_start"],
-    config["stimulus"]["temporal_freq_end"],
-    config["stimulus"]["temporal_freq_step"],
+    config['stimulus']['temporal_freq_start'],
+    config['stimulus']['temporal_freq_end'],
+    config['stimulus']['temporal_freq_step'],
 ))
-nonlinearity = getattr(torch, config["model"]["nonlinearity"])
-
-input_neurons = config["neurons"]["input_neurons"]  # Convert list to tuple for compatibility
-output_neuron = config["neurons"]["output_neuron"]
-use_sparse = config["model"]["use_sparse"]
 
 # --- load in connectivity and cell info data ---
-connectome_folder = Path(config["data"]["connectome_folder"])
+connectome_folder = Path(config['data']['connectome_folder'])
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
 num_neurons = len(cell_info_df.index)
 
 # create the model
-model = nm.NeuralRnn(synapse_counts_df=synapse_counts_df, cell_types=cell_info_df.type.values, nonlinearity=nonlinearity,
- device=device, dtype=dtype, use_sparse=use_sparse)
+model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
+                     cell_types=cell_info_df.type.to_numpy(), nonlinearity=config['model']['nonlinearity'],
+                     device=config['model']['device'], dtype=config['model']['dtype'], 
+                     use_sparse=config['model']['use_sparse'], scale_in_out=config['model']['scale_in_out'])
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
@@ -117,7 +115,7 @@ target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies
 
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)
-timestamp = datetime.now().strftime("%Y/%m/%d/%H_%M_%S")
+timestamp = datetime.now().strftime('%Y/%m/%d/%H_%M_%S')
 model_save_path = Path('models/' + timestamp + '/model.pkl')
 loss_list = []
 
@@ -138,11 +136,11 @@ for step in range(num_steps):
     # log once per outer step
     loss_list.append(loss.item())
 
-    print(f"step {step + 1} / {num_steps} | loss = {loss.item()}")
+    print(f'step {step + 1} / {num_steps} | loss = {loss.item()}')
 
     if step % config['simulation']['save_every'] == 0:
         with torch.no_grad():
-            # model.save(model_save_path)
+            model.save(model_save_path)
 
             pred, readout = model.predict_and_readout(cell_inputs)
 

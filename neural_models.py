@@ -7,10 +7,18 @@ import time
 
 
 class NeuralRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_df, cell_types, nonlinearity=torch.relu, device=torch.device('cpu'), dtype=torch.float32,
-                 use_sparse=False):
+    def __init__(self, synapse_counts_coo, cell_types, nonlinearity='relu', device='cpu', dtype='float32',
+                 scale_in_out=False, use_sparse=False, readout_neurons=['T4a', 'T4b']):
+        # capture constructor inputs early (before we mutate or derive types)
+        # we'll save these to so that we can load the class easily
+        params = locals().copy()
+        params.pop('self', None)
+        params.pop('__class__', None)
+        self.init_inputs = params
         super().__init__()
+
         diagonal_init = 0.9
+        synapse_strength_init = 0.04
         input_strength_init = 0.2
         output_strength_init = input_strength_init
         stimulus_strength_init = 0.1
@@ -18,20 +26,20 @@ class NeuralRnn(torch.nn.Module):
         readout_bias_init = 0
 
         # --- model properties ---
-        self.nonlinearity = nonlinearity
+        self.nonlinearity = getattr(torch, nonlinearity)
         self.cell_types = cell_types
-        self.device = device
-        self.dtype = dtype
+        self.device = torch.device(device)
+        self.dtype = getattr(torch, dtype)
         self.use_sparse = use_sparse
         self.num_neurons = cell_types.shape[0]
         self.unique_cell_types = np.unique(cell_types)
         self.num_cell_types = self.unique_cell_types.shape[0]
+        self.synapse_counts_coo = synapse_counts_coo
+        self.scale_in_out = scale_in_out
 
         # set readout neurons and masks
-        self.neuron_pro_name = 'T4a'
-        self.neuron_reg_name = 'T4b'
-        self.mask_pro = self.cell_types == self.neuron_pro_name
-        self.mask_reg = self.cell_types == self.neuron_reg_name
+        self.readout_neurons = readout_neurons
+        self.readout_masks = [self.cell_types == i for i in readout_neurons]
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -39,38 +47,45 @@ class NeuralRnn(torch.nn.Module):
 
         # --- model parameters
         self.diagonal_logit = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
-        self.synapse_strength_log = torch.tensor(np.log(1.1), device=self.device, dtype=self.dtype)
-        # self.synapse_strength_log = torch.tensor(np.log(1.1*0.04), device=self.device, dtype=self.dtype)
-        self.input_strength_log = torch.full((self.num_cell_types,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
-        self.output_strength_log = torch.full((self.num_cell_types,), np.log(output_strength_init), device=self.device, dtype=self.dtype)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
         self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         self.readout_weight_log = torch.tensor(np.log(readout_weight_init), device=self.device, dtype=self.dtype)
         self.readout_bias = torch.tensor(readout_bias_init, device=self.device, dtype=self.dtype)
 
         self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
-        # self.synapse_strength_log = torch.nn.Parameter(self.synapse_strength_log)
-        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
-        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
         self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
         self.readout_bias = torch.nn.Parameter(self.readout_bias)
 
-        # --- pre-compute some variables for efficiency ---
+        # if we're scaling inputs and outputs then define those vectors as parameters and
+        # set synapse strength to a buffer since it is redundant.
+        synapse_strength_log = torch.tensor(np.log(synapse_strength_init), device=self.device, dtype=self.dtype)
+        input_strength_log = torch.full((self.num_cell_types,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
+        output_strength_log = torch.full((self.num_cell_types,), np.log(output_strength_init), device=self.device, dtype=self.dtype)
 
+        if self.scale_in_out:
+            self.input_strength_log = torch.nn.Parameter(input_strength_log)
+            self.output_strength_log = torch.nn.Parameter(output_strength_log)
+
+            synapse_strength_log[...] = np.log(1)
+            self.register_buffer('synapse_strength_log', synapse_strength_log)
+        else:
+            self.synapse_strength_log = torch.nn.Parameter(synapse_strength_log)
+
+            input_strength_log[:] = np.log(1)
+            output_strength_log[:] = np.log(1)
+            self.register_buffer('input_strength_log', input_strength_log)
+            self.register_buffer('output_strength_log', output_strength_log)
+        
+        # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
-        rows = torch.tensor(synapse_counts_df.post_matrix_ind.values, device=device, dtype=torch.int64)
-        cols = torch.tensor(synapse_counts_df.pre_matrix_ind.values, device=device, dtype=torch.int64)
-        values = torch.tensor(synapse_counts_df.synapse_counts.values, device=device, dtype=self.dtype)
+        # synapse counts sparse must be in the form N x 3 with [indices, (pre_synaptic, post_synaptic, count)]
+        rows = torch.tensor(self.synapse_counts_coo[:, 1], device=device, dtype=torch.int64)
+        cols = torch.tensor(self.synapse_counts_coo[:, 0], device=device, dtype=torch.int64)
+        values = torch.tensor(self.synapse_counts_coo[:, 2], device=device, dtype=self.dtype)
 
         if use_sparse:
-            # Diag indices only used if using sparse matricies when adding the diagonal to the dynamics matrix
-            self.diag_indices = torch.stack([
-                torch.arange(self.num_neurons, device=self.device, dtype=torch.int64),
-                torch.arange(self.num_neurons, device=self.device, dtype=torch.int64)
-            ], dim=0)
-
             # indices must be int64
             indices = torch.stack([rows, cols], dim=0)
             self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
@@ -148,10 +163,14 @@ class NeuralRnn(torch.nn.Module):
 
     def readout(self, outputs):
         # given some outputs of the rnn calcualte the linear decoding readout
-        neurons_pro = outputs[:, :, self.mask_pro].mean(dim=(1, 2))  # (batch,)
-        neurons_reg = outputs[:, :, self.mask_reg].mean(dim=(1, 2))  # (batch,)
+        if len(self.readout_masks) == 1:
+            readout = outputs[:, :, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
+        else:  # readout_mask should have length 2
+            neurons_pro = outputs[:, :, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
+            neurons_reg = outputs[:, :, self.readout_masks[1]].mean(dim=(1, 2))  # (batch,)
+            readout = neurons_pro - neurons_reg
 
-        return torch.exp(self.readout_weight_log) * (neurons_pro - neurons_reg) + self.readout_bias
+        return torch.exp(self.readout_weight_log) * readout + self.readout_bias
     
     def predict_and_readout(self, inputs):
         # predict the rnn outputs from an input and then read them out
@@ -161,6 +180,29 @@ class NeuralRnn(torch.nn.Module):
     def save(self, path):
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open('wb') as f:
-            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        payload = {
+            'inputs': self.init_inputs,
+            # store weights on CPU for portability
+            'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
+        }
+
+        # torch.save uses pickle under the hood and handles tensors well
+        torch.save(payload, p)
+
+    @classmethod
+    def load(cls, path, device=None, dtype=None):
+        data = torch.load(Path(path), map_location='cpu', weights_only=False)
+        inputs = dict(data['inputs'])
+        if device is not None:
+            inputs['device'] = device
+        if dtype is not None:
+            inputs['dtype'] = dtype
+
+        # construct directly from saved (or overridden) inputs
+        model = cls(**inputs)
+
+        model.load_state_dict(data['state_dict'])
+
+        return model
 
