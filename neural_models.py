@@ -49,9 +49,9 @@ class NeuralRnn(torch.nn.Module):
         self.readout_bias = torch.tensor(readout_bias_init, device=self.device, dtype=self.dtype)
 
         self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
-        self.synapse_strength_log = torch.nn.Parameter(self.synapse_strength_log)
-        # self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
-        # self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+        # self.synapse_strength_log = torch.nn.Parameter(self.synapse_strength_log)
+        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
         self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
@@ -74,6 +74,7 @@ class NeuralRnn(torch.nn.Module):
             # indices must be int64
             indices = torch.stack([rows, cols], dim=0)
             self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
+            self.synapse_counts = self.synapse_counts.coalesce()
         else:
             # create a dense matrix
             self.synapse_counts = torch.zeros((self.num_neurons, self.num_neurons), device=self.device, dtype=self.dtype)
@@ -83,39 +84,32 @@ class NeuralRnn(torch.nn.Module):
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1
         for cti, ct in enumerate(self.unique_cell_types):
             self.neuron_to_type_index[self.cell_types == ct] = cti
+        assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
         
-        # Pre-allocate tensors to avoid repeated allocation. these will be populated by shared parameters across cell types
-        self.diagonal = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
-        self.stimulus_strength = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
-        self.offset_all_neurons = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
-
-        self.construct_model_parameters()
-
     def forward(self, x_prev, u_t):
-        return self.nonlinearity(x_prev @ self.dynamics_matrix.T + u_t * self.stimulus_strength + self.offset_all_neurons)
-
-    def construct_model_parameters(self):
-        # Vectorized assignment using pre-computed mapping
-        self.diagonal = torch.sigmoid(self.diagonal_logit)[self.neuron_to_type_index]
-        self.input_strength = torch.exp(self.input_strength_log)[self.neuron_to_type_index]
-        self.output_strength = torch.exp(self.output_strength_log)[self.neuron_to_type_index]
-        self.stimulus_strength = torch.exp(self.stimulus_strength_log)[self.neuron_to_type_index]
-        self.offset_all_neurons = self.offset[self.neuron_to_type_index]
+        diagonal = torch.sigmoid(self.diagonal_logit)[self.neuron_to_type_index]
         synapse_strength = torch.exp(self.synapse_strength_log)
+        input_strength = torch.exp(self.input_strength_log)[self.neuron_to_type_index]
+        output_strength = torch.exp(self.output_strength_log)[self.neuron_to_type_index]
+        stimulus_strength = torch.exp(self.stimulus_strength_log)[self.neuron_to_type_index]
+        offset_all_neurons = self.offset[self.neuron_to_type_index]
 
-        if self.use_sparse:
-            # Use pre-computed diagonal indices for faster sparse tensor creation
-            dynamics_diag = torch.sparse_coo_tensor(
-                indices=self.diag_indices,
-                values=self.diagonal,
-                size=(self.num_neurons, self.num_neurons),
-                device=self.device,
-                dtype=self.dtype,
-            )
-        else:
-            dynamics_diag = torch.diag(self.diagonal)
+        # model is
+        # dynamics_matrix = out_scaling_column_vector * synapse_counts * in_scaling_row_vector + diagonal
+        # x_next = nonlin( dynamics_matrix @ x_prev + stimulus * stimulus_strength + offset )
+        # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
+        # issues with passing gradients due to pytorch's limited sparse support.
+        # we can't precompute the dynamics matrix because the broacast opperation of hte input/output vectors doesn't
+        # allow for passing the gradient when synapse_counts is sparse
+        # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
 
-        self.dynamics_matrix = synapse_strength * self.output_strength[:, None] * self.synapse_counts * self.input_strength[None, :] + dynamics_diag
+        x_scaled = x_prev * input_strength[None, :]
+        z = x_scaled @ self.synapse_counts.T
+        z = synapse_strength * z * output_strength[None, :]
+        z = z + x_prev * diagonal
+        x_next = self.nonlinearity(z + u_t * stimulus_strength + offset_all_neurons)
+
+        return x_next
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
@@ -123,12 +117,12 @@ class NeuralRnn(torch.nn.Module):
             # find the optimal starting readout weight and bias using least squares linear regression
             readout = self.predict_and_readout(inputs)[1]
             # get rid of the current readout / bias
-            readout -= self.readout_bias
-            readout /= torch.exp(self.readout_weight_log)
+            readout = readout - self.readout_bias
+            readout = readout / torch.exp(self.readout_weight_log)
 
             # readout, target are 1D torch tensors of shape (N,)
-            readout_np = readout.detach().cpu().numpy().astype(np.float64, copy=False)
-            target_np  = target.detach().cpu().numpy().astype(np.float64, copy=False)
+            readout_np = readout.detach().cpu().numpy().astype(np.float64)
+            target_np  = target.detach().cpu().numpy().astype(np.float64)
 
             # fit with constraint that the slope is positive. this is to keep it from learningn to swap left and right
             # so when give it an initial condition we need to make sure its positive
@@ -142,7 +136,6 @@ class NeuralRnn(torch.nn.Module):
 
     def predict(self, inputs):
         # given some input, generate the outputs of the rnn
-        self.construct_model_parameters()
         num_batches, num_time, num_neurons = inputs.shape
 
         x = inputs.new_zeros(num_batches, self.num_neurons)
