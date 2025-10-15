@@ -102,11 +102,11 @@ class NeuralRnn(torch.nn.Module):
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
         
     def forward(self, x_prev, u_t):
-        diagonal = torch.sigmoid(self.diagonal_logit)[self.neuron_to_type_index]
-        synapse_strength = torch.exp(self.synapse_strength_log)
-        input_strength = torch.exp(self.input_strength_log)[self.neuron_to_type_index]
-        output_strength = torch.exp(self.output_strength_log)[self.neuron_to_type_index]
-        stimulus_strength = torch.exp(self.stimulus_strength_log)[self.neuron_to_type_index]
+        diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
+        synapse_strength = self.synapse_strength_log.exp()
+        input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
+        output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
         offset_all_neurons = self.offset[self.neuron_to_type_index]
 
         # model is
@@ -133,7 +133,7 @@ class NeuralRnn(torch.nn.Module):
             readout = self.predict_and_readout(inputs)[1]
             # get rid of the current readout / bias
             readout = readout - self.readout_bias
-            readout = readout / torch.exp(self.readout_weight_log)
+            readout = readout / self.readout_weight_log.exp()
 
             # readout, target are 1D torch tensors of shape (N,)
             readout_np = readout.detach().cpu().numpy().astype(np.float64)
@@ -153,9 +153,10 @@ class NeuralRnn(torch.nn.Module):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
+        # initial neural activity values
         x = inputs.new_zeros(num_batches, self.num_neurons)
         outputs = inputs.new_zeros(num_batches, num_time, self.num_neurons)
-        for t in range(1, num_time):
+        for t in range(num_time):
             x = self(x, inputs[:, t, :])
             outputs[:, t, :] = x
 
@@ -170,7 +171,7 @@ class NeuralRnn(torch.nn.Module):
             neurons_reg = outputs[:, :, self.readout_masks[1]].mean(dim=(1, 2))  # (batch,)
             readout = neurons_pro - neurons_reg
 
-        return torch.exp(self.readout_weight_log) * readout + self.readout_bias
+        return self.readout_weight_log.exp() * readout + self.readout_bias
     
     def predict_and_readout(self, inputs):
         # predict the rnn outputs from an input and then read them out

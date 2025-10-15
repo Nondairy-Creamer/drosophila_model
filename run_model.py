@@ -4,7 +4,7 @@ import model_utilities as mu
 import pandas as pd
 from pathlib import Path
 import matplotlib
-matplotlib.use('Agg')
+# matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import neural_models as nm
 import time
@@ -55,51 +55,14 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
+# get the column info for all L1s and use that to know the location and column ID for each ommatidia
 l1_df = column_info_df[column_info_df['type'] == 'L1']
 
 sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
-
-# --- define the external inputs to cells ---
-# in this case we will directly stimulate L1, L2, and L3 with negative contrast
-# we aren't stimulating receptors because they have a complicated relationship between location and viewing angle
-# we are using negative contrast because L1-3 are inhibited by light
-
-# we have a larger list of neuron ids for each neuron
-# we have a subset of that list that says for each neuron Id what column it belongs to
-# need to find the neuron_index in the larger list for each entry in the subset list
-# then we need to find the index in the stimulus that belongs to each column.
-# with those, we can assign the correct stimulus to each neuron
-column_info_df['root_ind'] = pd.Index(cell_info_df.root_id).get_indexer(column_info_df.root_id)
-column_info_df['column_ind'] = pd.Index(l1_df.column_id).get_indexer(column_info_df.column_id)
-
-# get rid of any entries where we have column info but not cell info, or we have L2/L3 but not L1
-column_info_df = column_info_df.query('root_ind != -1 and column_ind != -1')
-
-# get the lam neurons
-lam_column_bool = column_info_df['type'].isin(input_neurons)
-root_id_to_column_id = column_info_df[lam_column_bool].copy()
-
-# create a dictionary where the key is the column number and the output is the indices of the L1-3 cells in that column
-col_to_cell_ind = (
-    root_id_to_column_id.groupby('column_id', sort=False).root_ind
-      .agg(list)            # Python lists per group
-      .map(np.asarray)      # convert each to a NumPy array
-      .to_dict()
-)
-
-cell_inputs = []
-for direction in ['right', 'left', 'up', 'down']:
-    num_waves = len(sine_waves[direction])
-    cell_inputs.append(np.zeros((num_waves, num_time, num_neurons)))
-
-    for swi, sw in enumerate(sine_waves[direction]):
-        # each value in the sine wave is assigned to a specific column in the eye
-        # for each column, stimulate the L1, L2, and L3 cells
-        cell_inputs[-1][swi, :, root_id_to_column_id.root_ind.values] = sw[root_id_to_column_id.column_ind.values, :]
-
-cell_inputs = torch.tensor(np.concatenate(cell_inputs, axis=0), device=device, dtype=dtype)
-num_stim = cell_inputs.shape[0]
+# we're going to put the sinewaves into L1, L2, L3 so invert contast
+sine_waves = torch.tensor(-sine_waves, device=device, dtype=dtype)
+cell_inputs = mu.map_stimulus_to_cells(sine_waves, column_info_df, cell_info_df.root_id, l1_df.column_id, input_neurons=input_neurons)
 
 # --- train the model ---
 if use_bfgs:
@@ -108,7 +71,7 @@ else:
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     
 # Halve the learning rate every 400 iterations
-target = torch.zeros(num_stim, device=device, dtype=dtype)
+target = torch.zeros(cell_inputs.shape[0], device=device, dtype=dtype)
 num_freq = len(temporal_frequencies)
 target[0 : num_freq] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
 target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
@@ -116,7 +79,7 @@ target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)
 timestamp = datetime.now().strftime('%Y/%m/%d/%H_%M_%S')
-model_save_path = Path('models/' + timestamp + '/model.pkl')
+model_save_folder = Path('models/' + timestamp)
 loss_list = []
 
 for step in range(num_steps):
@@ -138,9 +101,12 @@ for step in range(num_steps):
 
     print(f'step {step + 1} / {num_steps} | loss = {loss.item()}')
 
-    if step % config['simulation']['save_every'] == 0:
+    if (step % config['simulation']['save_every'] == 0) | (step == num_steps - 1):
         with torch.no_grad():
-            model.save(model_save_path)
+            model.save(model_save_folder / 'model.pt')
+            du.save_config(config, model_save_folder / 'config.toml')
+            torch.save(cell_inputs.detach().cpu(), model_save_folder / "cell_inputs.pt")
+
 
             pred, readout = model.predict_and_readout(cell_inputs)
 
@@ -150,12 +116,12 @@ for step in range(num_steps):
                 cell_x = column_info_df[cell_to_plot_bool].x
                 cell_z = column_info_df[cell_to_plot_bool].z
 
-                cell_activity = pred[0, 9, column_info_df[cell_to_plot_bool].root_ind.values]
+                cell_activity = pred[0, 9, column_info_df[cell_to_plot_bool].root_ind.values].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=cell_activity)
                 plt.show()
 
-                cell_activity = pred[6, 9, column_info_df[cell_to_plot_bool].root_ind.values]
+                cell_activity = pred[6, 9, column_info_df[cell_to_plot_bool].root_ind.values].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=cell_activity)
                 plt.show()
@@ -172,5 +138,3 @@ for step in range(num_steps):
             plt.legend()
             plt.savefig('figures/loss.png')
             plt.close()
-
-model.save(model_save_path)

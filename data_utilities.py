@@ -1,32 +1,41 @@
-"""
+'''
 Simple TOML configuration loader for the Drosophila neural model.
-"""
+'''
 
 from pathlib import Path
+import os
+import tempfile
+from typing import Any, Dict
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib
 
-def load_config() -> dict:
-    """
+try:
+    # Python <3.11 needs a writer; on 3.11+ prefer tomllib for reading and tomli_w for writing
+    import tomli_w as toml_writer
+except ImportError:  # pragma: no cover - tomli_w present per requirements for <3.11
+    toml_writer = None
+
+def load_config(config_path: str = 'config.toml') -> dict:
+    '''
     Load configuration by merging default config with user config.
     
     Returns:
         Dictionary containing the merged configuration
-    """
+    '''
     # Load default config
-    default_path = Path("config_default.toml")
+    default_path = Path('config_default.toml')
     if not default_path.exists():
-        raise FileNotFoundError(f"Default configuration file not found: {default_path}")
+        raise FileNotFoundError(f'Default configuration file not found: {default_path}')
     
-    with open(default_path, "rb") as f:
+    with open(default_path, 'rb') as f:
         config = tomllib.load(f)
     
     # Check for user config and merge if it exists
-    user_path = Path("config.toml")
+    user_path = Path(config_path)
     if user_path.exists():
-        with open(user_path, "rb") as f:
+        with open(user_path, 'rb') as f:
             user_config = tomllib.load(f)
         
         # Recursively merge user config into default config
@@ -35,7 +44,7 @@ def load_config() -> dict:
     return config
 
 def _merge_configs(default: dict, user: dict) -> dict:
-    """
+    '''
     Recursively merge user config into default config.
     
     Args:
@@ -44,7 +53,7 @@ def _merge_configs(default: dict, user: dict) -> dict:
         
     Returns:
         Merged configuration dictionary
-    """
+    '''
     result = default.copy()
     
     for key, value in user.items():
@@ -54,4 +63,43 @@ def _merge_configs(default: dict, user: dict) -> dict:
             result[key] = value
     
     return result
+
+
+def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
+    '''
+    Save a configuration dictionary to a TOML file.
+
+    Args:
+        config: Configuration dictionary to be written
+        path: Output TOML path (default: 'config.toml')
+
+    The write is performed atomically by writing to a temporary file
+    in the destination directory and then replacing the target.
+    '''
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Serialize using tomli_w where available. For Python 3.11+, tomllib has no writer,
+    # so tomli-w remains the recommended writer.
+    if toml_writer is None:
+        raise RuntimeError(
+            "TOML writer not available. Please install 'tomli-w' for writing TOML files."
+        )
+
+    # Write atomically
+    dir_fd = os.open(str(output_path.parent), os.O_RDONLY)
+    try:
+        with tempfile.NamedTemporaryFile('w', delete=False, dir=str(output_path.parent), suffix='.tmp') as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(toml_writer.dumps(config))
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        # Replace target
+        os.replace(tmp_path, output_path)
+        os.fsync(dir_fd)
+    finally:
+        try:
+            os.close(dir_fd)
+        except Exception:
+            pass
 
