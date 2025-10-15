@@ -18,15 +18,19 @@ class NeuralRnn(torch.nn.Module):
         super().__init__()
 
         diagonal_init = 0.9
-        synapse_strength_init = 0.04
+        synapse_strength_init = 0.04 * 0.01
         input_strength_init = 0.2
         output_strength_init = input_strength_init
-        stimulus_strength_init = 0.1
+        stimulus_strength_init = 0.1 * 10
         readout_weight_init = 1
         readout_bias_init = 0
 
         # --- model properties ---
-        self.nonlinearity = getattr(torch, nonlinearity)
+        if nonlinearity in ("identity", "linear"):
+            self.nonlinearity = torch.nn.Identity()
+        else:
+            self.nonlinearity = getattr(torch, nonlinearity)
+            
         self.cell_types = cell_types
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype)
