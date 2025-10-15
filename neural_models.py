@@ -18,10 +18,10 @@ class NeuralRnn(torch.nn.Module):
         super().__init__()
 
         diagonal_init = 0.9
-        synapse_strength_init = 0.04 * 0.01
+        synapse_strength_init = 0.04
         input_strength_init = 0.2
         output_strength_init = input_strength_init
-        stimulus_strength_init = 0.1 * 10
+        stimulus_strength_init = 0.1
         readout_weight_init = 1
         readout_bias_init = 0
 
@@ -43,7 +43,15 @@ class NeuralRnn(torch.nn.Module):
 
         # set readout neurons and masks
         self.readout_neurons = readout_neurons
-        self.readout_masks = [self.cell_types == i for i in readout_neurons]
+        # store readout masks as torch.bool on model device for safe tensor indexing
+        self.readout_masks = [
+            torch.tensor(self.cell_types == neuron_name, device=self.device, dtype=torch.bool)
+            for neuron_name in readout_neurons
+        ]
+        # validate readout masks are non-empty
+        for i, mask in enumerate(self.readout_masks):
+            if not torch.any(mask):
+                raise ValueError(f"Readout neuron '{self.readout_neurons[i]}' not found in provided cell_types.")
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -102,7 +110,9 @@ class NeuralRnn(torch.nn.Module):
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1
         for cti, ct in enumerate(self.unique_cell_types):
-            self.neuron_to_type_index[self.cell_types == ct] = cti
+            ct_mask_np = (self.cell_types == ct)
+            ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
+            self.neuron_to_type_index[ct_mask] = cti
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
         
     def forward(self, x_prev, u_t):

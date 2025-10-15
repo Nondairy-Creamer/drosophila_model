@@ -4,7 +4,7 @@ import model_utilities as mu
 import pandas as pd
 from pathlib import Path
 import matplotlib
-# matplotlib.use('Agg')
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import neural_models as nm
 import time
@@ -70,7 +70,7 @@ if use_bfgs:
 else:
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     
-# Halve the learning rate every 400 iterations
+# Define the target
 target = torch.zeros(cell_inputs.shape[0], device=device, dtype=dtype)
 num_freq = len(temporal_frequencies)
 target[0 : num_freq] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
@@ -106,8 +106,6 @@ for step in range(num_steps):
             model.save(model_save_folder / 'model.pt')
             du.save_config(config, model_save_folder / 'config.toml')
             torch.save(cell_inputs.detach().cpu(), model_save_folder / "cell_inputs.pt")
-
-
             pred, readout = model.predict_and_readout(cell_inputs)
 
             if config['visualization']['show_plots']:

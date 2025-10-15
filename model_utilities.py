@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import pandas as pd
 
 
-def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6, temporal_frequency=[4],
+def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
                      dt=0.01, max_time=1, plot_figs=False):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
@@ -23,7 +23,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi / 6,
     # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
     # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
     filter_std = filter_std_base * 1 / np.cos(sample_theta - np.pi / 2)
-    contrast_scaling_factor = np.exp(-2 * np.pi**2 * filter_std**2 / wavelength ** 2)
+    contrast_scaling_factor = np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
 
     # length scales for vertical sine waves (since the cylinder is flat vertically)
     vert_wavelength = 2 * np.tan(wavelength / 2) # length of sine wave in cartesian space
