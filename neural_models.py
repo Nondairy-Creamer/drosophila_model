@@ -18,10 +18,10 @@ class NeuralRnn(torch.nn.Module):
         super().__init__()
 
         diagonal_init = 0.9
-        synapse_strength_init = 0.04
+        synapse_strength_init = 0.04 * 0.1
         input_strength_init = 0.2
         output_strength_init = input_strength_init
-        stimulus_strength_init = 0.1
+        stimulus_strength_init = 0.1 * 10
         readout_weight_init = 1
         readout_bias_init = 0
 
@@ -142,25 +142,23 @@ class NeuralRnn(torch.nn.Module):
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
+            # just set the wieght so that the readout has the same standard deviation as the data and the bias centers the readout on the data
+            # can't do linear regression because slope needs to be positive. least squares with bounds often fits to 0 and kills the gradient
             epsilon = 1e-6
-            # find the optimal starting readout weight and bias using least squares linear regression
+
             readout = self.predict_and_readout(inputs)[1]
             # get rid of the current readout / bias
             readout = readout - self.readout_bias
             readout = readout / self.readout_weight_log.exp()
 
-            # readout, target are 1D torch tensors of shape (N,)
-            readout_np = readout.detach().cpu().numpy().astype(np.float64)
-            target_np  = target.detach().cpu().numpy().astype(np.float64)
-
-            # fit with constraint that the slope is positive. this is to keep it from learningn to swap left and right
-            # so when give it an initial condition we need to make sure its positive
-            A = np.c_[readout_np, np.ones_like(readout_np, dtype=np.float64)]
-            res = lsq_linear(A, target_np, bounds=([epsilon, -np.inf], [np.inf, np.inf]))
-            slope, intercept = res.x  # slope >= 0, intercept free
+            # find the STD of the prediction and the bias that will center it on the target
+            readout_std = torch.std(readout, unbiased=False).clamp_min(epsilon)
+            target_std = torch.std(target, unbiased=False).clamp_min(epsilon)
+            slope = target_std / readout_std
+            intercept = torch.mean(target - slope * readout)
 
             # set the initial values
-            self.readout_weight_log.copy_(np.log(slope))
+            self.readout_weight_log.copy_(torch.log(slope))
             self.readout_bias.copy_(intercept)
 
     def predict(self, inputs):

@@ -23,11 +23,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
     # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
     filter_std = filter_std_base * 1 / np.cos(sample_theta - np.pi / 2)
-    # TODO FIX THIS
-    # contrast_scaling_factor = np.exp(20 * -2 * np.pi**2 * filter_std**2 / wavelength**2)
-    # contrast_scaling_factor /= np.max(contrast_scaling_factor)
-    contrast_scaling_factor = np.exp(-2 * filter_std ** 2 * wavelength ** 2)
-    contrast_scaling_factor /= np.max(contrast_scaling_factor)
+    contrast_scaling_factor = np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
 
     # length scales for vertical sine waves (since the cylinder is flat vertically)
     vert_wavelength = 2 * np.tan(wavelength / 2) # length of sine wave in cartesian space
