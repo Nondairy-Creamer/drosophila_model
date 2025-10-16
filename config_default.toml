@@ -35,7 +35,6 @@ temporal_freq_step = 4
 connectome_folder = '../connectome_data'
 fly_eye = 'right'  # 'left' or 'right'
 use_intrinsic = false
-hemisphere_coverage = 0.85  # fraction of hemisphere the fly's vision covers
 
 # Neurotransmitter classifications
 excitatory_nt = ['ACH']

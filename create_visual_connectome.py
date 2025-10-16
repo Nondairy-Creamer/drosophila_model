@@ -15,7 +15,6 @@ excitatory_nt = config["data"]["excitatory_nt"]
 inhibitory_nt = config["data"]["inhibitory_nt"]
 fly_eye = config["data"]["fly_eye"]
 use_intrinsic = config["data"]["use_intrinsic"]
-hemisphere_coverage = config["data"]["hemisphere_coverage"]
 
 # --- data sets ---
 # each neuron in the drosophila connectome has a unique "root id"
@@ -111,8 +110,8 @@ xy -= np.mean(xy, axis=1)[:, None]
 # project x and y to angular spherical coordinates using Lambert azimuthal equal-area (LAEA) projection
 # assume that the north pole of the sphere is at the center of the eye in our new x y coordinates
 # in this mapping, a hemisphere lies within a radius of sqrt(2)
-# the fly eye takes up roughly 3/4rds of the angle of a hemisphere
-max_angle = np.pi / 2 * hemisphere_coverage
+# the fly eye takes up roughly a hemisphere
+max_angle = np.pi / 2
 max_radius = np.sqrt(2) * np.sin(max_angle / 2)
 
 # radius is calculated as sqrt(x^2+y^2)
