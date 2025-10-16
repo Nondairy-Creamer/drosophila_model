@@ -9,7 +9,7 @@ scale_in_out = true
 readout_neurons = ['T4a', 'T4b']
 
 # Model architecture parameters
-nonlinearity = 'relu'  # 'relu', 'tanh', 'sigmoid'
+nonlinearity = 'relu'  # 'linear', 'relu', 'tanh', 'sigmoid'
 
 [simulation]
 # Time parameters
@@ -44,9 +44,3 @@ inhibitory_nt = ['GABA', 'GLUT']
 # Data types
 synapse_count_dtype = 'float64'
 root_id_dtype = 'int64'
-
-[visualization]
-# Plotting and visualization settings
-show_plots = true
-save_plots = false
-plot_format = 'png'

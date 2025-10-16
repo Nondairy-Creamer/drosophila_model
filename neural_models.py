@@ -136,7 +136,7 @@ class NeuralRnn(torch.nn.Module):
         z = x_scaled @ self.synapse_counts.T
         z = synapse_strength * z * output_strength[None, :]
         z = z + x_prev * diagonal
-        x_next = self.nonlinearity(z + u_t * stimulus_strength + offset_all_neurons)
+        x_next = self.nonlinearity(z + u_t * stimulus_strength[None, :] + offset_all_neurons[None, :])
 
         return x_next
 

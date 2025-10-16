@@ -61,7 +61,7 @@ l1_df = column_info_df[column_info_df['type'] == 'L1']
 sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
 # we're going to put the sinewaves into L1, L2, L3 so invert contast
-sine_waves = torch.tensor(-sine_waves, device=device, dtype=dtype)
+sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 cell_inputs = mu.map_stimulus_to_cells(sine_waves, column_info_df, cell_info_df.root_id, l1_df.column_id, input_neurons=input_neurons)
 
 # --- train the model ---
@@ -108,7 +108,7 @@ for step in range(num_steps):
             torch.save(cell_inputs.detach().cpu(), model_save_folder / "cell_inputs.pt")
             pred, readout = model.predict_and_readout(cell_inputs)
 
-            if config['visualization']['show_plots']:
+            if step == 0:
                 cell_to_plot = 'L1'
                 cell_to_plot_bool = column_info_df.type == cell_to_plot
                 cell_x = column_info_df[cell_to_plot_bool].x
@@ -117,12 +117,14 @@ for step in range(num_steps):
                 cell_activity = pred[0, 9, column_info_df[cell_to_plot_bool].root_ind.values].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=cell_activity)
-                plt.show()
+                plt.savefig('figures/L1_resp_to_pro.png')
+                plt.close()
 
                 cell_activity = pred[6, 9, column_info_df[cell_to_plot_bool].root_ind.values].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=cell_activity)
-                plt.show()
+                plt.savefig('figures/L1_resp_to_up.png')
+                plt.close()
 
             plt.figure()
             plt.plot(readout.detach().cpu().numpy(), label='prediction')
