@@ -175,12 +175,15 @@ class NeuralRnn(torch.nn.Module):
         return outputs
 
     def readout(self, outputs):
+        # average over the second half of the output
+        half_time = int(outputs.shape[1] / 2)
+
         # given some outputs of the rnn calcualte the linear decoding readout
         if len(self.readout_masks) == 1:
-            readout = outputs[:, :, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
+            readout = outputs[:, half_time:, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
         else:  # readout_mask should have length 2
-            neurons_pro = outputs[:, :, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
-            neurons_reg = outputs[:, :, self.readout_masks[1]].mean(dim=(1, 2))  # (batch,)
+            neurons_pro = outputs[:, half_time:, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
+            neurons_reg = outputs[:, half_time:, self.readout_masks[1]].mean(dim=(1, 2))  # (batch,)
             readout = neurons_pro - neurons_reg
 
         return self.readout_weight_log.exp() * readout + self.readout_bias

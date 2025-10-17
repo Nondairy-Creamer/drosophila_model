@@ -61,7 +61,7 @@ l1_df = column_info_df[column_info_df['type'] == 'L1']
 sine_waves = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
 # we're going to put the sinewaves into L1, L2, L3 so invert contast
-sine_waves = torch.tensor(-sine_waves, device=device, dtype=dtype)
+sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 cell_inputs = mu.map_stimulus_to_cells(sine_waves, column_info_df, cell_info_df.root_id, l1_df.column_id, input_neurons=input_neurons)
 
 # --- train the model ---
@@ -71,10 +71,10 @@ else:
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     
 # Define the target
+all_tf = out = [i for i in temporal_frequencies for _ in (0, 1)]
+all_tf = all_tf + [-i for i in all_tf]
 target = torch.zeros(cell_inputs.shape[0], device=device, dtype=dtype)
-num_freq = len(temporal_frequencies)
-target[0 : num_freq] = torch.tensor([i for i in temporal_frequencies], device=device, dtype=dtype)
-target[num_freq : 2 * num_freq] = torch.tensor([-i for i in temporal_frequencies], device=device, dtype=dtype)
+target[0 : len(all_tf)] = torch.tensor(all_tf, device=device, dtype=dtype)
 
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)
@@ -118,32 +118,25 @@ for step in range(num_steps):
                 c = cell_inputs[0, 0, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=c)
-                plt.savefig('figures/pro_stim_0.png')
-                plt.close()
-
-                c = cell_inputs[0, 1, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
-                plt.figure()
-                plt.scatter(cell_x, cell_z, c=c)
-                plt.savefig('figures/pro_stim_9.png')
+                plt.savefig('figures/pro_stim.png')
                 plt.close()
 
                 c = cell_inputs[int(sine_waves.shape[0] / 2), 0, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=c)
-                plt.savefig('figures/up_stim_0.png')
-                plt.close()
-
-                c = cell_inputs[int(sine_waves.shape[0] / 2), 1, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
-                plt.figure()
-                plt.scatter(cell_x, cell_z, c=c)
-                plt.savefig('figures/up_stim_9.png')
+                plt.savefig('figures/up_stim.png')
                 plt.close()
 
             plt.figure()
-            plt.plot(readout.detach().cpu().numpy(), label='prediction')
-            plt.plot(target.detach().cpu().numpy(), label='target')
+            colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+            direction = ['progressive', 'regressive', 'up', 'down']
+            readout_plot = readout.detach().cpu().numpy().T.reshape((4, int(readout.shape[0]/4))).T
+            target_plot = target.detach().cpu().numpy().T.reshape((4, int(target.shape[0]/4))).T
+            for i in range(readout_plot.shape[1]):
+                plt.plot(target_plot[:, i], color=colors[i], label=direction[i] + ' target')
+                plt.plot(readout_plot[:, i], color=colors[i], ls='--', label=direction[i] + ' prediction')
             plt.legend()
-            plt.savefig('figures/pred_vs_target_' + str(step) + '.png')
+            plt.savefig('figures/pred_vs_target.png')
             plt.close()
 
             plt.figure()

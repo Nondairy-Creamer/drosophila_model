@@ -35,21 +35,25 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))
         sine_wave *= contrast_scaling_factor[None, :]
         sine_wave_dict['right'].append(sine_wave)
+        sine_wave_dict['right'].append(-sine_wave)
 
         # leftward sine wave
         sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
         sine_wave *= contrast_scaling_factor[None, :]
         sine_wave_dict['left'].append(sine_wave)
+        sine_wave_dict['left'].append(-sine_wave)
 
         # upward sine wave
         sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
         sine_wave *= contrast_scaling_factor[None, :]
         sine_wave_dict['up'].append(sine_wave)
+        sine_wave_dict['up'].append(-sine_wave)
 
         # downward sine wave
         sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))
         sine_wave *= contrast_scaling_factor[None, :]
         sine_wave_dict['down'].append(sine_wave)
+        sine_wave_dict['down'].append(-sine_wave)
 
     # save a figure showing the stimuli
     for direction in ['right', 'left', 'up', 'down']:
