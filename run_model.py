@@ -127,13 +127,13 @@ for step in range(num_steps):
                 plt.savefig('figures/pro_stim_9.png')
                 plt.close()
 
-                c = cell_inputs[6, 0, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
+                c = cell_inputs[int(sine_waves.shape[0] / 2), 0, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=c)
                 plt.savefig('figures/up_stim_0.png')
                 plt.close()
 
-                c = cell_inputs[6, 1, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
+                c = cell_inputs[int(sine_waves.shape[0] / 2), 1, plot_column_df.root_ind.to_numpy()].detach().cpu().numpy()
                 plt.figure()
                 plt.scatter(cell_x, cell_z, c=c)
                 plt.savefig('figures/up_stim_9.png')
