@@ -2,4 +2,4 @@ config.toml
 figures/*
 !figures/.gitkeep
 models/*
-!figures/.gitkeep
+!models/.gitkeep
