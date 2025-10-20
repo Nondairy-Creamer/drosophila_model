@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import pandas as pd
 
@@ -30,38 +32,53 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     theta_to_length = np.tan(theta_mesh - np.pi / 2)
 
     sine_wave_dict = {'right': [], 'left': [], 'up': [], 'down': []}
+    tf_dict = {'right': [], 'left': [], 'up': [], 'down': []}
+    # generate sine waves at a specific temporal frequency for up down left right
+    # at phase 0, 180, 
     for tf in temporal_frequency:
-        # rightward sine wave
-        sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))
-        sine_wave *= contrast_scaling_factor[None, :]
-        sine_wave_dict['right'].append(sine_wave)
-        sine_wave_dict['right'].append(-sine_wave)
+        # -- rightward sine wave --
+        sine_wave_right = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))
+        sine_wave_right_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh) + np.pi / 2)
+        sine_wave_right *= contrast_scaling_factor[None, :]
+        sine_wave_right_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_dict['right'].append(sine_wave_right)
+        sine_wave_dict['right'].append(sine_wave_right_shifted)
+        sine_wave_dict['right'].append(-sine_wave_right)
+        sine_wave_dict['right'].append(-sine_wave_right_shifted)
+        tf_dict['right'] += [tf] * 4
 
-        # leftward sine wave
-        sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
-        sine_wave *= contrast_scaling_factor[None, :]
-        sine_wave_dict['left'].append(sine_wave)
-        sine_wave_dict['left'].append(-sine_wave)
+        # -- leftward sine wave --
+        sine_wave_left = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
+        sine_wave_left_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh) + np.pi / 2)
+        sine_wave_left *= contrast_scaling_factor[None, :]
+        sine_wave_left_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_dict['left'].append(sine_wave_left)
+        sine_wave_dict['left'].append(sine_wave_left_shifted)
+        sine_wave_dict['left'].append(-sine_wave_left)
+        sine_wave_dict['left'].append(-sine_wave_left_shifted)
+        tf_dict['left'] += [-tf] * 4
 
-        # upward sine wave
-        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
-        sine_wave *= contrast_scaling_factor[None, :]
-        sine_wave_dict['up'].append(sine_wave)
-        sine_wave_dict['up'].append(-sine_wave)
+        # -- upward sine wave -- 
+        sine_wave_up = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
+        sine_wave_up_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh) + np.pi / 2)
+        sine_wave_up *= contrast_scaling_factor[None, :]
+        sine_wave_up_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_dict['up'].append(sine_wave_up)
+        sine_wave_dict['up'].append(sine_wave_up_shifted)
+        sine_wave_dict['up'].append(-sine_wave_up)
+        sine_wave_dict['up'].append(-sine_wave_up_shifted)
+        tf_dict['up'] += [tf] * 4
 
-        # downward sine wave
-        sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))
-        sine_wave *= contrast_scaling_factor[None, :]
-        sine_wave_dict['down'].append(sine_wave)
-        sine_wave_dict['down'].append(-sine_wave)
-
-    # save a figure showing the stimuli
-    for direction in ['right', 'left', 'up', 'down']:
-        plt.figure()
-        plt.imshow(sine_wave_dict[direction][0][:, :100], cmap='gray')
-        plt.colorbar()
-        plt.savefig('figures/sine_stim_' + direction + '.png')
-        plt.close()
+        # -- downward sine wave --
+        sine_wave_down = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))
+        sine_wave_down_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh) + np.pi / 2)
+        sine_wave_down *= contrast_scaling_factor[None, :]
+        sine_wave_down_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_dict['down'].append(sine_wave_down)
+        sine_wave_dict['down'].append(sine_wave_down_shifted)
+        sine_wave_dict['down'].append(-sine_wave_down)
+        sine_wave_dict['down'].append(-sine_wave_down_shifted)
+        tf_dict['down'] += [-tf] * 4
 
     plt.figure()
     plt.scatter(sample_theta, contrast_scaling_factor)
@@ -70,11 +87,13 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
 
     num_time, num_cell = phi_mesh.shape
     stimulus = np.zeros((0, num_time, num_cell))
+    tf_out = []
     for direction in ['right', 'left', 'up', 'down']:
         this_stim = np.stack(sine_wave_dict[direction])
         stimulus = np.concatenate((stimulus, this_stim), axis=0)
+        tf_out += tf_dict[direction]
 
-    return stimulus
+    return stimulus, tf_out
 
 def map_stimulus_to_cells(stimulus, column_info_df, root_ids, stim_column_ids, input_neurons=('L1', 'L2', 'L3')):
     # --- define the external inputs to cells ---

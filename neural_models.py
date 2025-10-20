@@ -1,9 +1,6 @@
 import torch
 import numpy as np
-from scipy.optimize import lsq_linear
-import pickle
 from pathlib import Path
-import time
 
 
 class NeuralRnn(torch.nn.Module):
@@ -18,10 +15,10 @@ class NeuralRnn(torch.nn.Module):
         super().__init__()
 
         diagonal_init = 0.9
-        synapse_strength_init = 0.04
-        input_strength_init = 0.2
+        synapse_strength_init = 1e-3
+        input_strength_init = np.sqrt(synapse_strength_init)
         output_strength_init = input_strength_init
-        stimulus_strength_init = 0.1
+        stimulus_strength_init = 1e-1
         readout_weight_init = 1
         readout_bias_init = 0
 
