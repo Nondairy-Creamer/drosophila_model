@@ -11,7 +11,7 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))  # adds /works
 import neural_models as nm
 import data_utilities as du
 
-model_folder = Path('models/2025/10/20/15_16_23')
+model_folder = Path('models/20251020_164609')
 
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralRnn.load(model_folder / 'model.pt')

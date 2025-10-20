@@ -11,24 +11,24 @@ readout_neurons = ['T4a', 'T4b']
 # Model architecture parameters
 nonlinearity = 'relu'  # 'linear', 'relu', 'tanh', 'sigmoid'
 
-[simulation]
-# Time parameters
-dt = 0.01  # time step in seconds
-max_time = 0.1  # maximum simulation time in seconds
-num_steps = 10  # number of training steps
-save_every = 100 # number of steps before printing loss
-use_bfgs = true
+[training]
+num_steps = 100  # number of training steps
+save_every = 10 # number of steps before printing loss
+use_bfgs = false
 
 # Learning parameters
-alpha = 1e-2  # learning rate
+alpha = 1e-4  # learning rate
 readout_weight_init = 1e0  # initial readout weight
 readout_bias_init = 0e0  # initial readout weight
 
 [stimulus]
+# Time parameters
+dt = 0.01  # time step in seconds
+max_time = 0.25  # maximum simulation time in seconds
 # Temporal frequency parameters
-temporal_freq_start = 2
-temporal_freq_end = 12
-temporal_freq_step = 4
+temporal_freq_start = 4
+temporal_freq_end = 9
+temporal_freq_step = 2
 
 [data]
 # Data paths and settings
@@ -36,6 +36,7 @@ connectome_folder = '../connectome_data'
 fly_eye = 'right'  # 'left' or 'right'
 use_intrinsic = false
 hemisphere_coverage = 0.85  # fraction of hemisphere the fly's vision covers
+normalize_rows = false
 
 # Neurotransmitter classifications
 excitatory_nt = ['ACH']
@@ -44,3 +45,4 @@ inhibitory_nt = ['GABA', 'GLUT']
 # Data types
 synapse_count_dtype = 'float64'
 root_id_dtype = 'int64'
+

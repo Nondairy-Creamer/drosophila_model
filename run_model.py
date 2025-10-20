@@ -10,6 +10,7 @@ import neural_models as nm
 import time
 import data_utilities as du
 from datetime import datetime
+import training_utilities as tu
 
 # Load configuration from TOML file
 config = du.load_config()
@@ -24,13 +25,10 @@ for p in fig_dir.iterdir():
 # Extract parameters from config
 device = torch.device(config['model']['device'])
 dtype = getattr(torch, config['model']['dtype'])
-dt = config['simulation']['dt']
-max_time = config['simulation']['max_time']
-num_steps = config['simulation']['num_steps']
-alpha = config['simulation']['alpha']
+dt = config['stimulus']['dt']
+max_time = config['stimulus']['max_time']
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
-use_bfgs = config['simulation']['use_bfgs']
 input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 
 # Generate temporal frequencies
@@ -80,62 +78,21 @@ for si, s in enumerate(cell_inputs):
     plt.savefig(stim_fig_folder / ('stim_' + str(si) + '.png'))
     plt.close()
 
-# --- train the model ---
-if use_bfgs:
-    opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
-else:
-    opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    
+
 # Define the target as the temporal freuqencies. but set up / down to zero
 target = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 target[target.shape[0] // 2:] = 0
 
+# save the config file and inputs
+timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+model_save_folder = Path('models/' + timestamp)
+du.save_config(config, model_save_folder / 'config.toml')
+torch.save(cell_inputs.detach().cpu(), model_save_folder / "cell_inputs.pt")
+torch.save(target.detach().cpu(), model_save_folder / "target.pt")
+
+# --- train the model ---
 # find a good estimate of the readout weights
 model.estimate_readout_weights(cell_inputs, target)
-timestamp = datetime.now().strftime('%Y/%m/%d/%H_%M_%S')
-model_save_folder = Path('models/' + timestamp)
-loss_list = []
-
-for step in range(num_steps):
-    def closure():
-        opt.zero_grad()
-        readout = model.predict_and_readout(cell_inputs)[1]
-        loss = torch.nn.functional.mse_loss(readout, target)
-        loss.backward()
-        return loss
-
-    if use_bfgs:
-        loss = opt.step(closure)
-    else:
-        loss = closure()
-        opt.step()
-
-    # log once per outer step
-    loss_list.append(loss.item())
-
-    print(f'step {step + 1} / {num_steps} | loss = {loss.item()}')
-
-    if (step % config['simulation']['save_every'] == 0) | (step == num_steps - 1):
-        with torch.no_grad():
-            model.save(model_save_folder / 'model.pt')
-            du.save_config(config, model_save_folder / 'config.toml')
-            torch.save(cell_inputs.detach().cpu(), model_save_folder / "cell_inputs.pt")
-            pred, readout = model.predict_and_readout(cell_inputs)
-
-            plt.figure()
-            colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
-            direction = ['progressive', 'regressive', 'up', 'down']
-            readout_plot = readout.detach().cpu().numpy().T.reshape((4, readout.shape[0] // 4)).T
-            target_plot = target.detach().cpu().numpy().T.reshape((4, target.shape[0] // 4)).T
-            for i in range(readout_plot.shape[1]):
-                plt.plot(target_plot[:, i], color=colors[i], label=direction[i] + ' target')
-                plt.plot(readout_plot[:, i], color=colors[i], ls='--', label=direction[i] + ' prediction')
-            plt.legend()
-            plt.savefig('figures/pred_vs_target.png')
-            plt.close()
-
-            plt.figure()
-            plt.plot(loss_list, label='loss')
-            plt.legend()
-            plt.savefig('figures/loss.png')
-            plt.close()
+tu.train_model(model, cell_inputs, target, model_save_folder=model_save_folder, 
+               num_steps=config['training']['num_steps'], save_every=config['training']['save_every'], 
+               alpha=config['training']['alpha'], use_bfgs=config['training']['use_bfgs'])

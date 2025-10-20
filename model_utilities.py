@@ -1,8 +1,5 @@
 import torch
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib import pyplot as plt
 import pandas as pd
 
 
@@ -79,11 +76,6 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         sine_wave_dict['down'].append(-sine_wave_down)
         sine_wave_dict['down'].append(-sine_wave_down_shifted)
         tf_dict['down'] += [-tf] * 4
-
-    plt.figure()
-    plt.scatter(sample_theta, contrast_scaling_factor)
-    plt.savefig('figures/contrast_scaling.png')
-    plt.close()
 
     num_time, num_cell = phi_mesh.shape
     stimulus = np.zeros((0, num_time, num_cell))
