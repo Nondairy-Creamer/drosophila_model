@@ -54,7 +54,8 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
 # get the column info for all L1s and use that to know the location and column ID for each ommatidia
-l1_df = column_info_df[column_info_df['type'] == 'L1']
+l1_bool = column_info_df['type'] == 'L1'
+l1_df = column_info_df[l1_bool]
 
 sine_waves, sine_wave_tfs = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
@@ -65,6 +66,7 @@ cell_inputs = mu.map_stimulus_to_cells(sine_waves, column_info_df, cell_info_df.
 column_info_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet', index=False)
 
 # --- plot the stimuli ---
+l1_df = column_info_df[l1_bool]  # this needs to be defined again since map_stimulus_to_cells added the root_ind column
 cell_x = l1_df.x
 cell_z = l1_df.z
 stim_fig_folder = Path('figures/stimulus')
