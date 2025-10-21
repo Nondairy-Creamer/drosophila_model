@@ -3,9 +3,7 @@ import torch
 import model_utilities as mu
 import pandas as pd
 from pathlib import Path
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib import pyplot as plt
+import plotting_utilities as pu
 import neural_models as nm
 import time
 import data_utilities as du
@@ -48,7 +46,7 @@ num_neurons = len(cell_info_df.index)
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
                      cell_types=cell_info_df.type.to_numpy(), nonlinearity=config['model']['nonlinearity'],
-                     device=config['model']['device'], dtype=config['model']['dtype'], readout_neurons=config['model']['readout_neurons'],
+                     device=config['model']['device'], dtype=config['model']['dtype'],
                      use_sparse=config['model']['use_sparse'], scale_in_out=config['model']['scale_in_out'])
 
 # --- get a sign wave stimulus ---
@@ -67,23 +65,16 @@ column_info_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet',
 
 # --- plot the stimuli ---
 l1_df = column_info_df[l1_bool]  # this needs to be defined again since map_stimulus_to_cells added the root_ind column
-cell_x = l1_df.x
-cell_z = l1_df.z
-stim_fig_folder = Path('figures/stimulus')
-stim_fig_folder.mkdir(parents=True, exist_ok=True)
-
-for si, s in enumerate(cell_inputs):
-    # just plot the first timepoint
-    c = s[0, l1_df.root_ind.to_numpy()].detach().cpu().numpy()
-    plt.figure()
-    plt.scatter(cell_x, cell_z, c=c)
-    plt.savefig(stim_fig_folder / ('stim_' + str(si) + '.png'))
-    plt.close()
-
+stimuli_plot = [i[0, l1_df.root_ind.to_numpy()].detach().cpu().numpy() for i in cell_inputs]
+pu.plot_response_over_space(stimuli_plot, l1_df.x, l1_df.z, save_folder='figures/stimulus')
 
 # Define the target as the temporal freuqencies. but set up / down to zero
-target = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
-target[target.shape[0] // 2:] = 0
+target = torch.zeros((len(sine_wave_tfs), 4), device=device, dtype=dtype)
+target[:] = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)[:, None]
+target[target.shape[0] // 2:, 0] = 0
+target[target.shape[0] // 2:, 1] = 0
+target[:target.shape[0] // 2, 2] = 0
+target[:target.shape[0] // 2, 3] = 0
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -98,3 +89,4 @@ model.estimate_readout_weights(cell_inputs, target)
 tu.train_model(model, cell_inputs, target, model_save_folder=model_save_folder, 
                num_steps=config['training']['num_steps'], save_every=config['training']['save_every'], 
                alpha=config['training']['alpha'], use_bfgs=config['training']['use_bfgs'])
+

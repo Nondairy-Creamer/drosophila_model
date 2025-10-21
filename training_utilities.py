@@ -1,7 +1,5 @@
 import torch
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib import pyplot as plt
+import plotting_utilities as pu
 
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4, use_bfgs=False,
@@ -43,20 +41,8 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                     model.save(model_save_folder / 'model.pt')
                 pred, readout = model.predict_and_readout(inputs)
 
-                plt.figure()
-                colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
-                direction = ['progressive', 'regressive', 'up', 'down']
-                readout_plot = readout.detach().cpu().numpy().T.reshape((4, readout.shape[0] // 4)).T
-                target_plot = target.detach().cpu().numpy().T.reshape((4, target.shape[0] // 4)).T
-                for i in range(readout_plot.shape[1]):
-                    plt.plot(target_plot[:, i], color=colors[i], label=direction[i] + ' target')
-                    plt.plot(readout_plot[:, i], color=colors[i], ls='--', label=direction[i] + ' prediction')
-                plt.legend()
-                plt.savefig('figures/pred_vs_target.png')
-                plt.close()
+                readout_names = list(model.readout_neurons.keys())
+                pu.plot_readout_target(readout, target, readout_names=readout_names, save_folder=model_save_folder)
+                pu.plot_loss(loss, save_folder=model_save_folder)
 
-                plt.figure()
-                plt.plot(loss_list, label='loss')
-                plt.legend()
-                plt.savefig('figures/loss.png')
-                plt.close()
+

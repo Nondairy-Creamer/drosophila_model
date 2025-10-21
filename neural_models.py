@@ -5,7 +5,14 @@ from pathlib import Path
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, nonlinearity='relu', device='cpu', dtype='float32',
-                 scale_in_out=False, use_sparse=False, readout_neurons=['T4a', 'T4b']):
+                 scale_in_out=False, use_sparse=False, readout_neurons=None):
+
+        self.readout_neurons = {'right_left_light': ['T4a', 'T4b'],
+                                'right_left_dark': ['T5a', 'T5b'],
+                                'up_down_light': ['T4c', 'T4d'],
+                                'up_down_dark': ['T5c', 'T5d'],
+                                }
+
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -38,17 +45,18 @@ class NeuralRnn(torch.nn.Module):
         self.synapse_counts_coo = synapse_counts_coo
         self.scale_in_out = scale_in_out
 
-        # set readout neurons and masks
-        self.readout_neurons = readout_neurons
-        # store readout masks as torch.bool on model device for safe tensor indexing
-        self.readout_masks = [
-            torch.tensor(self.cell_types == neuron_name, device=self.device, dtype=torch.bool)
-            for neuron_name in readout_neurons
-        ]
-        # validate readout masks are non-empty
-        for i, mask in enumerate(self.readout_masks):
-            if not torch.any(mask):
-                raise ValueError(f"Readout neuron '{self.readout_neurons[i]}' not found in provided cell_types.")
+        # store readout masks as a quick way to access the neurons being read out
+        self.readout_masks = {}
+        for key in self.readout_neurons.keys():
+            self.readout_masks[key] = [
+                torch.tensor(self.cell_types == neuron_name, device=self.device, dtype=torch.bool)
+                for neuron_name in self.readout_neurons[key]
+            ]
+
+            # validate readout masks are non-empty
+            for i, mask in enumerate(self.readout_masks[key]):
+                if not torch.any(mask):
+                    raise ValueError(f"Readout neuron '{self.readout_neurons[i]}' not found in provided cell_types.")
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -172,16 +180,13 @@ class NeuralRnn(torch.nn.Module):
         return outputs
 
     def readout(self, outputs):
-        # average over the second half of the output
-        half_time = int(outputs.shape[1] / 2)
+        readout_keys = self.readout_masks.keys()
+        readout = torch.zeros((outputs.shape[0], len(readout_keys)), device=self.device, dtype=self.dtype)
 
-        # given some outputs of the rnn calcualte the linear decoding readout
-        if len(self.readout_masks) == 1:
-            readout = outputs[:, half_time:, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
-        else:  # readout_mask should have length 2
-            neurons_pro = outputs[:, half_time:, self.readout_masks[0]].mean(dim=(1, 2))  # (batch,)
-            neurons_reg = outputs[:, half_time:, self.readout_masks[1]].mean(dim=(1, 2))  # (batch,)
-            readout = neurons_pro - neurons_reg
+        for ki, key in enumerate(readout_keys):
+            neurons_positive = outputs[:, :, self.readout_masks[key][0]].mean(dim=(1, 2))  # (batch,)
+            neurons_negative = outputs[:, :, self.readout_masks[key][1]].mean(dim=(1, 2))  # (batch,)
+            readout[:, ki] = neurons_positive - neurons_negative
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     
