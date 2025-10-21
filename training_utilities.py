@@ -43,6 +43,6 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
                 readout_names = list(model.readout_neurons.keys())
                 pu.plot_readout_target(readout, target, readout_names=readout_names, save_folder=model_save_folder)
-                pu.plot_loss(loss, save_folder=model_save_folder)
+                pu.plot_loss(loss_list, save_folder=model_save_folder)
 
 

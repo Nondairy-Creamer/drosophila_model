@@ -147,7 +147,7 @@ class NeuralRnn(torch.nn.Module):
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
-            # just set the wieght so that the readout has the same standard deviation as the data and the bias centers the readout on the data
+            # just set the wieght so that the readout has 1/10 standard deviation as the data and the bias centers the readout on the data
             # can't do linear regression because slope needs to be positive. least squares with bounds often fits to 0 and kills the gradient
             epsilon = 1e-6
 
@@ -159,7 +159,7 @@ class NeuralRnn(torch.nn.Module):
             # find the STD of the prediction and the bias that will center it on the target
             readout_std = torch.std(readout, unbiased=False).clamp_min(epsilon)
             target_std = torch.std(target, unbiased=False).clamp_min(epsilon)
-            slope = target_std / readout_std
+            slope = 0.1 * target_std / readout_std
             intercept = torch.mean(target - slope * readout)
 
             # set the initial values
@@ -182,10 +182,11 @@ class NeuralRnn(torch.nn.Module):
     def readout(self, outputs):
         readout_keys = self.readout_masks.keys()
         readout = torch.zeros((outputs.shape[0], len(readout_keys)), device=self.device, dtype=self.dtype)
+        halftime = outputs.shape[1] // 2
 
         for ki, key in enumerate(readout_keys):
-            neurons_positive = outputs[:, :, self.readout_masks[key][0]].mean(dim=(1, 2))  # (batch,)
-            neurons_negative = outputs[:, :, self.readout_masks[key][1]].mean(dim=(1, 2))  # (batch,)
+            neurons_positive = outputs[:, halftime:, self.readout_masks[key][0]].mean(dim=(1, 2))  # (batch,)
+            neurons_negative = outputs[:, halftime:, self.readout_masks[key][1]].mean(dim=(1, 2))  # (batch,)
             readout[:, ki] = neurons_positive - neurons_negative
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
