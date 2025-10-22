@@ -5,7 +5,7 @@ from pathlib import Path
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, nonlinearity='relu', device='cpu', dtype='float32',
-                 scale_in_out=False, use_sparse=False, readout_neurons=None):
+                 scale_in_out=False, use_sparse=False):
 
         self.readout_neurons = {'right_left_light': ['T4a', 'T4b'],
                                 'right_left_dark': ['T5a', 'T5b'],
@@ -185,8 +185,8 @@ class NeuralRnn(torch.nn.Module):
         halftime = outputs.shape[1] // 2
 
         for ki, key in enumerate(readout_keys):
-            neurons_positive = outputs[:, halftime:, self.readout_masks[key][0]].mean(dim=(1, 2))  # (batch,)
-            neurons_negative = outputs[:, halftime:, self.readout_masks[key][1]].mean(dim=(1, 2))  # (batch,)
+            neurons_positive = outputs[:, halftime:, self.readout_masks[key][0]].mean(dim=1)  # (batch,)
+            neurons_negative = outputs[:, halftime:, self.readout_masks[key][1]].mean(dim=1)  # (batch,)
             readout[:, ki] = neurons_positive - neurons_negative
 
         return self.readout_weight_log.exp() * readout + self.readout_bias

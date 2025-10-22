@@ -21,8 +21,11 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     # smooth the sign wave according to its location in theta. For simplicity, just assume that the ommatidia applies
     # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
     # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
-    filter_std = filter_std_base * 1 / np.cos(sample_theta - np.pi / 2)
-    contrast_scaling_factor = np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
+    def contrast_scaling_func(theta):
+        filter_std = filter_std_base * 1 / np.cos(theta - np.pi / 2)
+        return np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
+
+    contrast_scaling_factor = contrast_scaling_func(sample_theta)
 
     # length scales for vertical sine waves (since the cylinder is flat vertically)
     vert_wavelength = 2 * np.tan(wavelength / 2) # length of sine wave in cartesian space
@@ -85,7 +88,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         stimulus = np.concatenate((stimulus, this_stim), axis=0)
         tf_out += tf_dict[direction]
 
-    return stimulus, tf_out
+    return stimulus, tf_out, contrast_scaling_func
 
 def map_stimulus_to_cells(stimulus, column_info_df, root_ids, stim_column_ids, input_neurons=('L1', 'L2', 'L3')):
     # --- define the external inputs to cells ---
