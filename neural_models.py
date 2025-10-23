@@ -4,14 +4,11 @@ from pathlib import Path
 
 
 class NeuralRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_coo, cell_types, nonlinearity='relu', device='cpu', dtype='float32',
+    def __init__(self, synapse_counts_coo, cell_types, readout_neurons, readout_inds, nonlinearity='relu', device='cpu', dtype='float32',
                  scale_in_out=False, use_sparse=False):
 
-        self.readout_neurons = {'right_left_light': ['T4a', 'T4b'],
-                                'right_left_dark': ['T5a', 'T5b'],
-                                'up_down_light': ['T4c', 'T4d'],
-                                'up_down_dark': ['T5c', 'T5d'],
-                                }
+        self.readout_neurons = readout_neurons
+        self.readout_inds = readout_inds
 
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
@@ -45,19 +42,6 @@ class NeuralRnn(torch.nn.Module):
         self.synapse_counts_coo = synapse_counts_coo
         self.scale_in_out = scale_in_out
 
-        # store readout masks as a quick way to access the neurons being read out
-        self.readout_masks = {}
-        for key in self.readout_neurons.keys():
-            self.readout_masks[key] = [
-                torch.tensor(self.cell_types == neuron_name, device=self.device, dtype=torch.bool)
-                for neuron_name in self.readout_neurons[key]
-            ]
-
-            # validate readout masks are non-empty
-            for i, mask in enumerate(self.readout_masks[key]):
-                if not torch.any(mask):
-                    raise ValueError(f"Readout neuron '{self.readout_neurons[i]}' not found in provided cell_types.")
-
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
             return np.log(p / (1 - p))
@@ -72,8 +56,8 @@ class NeuralRnn(torch.nn.Module):
         self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
-        self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
-        self.readout_bias = torch.nn.Parameter(self.readout_bias)
+        # self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
+        # self.readout_bias = torch.nn.Parameter(self.readout_bias)
 
         # if we're scaling inputs and outputs then define those vectors as parameters and
         # set synapse strength to a buffer since it is redundant.
@@ -147,7 +131,7 @@ class NeuralRnn(torch.nn.Module):
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():
-            # just set the wieght so that the readout has 1/10 standard deviation as the data and the bias centers the readout on the data
+            # just set the wieght so that the readout has the same standard deviation as the data and the bias centers the readout on the data
             # can't do linear regression because slope needs to be positive. least squares with bounds often fits to 0 and kills the gradient
             epsilon = 1e-6
 
@@ -159,7 +143,7 @@ class NeuralRnn(torch.nn.Module):
             # find the STD of the prediction and the bias that will center it on the target
             readout_std = torch.std(readout, unbiased=False).clamp_min(epsilon)
             target_std = torch.std(target, unbiased=False).clamp_min(epsilon)
-            slope = 0.1 * target_std / readout_std
+            slope = target_std / readout_std
             intercept = torch.mean(target - slope * readout)
 
             # set the initial values
@@ -180,14 +164,15 @@ class NeuralRnn(torch.nn.Module):
         return outputs
 
     def readout(self, outputs):
-        readout_keys = self.readout_masks.keys()
-        readout = torch.zeros((outputs.shape[0], len(readout_keys)), device=self.device, dtype=self.dtype)
+        readout_keys = list(self.readout_inds.keys())
+        readout_size = self.readout_inds[readout_keys[0]].shape[0]
+        readout = torch.zeros((outputs.shape[0], readout_size, len(readout_keys)), device=self.device, dtype=self.dtype)
         halftime = outputs.shape[1] // 2
 
         for ki, key in enumerate(readout_keys):
-            neurons_positive = outputs[:, halftime:, self.readout_masks[key][0]].mean(dim=1)  # (batch,)
-            neurons_negative = outputs[:, halftime:, self.readout_masks[key][1]].mean(dim=1)  # (batch,)
-            readout[:, ki] = neurons_positive - neurons_negative
+            neurons_positive = outputs[:, halftime:, self.readout_inds[key][:, 0]].mean(dim=1)  # (batch,)
+            neurons_negative = outputs[:, halftime:, self.readout_inds[key][:, 1]].mean(dim=1)  # (batch,)
+            readout[:, :, ki] = neurons_positive - neurons_negative
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     
