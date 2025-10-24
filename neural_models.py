@@ -4,11 +4,11 @@ from pathlib import Path
 
 
 class NeuralRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_coo, cell_types, readout_neurons, readout_inds, nonlinearity='relu', device='cpu', dtype='float32',
+    def __init__(self, synapse_counts_coo, cell_types, readout_neurons, readout_indexes, nonlinearity='relu', device='cpu', dtype='float32',
                  scale_in_out=False, use_sparse=False):
 
         self.readout_neurons = readout_neurons
-        self.readout_inds = readout_inds
+        self.readout_indexes = readout_indexes
 
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
@@ -164,15 +164,19 @@ class NeuralRnn(torch.nn.Module):
         return outputs
 
     def readout(self, outputs):
-        readout_keys = list(self.readout_inds.keys())
-        readout_size = self.readout_inds[readout_keys[0]].shape[0]
-        readout = torch.zeros((outputs.shape[0], readout_size, len(readout_keys)), device=self.device, dtype=self.dtype)
+        readout_keys = list(self.readout_indexes.keys())
+        readout_size = len(self.readout_indexes[readout_keys[0]][0])
+        num_stimuli = outputs.shape[0]
+        num_readouts = len(readout_keys)
+        readout = torch.zeros((num_readouts, num_stimuli, readout_size), device=self.device, dtype=self.dtype)
         halftime = outputs.shape[1] // 2
 
         for ki, key in enumerate(readout_keys):
-            neurons_positive = outputs[:, halftime:, self.readout_inds[key][:, 0]].mean(dim=1)  # (batch,)
-            neurons_negative = outputs[:, halftime:, self.readout_inds[key][:, 1]].mean(dim=1)  # (batch,)
-            readout[:, :, ki] = neurons_positive - neurons_negative
+            # average over the second half of stimulus presentation
+            # and select the neurons using the readout_indexes
+            neurons_positive = outputs[:, halftime:, self.readout_indexes[key][0]].mean(dim=1)  # (batch,)
+            neurons_negative = outputs[:, halftime:, self.readout_indexes[key][1]].mean(dim=1)  # (batch,)
+            readout[ki, :, :] = neurons_positive - neurons_negative
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     

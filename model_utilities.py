@@ -90,34 +90,28 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
 
     return stimulus, tf_out, contrast_scaling_func
 
-def map_stimulus_to_cells(stimulus, column_info_df, root_ids, stim_column_ids, input_neurons=('L1', 'L2', 'L3')):
+def map_stimulus_to_cells(stimulus, cell_info_df, column_info_df, input_neurons=('L1', 'L2', 'L3')):
     # --- define the external inputs to cells ---
     # in this case we will directly stimulate L1, L2, and L3 with negative contrast
     # we aren't stimulating receptors because they have a complicated relationship between location and viewing angle
     # we are using negative contrast because L1-3 are inhibited by light
+    # each L1-3 neuron exists in a single visual column that corresponds to a point of light
 
-    # we have a larger list of neuron ids for each neuron
-    # we have a subset of that list that says for each neuron Id what column it belongs to
-    # need to find the neuron_index in the larger list for each entry in the subset list
-    # then we need to find the index in the stimulus that belongs to each column.
-    # with those, we can assign the correct stimulus to each neuron
-    column_info_df['root_ind'] = pd.Index(root_ids).get_indexer(column_info_df.root_id)
-    column_info_df['column_ind'] = pd.Index(stim_column_ids).get_indexer(column_info_df.column_id)
+    # we have a stimulus tensor that is [stimuli, time, columns]
+    # we need to map it to a cell input that is [stimuli, time, neurons] where only the input_neurons receive the stimulus
+    # throughout, ID is the actual unique ID of the neuron / column
+    # index referes to its position in these arrays
 
-    # get rid of any entries where we have column info but not cell info, or we have L2/L3 but not L1
-    column_info_df = column_info_df.query('root_ind != -1 and column_ind != -1')
+    num_neurons = len(cell_info_df)
+    neuron_indexes = np.arange(len(cell_info_df))  # index of every neuron in the model
+    column_index_for_each_neuron = pd.Index(column_info_df.column_id).get_indexer(cell_info_df.column_id)  # for each neuron, the index of the column its in
+    neuron_is_input = cell_info_df.type.isin(input_neurons)  # whether a neuron is being stimuluated
+    input_neuron_indexes = neuron_indexes[neuron_is_input]  # the indexes of the sitmulated neurons
+    column_index_for_each_input_neuron = column_index_for_each_neuron[neuron_is_input]  # the column indexes of the sitmulated neurons
 
-    # get the lam neurons
-    input_neuron_bool = column_info_df['type'].isin(input_neurons)
-    root_id_to_column_id = column_info_df[input_neuron_bool].copy()
-
-    num_stim = stimulus.shape[0]
-    num_time = stimulus.shape[1]
-    num_neuron = len(root_ids)
-    cell_inputs = torch.zeros((num_stim, num_time, num_neuron), device=stimulus.device, dtype=stimulus.dtype)
-    neuron_idx = torch.as_tensor(root_id_to_column_id.root_ind.to_numpy(), device=stimulus.device, dtype=torch.long)
-    column_idx = torch.as_tensor(root_id_to_column_id.column_ind.to_numpy(), device=stimulus.device, dtype=torch.long)
-    cell_inputs[:, :, neuron_idx] = stimulus[:, :, column_idx]
+    num_stim, num_time, num_column = stimulus.shape
+    cell_inputs = torch.zeros((num_stim, num_time, num_neurons), device=stimulus.device, dtype=stimulus.dtype)
+    cell_inputs[:, :, input_neuron_indexes] = -stimulus[:, :, column_index_for_each_input_neuron]
 
     return cell_inputs
 
@@ -162,44 +156,6 @@ def rtp_to_xyz(rtp):
     z = rtp[0, :] * np.cos(rtp[1, :])
 
     return np.vstack((x, y, z))
-
-def scatter_3d_with_origin_axes(xyz):
-    fig = plt.figure(figsize=(6, 6))
-    ax = fig.add_subplot(111, projection='3d')
-
-    x, y, z = xyz[0, :], xyz[1, :], xyz[2, :]
-
-    # Scatter plot
-    sc = ax.scatter(x, y, z, c=z, cmap='viridis', s=20, alpha=0.8)
-
-    # Equal aspect ratio
-    max_range = np.array([x.max()-x.min(), y.max()-y.min(), z.max()-z.min()]).max() / 2.0
-    mid_x = (x.max()+x.min()) * 0.5
-    mid_y = (y.max()+y.min()) * 0.5
-    mid_z = (z.max()+z.min()) * 0.5
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
-
-    # Axis arrows starting at origin (0,0,0)
-    axis_length = max_range * 1.2
-    ax.quiver(0, 0, 0, axis_length, 0, 0, color='k', arrow_length_ratio=0.1)
-    ax.quiver(0, 0, 0, 0, axis_length, 0, color='k', arrow_length_ratio=0.1)
-    ax.quiver(0, 0, 0, 0, 0, axis_length, color='k', arrow_length_ratio=0.1)
-
-    # Labels at tips
-    ax.text(axis_length, 0, 0, 'X', color='k', fontsize=12)
-    ax.text(0, axis_length, 0, 'Y', color='k', fontsize=12)
-    ax.text(0, 0, axis_length, 'Z', color='k', fontsize=12)
-
-    # Labels + colorbar
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title("3D Scatter with Origin Axes")
-
-    fig.colorbar(sc, ax=ax, shrink=0.5, aspect=10, label="Z value (color)")
-    plt.show()
 
 def run_rnn(cell, inputs):
     """

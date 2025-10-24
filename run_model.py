@@ -28,7 +28,6 @@ dt = config['stimulus']['dt']
 max_time = config['stimulus']['max_time']
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
-input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 
 # Generate temporal frequencies
 temporal_frequencies = list(np.arange(
@@ -39,81 +38,87 @@ temporal_frequencies = list(np.arange(
 
 # --- load in connectivity and cell info data ---
 connectome_folder = Path(config['data']['connectome_folder'])
-column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
 num_neurons = len(cell_info_df.index)
 
-# our loss function will compare cells at every point in space. To do this, we need a paired set of vectors
-# that gives us the index in cell_info_df belonging to each neuron
-readout_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+# first generate the information about the columns - their location and ID
+# we'll use the columns that have all our input and output neurons
+input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
+output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
-column_ids = [column_info_df[column_info_df.type == i].column_id.to_numpy() for i in readout_neurons]
-column_ids = reduce(np.intersect1d, column_ids)
-readout_inds = np.zeros((len(column_ids), len(readout_neurons))) - 1
+# get the column id for each column that has all of the neurons in input_neurons
+column_ids_input = [cell_info_df[cell_info_df.type == i].column_id.to_numpy() for i in input_neurons]
+column_ids_input = [i[~np.isnan(i)] for i in column_ids_input]
+column_ids_input = reduce(np.intersect1d, column_ids_input)
 
-# get the column locations in space for plotting
-_t4a_rows = column_info_df[column_info_df.type == readout_neurons[0]]
-_t4a_order = pd.Index(_t4a_rows.column_id).get_indexer(column_ids)
-readout_column_xy = _t4a_rows.iloc[_t4a_order][['x', 'z']].to_numpy()
+# get the column id for each column that has all of the neurons in output_neurons AND input neurons so we dont read outputs from a bad column as often
+column_ids_output = [cell_info_df[cell_info_df.type == i].column_id.to_numpy() for i in (output_neurons + input_neurons)]
+column_ids_output = [i[~np.isnan(i)] for i in column_ids_output]
+column_ids_output = reduce(np.intersect1d, column_ids_output)
 
-for ccti, cct in enumerate(readout_neurons):
-    _subset = column_info_df[column_info_df.type == cct]
-    _order = pd.Index(_subset.column_id).get_indexer(column_ids)
-    assert not np.any(_order == -1), f'missing columns for {cct}'
-    _sorted_root_ids = _subset.iloc[_order].root_id
-    readout_inds[:, ccti] = pd.Index(cell_info_df.root_id).get_indexer(_sorted_root_ids)
+# create a dataframe that has our column info for the input neurons
+# we just need to get the info from cell_info_df but restrict it to the column ids above and only 1 cell in that column since all columns with the same ID have
+# the same x, y, z position
+column_bool = (cell_info_df.type == input_neurons[0]) & cell_info_df.column_id.isin(column_ids_input)
+column_info_input_df = cell_info_df[column_bool][['column_id', 'phi', 'theta', 'x', 'y', 'z']]
+column_info_input_df = column_info_input_df.sort_values(by='column_id').reset_index(drop=True)  # for clarity, make sure its always with increasing column_ids
 
-assert ~np.any(readout_inds == -1), 'some readout inds not assigned'
-readout_inds = torch.tensor(readout_inds, device=device, dtype=torch.int64)
+# and output neurons
+column_bool = (cell_info_df.type == output_neurons[0]) & cell_info_df.column_id.isin(column_ids_output)
+column_info_output_df = cell_info_df[column_bool][['column_id', 'phi', 'theta', 'x', 'y', 'z']]
+column_info_output_df = column_info_output_df.sort_values(by='column_id').reset_index(drop=True)  # for clarity, make sure its always with increasing column_ids
 
-readout_neurons_dict = {'right_left_light': readout_neurons[0:2],
-                        'up_down_light': readout_neurons[2:4],
-                        'right_left_dark': readout_neurons[4:6],
-                        'up_down_dark': readout_neurons[6:8],
-                        }
+# get the index in the model for the output neurons and in the chosen columns
+output_indexes = []
+correct_columns_bool = cell_info_df.column_id.isin(column_ids_output)
+for i in output_neurons:
+    this_cell_and_column = (cell_info_df.type == i) & correct_columns_bool
+    output_indexes.append(np.where(this_cell_and_column)[0])
 
-readout_inds_dict = {'right_left_light': readout_inds[:, 0:2],
-                     'up_down_light': readout_inds[:, 2:4],
-                     'right_left_dark': readout_inds[:, 4:6],
-                     'up_down_dark': readout_inds[:, 6:8],
-                     }
+output_neurons_dict = {'right_left_light': output_neurons[0:2],
+                       'up_down_light': output_neurons[2:4],
+                       'right_left_dark': output_neurons[4:6],
+                       'up_down_dark': output_neurons[6:8],
+                       }
+
+output_indexes_dict = {'right_left_light': output_indexes[0:2],
+                       'up_down_light': output_indexes[2:4],
+                       'right_left_dark': output_indexes[4:6],
+                       'up_down_dark': output_indexes[6:8],
+                       }
 
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
                      cell_types=cell_info_df.type.to_numpy(), nonlinearity=config['model']['nonlinearity'],
                      device=config['model']['device'], dtype=config['model']['dtype'],
                      use_sparse=config['model']['use_sparse'], scale_in_out=config['model']['scale_in_out'],
-                     readout_neurons=readout_neurons_dict, readout_inds=readout_inds_dict)
+                     readout_neurons=output_neurons_dict, readout_indexes=output_indexes_dict)
 
 # --- get a sign wave stimulus ---
-# get the column's we're going to use based on which columns have L1 cells
-l1_bool = column_info_df['type'] == 'L1'
-l1_df = column_info_df[l1_bool]
-
 # generate a sine wave on a cylinder around the fly
-sine_waves, sine_wave_tfs, contrast_scaling_func = mu.create_sine_wave(l1_df.phi.to_numpy(), l1_df.theta.to_numpy(), 
+sine_waves, sine_wave_tfs, contrast_scaling_func = mu.create_sine_wave(column_info_input_df.phi.to_numpy(), column_info_input_df.theta.to_numpy(), 
     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
-# we're going to put the sinewaves into L1, L2, L3 so invert contast
 sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
-cell_inputs = mu.map_stimulus_to_cells(sine_waves, column_info_df, cell_info_df.root_id, l1_df.column_id, input_neurons=input_neurons)
-# column_info_df got updated with the mapping to cell_info_df. save here
-column_info_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet', index=False)
+
+# map the sine waves to the cells
+cell_inputs = mu.map_stimulus_to_cells(sine_waves, cell_info_df, column_info_input_df, input_neurons=input_neurons)
 
 # --- plot the stimuli ---
-l1_df = column_info_df[l1_bool]  # this needs to be defined again since map_stimulus_to_cells added the root_ind column
-stimuli_plot = [i[0, l1_df.root_ind.to_numpy()].detach().cpu().numpy() for i in cell_inputs]
-pu.plot_response_over_space(stimuli_plot, l1_df.x, l1_df.z, save_folder='figures/stimulus')
+pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_input_df.x, column_info_input_df.z, save_folder='figures/stimulus')
 
 # Define the target as the temporal frequencies. but set up / down to zero for left/right cells
 # do set right / left to zero for up/down cells
 # target shape should (be stimuli / batch size, readout types, neurons)
-target = torch.zeros((len(sine_wave_tfs), readout_inds.shape[0], 4), device=device, dtype=dtype)
-target[:] = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)[:, None, None]
-target[target.shape[0] // 2:, :, 0] = 0
-target[:target.shape[0] // 2, :, 1] = 0
-target[target.shape[0] // 2:, :, 2] = 0
-target[:target.shape[0] // 2, :, 3] = 0
+num_readouts = len(output_neurons_dict)
+num_stimuli = cell_inputs.shape[0]
+readout_size = column_ids_output.shape[0]
+target = torch.zeros((num_readouts, num_stimuli, readout_size), device=device, dtype=dtype)
+target[:] = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)[None, :, None]
+target[0, target.shape[0] // 2:, :] = 0
+target[1, :target.shape[0] // 2, :] = 0
+target[2, target.shape[0] // 2:, :] = 0
+target[3, :target.shape[0] // 2, :] = 0
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -128,5 +133,5 @@ torch.save(target.detach().cpu(), model_save_folder / "target.pt")
 tu.train_model(model, cell_inputs, target, model_save_folder=model_save_folder, 
                num_steps=config['training']['num_steps'], save_every=config['training']['save_every'], 
                alpha=config['training']['alpha'], use_bfgs=config['training']['use_bfgs'],
-               readout_xy=readout_column_xy)
+               readout_xy=column_info_output_df[['x', 'z']].to_numpy())
 

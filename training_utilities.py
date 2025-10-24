@@ -55,8 +55,8 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                 pu.plot_readout_target(readout, target, readout_names=readout_names, save_folder=model_save_folder)
 
                 if readout_xy is not None:
-                    for i in range(readout.shape[2]):
-                        pu.plot_response_over_space(readout[:4:, :, i].detach().cpu().numpy(), readout_xy[:, 0], readout_xy[:, 1], save_folder=model_save_folder / ('readout' + str(i)))
+                    for i in range(readout.shape[0]):
+                        pu.plot_response_over_space(readout[i, :4:, :].detach().cpu().numpy(), readout_xy[:, 0], readout_xy[:, 1], save_folder=model_save_folder / ('readout' + str(i)))
 
                 pu.plot_loss(loss_list, save_folder=model_save_folder)
 

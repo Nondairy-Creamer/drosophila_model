@@ -3,6 +3,7 @@ from pathlib import Path
 import model_utilities as mu
 import pandas as pd
 from data_utilities import load_config
+import plotting_utilities as pu
 
 # Load configuration
 config = load_config()
@@ -32,7 +33,7 @@ synaptic_connections_df = pd.read_csv(connectome_folder / 'connections_princeton
                                       )
 
 # The optic lobes are organized into retinotopic visual columns and this data set specifies the column id and location
-# of each cell on a hexagonal grid
+# of each cell on a hexagonal grid. not all visual neurons have this column information
 columns_df = pd.read_csv(connectome_folder / 'column_assignment.csv', dtype={"root_id": root_id_dtype})
 
 # --- process the incoming data ---
@@ -70,25 +71,16 @@ synapse_counts *= synapse_sign
 model_root_ids = np.unique((presynaptic_ids, postsynaptic_ids))
 num_neurons = len(model_root_ids)
 
-# limit cell info to those in the synaptic connectivity matrix and save
-visual_neurons_df = visual_neurons_df[visual_neurons_df.root_id.isin(model_root_ids)]
-# save the cell info
-visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
+# limit cell info to those in the synaptic connectivity matrix. Make sure we keep the same ordering of model_root_ids
+visual_neurons_indexes = pd.Index(visual_neurons_df.root_id).get_indexer(model_root_ids)
+visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indexes]
 
-# for speed, make a hash map that takes you from root id to matrix index
-id_to_index_mapping = {}
-pre_matrix_ind = np.zeros_like(presynaptic_ids)
-post_matrix_ind = np.zeros_like(postsynaptic_ids)
-for i in range(num_neurons):
-    id_to_index_mapping[model_root_ids[i]] = i
-
-# loop through all the pre / post cells and map them from root id to matrix index
-for i in range(synapse_counts.shape[0]):
-    pre_matrix_ind[i] = id_to_index_mapping[presynaptic_ids[i]]
-    post_matrix_ind[i] = id_to_index_mapping[postsynaptic_ids[i]]
+# make a mapping from root id to matrix index for presyanptic and postsynaptic connections
+pre_matrix_indexes = pd.Index(model_root_ids).get_indexer(presynaptic_ids)
+post_matrix_indexes = pd.Index(model_root_ids).get_indexer(postsynaptic_ids)
 
 # save the matrix indices and values to a data frame
-synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_ind, 'post_matrix_ind': post_matrix_ind, 'synapse_counts': synapse_counts})
+synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_indexes, 'post_matrix_ind': post_matrix_indexes, 'synapse_counts': synapse_counts})
 # Save the synapse counts and cell types to a dict to use in modeling
 synapse_counts_df.to_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet', index=False)
 
@@ -152,7 +144,7 @@ xyz = mu.rotate_3d(xyz, -max_phi, 'z')
 rtp = mu.xyz_to_rtp(xyz)
 
 # --- plot the ommatidia locations
-mu.scatter_3d_with_origin_axes(xyz)
+pu.scatter_3d_with_origin_axes(xyz)
 
 # --- save the column data ---
 column_info_df = columns_df.drop(columns = ['p', 'q', 'x', 'y'])
@@ -161,5 +153,24 @@ column_info_df['phi'] = rtp[2, :]
 column_info_df['x'] = xyz[0, :]
 column_info_df['y'] = xyz[1, :]
 column_info_df['z'] = xyz[2, :]
+
+# map the column info to the cell info for the cells we have. if we dont have them set to nan
+visual_neurons_df['column_id'] = np.full(num_neurons, np.nan, dtype=float)
+visual_neurons_df['theta'] = np.full(num_neurons, np.nan, dtype=float)
+visual_neurons_df['phi'] = np.full(num_neurons, np.nan, dtype=float)
+visual_neurons_df['x'] = np.full(num_neurons, np.nan, dtype=float)
+visual_neurons_df['y'] = np.full(num_neurons, np.nan, dtype=float)
+visual_neurons_df['z'] = np.full(num_neurons, np.nan, dtype=float)
+
+column_to_all_indexes = pd.Index(visual_neurons_df.root_id).get_indexer(column_info_df.root_id)
+visual_neurons_df['column_id'].iloc[column_to_all_indexes] = column_info_df['column_id']
+visual_neurons_df['theta'].iloc[column_to_all_indexes] = column_info_df['theta']
+visual_neurons_df['phi'].iloc[column_to_all_indexes] = column_info_df['phi']
+visual_neurons_df['x'].iloc[column_to_all_indexes] = column_info_df['x']
+visual_neurons_df['y'].iloc[column_to_all_indexes] = column_info_df['y']
+visual_neurons_df['z'].iloc[column_to_all_indexes] = column_info_df['z']
+
+# save the cell info
+visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
 column_info_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet', index=False)
 
