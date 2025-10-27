@@ -115,10 +115,12 @@ num_stimuli = cell_inputs.shape[0]
 readout_size = column_ids_output.shape[0]
 target = torch.zeros((num_readouts, num_stimuli, readout_size), device=device, dtype=dtype)
 target[:] = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)[None, :, None]
-target[0, target.shape[0] // 2:, :] = 0
-target[1, :target.shape[0] // 2, :] = 0
-target[2, target.shape[0] // 2:, :] = 0
-target[3, :target.shape[0] // 2, :] = 0
+# Zero incompatible directions by splitting the stimuli dimension (dim=1)
+half_stimuli = num_stimuli // 2
+target[0, half_stimuli:, :] = 0
+target[1, :half_stimuli, :] = 0
+target[2, half_stimuli:, :] = 0
+target[3, :half_stimuli, :] = 0
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

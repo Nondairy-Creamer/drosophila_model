@@ -32,7 +32,7 @@ def plot_loss(loss, save_folder=Path('figures')):
 
     plt.figure()
     plt.plot(loss)
-    plt.ylabel('MSE loss')
+    plt.ylabel('negative correlation loss')
     plt.xlabel('epochs')
     plt.savefig(save_folder / 'loss.png')
     plt.close()

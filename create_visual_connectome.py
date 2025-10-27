@@ -162,13 +162,11 @@ visual_neurons_df['x'] = np.full(num_neurons, np.nan, dtype=float)
 visual_neurons_df['y'] = np.full(num_neurons, np.nan, dtype=float)
 visual_neurons_df['z'] = np.full(num_neurons, np.nan, dtype=float)
 
-column_to_all_indexes = pd.Index(visual_neurons_df.root_id).get_indexer(column_info_df.root_id)
-visual_neurons_df['column_id'].iloc[column_to_all_indexes] = column_info_df['column_id']
-visual_neurons_df['theta'].iloc[column_to_all_indexes] = column_info_df['theta']
-visual_neurons_df['phi'].iloc[column_to_all_indexes] = column_info_df['phi']
-visual_neurons_df['x'].iloc[column_to_all_indexes] = column_info_df['x']
-visual_neurons_df['y'].iloc[column_to_all_indexes] = column_info_df['y']
-visual_neurons_df['z'].iloc[column_to_all_indexes] = column_info_df['z']
+cols = ['column_id','theta','phi','x','y','z']
+row_pos = pd.Index(visual_neurons_df.root_id).get_indexer(column_info_df.root_id)
+valid = row_pos >= 0
+col_pos = visual_neurons_df.columns.get_indexer(cols)
+visual_neurons_df.iloc[row_pos[valid], col_pos] = column_info_df.loc[valid, cols].to_numpy()
 
 # save the cell info
 visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
