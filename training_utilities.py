@@ -1,40 +1,57 @@
 import torch
 import plotting_utilities as pu
+import numpy as np
+import neural_models as nm
 
 
-def corr_loss(y_hat, y, eps=1e-8):
+def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
     # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat - y_hat.mean()
-    y = y - y.mean()
-    y_hat = y_hat / (y_hat.std().clamp_min(eps))
-    y = y / (y.std().clamp_min(eps))
-    corr = (y_hat * y).mean()
-    return 1.0 - corr
+    y_hat = y_hat - y_hat.mean(dim=1, keepdim=True)
+    y = y - y.mean(dim=1, keepdim=True)
+    y_hat = y_hat / (y_hat.std(dim=1, keepdim=True).clamp_min(eps))
+    y = y / (y.std(dim=1, keepdim=True).clamp_min(eps))
+    corr = (y_hat * y).mean(dim=1, keepdim=True)
 
+    if neuron_scaling is not None:
+        neuron_scaling = neuron_scaling / neuron_scaling.sum()
+        corr = torch.sum(corr * neuron_scaling[None, None, :], dim=2)
+        
+    ave_corr = corr.mean()
+
+    return 1.0 - ave_corr
+
+def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
+    # Compute a single correlation across all elements by normalizing globally
+    y_hat = y_hat / (y_hat.norm(dim=1, keepdim=True).clamp_min(eps))
+    y = y / (y.norm(dim=1, keepdim=True).clamp_min(eps))
+    cosine_sim = (y_hat * y).sum(dim=1, keepdim=True)
+
+    if neuron_scaling is not None:
+        neuron_scaling = neuron_scaling / neuron_scaling.sum()
+        cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, :], dim=2)
+        
+    ave_cosine_sim = cosine_sim.mean()
+
+    return 1.0 - ave_cosine_sim
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4, use_bfgs=False,
-                clip_grad_norm=None, clip_grad_value=None, readout_xy=None, lr_plateau_start_loss=0.99,
-                reload_best_on_lr_drop=True):
+                clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=corr_loss,
+                patience=50, alpha_factor = 0.5):
     # --- train the model ---
     if use_bfgs:
         opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
     else:
         opt = torch.optim.Adam(model.parameters(), lr=alpha)
 
-    # Reduce LR on plateau in training loss
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode='min', factor=0.5, patience=30, threshold=1e-8,
-        threshold_mode='rel', cooldown=10, min_lr=1e-6,
-    )
-
     loss_list = []
     prev_lr = opt.param_groups[0]['lr']
+    best_loss = np.inf
+    time_since_best = 0
     for step in range(num_steps):
         def closure():
             opt.zero_grad()
             readout = model.predict_and_readout(inputs)[1]
-            # loss = torch.nn.functional.mse_loss(readout, target)
-            loss = corr_loss(readout, target)
+            loss = loss_fn(readout, target)
             loss.backward()
             # Optional gradient clipping (prefer norm if both provided)
             if clip_grad_norm is not None:
@@ -49,38 +66,48 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
             loss = closure()
             opt.step()
 
-        # step the LR scheduler with the latest loss value, optionally gating start
-        loss_value = loss.item()
-        if (lr_plateau_start_loss is None) or (loss_value <= lr_plateau_start_loss):
-            scheduler.step(loss_value)
-
-        # Detect LR drop (plateau) and optionally reload the best checkpoint
-        new_lr = opt.param_groups[0]['lr']
-        if reload_best_on_lr_drop and (new_lr < prev_lr) and (model_save_folder is not None):
-            best_path = (model_save_folder / 'best_model.pt')
-            if best_path.exists():
-                # load only the state_dict to the current model
-                data = torch.load(best_path, map_location='cpu', weights_only=False)
-                model.load_state_dict(data['state_dict'])
-                # reinitialize optimizer to clear stale state, keep the new LR
-                if use_bfgs:
-                    opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
-                else:
-                    opt = torch.optim.Adam(model.parameters(), lr=new_lr)
-                print(' -------------------------------- ')
-                print(f'Learning rate reduced to {new_lr:.2e}. Reloaded best checkpoint from {best_path.name}.')
-                print(' -------------------------------- ')
-        prev_lr = new_lr
-
-        # log once per outer step
+        # Detect if you've found the best loss so far
         loss_list.append(loss.item())
+        if loss_list[-1] < best_loss:
+            best_loss = loss_list[-1]
+            time_since_best = 0
 
+            # track and save the best checkpoint for easy rollback
+            if model_save_folder:
+                model.save(model_save_folder / 'best_model.pt')
+                torch.save({
+                    'optimizer_state_dict': opt.state_dict(),
+                    'loss': loss_list[-1],
+                    'step': step
+                }, model_save_folder / 'best_model_opt.pt')
+        else:
+            time_since_best += 1
+
+        if reload_best_on_loss_jump and (model_save_folder is not None):
+            patience = 30
+            alpha_factor = 0.5
+            if time_since_best > patience:
+                # Load the best model state into the existing model
+                checkpoint = torch.load(model_save_folder / 'best_model.pt', map_location='cpu', weights_only=False)
+                model.load_state_dict(checkpoint['state_dict'])
+                
+                # Load the best optimizer state and reduce learning rate
+                opt_state = torch.load(model_save_folder / 'best_model_opt.pt', map_location='cpu', weights_only=False)
+                opt.load_state_dict(opt_state['optimizer_state_dict'])
+                
+                alpha = alpha * alpha_factor
+                for param_group in opt.param_groups:
+                    param_group['lr'] = alpha
+                    
+                time_since_best = 0
+                print(' -------------------------------- ')
+                print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')
+                print(' -------------------------------- ')
+
+        rel_change = 0
         if len(loss_list) > 1:
             rel_change = (loss_list[-2] - loss_list[-1]) / loss_list[-1] if loss_list else 0
-        else:
-            rel_change = 0
-
-        print(f'step {step + 1} / {num_steps} | loss = {loss.item()} | rel_change = {rel_change} | lr = {new_lr}')
+        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e}')
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
@@ -88,8 +115,8 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                     # always save a rolling latest checkpoint
                     model.save(model_save_folder / 'model.pt')
                     # save a periodic checkpoint with step and loss for recovery
-                    ckpt_name = f"model_step_{step+1:07d}_loss_{loss_value:.6f}.pt"
-                    model.save(model_save_folder / ckpt_name)
+                    # ckpt_name = f"model_step_{step+1:07d}_loss_{loss_value:.6f}.pt"
+                    # model.save(model_save_folder / ckpt_name)
                 pred, readout = model.predict_and_readout(inputs)
 
                 readout_names = list(model.readout_neurons.keys())
@@ -101,9 +128,5 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
                 pu.plot_loss(loss_list, save_folder=model_save_folder)
 
-        # track and save the best checkpoint for easy rollback
-        if model_save_folder:
-            if (len(loss_list) == 1) or (loss_value < min(loss_list[:-1])):
-                model.save(model_save_folder / 'best_model.pt')
 
 
