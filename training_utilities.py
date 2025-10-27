@@ -23,7 +23,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
     # Reduce LR on plateau in training loss
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        opt, mode='min', factor=0.5, patience=20, threshold=1e-6,
+        opt, mode='min', factor=0.5, patience=30, threshold=1e-8,
         threshold_mode='rel', cooldown=10, min_lr=1e-6,
     )
 
