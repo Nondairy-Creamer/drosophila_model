@@ -174,9 +174,12 @@ class NeuralRnn(torch.nn.Module):
         for ki, key in enumerate(readout_keys):
             # average over the second half of stimulus presentation
             # and select the neurons using the readout_indexes
-            neurons_positive = outputs[:, halftime:, self.readout_indexes[key][0]].mean(dim=1)  # (batch,)
-            neurons_negative = outputs[:, halftime:, self.readout_indexes[key][1]].mean(dim=1)  # (batch,)
-            readout[ki, :, :] = neurons_positive - neurons_negative
+            if len(self.readout_indexes[key]) == 2:
+                neurons_positive = outputs[:, halftime:, self.readout_indexes[key][0]].mean(dim=1)  # (batch,)
+                neurons_negative = outputs[:, halftime:, self.readout_indexes[key][1]].mean(dim=1)  # (batch,)
+                readout[ki, :, :] = neurons_positive - neurons_negative
+            else:
+                readout[ki, :, :] = outputs[:, halftime:, self.readout_indexes[key][0]].mean(dim=1)  # (batch,)
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     

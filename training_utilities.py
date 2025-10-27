@@ -34,6 +34,11 @@ def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
 
     return 1.0 - ave_cosine_sim
 
+def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
+    cos_loss_val = cosine_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
+    corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
+    return 0.5 * cos_loss_val + 0.5 * corr_loss_val
+
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4, use_bfgs=False,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=corr_loss,
                 patience=50, alpha_factor = 0.5):

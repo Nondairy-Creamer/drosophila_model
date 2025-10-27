@@ -58,17 +58,39 @@ for i in output_neurons:
     this_cell_and_column = (cell_info_df.type == i) & correct_columns_bool
     output_indexes.append(np.where(this_cell_and_column)[0])
 
-output_neurons_dict = {'right_left_light': output_neurons[0:2],
-                       'up_down_light': output_neurons[2:4],
-                       'right_left_dark': output_neurons[4:6],
-                       'up_down_dark': output_neurons[6:8],
-                       }
+# output_neurons_dict = {'right_left_light': output_neurons[0:2],
+#                        'up_down_light': output_neurons[2:4],
+#                        'right_left_dark': output_neurons[4:6],
+#                        'up_down_dark': output_neurons[6:8],
+#                        }
 
-output_indexes_dict = {'right_left_light': output_indexes[0:2],
-                       'up_down_light': output_indexes[2:4],
-                       'right_left_dark': output_indexes[4:6],
-                       'up_down_dark': output_indexes[6:8],
-                       }
+# output_indexes_dict = {'right_left_light': output_indexes[0:2],
+#                        'up_down_light': output_indexes[2:4],
+#                        'right_left_dark': output_indexes[4:6],
+#                        'up_down_dark': output_indexes[6:8],
+#                        }
+
+output_neurons_dict = {
+    'right_light': output_neurons[0:1],
+    'left_light': output_neurons[1:2],
+    'up_light': output_neurons[2:3],
+    'down_light': output_neurons[3:4],
+    'right_dark': output_neurons[4:5],
+    'left_dark': output_neurons[5:6],
+    'up_dark': output_neurons[6:7],
+    'down_dark': output_neurons[7:8],
+    }
+
+output_indexes_dict = {
+    'right_light': output_indexes[0:1],
+    'left_light': output_indexes[1:2],
+    'up_light': output_indexes[2:3],
+    'down_light': output_indexes[3:4],
+    'right_dark': output_indexes[4:5],
+    'left_dark': output_indexes[5:6],
+    'up_dark': output_indexes[6:7],
+    'down_dark': output_indexes[7:8],
+    }
 
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
@@ -95,14 +117,22 @@ pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_i
 num_readouts = len(output_neurons_dict)
 num_stimuli = cell_inputs.shape[0]
 readout_size = column_ids_output.shape[0]
-target = torch.zeros((num_readouts, num_stimuli, readout_size), device=device, dtype=dtype)
-target[:] = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)[None, :, None]
+# target = torch.zeros((num_readouts, num_stimuli, readout_size), device=device, dtype=dtype)
+# target[:] = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)[None, :, None]
 # Zero incompatible directions by splitting the stimuli dimension (dim=1)
-half_stimuli = num_stimuli // 2
-target[0, half_stimuli:, :] = 0
-target[1, :half_stimuli, :] = 0
-target[2, half_stimuli:, :] = 0
-target[3, :half_stimuli, :] = 0
+# half_stimuli = num_stimuli // 2
+# target[0, half_stimuli:, :] = 0
+# target[1, :half_stimuli, :] = 0
+# target[2, half_stimuli:, :] = 0
+# target[3, :half_stimuli, :] = 0
+
+target = torch.zeros((num_readouts, num_stimuli, readout_size), device=device, dtype=dtype)
+sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
+quarter_stimuli = num_stimuli // 4
+for i in range(4):
+    quart = torch.arange(i * quarter_stimuli, (i + 1) * quarter_stimuli)
+    target[i, quart, :] = sine_wave_tfs[quart, None]
+    target[i + 4, quart, :] = sine_wave_tfs[quart, None]
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -114,11 +144,12 @@ torch.save(target.detach().cpu(), model_save_folder / "target.pt")
 
 contrast_scaling_factor = contrast_scaling_function(column_info_output_df['theta'].to_numpy())
 contrast_scaling_factor = torch.tensor(contrast_scaling_factor, dtype=dtype, device=device)
-def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
-    return tu.corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-8)
 # def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
-#     return tu.cosine_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-8)
-
+#     return tu.corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-8)
+# def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
+    # return tu.cosine_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-8)
+def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
+    return tu.combined_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-8)
 
 # --- train the model ---
 # find a good estimate of the readout weights
