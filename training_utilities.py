@@ -67,7 +67,9 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                     opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
                 else:
                     opt = torch.optim.Adam(model.parameters(), lr=new_lr)
+                print(' -------------------------------- ')
                 print(f'Learning rate reduced to {new_lr:.2e}. Reloaded best checkpoint from {best_path.name}.')
+                print(' -------------------------------- ')
         prev_lr = new_lr
 
         # log once per outer step
@@ -78,7 +80,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
         else:
             rel_change = 0
 
-        print(f'step {step + 1} / {num_steps} | loss = {loss.item()} | rel_change = {rel_change}')
+        print(f'step {step + 1} / {num_steps} | loss = {loss.item()} | rel_change = {rel_change} | lr = {new_lr}')
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():

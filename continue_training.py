@@ -12,7 +12,7 @@ model = nm.NeuralRnn.load(best_ckpt if best_ckpt.exists() else (model_folder / '
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
-alpha = 1e-3  # lower LR when resuming from best
+alpha = 1e-4  # lower LR when resuming from best
 num_steps = int(1e6)
 
 tu.train_model(model, cell_inputs, target, model_save_folder=model_folder, 
