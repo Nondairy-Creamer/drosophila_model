@@ -30,11 +30,7 @@ time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
 
 # Generate temporal frequencies
-temporal_frequencies = list(np.arange(
-    config['stimulus']['temporal_freq_start'],
-    config['stimulus']['temporal_freq_end'],
-    config['stimulus']['temporal_freq_step'],
-))
+temporal_frequencies = config['stimulus']['temporal_frequencies']
 
 # --- load in connectivity and cell info data ---
 connectome_folder = Path(config['data']['connectome_folder'])
@@ -131,7 +127,7 @@ sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 quarter_stimuli = num_stimuli // 4
 for i in range(4):
     quart = torch.arange(i * quarter_stimuli, (i + 1) * quarter_stimuli)
-    target[i, quart, :] = sine_wave_tfs[quart, None]
+    target[i, quart, :] = sine_wave_tfs[:quarter_stimuli, None]
     target[i + 4, quart, :] = sine_wave_tfs[quart, None]
 
 # save the config file and inputs

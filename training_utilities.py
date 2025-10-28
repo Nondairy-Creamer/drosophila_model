@@ -41,7 +41,7 @@ def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4, use_bfgs=False,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=corr_loss,
-                patience=50, alpha_factor = 0.5):
+                patience=100, alpha_factor = 0.5):
     # --- train the model ---
     if use_bfgs:
         opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
@@ -89,8 +89,6 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
             time_since_best += 1
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
-            patience = 30
-            alpha_factor = 0.5
             if time_since_best > patience:
                 # Load the best model state into the existing model
                 checkpoint = torch.load(model_save_folder / 'best_model.pt', map_location='cpu', weights_only=False)
