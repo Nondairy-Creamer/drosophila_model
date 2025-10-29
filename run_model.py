@@ -152,6 +152,5 @@ def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
 # model.estimate_readout_weights(cell_inputs, target)
 tu.train_model(model, cell_inputs, target, model_save_folder=model_save_folder, 
                num_steps=config['training']['num_steps'], save_every=config['training']['save_every'], 
-               alpha=config['training']['alpha'], use_bfgs=config['training']['use_bfgs'],
-               readout_xy=column_info_output_df[['x', 'z']].to_numpy(), loss_fn=loss_scaled)
+               alpha=config['training']['alpha'], readout_xy=column_info_output_df[['x', 'z']].to_numpy(), loss_fn=loss_scaled)
 
