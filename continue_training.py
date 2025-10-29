@@ -17,5 +17,6 @@ num_steps = int(1e6)
 
 tu.train_model(model, cell_inputs, target, model_save_folder=model_folder, 
                num_steps=num_steps, save_every=config['training']['save_every'], 
-               alpha=alpha)
+               clip_grad_norm=config['training']['clip_norm'], alpha=alpha)
+
                

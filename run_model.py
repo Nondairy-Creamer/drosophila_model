@@ -107,6 +107,6 @@ def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
 # find a good estimate of the readout weights
 # model.estimate_readout_weights(cell_inputs, target)
 tu.train_model(model, cell_inputs, target, model_save_folder=model_save_folder,  num_steps=config['training']['num_steps'], 
-               save_every=config['training']['save_every'], alpha=config['training']['alpha'], 
+               save_every=config['training']['save_every'], alpha=config['training']['alpha'], clip_grad_norm=config['training']['clip_norm'],
                readout_xy=column_info_output_df[['x', 'z']].to_numpy(), loss_fn=loss_scaled)
 

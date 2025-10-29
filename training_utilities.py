@@ -50,21 +50,13 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
     loss_list = []
     best_loss = np.inf
     time_since_best = 0
-    for step in range(num_steps):
-        def closure():
-            opt.zero_grad()
-            readout = model.predict_and_readout(inputs)[1]
-            loss = loss_fn(readout, target)
-            loss.backward()
-            # Optional gradient clipping (prefer norm if both provided)
-            if clip_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
-            elif clip_grad_value is not None:
-                torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
-            return loss
+    grad_norm = 0
 
-        loss = closure()
-            
+    for step in range(num_steps):
+        opt.zero_grad()
+        readout = model.predict_and_readout(inputs)[1]
+        loss = loss_fn(readout, target)
+
         # Detect if you've found the best loss so far BEFORE updating weights
         loss_list.append(loss.item())
         if loss_list[-1] < best_loss:
@@ -84,12 +76,18 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
             time_since_best += 1
             
         # Update weights AFTER checking/saving best model
+        loss.backward()
+        # Optional gradient clipping (prefer norm if both provided)
+        if clip_grad_norm is not None:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+        elif clip_grad_value is not None:
+            grad_norm = torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
         opt.step()
 
         rel_change = 0
         if len(loss_list) > 1:
             rel_change = (loss_list[-2] - loss_list[-1]) / loss_list[-1] if loss_list else 0
-        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e}')
+        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e} | grad magnitude = {grad_norm:.3g}')
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:
