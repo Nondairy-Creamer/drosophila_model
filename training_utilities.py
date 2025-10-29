@@ -39,17 +39,13 @@ def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
     corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
 
-def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4, use_bfgs=False,
+def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=corr_loss,
                 patience=100, alpha_factor = 0.5):
     # --- train the model ---
-    if use_bfgs:
-        opt = torch.optim.LBFGS(model.parameters(), line_search_fn='strong_wolfe')
-    else:
-        opt = torch.optim.Adam(model.parameters(), lr=alpha)
+    opt = torch.optim.Adam(model.parameters(), lr=alpha)
 
     loss_list = []
-    prev_lr = opt.param_groups[0]['lr']
     best_loss = np.inf
     time_since_best = 0
     for step in range(num_steps):
@@ -65,19 +61,16 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                 torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
             return loss
 
-        if use_bfgs:
-            loss = opt.step(closure)
-        else:
-            loss = closure()
-            opt.step()
-
-        # Detect if you've found the best loss so far
+        loss = closure()
+            
+        # Detect if you've found the best loss so far BEFORE updating weights
         loss_list.append(loss.item())
         if loss_list[-1] < best_loss:
             best_loss = loss_list[-1]
             time_since_best = 0
 
             # track and save the best checkpoint for easy rollback
+            # Save BEFORE opt.step() so we save the weights that achieved this loss
             if model_save_folder:
                 model.save(model_save_folder / 'best_model.pt')
                 torch.save({
@@ -87,6 +80,9 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                 }, model_save_folder / 'best_model_opt.pt')
         else:
             time_since_best += 1
+            
+        # Update weights AFTER checking/saving best model
+        opt.step()
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:

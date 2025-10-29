@@ -128,7 +128,7 @@ quarter_stimuli = num_stimuli // 4
 for i in range(4):
     quart = torch.arange(i * quarter_stimuli, (i + 1) * quarter_stimuli)
     target[i, quart, :] = sine_wave_tfs[:quarter_stimuli, None]
-    target[i + 4, quart, :] = sine_wave_tfs[quart, None]
+    target[i + 4, quart, :] = sine_wave_tfs[:quarter_stimuli, None]
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

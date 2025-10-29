@@ -14,7 +14,6 @@ nonlinearity = 'relu'  # 'linear', 'relu', 'tanh', 'sigmoid'
 [training]
 num_steps = 100  # number of training steps
 save_every = 10 # number of steps before printing loss
-use_bfgs = false
 
 # Learning parameters
 alpha = 1e-4  # learning rate
