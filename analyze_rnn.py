@@ -59,6 +59,6 @@ for i in range(2, len(pred_list) - 1, 2):
     plt.savefig(model_folder / 'analysis' / ('ave_resp_sub_' + str(i) + '.png'))
     plt.close()
 
-pu.plot_readout_target(readout, target, list(model.readout_neurons.keys()), save_folder=model_folder / 'analysis')
+pu.plot_readout_target(readout, target, list(model.readout_indexes.keys()), save_folder=model_folder / 'analysis')
 
 print('analysis completed')

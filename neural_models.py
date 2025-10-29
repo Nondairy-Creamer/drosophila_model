@@ -4,10 +4,9 @@ from pathlib import Path
 
 
 class NeuralRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_coo, cell_types, readout_neurons, readout_indexes, nonlinearity='relu', device='cpu', dtype='float32',
+    def __init__(self, synapse_counts_coo, cell_types, readout_indexes, nonlinearity='relu', device='cpu', dtype='float32',
                  scale_in_out=False, use_sparse=False):
 
-        self.readout_neurons = readout_neurons
         self.readout_indexes = readout_indexes
 
         # capture constructor inputs early (before we mutate or derive types)
@@ -165,7 +164,7 @@ class NeuralRnn(torch.nn.Module):
 
     def readout(self, outputs):
         readout_keys = list(self.readout_indexes.keys())
-        readout_size = len(self.readout_indexes[readout_keys[0]][0])
+        readout_size = len(self.readout_indexes[readout_keys[0]])
         num_stimuli = outputs.shape[0]
         num_readouts = len(readout_keys)
         readout = torch.zeros((num_readouts, num_stimuli, readout_size), device=self.device, dtype=self.dtype)
@@ -174,12 +173,7 @@ class NeuralRnn(torch.nn.Module):
         for ki, key in enumerate(readout_keys):
             # average over the second half of stimulus presentation
             # and select the neurons using the readout_indexes
-            if len(self.readout_indexes[key]) == 2:
-                neurons_positive = outputs[:, halftime:, self.readout_indexes[key][0]].mean(dim=1)  # (batch,)
-                neurons_negative = outputs[:, halftime:, self.readout_indexes[key][1]].mean(dim=1)  # (batch,)
-                readout[ki, :, :] = neurons_positive - neurons_negative
-            else:
-                readout[ki, :, :] = outputs[:, halftime:, self.readout_indexes[key][0]].mean(dim=1)  # (batch,)
+            readout[ki, :, :] = outputs[:, halftime:, self.readout_indexes[key]].mean(dim=1)  # (batch,)
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     

@@ -13,6 +13,7 @@ def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
     corr = (y_hat * y).mean(dim=1, keepdim=True)
 
     if neuron_scaling is not None:
+        assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
         corr = torch.sum(corr * neuron_scaling[None, None, :], dim=2)
         
@@ -27,6 +28,7 @@ def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
     cosine_sim = (y_hat * y).sum(dim=1, keepdim=True)
 
     if neuron_scaling is not None:
+        assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
         cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, :], dim=2)
         
@@ -40,7 +42,7 @@ def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
-                clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=corr_loss,
+                clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor = 0.5):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
@@ -84,6 +86,11 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
         # Update weights AFTER checking/saving best model
         opt.step()
 
+        rel_change = 0
+        if len(loss_list) > 1:
+            rel_change = (loss_list[-2] - loss_list[-1]) / loss_list[-1] if loss_list else 0
+        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e}')
+
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:
                 # Load the best model state into the existing model
@@ -103,11 +110,6 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                 print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')
                 print(' -------------------------------- ')
 
-        rel_change = 0
-        if len(loss_list) > 1:
-            rel_change = (loss_list[-2] - loss_list[-1]) / loss_list[-1] if loss_list else 0
-        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e}')
-
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
                 if model_save_folder:
@@ -118,7 +120,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                     # model.save(model_save_folder / ckpt_name)
                 pred, readout = model.predict_and_readout(inputs)
 
-                readout_names = list(model.readout_neurons.keys())
+                readout_names = list(model.readout_indexes.keys())
                 pu.plot_readout_target(readout, target, readout_names=readout_names, save_folder=model_save_folder)
 
                 if readout_xy is not None:
