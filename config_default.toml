@@ -16,9 +16,10 @@ num_steps = 100  # number of training steps
 save_every = 10 # number of steps before printing loss
 
 # Learning parameters
-alpha = 1e-4  # learning rate
+alpha = 1e-1  # learning rate
 readout_weight_init = 1e0  # initial readout weight
 readout_bias_init = 0e0  # initial readout weight
+clip_norm = 0.1
 
 [stimulus]
 # Time parameters

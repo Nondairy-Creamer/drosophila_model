@@ -21,7 +21,7 @@ def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
 
     return 1.0 - ave_corr
 
-def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
+def cos_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
     y_hat = y_hat / (y_hat.norm(dim=1, keepdim=True).clamp_min(eps))
     y = y / (y.norm(dim=1, keepdim=True).clamp_min(eps))
@@ -37,7 +37,7 @@ def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     return 1.0 - ave_cosine_sim
 
 def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
-    cos_loss_val = cosine_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
+    cos_loss_val = cos_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
 
