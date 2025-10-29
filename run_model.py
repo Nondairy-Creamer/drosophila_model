@@ -100,8 +100,10 @@ torch.save(target.detach().cpu(), model_save_folder / "target.pt")
 
 contrast_scaling_factor = contrast_scaling_function(column_info_output_df['theta'].to_numpy())
 contrast_scaling_factor = torch.tensor(contrast_scaling_factor, dtype=dtype, device=device)
+torch.save(contrast_scaling_factor.detach().cpu(), model_save_folder / "contrast_scaling_factor.pt")
+
 def loss_scaled(y_hat, y, neuron_scaling=contrast_scaling_factor):
-    return tu.combined_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-8)
+    return tu.combined_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=1e-6)
 
 # --- train the model ---
 # find a good estimate of the readout weights

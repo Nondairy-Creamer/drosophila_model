@@ -22,6 +22,7 @@ class NeuralRnn(torch.nn.Module):
         input_strength_init = np.sqrt(synapse_strength_init)
         output_strength_init = input_strength_init
         stimulus_strength_init = 1e-1
+        offset_init = 1e-1
         readout_weight_init = 1
         readout_bias_init = 0
 
@@ -48,7 +49,7 @@ class NeuralRnn(torch.nn.Module):
         # --- model parameters
         self.diagonal_logit = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
-        self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype) + offset_init
         self.readout_weight_log = torch.tensor(np.log(readout_weight_init), device=self.device, dtype=self.dtype)
         self.readout_bias = torch.tensor(readout_bias_init, device=self.device, dtype=self.dtype)
 

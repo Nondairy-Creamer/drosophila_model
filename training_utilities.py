@@ -4,7 +4,7 @@ import numpy as np
 import neural_models as nm
 
 
-def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
+def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
     y_hat = y_hat - y_hat.mean(dim=1, keepdim=True)
     y = y - y.mean(dim=1, keepdim=True)
@@ -21,7 +21,7 @@ def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
 
     return 1.0 - ave_corr
 
-def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
+def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
     y_hat = y_hat / (y_hat.norm(dim=1, keepdim=True).clamp_min(eps))
     y = y / (y.norm(dim=1, keepdim=True).clamp_min(eps))
@@ -36,7 +36,7 @@ def cosine_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
 
     return 1.0 - ave_cosine_sim
 
-def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-8):
+def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     cos_loss_val = cosine_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
@@ -77,6 +77,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
             
         # Update weights AFTER checking/saving best model
         loss.backward()
+
         # Optional gradient clipping (prefer norm if both provided)
         if clip_grad_norm is not None:
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
