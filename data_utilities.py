@@ -43,6 +43,9 @@ def load_config(config_path: str = 'config.toml') -> dict:
         # Recursively merge user config into default config
         config = _merge_configs(config, user_config)
     
+    # Convert "none" strings to Python None
+    config = _convert_none_strings(config)
+    
     return config
 
 def _merge_configs(default: dict, user: dict) -> dict:
@@ -66,6 +69,24 @@ def _merge_configs(default: dict, user: dict) -> dict:
     
     return result
 
+def _convert_none_strings(config: dict | list | Any) -> dict | list | Any:
+    '''
+    Recursively convert "none" strings (case-insensitive) to Python None.
+    
+    Args:
+        config: Configuration value (dict, list, or other type)
+        
+    Returns:
+        Configuration with "none" strings converted to None
+    '''
+    if isinstance(config, dict):
+        return {key: _convert_none_strings(value) for key, value in config.items()}
+    elif isinstance(config, list):
+        return [_convert_none_strings(item) for item in config]
+    elif isinstance(config, str) and config.lower() == "none":
+        return None
+    else:
+        return config
 
 def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
     '''
