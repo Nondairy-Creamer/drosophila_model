@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 model_folder = Path('models/20251029_190820')
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'best_model.pt')
+model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 

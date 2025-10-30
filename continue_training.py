@@ -7,8 +7,7 @@ import training_utilities as tu
 model_folder = Path('models/20251029_212010')
 
 config = du.load_config(model_folder / 'config.toml')
-best_ckpt = model_folder / 'best.pt'
-model = nm.NeuralRnn.load(best_ckpt if best_ckpt.exists() else (model_folder / 'model.pt'))
+model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 num_steps = int(1e6)
@@ -21,7 +20,7 @@ def loss_scaled(y_hat, y):
     return tu.combined_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
 
 # Load the best optimizer state and reduce learning rate
-opt_state = torch.load(model_folder / 'best_model_opt.pt', map_location='cpu', weights_only=False)
+opt_state = torch.load(model_folder / 'model_opt.pt', map_location='cpu', weights_only=False)
 # if you want to use the previous alpha, set the alpha here to None
 # otherwise, overwrite the previous alpha
 if alpha is not None:

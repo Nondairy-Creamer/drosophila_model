@@ -69,12 +69,12 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
             # track and save the best checkpoint for easy rollback
             # Save BEFORE opt.step() so we save the weights that achieved this loss
             if model_save_folder:
-                model.save(model_save_folder / 'best_model.pt')
+                model.save(model_save_folder / 'model.pt')
                 torch.save({
                     'optimizer_state_dict': opt.state_dict(),
                     'loss': loss_list[-1],
                     'step': step
-                }, model_save_folder / 'best_model_opt.pt')
+                }, model_save_folder / 'model_opt.pt')
         else:
             time_since_best += 1
             
@@ -96,11 +96,11 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:
                 # Load the best model state into the existing model
-                checkpoint = torch.load(model_save_folder / 'best_model.pt', map_location='cpu', weights_only=False)
+                checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
                 model.load_state_dict(checkpoint['state_dict'])
                 
                 # Load the best optimizer state and reduce learning rate
-                opt_state = torch.load(model_save_folder / 'best_model_opt.pt', map_location='cpu', weights_only=False)
+                opt_state = torch.load(model_save_folder / 'model_opt.pt', map_location='cpu', weights_only=False)
                 opt.load_state_dict(opt_state['optimizer_state_dict'])
                 
                 alpha = alpha * alpha_factor
@@ -114,14 +114,6 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
-                if model_save_folder:
-                    # always save a rolling latest checkpoint
-                    model.save(model_save_folder / 'model.pt')
-                    # save a periodic checkpoint with step and loss for recovery
-                    # ckpt_name = f"model_step_{step+1:07d}_loss_{loss_value:.6f}.pt"
-                    # model.save(model_save_folder / ckpt_name)
-                pred, readout = model.predict_and_readout(inputs)
-
                 readout_names = list(model.readout_indexes.keys())
                 pu.plot_readout_target(readout, target, readout_names=readout_names, save_folder=model_save_folder)
 
