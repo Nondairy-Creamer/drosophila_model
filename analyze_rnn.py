@@ -11,10 +11,10 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251029_190820')
+model_folder = Path('models/20251030_174245')
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'model.pt')
+model = nm.NeuralRnn.load(model_folder / 'model_init.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
@@ -27,14 +27,22 @@ def loss_scaled(y_hat, y):
 connectome_folder = Path(config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 
-cells_to_plot = ['L1', 'Mi1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+cells_to_plot = ['L1', 'Mi1', 'Tm3', 'T4a', 'T4b', 'T4c', 'T4d']
 column_info_df, column_ids = du.get_column_df(cell_info_df, cells_to_plot)
+
+# restrict the columns to a line across the eye
+vert_lim = 2.5 * np.pi / 180
+within_vert_lim = np.abs(column_info_df['theta'] - np.pi / 2) < vert_lim
+column_info_df = column_info_df[within_vert_lim]
+column_ids = column_ids[within_vert_lim]
+sort_inds = np.argsort(column_info_df['phi'])[::-1]
+
 pred, readout = model.predict_and_readout(cell_inputs)
 stim_fig_folder = Path('figures/analysis')
 shutil.rmtree(stim_fig_folder, ignore_errors=True)
 stim_fig_folder.mkdir(parents=True, exist_ok=True)
 time_point = 20
-these_colulmns = cell_info_df.column_id.isin(column_ids)
+these_columns = cell_info_df.column_id.isin(column_ids)
 
 # get the correlation and cosine similarity
 correlation_similarity = 1.0 - tu.corr_loss(readout, target).detach().cpu().numpy()
@@ -43,19 +51,32 @@ cosine_similarity = 1.0 - tu.cos_loss(readout, target).detach().cpu().numpy()
 print('correlation:', correlation_similarity)
 print('cosine similarity:', cosine_similarity)
 
-pred_list = []
 for ctp in cells_to_plot:
-    cell_to_plot_bool = (cell_info_df.type == ctp) & these_colulmns
-    cell_x = column_info_df.x
-    cell_z = column_info_df.z
+    # Create boolean mask for cells in the full cell_info_df (for indexing predictions)
+    cell_to_plot_bool = (cell_info_df.type == ctp) & these_columns
+    
+    # Filter column_info_df directly for this cell type (for spatial information)
+    cell_to_plot_df = cell_info_df[cell_to_plot_bool]
+    cell_x = cell_to_plot_df.x
+    cell_z = cell_to_plot_df.z
+    
+    # Get sort indices for just this cell type
+    sort_inds_for_cell = np.argsort(cell_to_plot_df['phi'].to_numpy())[::-1]
 
     # plot the response to every fourth stimulus
     # this is to skip the repeats over phase
     num_phase_rep = 4
-    half_time = pred.shape[1] // 2
-    pred_plot = pred[::num_phase_rep, half_time:, cell_to_plot_bool].detach().cpu().numpy()
-    pred_list.append(pred_plot)
+    pred_plot = pred[::num_phase_rep, :, cell_to_plot_bool].detach().cpu().numpy()
+    stim_plot = cell_inputs[::num_phase_rep, :, cell_to_plot_bool].detach().cpu().numpy()
     pu.plot_response_over_space(pred_plot[:, time_point, :], cell_x, cell_z, save_folder=model_folder / 'analysis' / ctp)
+
+    for ri, r in enumerate(stim_plot):
+        plt.figure()
+        plt.imshow(r[:, sort_inds_for_cell], interpolation='nearest', aspect='auto')
+        plt.clim(0, np.max(r))
+        plt.colorbar()
+        plt.savefig(model_folder / 'analysis' / ctp / ('xt_resp' + str(ri) + '.png'))
+        plt.close()
 
     ave_resp_neurons = np.mean(pred_plot, axis=2)
     plt.figure()

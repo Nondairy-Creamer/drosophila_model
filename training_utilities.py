@@ -23,8 +23,8 @@ def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
 
 def cos_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat / (y_hat.norm(dim=1, keepdim=True).clamp_min(eps))
-    y = y / (y.norm(dim=1, keepdim=True).clamp_min(eps))
+    y_hat = y_hat / y_hat.norm(dim=1, keepdim=True).clamp_min(eps)
+    y = y / y.norm(dim=1, keepdim=True).clamp_min(eps)
     cosine_sim = (y_hat * y).sum(dim=1, keepdim=True)
 
     if neuron_scaling is not None:

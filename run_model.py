@@ -104,6 +104,9 @@ torch.save(contrast_scaling_factor.detach().cpu(), model_save_folder / "contrast
 
 def loss_scaled(y_hat, y):
     return tu.combined_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
+    # return tu.cos_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
+
+model.save(model_save_folder / 'model_init.pt')
 
 # --- train the model ---
 # find a good estimate of the readout weights
