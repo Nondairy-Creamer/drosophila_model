@@ -106,8 +106,13 @@ def map_stimulus_to_cells(stimulus, cell_info_df, column_info_df, input_neurons=
     neuron_indexes = np.arange(len(cell_info_df))  # index of every neuron in the model
     column_index_for_each_neuron = pd.Index(column_info_df.column_id).get_indexer(cell_info_df.column_id)  # for each neuron, the index of the column its in
     neuron_is_input = cell_info_df.type.isin(input_neurons)  # whether a neuron is being stimuluated
-    input_neuron_indexes = neuron_indexes[neuron_is_input]  # the indexes of the sitmulated neurons
-    column_index_for_each_input_neuron = column_index_for_each_neuron[neuron_is_input]  # the column indexes of the sitmulated neurons
+    
+    # Only select input neurons whose columns are in column_info_df (i.e., column_index != -1)
+    valid_column = column_index_for_each_neuron >= 0
+    neuron_is_input_and_valid = neuron_is_input & valid_column
+    
+    input_neuron_indexes = neuron_indexes[neuron_is_input_and_valid]  # the indexes of the sitmulated neurons
+    column_index_for_each_input_neuron = column_index_for_each_neuron[neuron_is_input_and_valid]  # the column indexes of the sitmulated neurons
 
     num_stim, num_time, num_column = stimulus.shape
     cell_inputs = torch.zeros((num_stim, num_time, num_neurons), device=stimulus.device, dtype=stimulus.dtype)
