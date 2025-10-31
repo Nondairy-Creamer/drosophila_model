@@ -6,16 +6,16 @@ import neural_models as nm
 
 def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat - y_hat.mean(dim=1, keepdim=True)
-    y = y - y.mean(dim=1, keepdim=True)
-    y_hat = y_hat / (y_hat.std(dim=1, keepdim=True).clamp_min(eps))
-    y = y / (y.std(dim=1, keepdim=True).clamp_min(eps))
-    corr = (y_hat * y).mean(dim=1, keepdim=True)
+    y_hat = y_hat - y_hat.mean(dim=(1, 2), keepdim=True)
+    y = y - y.mean(dim=(1, 2), keepdim=True)
+    y_hat = y_hat / (y_hat.std(dim=(1, 2), keepdim=True).clamp_min(eps))
+    y = y / (y.std(dim=(1, 2), keepdim=True).clamp_min(eps))
+    corr = (y_hat * y).mean(dim=(1, 2), keepdim=True)
 
     if neuron_scaling is not None:
         assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        corr = torch.sum(corr * neuron_scaling[None, None, :], dim=2)
+        corr = torch.sum(corr * neuron_scaling[None, None, None, :], dim=-1)
         
     ave_corr = corr.mean()
 
@@ -23,14 +23,14 @@ def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
 
 def cos_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat / y_hat.norm(dim=1, keepdim=True).clamp_min(eps)
-    y = y / y.norm(dim=1, keepdim=True).clamp_min(eps)
-    cosine_sim = (y_hat * y).sum(dim=1, keepdim=True)
+    y_hat = y_hat / y_hat.norm(dim=(1, 2), keepdim=True).clamp_min(eps)
+    y = y / y.norm(dim=(1, 2), keepdim=True).clamp_min(eps)
+    cosine_sim = (y_hat * y).sum(dim=(1, 2), keepdim=True)
 
     if neuron_scaling is not None:
         assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, :], dim=2)
+        cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, None, :], dim=-1)
         
     ave_cosine_sim = cosine_sim.mean()
 
@@ -40,6 +40,11 @@ def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     cos_loss_val = cos_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
+
+def get_scaled_loss(loss_fn, neuron_scaling=None):
+    def loss_out(y_hat, y):
+        return loss_fn(y_hat, y, neuron_scaling=neuron_scaling)
+    return loss_out
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
@@ -119,7 +124,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
                 if readout_xy is not None:
                     for i in range(readout.shape[0]):
-                        pu.plot_response_over_space(readout[i, ::4, :].detach().cpu().numpy(), readout_xy[:, 0], readout_xy[:, 1], save_folder=model_save_folder / ('readout' + str(i)))
+                        pu.plot_response_over_space(readout[i, ::4, :, :].detach().cpu().numpy().mean(axis=1), readout_xy[:, 0], readout_xy[:, 1], save_folder=model_save_folder / ('readout' + str(i)))
 
                 pu.plot_loss(loss_list, save_folder=model_save_folder)
 

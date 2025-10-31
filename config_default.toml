@@ -9,11 +9,12 @@ scale_in_out = true
 readout_neurons = ['T4a', 'T4b']
 
 # Model architecture parameters
-nonlinearity = 'relu'  # 'linear', 'relu', 'tanh', 'sigmoid'
+nonlinearity = 'Softplus'  # 'linear', 'relu', 'tanh', 'sigmoid'
 
 [training]
 num_steps = 100  # number of training steps
-save_every = 10 # number of steps before printing loss
+save_every = 10  # number of steps before printing loss
+loss_fn = 'cos_loss'
 
 # Learning parameters
 alpha = 1e-1  # learning rate

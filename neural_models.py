@@ -22,7 +22,7 @@ class NeuralRnn(torch.nn.Module):
         input_strength_init = np.sqrt(synapse_strength_init)
         output_strength_init = input_strength_init
         stimulus_strength_init = 1.0
-        offset_init = 1.0
+        offset_init = 0.0
         readout_weight_init = 1.0
         readout_bias_init = 0.0
 
@@ -167,14 +167,13 @@ class NeuralRnn(torch.nn.Module):
         readout_keys = list(self.readout_indexes.keys())
         readout_size = len(self.readout_indexes[readout_keys[0]])
         num_stimuli = outputs.shape[0]
+        num_time = outputs.shape[1]
         num_readouts = len(readout_keys)
-        readout = torch.zeros((num_readouts, num_stimuli, readout_size), device=self.device, dtype=self.dtype)
-        halftime = outputs.shape[1] // 2
+        readout = torch.zeros((num_readouts, num_stimuli, num_time, readout_size), device=self.device, dtype=self.dtype)
 
         for ki, key in enumerate(readout_keys):
-            # average over the second half of stimulus presentation
-            # and select the neurons using the readout_indexes
-            readout[ki, :, :] = outputs[:, halftime:, self.readout_indexes[key]].mean(dim=1)  # (batch,)
+            # select the neurons using the readout_indexes
+            readout[ki, :, :, :] = outputs[:, :, self.readout_indexes[key]]
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     

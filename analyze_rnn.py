@@ -11,18 +11,18 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251031_153410')
+model_folder = Path('models/20251031_195936')
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'model_init.pt')
+model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
 # Load contrast scaling factor and create loss function
 contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
 contrast_scaling_factor = torch.load(contrast_scaling_factor_path).to(device=model.device)
-def loss_scaled(y_hat, y):
-    return tu.combined_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
+loss_fn = getattr(tu, config['training']['loss_fn'])
+loss_scaled = tu.get_scaled_loss(loss_fn, contrast_scaling_factor)
 
 connectome_folder = Path(config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
@@ -72,16 +72,14 @@ for ctp in cells_to_plot:
 
     for ri, r in enumerate(pred_plot):
         plt.figure()
-        plt.imshow(r[:, sort_inds_for_cell], interpolation='nearest', aspect='auto')
-        plt.clim(0, np.max(r))
+        plt.imshow(r[:, sort_inds_for_cell], interpolation='nearest', aspect='auto', vmin=0)
         plt.colorbar()
         plt.savefig(model_folder / 'analysis' / ctp / ('xt_resp' + str(ri) + '.png'))
         plt.close()
 
     ave_resp_neurons = np.mean(pred_plot, axis=2)
     plt.figure()
-    plt.imshow(ave_resp_neurons, interpolation='nearest', aspect='auto')
-    plt.clim(0, np.max(ave_resp_neurons))
+    plt.imshow(ave_resp_neurons, interpolation='nearest', aspect='auto', vmin=0)
     plt.colorbar()
     plt.savefig(model_folder / 'analysis' / ctp / 'ave_resp_neurons.png')
     plt.close()

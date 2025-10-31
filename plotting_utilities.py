@@ -11,8 +11,8 @@ def plot_readout_target(readout, target, readout_names, save_folder=Path('figure
         plt.figure()
         colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
         direction = ['progressive', 'regressive', 'up', 'down']
-        readout_plot = readout[i, :, :].mean(axis=1).detach().cpu().numpy().T.reshape((4, readout.shape[1] // 4)).T
-        target_plot = target[i, :, :].mean(axis=1).detach().cpu().numpy().T.reshape((4, target.shape[1] // 4)).T
+        readout_plot = readout[i].mean(axis=(1, 2)).detach().cpu().numpy().T.reshape((4, readout.shape[1] // 4)).T
+        target_plot = target[i].mean(axis=(1, 2)).detach().cpu().numpy().T.reshape((4, target.shape[1] // 4)).T
         
         # scale target to match prediction for visualization
         # since scale doesnt matter for our loss

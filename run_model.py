@@ -76,7 +76,7 @@ pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_i
 num_readouts = len(readout_indexes)
 num_stimuli = cell_inputs.shape[0]
 readout_size = column_ids_output.shape[0]
-target = torch.zeros((num_readouts, num_stimuli, readout_size), device=device, dtype=dtype)
+target = torch.zeros((num_readouts, num_stimuli, num_time, readout_size), device=device, dtype=dtype)
 
 # stimuli are right left up down
 # cell preferences are currently right left up down right left up down
@@ -87,8 +87,8 @@ for i in range(num_stimulus_blocks):
     # both the i and i+4 cells respond to the same stimulus
     # T4a is rightward selective and T5a is as well
     # this code will change if you change the cell readouts
-    target[i, quart, :] = torch.abs(sine_wave_tfs[:stimulus_block_size, None])  # just take block of TFs and only use them as positive
-    target[i + 4, quart, :] = torch.abs(sine_wave_tfs[:stimulus_block_size, None])
+    target[i, quart, :, :] = torch.abs(sine_wave_tfs[:stimulus_block_size, None, None])  # just take block of TFs and only use them as positive
+    target[i + 4, quart, :, :] = torch.abs(sine_wave_tfs[:stimulus_block_size, None, None])
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -102,9 +102,9 @@ contrast_scaling_factor = contrast_scaling_function(column_info_output_df['theta
 contrast_scaling_factor = torch.tensor(contrast_scaling_factor, dtype=dtype, device=device)
 torch.save(contrast_scaling_factor.detach().cpu(), model_save_folder / "contrast_scaling_factor.pt")
 
-def loss_scaled(y_hat, y):
-    return tu.combined_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
-    # return tu.cos_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
+# get the loss function
+loss_fn = getattr(tu, config['training']['loss_fn'])
+loss_scaled = tu.get_scaled_loss(loss_fn, contrast_scaling_factor)
 
 model.save(model_save_folder / 'model_init.pt')
 model.save(model_save_folder / 'model.pt')
