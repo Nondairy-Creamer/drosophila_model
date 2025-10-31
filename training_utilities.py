@@ -91,7 +91,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
         rel_change = 0
         if len(loss_list) > 1:
             rel_change = (loss_list[-2] - loss_list[-1]) / loss_list[-1] if loss_list else 0
-        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e} | grad magnitude = {grad_norm:.3g}')
+        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | rel_change = {rel_change:.4e} | lr = {alpha:.2e} | grad magnitude = {grad_norm:.3g} | path = {model_save_folder}')
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:
