@@ -11,12 +11,23 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251031_195936')
+model_folder = Path('models/20251031_162210')
 
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
+
+print('--- Average model parameters ---')
+diagonal_ave = torch.mean(model.diagonal_logit).sigmoid().detach().cpu().numpy()
+synapse_strength_ave = torch.mean(model.synapse_strength_log.exp() * model.input_strength_log.exp() * model.output_strength_log.exp()).detach().cpu().numpy()
+offset_ave = torch.mean(model.offset).detach().cpu().numpy()
+stimulus_strength_ave = torch.mean(model.stimulus_strength_log[model.unique_cell_types == 'L1']).exp().detach().cpu().numpy()
+
+print('diagonal', diagonal_ave)
+print('synapse strength', torch.mean(model.synapse_strength_log.exp() * model.input_strength_log.exp() * model.output_strength_log.exp()).detach().cpu().numpy())
+print('offset', offset_ave)
+print('stimulus strength', stimulus_strength_ave)
 
 # Load contrast scaling factor and create loss function
 contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
