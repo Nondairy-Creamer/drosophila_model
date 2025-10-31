@@ -18,16 +18,20 @@ model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
-print('--- Average model parameters ---')
-diagonal_ave = torch.mean(model.diagonal_logit).sigmoid().detach().cpu().numpy()
-synapse_strength_ave = torch.mean(model.synapse_strength_log.exp() * model.input_strength_log.exp() * model.output_strength_log.exp()).detach().cpu().numpy()
-offset_ave = torch.mean(model.offset).detach().cpu().numpy()
-stimulus_strength_ave = torch.mean(model.stimulus_strength_log[model.unique_cell_types == 'L1']).exp().detach().cpu().numpy()
+cells_to_plot = ['L1', 'L2', 'L3', 'Mi1', 'Tm3', 'T4a', 'T4b', 'T4c', 'T4d']
 
-print('diagonal', diagonal_ave)
-print('synapse strength', torch.mean(model.synapse_strength_log.exp() * model.input_strength_log.exp() * model.output_strength_log.exp()).detach().cpu().numpy())
-print('offset', offset_ave)
-print('stimulus strength', stimulus_strength_ave)
+for ctp in cells_to_plot:
+    print('--- Model parameters for', ctp, '---')
+    chosen_neuron_bool = model.unique_cell_types == ctp
+    chosen_diagonal = model.diagonal_logit[chosen_neuron_bool].sigmoid().detach().cpu().numpy()
+    chosen_strength = (model.synapse_strength_log.exp() * model.input_strength_log[chosen_neuron_bool].exp() * model.output_strength_log[chosen_neuron_bool].exp()).detach().cpu().numpy()
+    chosen_offset = model.offset[chosen_neuron_bool].detach().cpu().numpy()
+    chosen_stimulus_strength = model.stimulus_strength_log[[chosen_neuron_bool]].exp().detach().cpu().numpy()
+
+    print(f'diagonal: {chosen_diagonal[0]:4g}')
+    print(f'synapse strength: {chosen_strength[0]:4g}')
+    print(f'offset: {chosen_offset[0]:4g}')
+    print(f'stimulus strength: {chosen_stimulus_strength[0]:4g}')
 
 # Load contrast scaling factor and create loss function
 contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
@@ -37,8 +41,6 @@ loss_scaled = tu.get_scaled_loss(loss_fn, contrast_scaling_factor)
 
 connectome_folder = Path(config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-
-cells_to_plot = ['L1', 'Mi1', 'Tm3', 'T4a', 'T4b', 'T4c', 'T4d']
 column_info_df, column_ids = du.get_column_df(cell_info_df, cells_to_plot)
 
 # restrict the columns to a line across the eye

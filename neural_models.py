@@ -22,7 +22,7 @@ class NeuralRnn(torch.nn.Module):
         input_strength_init = np.sqrt(synapse_strength_init)
         output_strength_init = input_strength_init
         stimulus_strength_init = 1.0
-        offset_init = 0.0
+        offset_init = 1.0
         readout_weight_init = 1.0
         readout_bias_init = 0.0
 
