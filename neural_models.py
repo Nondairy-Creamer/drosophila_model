@@ -17,12 +17,12 @@ class NeuralRnn(torch.nn.Module):
         self.init_inputs = params
         super().__init__()
 
-        diagonal_init = 0.9
-        synapse_strength_init = 1e-3
+        diagonal_init = 0.7
+        synapse_strength_init = 1e-4
         input_strength_init = np.sqrt(synapse_strength_init)
         output_strength_init = input_strength_init
-        stimulus_strength_init = 1e-1
-        offset_init = 1e-1
+        stimulus_strength_init = 1e0
+        offset_init = 5e-1
         readout_weight_init = 1
         readout_bias_init = 0
 
@@ -124,7 +124,7 @@ class NeuralRnn(torch.nn.Module):
         x_scaled = x_prev * input_strength[None, :]
         z = x_scaled @ self.synapse_counts.T
         z = synapse_strength * z * output_strength[None, :]
-        z = z + x_prev * diagonal
+        z = z + x_prev * diagonal[None, :]
         x_next = self.nonlinearity(z + u_t * stimulus_strength[None, :] + offset_all_neurons[None, :])
 
         return x_next

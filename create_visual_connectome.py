@@ -73,11 +73,16 @@ num_neurons = len(model_root_ids)
 
 # limit cell info to those in the synaptic connectivity matrix. Make sure we keep the same ordering of model_root_ids
 visual_neurons_indexes = pd.Index(visual_neurons_df.root_id).get_indexer(model_root_ids)
+# Verify all root IDs were found (no -1 indices) - this should always pass if data is consistent
+assert np.all(visual_neurons_indexes >= 0), "Some model_root_ids not found in visual_neurons_df - data inconsistency"
 visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indexes]
 
 # make a mapping from root id to matrix index for presyanptic and postsynaptic connections
 pre_matrix_indexes = pd.Index(model_root_ids).get_indexer(presynaptic_ids)
 post_matrix_indexes = pd.Index(model_root_ids).get_indexer(postsynaptic_ids)
+# Verify all IDs were found - these should always pass since model_root_ids was built from these IDs
+assert np.all(pre_matrix_indexes >= 0), "Some presynaptic IDs not found in model_root_ids - data inconsistency"
+assert np.all(post_matrix_indexes >= 0), "Some postsynaptic IDs not found in model_root_ids - data inconsistency"
 
 # save the matrix indices and values to a data frame
 synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_indexes, 'post_matrix_ind': post_matrix_indexes, 'synapse_counts': synapse_counts})

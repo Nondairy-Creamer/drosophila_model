@@ -107,6 +107,7 @@ def loss_scaled(y_hat, y):
     # return tu.cos_loss(y_hat, y, neuron_scaling=contrast_scaling_factor, eps=1e-6)
 
 model.save(model_save_folder / 'model_init.pt')
+model.save(model_save_folder / 'model.pt')
 
 # --- train the model ---
 # find a good estimate of the readout weights

@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251030_174245')
+model_folder = Path('models/20251031_153410')
 
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralRnn.load(model_folder / 'model_init.pt')
@@ -70,7 +70,7 @@ for ctp in cells_to_plot:
     stim_plot = cell_inputs[::num_phase_rep, :, cell_to_plot_bool].detach().cpu().numpy()
     pu.plot_response_over_space(pred_plot[:, time_point, :], cell_x, cell_z, save_folder=model_folder / 'analysis' / ctp)
 
-    for ri, r in enumerate(stim_plot):
+    for ri, r in enumerate(pred_plot):
         plt.figure()
         plt.imshow(r[:, sort_inds_for_cell], interpolation='nearest', aspect='auto')
         plt.clim(0, np.max(r))
