@@ -46,6 +46,7 @@ column_info_input_df, column_ids_input = du.get_column_df(cell_info_df, input_ne
 column_info_output_df, column_ids_output = du.get_column_df(cell_info_df, output_neurons)
 
 # get the index in the model for the readout neurons and in the chosen columns
+# make sure it is ordered the same way it is in column_info_output_df
 col_order = column_info_output_df['column_id'].to_numpy()
 readout_indexes = {}
 for t in output_neurons:
@@ -59,7 +60,7 @@ for t in output_neurons:
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
                      cell_types=cell_info_df.type.to_numpy(), nonlinearity=config['model']['nonlinearity'],
                      device=config['model']['device'], dtype=config['model']['dtype'],
-                     use_sparse=config['model']['use_sparse'], scale_in_out=config['model']['scale_in_out'],
+                     use_sparse=config['model']['use_sparse'], use_layer_norm=config['model']['use_layer_norm'],
                      readout_indexes=readout_indexes)
 
 # --- get a sign wave stimulus ---

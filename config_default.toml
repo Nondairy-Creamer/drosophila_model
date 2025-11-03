@@ -5,7 +5,7 @@
 device = 'cpu'  # 'cpu' or 'cuda'
 dtype = 'float32'  # 'float32' or 'float64'
 use_sparse = true
-scale_in_out = true
+use_layer_norm = false
 readout_neurons = ['T4a', 'T4b']
 
 # Model architecture parameters

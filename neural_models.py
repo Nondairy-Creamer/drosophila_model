@@ -5,7 +5,7 @@ from pathlib import Path
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, readout_indexes, nonlinearity='relu', device='cpu', dtype='float32',
-                 scale_in_out=False, use_sparse=False):
+                 use_sparse=False, use_layer_norm=False):
 
         self.readout_indexes = readout_indexes
 
@@ -18,11 +18,8 @@ class NeuralRnn(torch.nn.Module):
         super().__init__()
 
         diagonal_init = 0.7
-        synapse_strength_init = 1e-3
-        input_strength_init = np.sqrt(synapse_strength_init)
-        output_strength_init = input_strength_init
-        stimulus_strength_init = 1.0
-        offset_init = 1.0
+        stimulus_strength_init = 5.0
+        offset_init = 0.0  # Changed from 1.0 - let the network learn the bias
         readout_weight_init = 1.0
         readout_bias_init = 0.0
 
@@ -36,11 +33,11 @@ class NeuralRnn(torch.nn.Module):
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype)
         self.use_sparse = use_sparse
+        self.use_layer_norm = use_layer_norm
         self.num_neurons = cell_types.shape[0]
         self.unique_cell_types = np.unique(cell_types)
         self.num_cell_types = self.unique_cell_types.shape[0]
         self.synapse_counts_coo = synapse_counts_coo
-        self.scale_in_out = scale_in_out
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -59,26 +56,6 @@ class NeuralRnn(torch.nn.Module):
         # self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
         # self.readout_bias = torch.nn.Parameter(self.readout_bias)
 
-        # if we're scaling inputs and outputs then define those vectors as parameters and
-        # set synapse strength to a buffer since it is redundant.
-        synapse_strength_log = torch.tensor(np.log(synapse_strength_init), device=self.device, dtype=self.dtype)
-        input_strength_log = torch.full((self.num_cell_types,), np.log(input_strength_init), device=self.device, dtype=self.dtype)
-        output_strength_log = torch.full((self.num_cell_types,), np.log(output_strength_init), device=self.device, dtype=self.dtype)
-
-        if self.scale_in_out:
-            self.input_strength_log = torch.nn.Parameter(input_strength_log)
-            self.output_strength_log = torch.nn.Parameter(output_strength_log)
-
-            synapse_strength_log[...] = np.log(1)
-            self.register_buffer('synapse_strength_log', synapse_strength_log)
-        else:
-            self.synapse_strength_log = torch.nn.Parameter(synapse_strength_log)
-
-            input_strength_log[:] = np.log(1)
-            output_strength_log[:] = np.log(1)
-            self.register_buffer('input_strength_log', input_strength_log)
-            self.register_buffer('output_strength_log', output_strength_log)
-        
         # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
         # synapse counts sparse must be in the form N x 3 with [indices, (pre_synaptic, post_synaptic, count)]
@@ -96,6 +73,26 @@ class NeuralRnn(torch.nn.Module):
             self.synapse_counts = torch.zeros((self.num_neurons, self.num_neurons), device=self.device, dtype=self.dtype)
             self.synapse_counts.index_put_((rows, cols), values, accumulate=True).to(device=self.device, dtype=self.dtype)
 
+        # Use Kaiming-like initialization scaled by fan-in
+        # Target: keep variance roughly constant across layers
+        # Compute fan-in per neuron
+        fan_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()  # (num_neurons,)
+
+        # Average fan-in for each cell type
+        avg_fan_in_per_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask_np = (self.cell_types == ct)
+            ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
+            avg_fan_in_per_type[cti] = fan_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+
+        # Initialize strength per cell type based on its specific fan-in
+        # log(sqrt(1/sqrt(x))) = log(x^(-1/4)) = -0.25 * log(x)
+        synapse_scale = 1e-1
+        input_strength_log = -0.25 * torch.log(avg_fan_in_per_type) + np.log(synapse_scale)
+        output_strength_log = input_strength_log.clone()
+        self.input_strength_log = torch.nn.Parameter(input_strength_log)
+        self.output_strength_log = torch.nn.Parameter(output_strength_log)
+
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1
         for cti, ct in enumerate(self.unique_cell_types):
@@ -104,9 +101,12 @@ class NeuralRnn(torch.nn.Module):
             self.neuron_to_type_index[ct_mask] = cti
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
         
+        # Optional layer normalization for better signal propagation
+        if self.use_layer_norm:
+            self.layer_norm = torch.nn.LayerNorm(self.num_neurons, elementwise_affine=False, device=self.device, dtype=self.dtype)
+        
     def forward(self, x_prev, u_t):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
-        synapse_strength = self.synapse_strength_log.exp()
         input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
         output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
@@ -123,8 +123,13 @@ class NeuralRnn(torch.nn.Module):
 
         x_scaled = x_prev * input_strength[None, :]
         z = x_scaled @ self.synapse_counts.T
-        z = synapse_strength * z * output_strength[None, :]
+        z = z * output_strength[None, :]
         z = z + x_prev * diagonal[None, :]
+        
+        # Apply layer normalization before nonlinearity if enabled
+        if self.use_layer_norm:
+            z = self.layer_norm(z)
+        
         x_next = self.nonlinearity(z + u_t * stimulus_strength[None, :] + offset_all_neurons[None, :])
 
         return x_next

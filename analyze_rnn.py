@@ -11,20 +11,20 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251031_162210')
+model_folder = Path('models/20251103_223831')
 
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
-cells_to_plot = ['L1', 'L2', 'L3', 'Mi1', 'Tm3', 'T4a', 'T4b', 'T4c', 'T4d']
+cells_to_plot = ['L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T5a', 'T5b', 'T5c', 'T5d']
 
 for ctp in cells_to_plot:
     print('--- Model parameters for', ctp, '---')
     chosen_neuron_bool = model.unique_cell_types == ctp
     chosen_diagonal = model.diagonal_logit[chosen_neuron_bool].sigmoid().detach().cpu().numpy()
-    chosen_strength = (model.synapse_strength_log.exp() * model.input_strength_log[chosen_neuron_bool].exp() * model.output_strength_log[chosen_neuron_bool].exp()).detach().cpu().numpy()
+    chosen_strength = (model.input_strength_log[chosen_neuron_bool].exp() * model.output_strength_log[chosen_neuron_bool].exp()).detach().cpu().numpy()
     chosen_offset = model.offset[chosen_neuron_bool].detach().cpu().numpy()
     chosen_stimulus_strength = model.stimulus_strength_log[[chosen_neuron_bool]].exp().detach().cpu().numpy()
 
