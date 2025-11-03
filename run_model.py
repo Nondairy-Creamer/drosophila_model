@@ -45,12 +45,15 @@ output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 column_info_input_df, column_ids_input = du.get_column_df(cell_info_df, input_neurons)
 column_info_output_df, column_ids_output = du.get_column_df(cell_info_df, output_neurons)
 
-# get the index in the model for the output neurons and in the chosen columns
+# get the index in the model for the readout neurons and in the chosen columns
+col_order = column_info_output_df['column_id'].to_numpy()
 readout_indexes = {}
-correct_columns_bool = cell_info_df.column_id.isin(column_ids_output)
-for i in output_neurons:
-    this_cell_and_column = (cell_info_df.type == i) & correct_columns_bool
-    readout_indexes[i] = np.where(this_cell_and_column)[0]
+for t in output_neurons:
+    mask = (cell_info_df['type'] == t) & (cell_info_df['column_id'].isin(col_order))
+    df_t = cell_info_df.loc[mask, ['column_id']].copy()
+    df_t['row_idx'] = df_t.index  # preserve original row index
+    ordered = df_t.set_index('column_id').reindex(col_order)
+    readout_indexes[t] = ordered['row_idx'].to_numpy()
 
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
@@ -66,7 +69,7 @@ sine_waves, sine_wave_tfs, contrast_scaling_function = mu.create_sine_wave(colum
 sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
-# map the sine waves to the cells
+# The sine waves are generated for each column. Find the indices of the cells in input_neurons that correspond to each column in the stimulus
 cell_inputs = mu.map_stimulus_to_cells(sine_waves, cell_info_df, column_info_input_df, input_neurons=input_neurons)
 
 # --- plot the stimuli ---
