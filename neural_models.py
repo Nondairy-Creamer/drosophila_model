@@ -76,20 +76,23 @@ class NeuralRnn(torch.nn.Module):
         # Use Kaiming-like initialization scaled by fan-in
         # Target: keep variance roughly constant across layers
         # Compute fan-in per neuron
-        fan_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()  # (num_neurons,)
+        synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()  # (num_neurons,)
+        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()  # (num_neurons,)
 
         # Average fan-in for each cell type
-        avg_fan_in_per_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         for cti, ct in enumerate(self.unique_cell_types):
             ct_mask_np = (self.cell_types == ct)
             ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
-            avg_fan_in_per_type[cti] = fan_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
 
         # Initialize strength per cell type based on its specific fan-in
         # log(sqrt(1/sqrt(x))) = log(x^(-1/4)) = -0.25 * log(x)
         synapse_scale = 1e-1
-        input_strength_log = -0.25 * torch.log(avg_fan_in_per_type) + np.log(synapse_scale)
-        output_strength_log = input_strength_log.clone()
+        input_strength_log = -0.25 * torch.log(synapses_in_per_cell_type) + np.log(synapse_scale)
+        output_strength_log = -0.25 * torch.log(synapses_out_per_cell_type) + np.log(synapse_scale)
         self.input_strength_log = torch.nn.Parameter(input_strength_log)
         self.output_strength_log = torch.nn.Parameter(output_strength_log)
 
