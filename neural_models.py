@@ -101,8 +101,8 @@ class NeuralRnn(torch.nn.Module):
 
         # Initialize strength per cell type based on the inverse of its fan in / out
         # raising it to the 1/4 power is a heuristic
-        input_strength_init = synapses_in_per_cell_type.pow(-0.25 / 4)
-        output_strength_init = synapses_out_per_cell_type.pow(-0.25 / 4)
+        input_strength_init = synapses_in_per_cell_type.pow(-1 / 16)
+        output_strength_init = synapses_out_per_cell_type.pow(-1 / 16)
         self.input_strength_log = torch.nn.Parameter(torch.log(input_strength_init))
         self.output_strength_log = torch.nn.Parameter(torch.log(output_strength_init))
 
