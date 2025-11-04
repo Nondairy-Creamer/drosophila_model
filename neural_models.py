@@ -100,20 +100,30 @@ class NeuralRnn(torch.nn.Module):
             synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
 
         # Initialize strength per cell type based on the inverse of its fan in / out
-        # raising it to the 1/4 power is a heuristic
-        input_strength_init = synapses_in_per_cell_type.pow(-1 / 16)
-        output_strength_init = synapses_out_per_cell_type.pow(-1 / 16)
+        input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
+        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
         self.input_strength_log = torch.nn.Parameter(torch.log(input_strength_init))
         self.output_strength_log = torch.nn.Parameter(torch.log(output_strength_init))
 
-        # calculate the sigma max of the resulting matrix
-        target_sigma = 0.90
-        sigma, iterations, converged = self.calc_sigma_max()
-        assert converged, 'sigma max calculation did not converge'
-        with torch.no_grad():
-            self.output_strength_log.add_(np.log(target_sigma / sigma))
+        # Iteratively scale output_strength to achieve target spectral radius
+        target_rho = 0.90
+        max_scaling_iters = 100
+        rho_tolerance = 0.05
+        damping_factor = 0.1
 
-        a=1
+        for iter_idx in range(max_scaling_iters):
+            # rho, iterations, converged = self.calc_spectral_radius()
+            rho, iterations, converged = self.calc_sigma_max()
+            print(iter_idx, ':', rho)
+            assert converged, f'spectral radius calculation did not converge at scaling iteration {iter_idx}'
+            
+            if abs(rho - target_rho) < rho_tolerance:
+                break
+            
+            # Scale output_strength to move toward target
+            with torch.no_grad():
+                scale_factor = (target_rho / rho)**damping_factor
+                self.output_strength_log.add_(np.log(scale_factor))
 
     def forward(self, x_prev, u_t):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
@@ -150,18 +160,25 @@ class NeuralRnn(torch.nn.Module):
             At = A.T
             n = self.num_neurons
             device = self.device
+            diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
             D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
             D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
 
-            def mv(v):   # y = D_out * (A @ (D_in * v))
-                y = torch.sparse.mm(A, (D_in * v).unsqueeze(1)).squeeze(1)
-                return D_out * y
+            def mv(v):   # y = M @ v = D_out * (A @ (D_in * v)) + diagonal * v
+                v_scaled = v * D_in
+                y = v_scaled @ A.T
+                y = y * D_out
+                return y + diagonal * v
 
-            def mtv(v):  # y = D_in * (A^T @ (D_out * v))
-                y = torch.sparse.mm(At, (D_out * v).unsqueeze(1)).squeeze(1)
-                return D_in * y
+            def mtv(v):  # y = M^T @ v = D_in * (A^T @ (D_out * v)) + diagonal * v
+                v_scaled = v * D_out
+                y = v_scaled @ A
+                y = y * D_in
+                return y + diagonal * v
 
-            x = torch.randn(n, device=device)
+            # Use seeded random initialization for reproducibility
+            rng = torch.Generator(device=device).manual_seed(42)
+            x = torch.randn(n, device=device, generator=rng)
             x = x / (x.norm() + 1e-12)
 
             prev = None
@@ -178,6 +195,44 @@ class NeuralRnn(torch.nn.Module):
                 if prev is not None and torch.abs(rho - prev) / (prev + 1e-12) < tol:
                     return rho.item(), k, True
                 prev = rho
+            return rho.item(), max_iter, False
+
+    def calc_spectral_radius(self, max_iter=200, tol=1e-4):
+        """
+        Compute spectral radius (largest absolute eigenvalue) using power iteration.
+        This is what determines stability: stable iff ρ(M) < 1
+        """
+        with torch.no_grad():
+            A = self.synapse_counts.coalesce()
+            n = self.num_neurons
+            device = self.device
+            diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
+            D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]
+            D_out = self.output_strength_log.exp()[self.neuron_to_type_index]
+
+            def mv(v):   # y = M @ v = D_out * (A @ (D_in * v)) + diagonal * v
+                v_scaled = v * D_in
+                y = v_scaled @ A.T
+                y = y * D_out
+                return y + diagonal * v
+
+            # Use seeded random initialization for reproducibility
+            rng = torch.Generator(device=device).manual_seed(42)
+            x = torch.randn(n, device=device, generator=rng)
+            x = x / (x.norm() + 1e-12)
+
+            prev_rho = None
+            rho = torch.tensor(float("inf"), device=device)
+            for k in range(1, max_iter + 1):
+                y = mv(x)
+                y_norm = y.norm()
+                if y_norm == 0:
+                    return 0.0, k, True
+                x = y / y_norm
+                rho = y_norm  # ||M @ x|| where ||x|| = 1 gives spectral radius
+                if prev_rho is not None and torch.abs(rho - prev_rho) / (prev_rho + 1e-12) < tol:
+                    return rho.item(), k, True
+                prev_rho = rho
             return rho.item(), max_iter, False
 
     def estimate_readout_weights(self, inputs, target):
