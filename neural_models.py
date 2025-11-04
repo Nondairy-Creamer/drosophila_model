@@ -18,8 +18,8 @@ class NeuralRnn(torch.nn.Module):
         super().__init__()
 
         diagonal_init = 0.7
-        stimulus_strength_init = 5.0
-        offset_init = 0.0  # Changed from 1.0 - let the network learn the bias
+        stimulus_strength_init = 10.0
+        offset_init = 0.0
         readout_weight_init = 1.0
         readout_bias_init = 0.0
 
@@ -73,29 +73,6 @@ class NeuralRnn(torch.nn.Module):
             self.synapse_counts = torch.zeros((self.num_neurons, self.num_neurons), device=self.device, dtype=self.dtype)
             self.synapse_counts.index_put_((rows, cols), values, accumulate=True).to(device=self.device, dtype=self.dtype)
 
-        # Use Kaiming-like initialization scaled by fan-in
-        # Target: keep variance roughly constant across layers
-        # Compute fan-in per neuron
-        synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()  # (num_neurons,)
-        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()  # (num_neurons,)
-
-        # Average fan-in for each cell type
-        synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        for cti, ct in enumerate(self.unique_cell_types):
-            ct_mask_np = (self.cell_types == ct)
-            ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
-            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
-            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
-
-        # Initialize strength per cell type based on its specific fan-in
-        # log(sqrt(1/sqrt(x))) = log(x^(-1/4)) = -0.25 * log(x)
-        synapse_scale = 1e-1
-        input_strength_log = -0.25 * torch.log(synapses_in_per_cell_type) + np.log(synapse_scale)
-        output_strength_log = -0.25 * torch.log(synapses_out_per_cell_type) + np.log(synapse_scale)
-        self.input_strength_log = torch.nn.Parameter(input_strength_log)
-        self.output_strength_log = torch.nn.Parameter(output_strength_log)
-
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1
         for cti, ct in enumerate(self.unique_cell_types):
@@ -107,7 +84,37 @@ class NeuralRnn(torch.nn.Module):
         # Optional layer normalization for better signal propagation
         if self.use_layer_norm:
             self.layer_norm = torch.nn.LayerNorm(self.num_neurons, elementwise_affine=False, device=self.device, dtype=self.dtype)
-        
+
+        # Target: keep variance roughly constant across layers
+        # Compute fan-in per neuron
+        synapses_in_per_neuron = self.synapse_counts.pow(2).sum(dim=1).to_dense()  # (num_neurons,)
+        synapses_out_per_neuron = self.synapse_counts.pow(2).sum(dim=0).to_dense()  # (num_neurons,)
+
+        # Average fan-in for each cell type
+        synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask_np = (self.cell_types == ct)
+            ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
+            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+
+        # Initialize strength per cell type based on the inverse of its fan in / out
+        # raising it to the 1/4 power is a heuristic
+        input_strength_init = synapses_in_per_cell_type.pow(-0.25 / 2)
+        output_strength_init = synapses_out_per_cell_type.pow(-0.25 / 2)
+        self.input_strength_log = torch.nn.Parameter(torch.log(input_strength_init))
+        self.output_strength_log = torch.nn.Parameter(torch.log(output_strength_init))
+
+        # calculate the sigma max of the resulting matrix
+        target_sigma = 0.90
+        sigma, iterations, converged = self.calc_sigma_max()
+        assert converged, 'sigma max calculation did not converge'
+        with torch.no_grad():
+            self.output_strength_log.add_(np.log(target_sigma / sigma))
+
+        a=1
+
     def forward(self, x_prev, u_t):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
         input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
@@ -136,6 +143,42 @@ class NeuralRnn(torch.nn.Module):
         x_next = self.nonlinearity(z + u_t * stimulus_strength[None, :] + offset_all_neurons[None, :])
 
         return x_next
+
+    def calc_sigma_max(self, max_iter=200, tol=1e-4):
+        with torch.no_grad():
+            A = self.synapse_counts.coalesce()
+            At = A.T
+            n = self.num_neurons
+            device = self.device
+            D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
+            D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
+
+            def mv(v):   # y = D_out * (A @ (D_in * v))
+                y = torch.sparse.mm(A, (D_in * v).unsqueeze(1)).squeeze(1)
+                return D_out * y
+
+            def mtv(v):  # y = D_in * (A^T @ (D_out * v))
+                y = torch.sparse.mm(At, (D_out * v).unsqueeze(1)).squeeze(1)
+                return D_in * y
+
+            x = torch.randn(n, device=device)
+            x = x / (x.norm() + 1e-12)
+
+            prev = None
+            rho = torch.tensor(float("inf"), device=device)
+            for k in range(1, max_iter + 1):
+                y = mv(x)
+                z = mtv(y)                 # z = (A^T A)_scaled x
+                zn = z.norm()
+                if zn == 0:
+                    return 0.0, k, True
+                x = z / zn
+                lam = (x * z).sum()        # Rayleigh quotient on PSD operator
+                rho = torch.sqrt(torch.clamp(lam, min=0.0))
+                if prev is not None and torch.abs(rho - prev) / (prev + 1e-12) < tol:
+                    return rho.item(), k, True
+                prev = rho
+            return rho.item(), max_iter, False
 
     def estimate_readout_weights(self, inputs, target):
         with torch.no_grad():

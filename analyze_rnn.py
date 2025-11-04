@@ -11,14 +11,14 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251103_223831')
+model_folder = Path('models/20251104_160030')
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'model.pt')
+model = nm.NeuralRnn.load(model_folder / 'model_init.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
-cells_to_plot = ['L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T5a', 'T5b', 'T5c', 'T5d']
+cells_to_plot = ['L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T5a', 'L1', 'Mi1', 'T4a']
 
 for ctp in cells_to_plot:
     print('--- Model parameters for', ctp, '---')
