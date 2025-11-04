@@ -32,7 +32,7 @@ def plot_readout_target(readout, target, readout_names, save_folder=Path('figure
         plt.close()
 
         # plot with 0 in frame
-        max_plot = np.max(readout_plot)
+        max_plot = max(np.max(readout_plot), np.max(target_plot))
         plot_fudge = max_plot * 0.1
         for j in range(readout_plot.shape[1]):
             plt.plot(target_plot[:, j], color=colors[j], label=direction[j])
