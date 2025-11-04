@@ -16,20 +16,8 @@ def plot_readout_target(readout, target, readout_names, save_folder=Path('figure
         
         # scale target to match prediction for visualization
         # since scale doesnt matter for our loss
-        target_plot -= np.mean(target_plot)
-        target_plot /= np.std(target_plot)
-        target_plot *= np.std(readout_plot)  
-        target_plot += np.mean(readout_plot)
-
-        for j in range(readout_plot.shape[1]):
-            plt.plot(target_plot[:, j], color=colors[j], label=direction[j])
-            plt.plot(readout_plot[:, j], color=colors[j], ls='--', label=None)
-        plt.title(readout_names[i])
-        plt.ylabel('model response')
-        plt.xlabel('stimuli')
-        plt.legend()
-        plt.savefig(save_folder / ('pred_vs_target_' + readout_names[i] + '.png'))
-        plt.close()
+        target_plot /= np.sqrt(np.sum(target_plot**2))
+        target_plot *= np.sqrt(np.sum(readout_plot**2))
 
         # plot with 0 in frame
         max_plot = max(np.max(readout_plot), np.max(target_plot))
@@ -42,7 +30,7 @@ def plot_readout_target(readout, target, readout_names, save_folder=Path('figure
         plt.xlabel('stimuli')
         plt.ylim(-plot_fudge, max_plot + plot_fudge)
         plt.legend()
-        plt.savefig(save_folder / ('pred_vs_target_' + readout_names[i] + '_0baseline.png'))
+        plt.savefig(save_folder / ('pred_vs_target_' + readout_names[i] + '.png'))
         plt.close()
 
 def plot_loss(loss, save_folder=Path('figures')):
