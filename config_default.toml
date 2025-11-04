@@ -6,7 +6,6 @@ device = 'cpu'  # 'cpu' or 'cuda'
 dtype = 'float32'  # 'float32' or 'float64'
 use_sparse = true
 use_layer_norm = false
-readout_neurons = ['T4a', 'T4b']
 
 # Model architecture parameters
 nonlinearity = 'Softplus'  # 'linear', 'relu', 'tanh', 'sigmoid'
