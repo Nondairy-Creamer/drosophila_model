@@ -112,8 +112,8 @@ class NeuralRnn(torch.nn.Module):
         damping_factor = 0.1
 
         for iter_idx in range(max_scaling_iters):
-            # rho, iterations, converged = self.calc_spectral_radius()
-            rho, iterations, converged = self.calc_sigma_max()
+            rho, iterations, converged = self.calc_spectral_radius()
+            # rho, iterations, converged = self.calc_sigma_max()
             print(iter_idx, ':', rho)
             assert converged, f'spectral radius calculation did not converge at scaling iteration {iter_idx}'
             
