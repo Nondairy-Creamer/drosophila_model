@@ -11,10 +11,10 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251104_204439')
+model_folder = Path('models/20251104_203752')
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'model_init.pt')
+model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 

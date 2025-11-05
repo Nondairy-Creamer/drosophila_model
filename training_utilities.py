@@ -48,15 +48,20 @@ def get_scaled_loss(loss_fn, neuron_scaling=None):
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
 
-    loss_list = []
-    best_loss = np.inf
+    if loss_history is None:
+        loss_list = []
+        best_loss = np.inf
+    else:
+        loss_list = loss_history
+        best_loss = loss_history[-1]
+
     time_since_best = 0
     grad_norm = 0
 
@@ -77,7 +82,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
                 model.save(model_save_folder / 'model.pt')
                 torch.save({
                     'optimizer_state_dict': opt.state_dict(),
-                    'loss': loss_list[-1],
+                    'loss': loss_list,
                     'step': step
                 }, model_save_folder / 'model_opt.pt')
         else:
