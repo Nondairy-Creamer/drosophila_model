@@ -11,10 +11,10 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251104_203752')
+model_folder = Path('models/20251104_203752_21Loss_SqrtInit_SpecNorm')
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'model.pt')
+model = nm.NeuralRnn.load(model_folder / 'model.pt', device='cpu')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 
@@ -44,7 +44,7 @@ cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parque
 column_info_df, column_ids = du.get_column_df(cell_info_df, cells_to_plot)
 
 # restrict the columns to a line across the eye
-vert_lim = 2.5 * np.pi / 180
+vert_lim = 50 * np.pi / 180
 within_vert_lim = np.abs(column_info_df['theta'] - np.pi / 2) < vert_lim
 column_info_df = column_info_df[within_vert_lim]
 column_ids = column_ids[within_vert_lim]

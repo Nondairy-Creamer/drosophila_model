@@ -5,7 +5,7 @@ from pathlib import Path
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, readout_indexes, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_sparse=False, use_layer_norm=False):
+                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True):
 
         self.readout_indexes = readout_indexes
 
@@ -105,25 +105,26 @@ class NeuralRnn(torch.nn.Module):
         self.input_strength_log = torch.nn.Parameter(torch.log(input_strength_init))
         self.output_strength_log = torch.nn.Parameter(torch.log(output_strength_init))
 
-        # Iteratively scale output_strength to achieve target spectral radius
-        target_rho = 0.90
-        max_scaling_iters = 100
-        rho_tolerance = 0.05
-        damping_factor = 0.1
+        if set_spectral_radius:
+            # Iteratively scale output_strength to achieve target spectral radius
+            target_rho = 0.90
+            max_scaling_iters = 100
+            rho_tolerance = 0.05
+            damping_factor = 0.1
 
-        for iter_idx in range(max_scaling_iters):
-            rho, iterations, converged = self.calc_spectral_radius()
-            # rho, iterations, converged = self.calc_sigma_max()
-            print(iter_idx, ':', rho)
-            assert converged, f'spectral radius calculation did not converge at scaling iteration {iter_idx}'
-            
-            if abs(rho - target_rho) < rho_tolerance:
-                break
-            
-            # Scale output_strength to move toward target
-            with torch.no_grad():
-                scale_factor = (target_rho / rho)**damping_factor
-                self.output_strength_log.add_(np.log(scale_factor))
+            for iter_idx in range(max_scaling_iters):
+                rho, iterations, converged = self.calc_spectral_radius()
+                # rho, iterations, converged = self.calc_sigma_max()
+                print(iter_idx, ':', rho)
+                assert converged, f'spectral radius calculation did not converge at scaling iteration {iter_idx}'
+                
+                if abs(rho - target_rho) < rho_tolerance:
+                    break
+                
+                # Scale output_strength to move toward target
+                with torch.no_grad():
+                    scale_factor = (target_rho / rho)**damping_factor
+                    self.output_strength_log.add_(np.log(scale_factor))
 
     def forward(self, x_prev, u_t):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
@@ -311,7 +312,7 @@ class NeuralRnn(torch.nn.Module):
             inputs['dtype'] = dtype
 
         # construct directly from saved (or overridden) inputs
-        model = cls(**inputs)
+        model = cls(**inputs, set_spectral_radius=False)
 
         model.load_state_dict(data['state_dict'])
 
