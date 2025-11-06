@@ -48,7 +48,7 @@ def get_scaled_loss(loss_fn, neuron_scaling=None):
 
 def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, stim_to_cell_mapping=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
 
@@ -67,7 +67,7 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
     for step in range(num_steps):
         opt.zero_grad()
-        readout = model.predict_and_readout(inputs)[1]
+        readout = model.predict_and_readout(inputs, stim_to_cell_mapping)[1]
         loss = loss_fn(readout, target)
 
         # Detect if you've found the best loss so far BEFORE updating weights

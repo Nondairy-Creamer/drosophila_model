@@ -71,14 +71,15 @@ sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
 # The sine waves are generated for each column. Find the indices of the cells in input_neurons that correspond to each column in the stimulus
-cell_inputs = mu.map_stimulus_to_cells(sine_waves, cell_info_df, column_info_input_df, input_neurons=input_neurons)
+stim_to_cell_mapping = mu.get_stim_to_cell_mapping(cell_info_df, column_info_input_df, input_neurons=input_neurons)
+stim_to_cell_mapping = torch.tensor(stim_to_cell_mapping, device=device)
 
 # --- plot the stimuli ---
 pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_input_df.x, column_info_input_df.z, save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
 num_readouts = len(readout_indexes)
-num_stimuli = cell_inputs.shape[0]
+num_stimuli = sine_waves.shape[0]
 readout_size = column_ids_output.shape[0]
 target = torch.zeros((num_readouts, num_stimuli, num_time, readout_size), device=device, dtype=dtype)
 
@@ -99,7 +100,7 @@ timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 model_save_folder = Path('models/' + timestamp)
 model_save_folder.mkdir(parents=True, exist_ok=True)
 du.save_config(config, model_save_folder / 'config.toml')
-torch.save(cell_inputs.detach().cpu(), model_save_folder / "cell_inputs.pt")
+torch.save({'stimulus': sine_waves.detach().cpu(), 'mapping': stim_to_cell_mapping.detach().cpu()}, model_save_folder / "cell_inputs.pt")
 torch.save(target.detach().cpu(), model_save_folder / "target.pt")
 
 contrast_scaling_factor = contrast_scaling_function(column_info_output_df['theta'].to_numpy())
@@ -116,7 +117,7 @@ model.save(model_save_folder / 'model.pt')
 # --- train the model ---
 # find a good estimate of the readout weights
 # model.estimate_readout_weights(cell_inputs, target)
-tu.train_model(model, cell_inputs, target, model_save_folder=model_save_folder,  num_steps=config['training']['num_steps'], 
+tu.train_model(model, sine_waves, target, model_save_folder=model_save_folder,  num_steps=config['training']['num_steps'], 
                save_every=config['training']['save_every'], alpha=config['training']['alpha'], clip_grad_norm=config['training']['clip_norm'],
-               readout_xy=column_info_output_df[['x', 'z']].to_numpy(), loss_fn=loss_scaled)
+               readout_xy=column_info_output_df[['x', 'z']].to_numpy(), loss_fn=loss_scaled, stim_to_cell_mapping=stim_to_cell_mapping)
 

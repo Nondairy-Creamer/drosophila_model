@@ -90,7 +90,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
 
     return stimulus, tf_out, contrast_scaling_func
 
-def map_stimulus_to_cells(stimulus, cell_info_df, column_info_df, input_neurons=('L1', 'L2', 'L3')):
+def get_stim_to_cell_mapping(cell_info_df, column_info_df, input_neurons=('L1', 'L2', 'L3')):
     # --- define the external inputs to cells ---
     # in this case we will directly stimulate L1, L2, and L3 with negative contrast
     # we aren't stimulating receptors because they have a complicated relationship between location and viewing angle
@@ -111,14 +111,12 @@ def map_stimulus_to_cells(stimulus, cell_info_df, column_info_df, input_neurons=
     valid_column = column_index_for_each_neuron >= 0
     neuron_is_input_and_valid = neuron_is_input & valid_column
     
-    input_neuron_indexes = neuron_indexes[neuron_is_input_and_valid]  # the indexes of the sitmulated neurons
-    column_index_for_each_input_neuron = column_index_for_each_neuron[neuron_is_input_and_valid]  # the column indexes of the sitmulated neurons
+    cell_indices = neuron_indexes[neuron_is_input_and_valid]  # the indexes of the sitmulated neurons
+    stimulus_indices = column_index_for_each_neuron[neuron_is_input_and_valid]  # the column indexes of the sitmulated neurons
 
-    num_stim, num_time, num_column = stimulus.shape
-    cell_inputs = torch.zeros((num_stim, num_time, num_neurons), device=stimulus.device, dtype=stimulus.dtype)
-    cell_inputs[:, :, input_neuron_indexes] = -stimulus[:, :, column_index_for_each_input_neuron]
+    stim_to_cell_mapping = np.stack((stimulus_indices, cell_indices))
 
-    return cell_inputs
+    return stim_to_cell_mapping
 
 def rotate_2d(xy, angle):
     # data shape should be (2, n) with n data points

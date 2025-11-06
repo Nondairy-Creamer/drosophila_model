@@ -126,7 +126,7 @@ class NeuralRnn(torch.nn.Module):
                     scale_factor = (target_rho / rho)**damping_factor
                     self.output_strength_log.add_(np.log(scale_factor))
 
-    def forward(self, x_prev, u_t):
+    def forward(self, x_prev, u_t, stim_to_cell_mapping=None):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
         input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
         output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
@@ -151,7 +151,16 @@ class NeuralRnn(torch.nn.Module):
         if self.use_layer_norm:
             z = self.layer_norm(z)
         
-        x_next = self.nonlinearity(z + u_t * stimulus_strength[None, :] + offset_all_neurons[None, :])
+        if stim_to_cell_mapping is None:
+            z = z + u_t * stimulus_strength[None, :]
+        else:
+            # because stimulus can be very sparse (only stimulate 3 cell types)
+            # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
+            cell_idx = stim_to_cell_mapping[1]  # neuron indices (int64)
+            stim_idx = stim_to_cell_mapping[0]  # stimulus indices (int64)
+            z.index_add_(1, cell_idx, u_t[:, stim_idx] * stimulus_strength[None, cell_idx])
+
+        x_next = self.nonlinearity(z + offset_all_neurons[None, :])
 
         return x_next
 
@@ -257,7 +266,7 @@ class NeuralRnn(torch.nn.Module):
             self.readout_weight_log.copy_(torch.log(slope))
             self.readout_bias.copy_(intercept)
 
-    def predict(self, inputs):
+    def predict(self, inputs, stim_to_cell_mapping=None):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
@@ -265,7 +274,7 @@ class NeuralRnn(torch.nn.Module):
         x = inputs.new_zeros(num_batches, self.num_neurons)
         outputs = inputs.new_zeros(num_batches, num_time, self.num_neurons)
         for t in range(num_time):
-            x = self(x, inputs[:, t, :])
+            x = self(x, inputs[:, t, :], stim_to_cell_mapping)
             outputs[:, t, :] = x
 
         return outputs
@@ -284,9 +293,9 @@ class NeuralRnn(torch.nn.Module):
 
         return self.readout_weight_log.exp() * readout + self.readout_bias
     
-    def predict_and_readout(self, inputs):
+    def predict_and_readout(self, inputs, stim_to_cell_mapping=None):
         # predict the rnn outputs from an input and then read them out
-        outputs = self.predict(inputs)
+        outputs = self.predict(inputs, stim_to_cell_mapping)
         return outputs, self.readout(outputs)
 
     def save(self, path):

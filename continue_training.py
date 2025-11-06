@@ -9,6 +9,8 @@ model_folder = Path('models/20251104_203752')
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralRnn.load(model_folder / 'model.pt')
 cell_inputs = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
+stimulus = cell_inputs['stimulus'].to(device=model.device)
+stim_to_cell_mapping = cell_inputs['mapping'].to(device=model.device)
 target = torch.load(model_folder / 'target.pt').to(device=model.device)
 num_steps = int(1e6)
 alpha = None
@@ -29,10 +31,11 @@ else:
     for param_group in opt_state['optimizer_state_dict']['param_groups']:
         param_group['lr'] = alpha
         
-tu.train_model(model, cell_inputs, target, model_save_folder=model_folder, 
+tu.train_model(model, stimulus, target, model_save_folder=model_folder, 
                num_steps=num_steps, save_every=config['training']['save_every'], 
                clip_grad_norm=config['training']['clip_norm'], alpha=alpha, loss_fn=loss_scaled,
-               opt_state_dict=opt_state['optimizer_state_dict'], loss_history=opt_state['loss'])
+               opt_state_dict=opt_state['optimizer_state_dict'], loss_history=opt_state['loss'],
+               stim_to_cell_mapping=stim_to_cell_mapping)
 
 
                
