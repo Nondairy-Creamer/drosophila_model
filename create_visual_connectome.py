@@ -152,7 +152,8 @@ rtp = mu.xyz_to_rtp(xyz)
 pu.scatter_3d_with_origin_axes(xyz)
 
 # --- save the column data ---
-column_info_df = columns_df.drop(columns = ['p', 'q', 'x', 'y'])
+# rename the x and y values to "x_flat and y_flat"
+column_info_df = columns_df.rename(columns={'x': 'x_flat', 'y': 'y_flat'})
 column_info_df['theta'] = rtp[1, :]
 column_info_df['phi'] = rtp[2, :]
 column_info_df['x'] = xyz[0, :]
@@ -160,14 +161,8 @@ column_info_df['y'] = xyz[1, :]
 column_info_df['z'] = xyz[2, :]
 
 # map the column info to the cell info for the cells we have. if we dont have them set to nan
-visual_neurons_df['column_id'] = np.full(num_neurons, np.nan, dtype=float)
-visual_neurons_df['theta'] = np.full(num_neurons, np.nan, dtype=float)
-visual_neurons_df['phi'] = np.full(num_neurons, np.nan, dtype=float)
-visual_neurons_df['x'] = np.full(num_neurons, np.nan, dtype=float)
-visual_neurons_df['y'] = np.full(num_neurons, np.nan, dtype=float)
-visual_neurons_df['z'] = np.full(num_neurons, np.nan, dtype=float)
-
-cols = ['column_id','theta','phi','x','y','z']
+cols = ['column_id','theta','phi','x','y','z', 'x_flat', 'y_flat', 'p', 'q']
+visual_neurons_df[cols] = np.nan
 row_pos = pd.Index(visual_neurons_df.root_id).get_indexer(column_info_df.root_id)
 valid = row_pos >= 0
 col_pos = visual_neurons_df.columns.get_indexer(cols)

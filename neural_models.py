@@ -272,10 +272,13 @@ class NeuralRnn(torch.nn.Module):
 
         # initial neural activity values
         x = inputs.new_zeros(num_batches, self.num_neurons)
+
+        
         outputs = inputs.new_zeros(num_batches, num_time, self.num_neurons)
         for t in range(num_time):
             x = self(x, inputs[:, t, :], stim_to_cell_mapping)
             outputs[:, t, :] = x
+
 
         return outputs
 
