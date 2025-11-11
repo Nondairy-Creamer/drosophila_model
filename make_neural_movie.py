@@ -19,9 +19,10 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251104_203752_21Loss_SqrtInit_SpecNorm')
+model_folder = Path('models/20251110_234900')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
+fig_folder = Path(model_folder / 'movie')
 device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
 connectome_folder = Path(model_config['data']['connectome_folder'])
@@ -35,6 +36,7 @@ color_percentile = 90
 
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
 # --- load the sine wave stimuli ---
 directions = ['right', 'left', 'up', 'down']
@@ -76,7 +78,6 @@ input_neurons = ['L1', 'L2', 'L3']
 output_neurons = ['L1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)
-fig_folder = Path(model_folder / 'movie')
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)
 
@@ -155,6 +156,7 @@ data_out['motion_vector'] = [x_motion, z_motion]
 init_quiver = make_quiver_plot_factory(x_motion, z_motion, cell_x, cell_z)
 make_movie(init_quiver, directions, fig_folder, frame_rate, save_name="flow")
 
-np.savez_compressed("fly_model_responses.npz", **data_out)
+np.savez_compressed(fig_folder / 'fly_model_responses.npz', **data_out)
+column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
 
