@@ -39,41 +39,41 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
 # --- load the sine wave stimuli ---
-directions = ['right', 'left', 'up', 'down']
-stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
+# directions = ['right', 'left', 'up', 'down']
+# stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
 
-# restrict the stimulus to 8 Hz, one phase
-num_phase = 4
-num_dir = len(directions)
-num_vel = 3
-stimulus = stimulus[::num_phase, :, :]
-stimulus = stimulus[(num_vel - 1)::num_vel, :, :]
+# # restrict the stimulus to 8 Hz, one phase
+# num_phase = 4
+# num_dir = len(directions)
+# num_vel = 3
+# stimulus = stimulus[::num_phase, :, :]
+# stimulus = stimulus[(num_vel - 1)::num_vel, :, :]
 
-# # --- load the stimuli from the camera ---
-# directions = ['real_movie']
-# stimulus = np.load(connectome_folder / 'fly_view1.npy')
-# stimulus -= stimulus.mean(axis=0)
-# stimulus /= 128
-# # Resample stimulus from original 20 Hz (dt=0.05s) to target dt using linear interpolation
-# orig_dt = 1.0 / 20.0
-# target_dt = float(model_config['stimulus']['dt'])
-# num_t0, num_neurons = stimulus.shape
-# t0 = np.arange(num_t0, dtype=np.float64) * orig_dt
-# t_end = t0[-1]
-# num_t1 = int(np.floor(t_end / target_dt)) + 1
-# t1 = np.arange(num_t1, dtype=np.float64) * target_dt
-# stimulus_resampled = np.empty((num_t1, num_neurons), dtype=stimulus.dtype)
-# for j in range(num_neurons):
-#     stimulus_resampled[:, j] = np.interp(t1, t0, stimulus[:, j])
-# stimulus = stimulus_resampled
-# stimulus = stimulus[None, :, :]
-# stimulus = torch.tensor(stimulus, dtype=dtype, device=model.device)
-# input_neurons = ['L1', 'L2', 'L3']
-# column_info_input_df, column_input_ids = du.get_column_df(cell_info_df, input_neurons)
-# stim_to_cell_mapping = mu.get_stim_to_cell_mapping(cell_info_df, column_info_input_df, input_neurons=input_neurons)
-# stim_to_cell_mapping = torch.tensor(stim_to_cell_mapping, device=model.device)
+# --- load the stimuli from the camera ---
+directions = ['real_movie']
+stimulus = np.load(connectome_folder / 'fly_view3.npy')
+# encoding_mean = 255 / 2
+stimulus = np.log(stimulus)  # use logarithmic encoding?
+encoding_mean = np.log(255) / 2
+stimulus -= encoding_mean
+stimulus /= encoding_mean
 
+# Resample stimulus from original 20 Hz (dt=0.05s) to target dt using linear interpolation
+orig_dt = 1.0 / 20.0
+target_dt = float(model_config['stimulus']['dt'])
+num_t0, num_neurons = stimulus.shape
+t0 = np.arange(num_t0, dtype=np.float64) * orig_dt
+t_end = t0[-1]
+num_t1 = int(np.floor(t_end / target_dt)) + 1
+t1 = np.arange(num_t1, dtype=np.float64) * target_dt
+stimulus_resampled = np.empty((num_t1, num_neurons), dtype=stimulus.dtype)
+for j in range(num_neurons):
+    stimulus_resampled[:, j] = np.interp(t1, t0, stimulus[:, j])
+stimulus = stimulus_resampled
+stimulus = stimulus[None, :, :]
+stimulus = torch.tensor(stimulus, dtype=dtype, device=model.device)
 
+# --- feed the stimulus into the model ---
 input_neurons = ['L1', 'L2', 'L3']
 output_neurons = ['L1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
@@ -155,6 +155,16 @@ data_out['motion_vector'] = [x_motion, z_motion]
 
 init_quiver = make_quiver_plot_factory(x_motion, z_motion, cell_x, cell_z)
 make_movie(init_quiver, directions, fig_folder, frame_rate, save_name="flow")
+
+# --- Motion Magnitude ---
+# Create boolean mask for cells in the full cell_info_df (for indexing predictions)
+motion_magnitude = (np.abs(x_motion) + np.abs(z_motion)) / 2
+motion_magnitude /= np.nanpercentile(motion_magnitude, color_percentile)
+
+data_out['motion_magnitude'] = motion_magnitude
+
+init_scatter = make_scatter_plot_factory(motion_magnitude, cell_x, cell_z)
+make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="motion_magnitude")
 
 np.savez_compressed(fig_folder / 'fly_model_responses.npz', **data_out)
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
