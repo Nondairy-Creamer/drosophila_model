@@ -16,8 +16,6 @@ def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
     Returns a factory callable that, given a direction index, initializes a scatter plot and
     provides an update function for per-frame rendering.
     """
-    cell_x = np.asarray(cell_x)
-    cell_z = np.asarray(cell_z)
     norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
 
     def init_plot_for_direction(d, di):
@@ -46,9 +44,6 @@ def make_quiver_plot_factory(x_flow, z_flow, cell_x, cell_z):
     Returns a factory callable that, given a direction index, initializes a quiver plot (+X from pred_plot_0, +Y from pred_plot_1)
     and provides an update function for per-frame rendering. Arrow color encodes magnitude.
     """
-    cell_x = np.asarray(cell_x)
-    cell_z = np.asarray(cell_z)
-
     magnitude = np.hypot(x_flow, z_flow)
     max_mag = np.percentile(magnitude, 99) if np.any(magnitude) else 1.0
     norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)

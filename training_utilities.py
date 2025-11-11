@@ -3,36 +3,53 @@ import plotting_utilities as pu
 import numpy as np
 import neural_models as nm
 
+def nannorm(unormalized_tensor, keepdim=False, dim=None, eps=1e-6):
+    return torch.nansum(torch.abs(unormalized_tensor)**2, dim=dim, keepdim=keepdim).sqrt().clamp_min(eps)
 
-def corr_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
+def nanstd(x, dim, keepdim=False, eps=1e-6):
+    mask = ~torch.isnan(x)
+    count = mask.sum(dim=dim, keepdim=True).clamp_min(1)
+    x0 = torch.where(mask, x, 0.0)
+    mean = x0.sum(dim=dim, keepdim=True) / count
+    var = torch.where(mask, (x - mean)**2, 0.0).sum(dim=dim, keepdim=True) / count
+    std = var.sqrt().clamp_min(eps)
+    if keepdim:
+        return std
+    if isinstance(dim, tuple):
+        for d in sorted(dim, reverse=True):
+            std = std.squeeze(d)
+        return std
+    return std.squeeze(dim)
+
+def corr_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat - y_hat.mean(dim=(1, 2), keepdim=True)
-    y = y - y.mean(dim=(1, 2), keepdim=True)
-    y_hat = y_hat / (y_hat.std(dim=(1, 2), keepdim=True).clamp_min(eps))
-    y = y / (y.std(dim=(1, 2), keepdim=True).clamp_min(eps))
-    corr = (y_hat * y).mean(dim=(1, 2), keepdim=True)
+    y_hat = y_hat - torch.nanmean(y_hat, dim=dim, keepdim=True)
+    y = y - torch.nanmean(y, dim=dim, keepdim=True)
+    y_hat = y_hat / nanstd(y_hat, dim=dim, keepdim=True).clamp_min(eps)
+    y = y / nanstd(y, dim=dim, keepdim=True).clamp_min(eps)
+    corr = torch.nanmean(y_hat * y, dim=dim, keepdim=True)
 
     if neuron_scaling is not None:
         assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        corr = torch.sum(corr * neuron_scaling[None, None, None, :], dim=-1)
+        corr = torch.nansum(corr * neuron_scaling[None, None, :], dim=2)
         
-    ave_corr = corr.mean()
+    ave_corr = torch.nanmean(corr)
 
     return 1.0 - ave_corr
 
-def cos_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
+def cos_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat / y_hat.norm(dim=(1, 2), keepdim=True).clamp_min(eps)
-    y = y / y.norm(dim=(1, 2), keepdim=True).clamp_min(eps)
-    cosine_sim = (y_hat * y).sum(dim=(1, 2), keepdim=True)
+    y_hat = y_hat / nannorm(y_hat, dim=dim, keepdim=True).clamp_min(eps)
+    y = y / nannorm(y, dim=dim, keepdim=True).clamp_min(eps)
+    cosine_sim = torch.nansum(y_hat * y, dim=dim, keepdim=True)
 
     if neuron_scaling is not None:
         assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, None, :], dim=-1)
+        cosine_sim = torch.nansum(cosine_sim * neuron_scaling[None, None, :], dim=2)
         
-    ave_cosine_sim = cosine_sim.mean()
+    ave_cosine_sim = torch.nanmean(cosine_sim)
 
     return 1.0 - ave_cosine_sim
 
@@ -41,16 +58,27 @@ def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
 
-def get_scaled_loss(loss_fn, neuron_scaling=None):
+def get_scaled_loss_fn(loss_fn, neuron_scaling=None):
     def loss_out(y_hat, y):
         return loss_fn(y_hat, y, neuron_scaling=neuron_scaling)
     return loss_out
 
-def train_model(model, inputs, target, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
+def calc_loss(loss_fn, pred, target):
+    keys = list(pred.keys())
+    num_readouts = len(keys)
+
+    loss = loss_fn(pred[keys[0]], target[keys[0]]) / num_readouts
+    for i in keys[1:]:
+        loss = loss + loss_fn(pred[i], target[i]) / num_readouts
+
+    return loss
+
+def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, stim_to_cell_mapping=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
+    num_readouts = len(target.keys())
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -67,8 +95,8 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
     for step in range(num_steps):
         opt.zero_grad()
-        readout = model.predict_and_readout(inputs, stim_to_cell_mapping)[1]
-        loss = loss_fn(readout, target)
+        pred = model.predict(inputs, input_neurons=input_neurons, output_neurons=output_neurons)
+        calc_loss(loss_fn, pred, target)
 
         # Detect if you've found the best loss so far BEFORE updating weights
         loss_list.append(loss.item())
@@ -124,12 +152,14 @@ def train_model(model, inputs, target, model_save_folder=None, num_steps=100, sa
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
-                readout_names = list(model.readout_indexes.keys())
-                pu.plot_readout_target(readout, target, readout_names=readout_names, save_folder=model_save_folder)
+                pu.plot_readout_target(pred, target, save_folder=model_save_folder)
 
                 if readout_xy is not None:
-                    for i in range(readout.shape[0]):
-                        pu.plot_response_over_space(readout[i, ::4, :, :].detach().cpu().numpy().mean(axis=1), readout_xy[:, 0], readout_xy[:, 1], save_folder=model_save_folder / ('readout' + str(i)))
+                    for readout_neuron in pred:
+                        pu.plot_response_over_space(
+                            torch.nanmean(pred[readout_neuron][::4, :, :], dim=1).detach().cpu().numpy(),
+                            readout_xy[:, 0], readout_xy[:, 1],
+                            save_folder=model_save_folder / ('readout_' + readout_neuron))
 
                 pu.plot_loss(loss_list, save_folder=model_save_folder)
 

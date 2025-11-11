@@ -56,7 +56,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         sine_wave_dict['left'].append(sine_wave_left_shifted)
         sine_wave_dict['left'].append(-sine_wave_left)
         sine_wave_dict['left'].append(-sine_wave_left_shifted)
-        tf_dict['left'] += [-tf] * 4
+        tf_dict['left'] += [tf] * 4
 
         # -- upward sine wave -- 
         sine_wave_up = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
@@ -78,7 +78,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         sine_wave_dict['down'].append(sine_wave_down_shifted)
         sine_wave_dict['down'].append(-sine_wave_down)
         sine_wave_dict['down'].append(-sine_wave_down_shifted)
-        tf_dict['down'] += [-tf] * 4
+        tf_dict['down'] += [tf] * 4
 
     num_time, num_cell = phi_mesh.shape
     stimulus = np.zeros((0, num_time, num_cell))
@@ -88,7 +88,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         stimulus = np.concatenate((stimulus, this_stim), axis=0)
         tf_out += tf_dict[direction]
 
-    return stimulus, tf_out, contrast_scaling_func
+    return stimulus, tf_out, contrast_scaling_factor
 
 def get_stim_to_cell_mapping(cell_info_df, column_info_df, input_neurons=('L1', 'L2', 'L3')):
     # --- define the external inputs to cells ---

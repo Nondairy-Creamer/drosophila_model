@@ -6,8 +6,7 @@ from pathlib import Path
 import os
 import tempfile
 from typing import Any, Dict
-import numpy as np
-from functools import reduce
+
 try:
     import tomllib
 except ImportError:
@@ -125,17 +124,3 @@ def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
             os.close(dir_fd)
         except Exception:
             pass
-
-def get_column_df(cell_info_df, cell_ids):
-    # get the columns where we have a cell of each type in cell ids
-    column_ids = [cell_info_df[cell_info_df.type == i].column_id.to_numpy() for i in cell_ids]
-    column_ids = [i[~np.isnan(i)] for i in column_ids]
-    column_ids = reduce(np.intersect1d, column_ids)
-
-    # grab the information from cell_info_df for those columns. Restrict to the first neuron in cell_ids
-    # that we don't get multiple copies of each column
-    column_bool = (cell_info_df.type == cell_ids[0]) & cell_info_df.column_id.isin(column_ids)
-    column_info_df = cell_info_df[column_bool][['column_id', 'phi', 'theta', 'x', 'y', 'z']]
-    column_info_df = column_info_df.sort_values(by='column_id').reset_index(drop=True)  # for clarity, make sure its always with increasing column_ids
-
-    return column_info_df, column_ids

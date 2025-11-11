@@ -3,16 +3,20 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from pathlib import Path
 import numpy as np
+import torch
 
-def plot_readout_target(readout, target, readout_names, save_folder=Path('figures'), eps=1e-8):
+def plot_readout_target(readout, target, save_folder=Path('figures'), eps=1e-8):
     save_folder = convert_and_create_save_folder(save_folder)
 
-    for i in range(readout.shape[0]):
+    for readout_neuron in readout:
         plt.figure()
         colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
         direction = ['progressive', 'regressive', 'up', 'down']
-        readout_plot = readout[i].mean(axis=(1, 2)).detach().cpu().numpy().T.reshape((4, readout.shape[1] // 4)).T
-        target_plot = target[i].mean(axis=(1, 2)).detach().cpu().numpy().T.reshape((4, target.shape[1] // 4)).T
+        num_direction = len(direction)
+        readout_plot = torch.nanmean(readout[readout_neuron], dim=(1, 2)).detach().cpu().numpy()
+        readout_plot = readout_plot.reshape((num_direction, readout_plot.shape[0] // num_direction)).T
+        target_plot = target[readout_neuron].mean(dim=(1, 2)).detach().cpu().numpy()
+        target_plot = target_plot.reshape((num_direction, target_plot.shape[0] // num_direction)).T
         
         # scale target to match prediction for visualization
         # since scale doesnt matter for our loss
@@ -25,12 +29,12 @@ def plot_readout_target(readout, target, readout_names, save_folder=Path('figure
         for j in range(readout_plot.shape[1]):
             plt.plot(target_plot[:, j], color=colors[j], label=direction[j])
             plt.plot(readout_plot[:, j], color=colors[j], ls='--', label=None)
-        plt.title(readout_names[i])
+        plt.title(readout_neuron)
         plt.ylabel('model response')
         plt.xlabel('stimuli')
         plt.ylim(-plot_fudge, max_plot + plot_fudge)
         plt.legend()
-        plt.savefig(save_folder / ('pred_vs_target_' + readout_names[i] + '.png'))
+        plt.savefig(save_folder / ('pred_vs_target_' + readout_neuron + '.png'))
         plt.close()
 
 def plot_loss(loss, save_folder=Path('figures')):

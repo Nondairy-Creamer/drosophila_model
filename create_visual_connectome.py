@@ -72,20 +72,20 @@ model_root_ids = np.unique((presynaptic_ids, postsynaptic_ids))
 num_neurons = len(model_root_ids)
 
 # limit cell info to those in the synaptic connectivity matrix. Make sure we keep the same ordering of model_root_ids
-visual_neurons_indexes = pd.Index(visual_neurons_df.root_id).get_indexer(model_root_ids)
+visual_neurons_indices = pd.Index(visual_neurons_df.root_id).get_indexer(model_root_ids)
 # Verify all root IDs were found (no -1 indices) - this should always pass if data is consistent
-assert np.all(visual_neurons_indexes >= 0), "Some model_root_ids not found in visual_neurons_df - data inconsistency"
-visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indexes]
+assert np.all(visual_neurons_indices >= 0), "Some model_root_ids not found in visual_neurons_df - data inconsistency"
+visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indices]
 
 # make a mapping from root id to matrix index for presyanptic and postsynaptic connections
-pre_matrix_indexes = pd.Index(model_root_ids).get_indexer(presynaptic_ids)
-post_matrix_indexes = pd.Index(model_root_ids).get_indexer(postsynaptic_ids)
+pre_matrix_indices = pd.Index(model_root_ids).get_indexer(presynaptic_ids)
+post_matrix_indices = pd.Index(model_root_ids).get_indexer(postsynaptic_ids)
 # Verify all IDs were found - these should always pass since model_root_ids was built from these IDs
-assert np.all(pre_matrix_indexes >= 0), "Some presynaptic IDs not found in model_root_ids - data inconsistency"
-assert np.all(post_matrix_indexes >= 0), "Some postsynaptic IDs not found in model_root_ids - data inconsistency"
+assert np.all(pre_matrix_indices >= 0), "Some presynaptic IDs not found in model_root_ids - data inconsistency"
+assert np.all(post_matrix_indices >= 0), "Some postsynaptic IDs not found in model_root_ids - data inconsistency"
 
 # save the matrix indices and values to a data frame
-synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_indexes, 'post_matrix_ind': post_matrix_indexes, 'synapse_counts': synapse_counts})
+synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_indices, 'post_matrix_ind': post_matrix_indices, 'synapse_counts': synapse_counts})
 # Save the synapse counts and cell types to a dict to use in modeling
 synapse_counts_df.to_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet', index=False)
 
@@ -160,15 +160,24 @@ column_info_df['x'] = xyz[0, :]
 column_info_df['y'] = xyz[1, :]
 column_info_df['z'] = xyz[2, :]
 
-# map the column info to the cell info for the cells we have. if we dont have them set to nan
-cols = ['column_id','theta','phi','x','y','z', 'x_flat', 'y_flat', 'p', 'q']
-visual_neurons_df[cols] = np.nan
+# save the column id to visual neurons for those neurons that have a column
+visual_neurons_df['column_id'] = np.nan
 row_pos = pd.Index(visual_neurons_df.root_id).get_indexer(column_info_df.root_id)
-valid = row_pos >= 0
-col_pos = visual_neurons_df.columns.get_indexer(cols)
-visual_neurons_df.iloc[row_pos[valid], col_pos] = column_info_df.loc[valid, cols].to_numpy()
+row_pos = row_pos[row_pos >= 0] # don't index into neurons that don't have a column
+visual_neurons_df['column_id'].iloc[row_pos] = column_info_df['column_id'].to_numpy().astype(int)
+visual_neurons_df['column_index'] = visual_neurons_df['column_id'] - 1
+
+# get a df that just has all the unique columns and where they are in space. can map to the visual_neurons_df via column_id
+cols = ['column_id', 'theta', 'phi', 'x', 'y', 'z', 'x_flat', 'y_flat', 'p', 'q']
+unique_columns_df = (
+    column_info_df
+    .drop_duplicates(subset=['column_id'], keep='first')[cols]
+    .sort_values('column_id')
+    .reset_index(drop=True)
+)
+unique_columns_df['column_index'] = unique_columns_df['column_id'] - 1
 
 # save the cell info
 visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
-column_info_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet', index=False)
+unique_columns_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet', index=False)
 

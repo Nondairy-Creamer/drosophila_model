@@ -33,91 +33,82 @@ temporal_frequencies = config['stimulus']['temporal_frequencies']
 # --- load in connectivity and cell info data ---
 connectome_folder = Path(config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
+column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-num_neurons = len(cell_info_df.index)
+num_neurons = len(cell_info_df)
+num_columns = len(column_info_df)
 
 # first generate the information about the columns - their location and ID
 # we'll use the columns that have all our input and output neurons
 input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-
-# get the column id for each column that has all of the neurons in input_neurons
-column_info_input_df, column_ids_input = du.get_column_df(cell_info_df, input_neurons)
-column_info_output_df, column_ids_output = du.get_column_df(cell_info_df, output_neurons)
-
-# get the index in the model for the readout neurons and in the chosen columns
-# make sure it is ordered the same way it is in column_info_output_df
-col_order = column_info_output_df['column_id'].to_numpy()
-readout_indexes = {}
-for t in output_neurons:
-    mask = (cell_info_df['type'] == t) & (cell_info_df['column_id'].isin(col_order))
-    df_t = cell_info_df.loc[mask, ['column_id']].copy()
-    df_t['row_idx'] = df_t.index  # preserve original row index
-    ordered = df_t.set_index('column_id').reindex(col_order)
-    readout_indexes[t] = ordered['row_idx'].to_numpy()
+output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
-                     cell_types=cell_info_df.type.to_numpy(), nonlinearity=config['model']['nonlinearity'],
+                     column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(), 
+                     nonlinearity=config['model']['nonlinearity'],
                      device=config['model']['device'], dtype=config['model']['dtype'],
-                     use_sparse=config['model']['use_sparse'], use_layer_norm=config['model']['use_layer_norm'],
-                     readout_indexes=readout_indexes)
+                     use_sparse=config['model']['use_sparse'], use_layer_norm=config['model']['use_layer_norm'])
+
+
+checkpoint = torch.load('/workspace/drosophila_model/models/20251104_203752_21Loss_SqrtInit_SpecNorm/model.pt', map_location='cpu', weights_only=False)
+model.load_state_dict(checkpoint['state_dict'])
+model.save('/workspace/drosophila_model/models/20251104_203752_21Loss_SqrtInit_SpecNorm/model.pt')
 
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
-sine_waves, sine_wave_tfs, contrast_scaling_function = mu.create_sine_wave(column_info_input_df.phi.to_numpy(), column_info_input_df.theta.to_numpy(), 
+sine_waves, sine_wave_tfs, contrast_scaling_factor = mu.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
 sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
-# The sine waves are generated for each column. Find the indices of the cells in input_neurons that correspond to each column in the stimulus
-stim_to_cell_mapping = mu.get_stim_to_cell_mapping(cell_info_df, column_info_input_df, input_neurons=input_neurons)
-stim_to_cell_mapping = torch.tensor(stim_to_cell_mapping, device=device)
-
 # --- plot the stimuli ---
-pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_input_df.x, column_info_input_df.z, save_folder='figures/stimulus')
+pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_df.x, column_info_df.z, save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
-num_readouts = len(readout_indexes)
 num_stimuli = sine_waves.shape[0]
-readout_size = column_ids_output.shape[0]
-target = torch.zeros((num_readouts, num_stimuli, num_time, readout_size), device=device, dtype=dtype)
+directions = ['right', 'left', 'up', 'down']
+target = {}
 
-# stimuli are right left up down
-# cell preferences are currently right left up down right left up down
-num_stimulus_blocks = 4
-stimulus_block_size = num_stimuli // num_stimulus_blocks  # limits this cell prefernce to one of the right left up down blocks
-for i in range(num_stimulus_blocks):
-    quart = torch.arange(i * stimulus_block_size, (i + 1) * stimulus_block_size)
-    # both the i and i+4 cells respond to the same stimulus
-    # T4a is rightward selective and T5a is as well
-    # this code will change if you change the cell readouts
-    target[i, quart, :, :] = torch.abs(sine_wave_tfs[:stimulus_block_size, None, None])  # just take block of TFs and only use them as positive
-    target[i + 4, quart, :, :] = torch.abs(sine_wave_tfs[:stimulus_block_size, None, None])
+for i in range(len(output_neurons)):
+    this_neuron = output_neurons[i]
+    this_direction = output_neurons_direction[i]
+    this_direction_index = directions.index(this_direction)
+    num_direction = len(directions)
+    stimulus_block_size = num_stimuli // num_direction  # limits this cell prefernce to one of the right left up down blocks
+
+    # get the index of the stimuli that this neruon will respond to, based on the direction
+    stim_resp_inds = torch.arange(this_direction_index * stimulus_block_size, (this_direction_index + 1) * stimulus_block_size)
+
+    target[this_neuron] = torch.zeros((num_stimuli, num_time, num_columns), device=device, dtype=dtype)
+    target[this_neuron][stim_resp_inds, :, :] = sine_wave_tfs[stim_resp_inds, None, None]
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 model_save_folder = Path('models/' + timestamp)
 model_save_folder.mkdir(parents=True, exist_ok=True)
 du.save_config(config, model_save_folder / 'config.toml')
-torch.save({'stimulus': sine_waves.detach().cpu(), 'mapping': stim_to_cell_mapping.detach().cpu()}, model_save_folder / "cell_inputs.pt")
-torch.save(target.detach().cpu(), model_save_folder / "target.pt")
+torch.save(sine_waves.detach().cpu(), model_save_folder / "cell_inputs.pt")
+torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
 
-contrast_scaling_factor = contrast_scaling_function(column_info_output_df['theta'].to_numpy())
 contrast_scaling_factor = torch.tensor(contrast_scaling_factor, dtype=dtype, device=device)
 torch.save(contrast_scaling_factor.detach().cpu(), model_save_folder / "contrast_scaling_factor.pt")
 
 # get the loss function
 loss_fn = getattr(tu, config['training']['loss_fn'])
-loss_scaled = tu.get_scaled_loss(loss_fn, contrast_scaling_factor)
+loss_scaled = tu.get_scaled_loss_fn(loss_fn, contrast_scaling_factor)
 
 model.save(model_save_folder / 'model_init.pt')
 model.save(model_save_folder / 'model.pt')
 
 # --- train the model ---
-# find a good estimate of the readout weights
-# model.estimate_readout_weights(cell_inputs, target)
-tu.train_model(model, sine_waves, target, model_save_folder=model_save_folder,  num_steps=config['training']['num_steps'], 
-               save_every=config['training']['save_every'], alpha=config['training']['alpha'], clip_grad_norm=config['training']['clip_norm'],
-               readout_xy=column_info_output_df[['x', 'z']].to_numpy(), loss_fn=loss_scaled, stim_to_cell_mapping=stim_to_cell_mapping)
+tu.train_model(model, sine_waves, target, output_neurons, input_neurons,
+    model_save_folder=model_save_folder,
+    num_steps=config['training']['num_steps'],
+    save_every=config['training']['save_every'], 
+    alpha=config['training']['alpha'], 
+    clip_grad_norm=config['training']['clip_norm'],
+    readout_xy=column_info_df[['x', 'z']].to_numpy(), 
+    loss_fn=loss_scaled)
 

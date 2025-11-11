@@ -19,7 +19,7 @@ alpha = None
 contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
 contrast_scaling_factor = torch.load(contrast_scaling_factor_path).to(device=model.device)
 loss_fn = getattr(tu, config['training']['loss_fn'])
-loss_scaled = tu.get_scaled_loss(loss_fn, contrast_scaling_factor)
+loss_scaled = tu.get_scaled_loss_fn(loss_fn, contrast_scaling_factor)
 
 # Load the best optimizer state and reduce learning rate
 opt_state = torch.load(model_folder / 'model_opt.pt', map_location='cpu', weights_only=False)

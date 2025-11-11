@@ -1,14 +1,12 @@
 import torch
 import numpy as np
 from pathlib import Path
+from functools import reduce
 
 
 class NeuralRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_coo, cell_types, readout_indexes, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True):
-
-        self.readout_indexes = readout_indexes
-
+    def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
+                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True, trainable=True):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -20,8 +18,6 @@ class NeuralRnn(torch.nn.Module):
         diagonal_init = 0.7
         stimulus_strength_init = 10.0
         offset_init = 0.0
-        readout_weight_init = 1.0
-        readout_bias_init = 0.0
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -38,6 +34,8 @@ class NeuralRnn(torch.nn.Module):
         self.unique_cell_types = np.unique(cell_types)
         self.num_cell_types = self.unique_cell_types.shape[0]
         self.synapse_counts_coo = synapse_counts_coo
+        self.column_indices = column_indices
+        self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -47,14 +45,6 @@ class NeuralRnn(torch.nn.Module):
         self.diagonal_logit = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
         self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype) + offset_init
-        self.readout_weight_log = torch.tensor(np.log(readout_weight_init), device=self.device, dtype=self.dtype)
-        self.readout_bias = torch.tensor(readout_bias_init, device=self.device, dtype=self.dtype)
-
-        self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
-        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
-        self.offset = torch.nn.Parameter(self.offset)
-        # self.readout_weight_log = torch.nn.Parameter(self.readout_weight_log)
-        # self.readout_bias = torch.nn.Parameter(self.readout_bias)
 
         # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
@@ -102,8 +92,8 @@ class NeuralRnn(torch.nn.Module):
         # Initialize strength per cell type based on the inverse of its fan in / out
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        self.input_strength_log = torch.nn.Parameter(torch.log(input_strength_init))
-        self.output_strength_log = torch.nn.Parameter(torch.log(output_strength_init))
+        self.input_strength_log = torch.log(input_strength_init)
+        self.output_strength_log = torch.log(output_strength_init)
 
         if set_spectral_radius:
             # Iteratively scale output_strength to achieve target spectral radius
@@ -125,6 +115,13 @@ class NeuralRnn(torch.nn.Module):
                 with torch.no_grad():
                     scale_factor = (target_rho / rho)**damping_factor
                     self.output_strength_log.add_(np.log(scale_factor))
+
+        if trainable:
+            self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
+            self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
+            self.offset = torch.nn.Parameter(self.offset)
+            self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+            self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
 
     def forward(self, x_prev, u_t, stim_to_cell_mapping=None):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
@@ -156,9 +153,14 @@ class NeuralRnn(torch.nn.Module):
         else:
             # because stimulus can be very sparse (only stimulate 3 cell types)
             # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
-            cell_idx = stim_to_cell_mapping[1]  # neuron indices (int64)
-            stim_idx = stim_to_cell_mapping[0]  # stimulus indices (int64)
-            z.index_add_(1, cell_idx, u_t[:, stim_idx] * stimulus_strength[None, cell_idx])
+            cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
+            stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
+            # Guard against any negative indices 
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                z.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
 
         x_next = self.nonlinearity(z + offset_all_neurons[None, :])
 
@@ -245,61 +247,48 @@ class NeuralRnn(torch.nn.Module):
                 prev_rho = rho
             return rho.item(), max_iter, False
 
-    def estimate_readout_weights(self, inputs, target):
-        with torch.no_grad():
-            # just set the wieght so that the readout has the same standard deviation as the data and the bias centers the readout on the data
-            # can't do linear regression because slope needs to be positive. least squares with bounds often fits to 0 and kills the gradient
-            epsilon = 1e-6
-
-            readout = self.predict_and_readout(inputs)[1]
-            # get rid of the current readout / bias
-            readout = readout - self.readout_bias
-            readout = readout / self.readout_weight_log.exp()
-
-            # find the STD of the prediction and the bias that will center it on the target
-            readout_std = torch.std(readout, unbiased=False).clamp_min(epsilon)
-            target_std = torch.std(target, unbiased=False).clamp_min(epsilon)
-            slope = target_std / readout_std
-            intercept = torch.mean(target - slope * readout)
-
-            # set the initial values
-            self.readout_weight_log.copy_(torch.log(slope))
-            self.readout_bias.copy_(intercept)
-
-    def predict(self, inputs, stim_to_cell_mapping=None):
+    def predict(self, inputs, input_neurons:list=['L1'], output_neurons:list=['T4a']):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
+        # get a mapping from the stimulus (batch, time, columns) columns to neurons
+        input_neuron_indices, input_column_indices = self.get_shared_columns(input_neurons)
+        stim_to_cell_mapping = {'neuron_index': torch.tensor(input_neuron_indices, device=self.device, dtype=torch.int64),
+                                'stimulus_index': torch.tensor(input_column_indices, device=self.device, dtype=torch.int64)}
+
+        # if the output is columnar get the columns where we have all the readouts
+        readout_dict = {}
+        for i in output_neurons:
+            # only use output neurons that have an assigned column, are of the correct type, and have an input
+            # we require an input in that column so we don't waste time trying to fit neurons that are getting limited input
+            is_correct_type = (self.cell_types == i) & ~np.isnan(self.column_indices) & np.isin(self.column_indices, input_column_indices)
+            neuron_index = np.arange(self.num_neurons)
+
+            readout_dict[i] = {
+                'column_indices': torch.tensor(self.column_indices[is_correct_type], device=self.device, dtype=torch.int64),
+                'neuron_indices': torch.tensor(neuron_index[is_correct_type], device=self.device, dtype=torch.int64),
+                }
+
         # initial neural activity values
         x = inputs.new_zeros(num_batches, self.num_neurons)
-
-        
-        outputs = inputs.new_zeros(num_batches, num_time, self.num_neurons)
+        # outputs for each neuron in output_neurons are (batches, time, number of columns)
+        outputs = {}
+        for i in output_neurons:
+            outputs[i] = torch.full((num_batches, num_time, self.num_columns), float('nan'),
+                                    device=self.device, dtype=self.dtype)
+                                    
         for t in range(num_time):
             x = self(x, inputs[:, t, :], stim_to_cell_mapping)
-            outputs[:, t, :] = x
 
+            for i in output_neurons:
+                ci = readout_dict[i]['column_indices']
+                ni = readout_dict[i]['neuron_indices']
+                # Ensure we only write to valid column positions
+                valid = ci >= 0
+                if torch.any(valid):
+                    outputs[i][:, t, ci[valid]] = x[:, ni[valid]]
 
         return outputs
-
-    def readout(self, outputs):
-        readout_keys = list(self.readout_indexes.keys())
-        readout_size = len(self.readout_indexes[readout_keys[0]])
-        num_stimuli = outputs.shape[0]
-        num_time = outputs.shape[1]
-        num_readouts = len(readout_keys)
-        readout = torch.zeros((num_readouts, num_stimuli, num_time, readout_size), device=self.device, dtype=self.dtype)
-
-        for ki, key in enumerate(readout_keys):
-            # select the neurons using the readout_indexes
-            readout[ki, :, :, :] = outputs[:, :, self.readout_indexes[key]]
-
-        return self.readout_weight_log.exp() * readout + self.readout_bias
-    
-    def predict_and_readout(self, inputs, stim_to_cell_mapping=None):
-        # predict the rnn outputs from an input and then read them out
-        outputs = self.predict(inputs, stim_to_cell_mapping)
-        return outputs, self.readout(outputs)
 
     def save(self, path):
         p = Path(path)
@@ -314,6 +303,27 @@ class NeuralRnn(torch.nn.Module):
         # torch.save uses pickle under the hood and handles tensors well
         torch.save(payload, p)
 
+    def get_shared_columns(self, neuron_list):
+        # get all the neurons that are of the type in the list and their indices
+
+        # get a mapping from the stimulus (batch, time, columns) columns to neurons
+        neuron_indices = np.arange(self.num_neurons)
+
+        # get the list of column indices which have all of the input neurons
+        column_indices = [self.column_indices[self.cell_types == i] for i in neuron_list]
+        column_indices = [i[~np.isnan(i)] for i in column_indices]
+        column_indices = reduce(np.intersect1d, column_indices)
+
+        # get the neuron indices of the neurons in those columns with the right type
+        neuron_masks = [(self.cell_types == i) for i in neuron_list]
+        neuron_is_in_list = np.any(np.stack(neuron_masks), axis=0)
+        neuron_is_in_list = neuron_is_in_list & np.isin(self.column_indices, column_indices)
+
+        selected_neuron_indices = neuron_indices[neuron_is_in_list]
+        selected_column_indices = self.column_indices[neuron_is_in_list]
+
+        return selected_neuron_indices, selected_column_indices
+        
     @classmethod
     def load(cls, path, device=None, dtype=None):
         data = torch.load(Path(path), map_location='cpu', weights_only=False)
@@ -324,7 +334,9 @@ class NeuralRnn(torch.nn.Module):
             inputs['dtype'] = dtype
 
         # construct directly from saved (or overridden) inputs
-        model = cls(**inputs, set_spectral_radius=False)
+        inputs['set_spectral_radius'] = False
+        # inputs['trainable'] = False
+        model = cls(**inputs)
 
         model.load_state_dict(data['state_dict'])
 
