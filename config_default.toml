@@ -24,7 +24,8 @@ clip_norm = 0.1
 [stimulus]
 # Time parameters
 dt = 0.01  # time step in seconds
-max_time = 0.25  # maximum simulation time in seconds
+max_time = 1.5  # maximum simulation time in seconds
+pre_stim = 0.5
 # Temporal frequency parameters
 temporal_frequencies = [2, 4, 8]
 

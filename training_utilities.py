@@ -79,30 +79,40 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
+    cached_mappings = None
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
 
     if loss_history is None:
-        loss_list = []
-        best_loss = np.inf
+        loss_plot = []
     else:
-        loss_list = loss_history
-        best_loss = loss_history[-1]
+        # Preserve prior CPU loss history for plotting/checkpointing
+        loss_plot = list(loss_history)
+
+    # GPU-side loss history; append detached scalars each step
+    loss_list = []
+
+    # Track best loss entirely on GPU to avoid syncs; seed from prior CPU history if available
+    best_seed = min(loss_plot) if len(loss_plot) > 0 else float('inf')
+    best_loss = torch.tensor(best_seed, device=model.device, dtype=model.dtype)
 
     time_since_best = 0
-    grad_norm = 0
+    # Index of last GPU loss converted to CPU for plotting
+    last_saved_idx = -1
 
     for step in range(num_steps):
         start = time.time()
         opt.zero_grad()
-        pred = model.predict(inputs, input_neurons=input_neurons, output_neurons=output_neurons)
+        if cached_mappings is None:
+            pred, cached_mappings = model.predict(inputs, input_neurons=input_neurons, output_neurons=output_neurons, return_mappings=True)
+        else:
+            pred = model.predict(inputs, input_neurons=cached_mappings['stim_to_cell_mapping'], output_neurons=cached_mappings['readout_dict'])
         loss = calc_loss(loss_fn, pred, target)
 
-        # Detect if you've found the best loss so far BEFORE updating weights
-        loss_list.append(loss.item())
-        if loss_list[-1] < best_loss:
-            best_loss = loss_list[-1]
+        # Detect if you've found the best loss so far BEFORE updating weights (no sync)
+        if loss < best_loss:
+            best_loss = loss.detach()
             time_since_best = 0
 
             # track and save the best checkpoint for easy rollback
@@ -111,7 +121,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 model.save(model_save_folder / 'model.pt')
                 torch.save({
                     'optimizer_state_dict': opt.state_dict(),
-                    'loss': loss_list,
+                    'loss': loss_plot,
                     'step': step
                 }, model_save_folder / 'model_opt.pt')
         else:
@@ -122,15 +132,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
         # Optional gradient clipping (prefer norm if both provided)
         if clip_grad_norm is not None:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
         elif clip_grad_value is not None:
-            grad_norm = torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
+            torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
         opt.step()
-
-        loss_diff = 0
-        if len(loss_list) > 1:
-            loss_diff = loss_list[-2] - loss_list[-1]
-        print(f'step {step + 1} / {num_steps} | dt = {(time.time()-start):.3g} | loss = {loss.item():.4g} | loss diff = {loss_diff:.4e} | lr = {alpha:.2e} | grad magnitude = {grad_norm:.3g} | path = {model_save_folder}')
+        
+        # Record GPU-side loss scalar without sync
+        loss_list.append(loss.detach())
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:
@@ -153,16 +161,17 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
+                # Convert only new GPU losses to CPU floats for plotting/logging
+                for i in range(last_saved_idx + 1, len(loss_list)):
+                    loss_plot.append(loss_list[i].item())
+                last_saved_idx = len(loss_list) - 1
+
+                # Print last CPU loss value only at save cadence
                 pu.plot_readout_target(pred, target, save_folder=model_save_folder)
+                pu.plot_loss(loss_plot, save_folder=model_save_folder)
 
-                if readout_xy is not None:
-                    for readout_neuron in pred:
-                        pu.plot_response_over_space(
-                            torch.nanmean(pred[readout_neuron][::4, :, :], dim=1).detach().cpu().numpy(),
-                            readout_xy[:, 0], readout_xy[:, 1],
-                            save_folder=model_save_folder / ('readout_' + readout_neuron))
+        print(f'step {step + 1} / {num_steps} | dt = {(time.time()-start):.3g} | lr = {alpha:.2e} | path = {model_save_folder}')
 
-                pu.plot_loss(loss_list, save_folder=model_save_folder)
 
 
 

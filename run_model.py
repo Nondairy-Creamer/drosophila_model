@@ -26,6 +26,7 @@ device = torch.device(config['model']['device'])
 dtype = getattr(torch, config['model']['dtype'])
 dt = config['stimulus']['dt']
 max_time = config['stimulus']['max_time']
+pre_stim = config['stimulus']['pre_stim']  # seconds before the sine wave starts moving
 time_points = torch.arange(0, max_time, step=dt)
 num_time = len(time_points)
 temporal_frequencies = config['stimulus']['temporal_frequencies']
@@ -54,7 +55,7 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
 sine_waves, sine_wave_tfs, contrast_scaling_factor = mu.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
-    temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
+    temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time, pre_stim=pre_stim)
 sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
@@ -77,7 +78,8 @@ for i in range(len(output_neurons)):
     stim_resp_inds = torch.arange(this_direction_index * stimulus_block_size, (this_direction_index + 1) * stimulus_block_size)
 
     target[this_neuron] = torch.zeros((num_stimuli, num_time, num_columns), device=device, dtype=dtype)
-    target[this_neuron][stim_resp_inds, :, :] = sine_wave_tfs[stim_resp_inds, None, None]
+    start_index = int(pre_stim / dt)
+    target[this_neuron][stim_resp_inds, start_index:, :] = sine_wave_tfs[stim_resp_inds, None, None]
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

@@ -4,7 +4,7 @@ import pandas as pd
 
 
 def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
-                     dt=0.01, max_time=1):
+                     dt=0.01, max_time=1, pre_stim=0):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # positive tfs correspond to rightward. negative tfs correspond to leftward
@@ -36,9 +36,11 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     # generate sine waves at a specific temporal frequency for up down left right
     # at phase 0, 180, 
     for tf in temporal_frequency:
+        tf_vect = (t[:, None] > pre_stim) * tf
+
         # -- rightward sine wave --
-        sine_wave_right = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))
-        sine_wave_right_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh) + np.pi / 2)
+        sine_wave_right = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf_vect * t_mesh))
+        sine_wave_right_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf_vect * t_mesh) + np.pi / 2)
         sine_wave_right *= contrast_scaling_factor[None, :]
         sine_wave_right_shifted *= contrast_scaling_factor[None, :]
         sine_wave_dict['right'].append(sine_wave_right)
@@ -48,8 +50,8 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         tf_dict['right'] += [tf] * 4
 
         # -- leftward sine wave --
-        sine_wave_left = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
-        sine_wave_left_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh) + np.pi / 2)
+        sine_wave_left = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf_vect * t_mesh))
+        sine_wave_left_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf_vect * t_mesh) + np.pi / 2)
         sine_wave_left *= contrast_scaling_factor[None, :]
         sine_wave_left_shifted *= contrast_scaling_factor[None, :]
         sine_wave_dict['left'].append(sine_wave_left)
@@ -59,8 +61,8 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         tf_dict['left'] += [tf] * 4
 
         # -- upward sine wave -- 
-        sine_wave_up = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
-        sine_wave_up_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh) + np.pi / 2)
+        sine_wave_up = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf_vect * t_mesh))
+        sine_wave_up_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf_vect * t_mesh) + np.pi / 2)
         sine_wave_up *= contrast_scaling_factor[None, :]
         sine_wave_up_shifted *= contrast_scaling_factor[None, :]
         sine_wave_dict['up'].append(sine_wave_up)
@@ -70,8 +72,8 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         tf_dict['up'] += [tf] * 4
 
         # -- downward sine wave --
-        sine_wave_down = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))
-        sine_wave_down_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh) + np.pi / 2)
+        sine_wave_down = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf_vect * t_mesh))
+        sine_wave_down_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf_vect * t_mesh) + np.pi / 2)
         sine_wave_down *= contrast_scaling_factor[None, :]
         sine_wave_down_shifted *= contrast_scaling_factor[None, :]
         sine_wave_dict['down'].append(sine_wave_down)

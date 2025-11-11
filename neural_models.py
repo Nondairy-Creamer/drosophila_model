@@ -246,40 +246,56 @@ class NeuralRnn(torch.nn.Module):
                 prev_rho = rho
             return rho.item(), max_iter, False
 
-    def predict(self, inputs, input_neurons:list=['L1'], output_neurons:list=['T4a']):
+    def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], return_mappings=False):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
-        # get a mapping from the stimulus (batch, time, columns) columns to neurons
-        input_neuron_indices, input_column_indices = self.get_shared_columns(input_neurons)
-        stim_to_cell_mapping = {'neuron_index': torch.tensor(input_neuron_indices, device=self.device, dtype=torch.int64),
-                                'stimulus_index': torch.tensor(input_column_indices, device=self.device, dtype=torch.int64)}
+        # Handle input mapping (either compute from names list, or reuse provided indices)
+        if isinstance(input_neurons, list):
+            # get a mapping from the stimulus (batch, time, columns) columns to neurons
+            input_neuron_indices, input_column_indices = self.get_shared_columns(input_neurons)
+            input_column_indices_np = input_column_indices
+            stim_to_cell_mapping = {
+                'neuron_index': torch.tensor(input_neuron_indices, device=self.device, dtype=torch.int64),
+                'stimulus_index': torch.tensor(input_column_indices, device=self.device, dtype=torch.int64),
+            }
+        else:
+            # assume provided indices mapping (dict with 'neuron_index' and 'stimulus_index')
+            stim_to_cell_mapping = input_neurons
+            # derive numpy column indices for readout filtering
+            input_column_indices_np = stim_to_cell_mapping['stimulus_index'].detach().cpu().numpy()
 
-        # if the output is columnar get the columns where we have all the readouts
-        readout_dict = {}
-        for i in output_neurons:
-            # only use output neurons that have an assigned column, are of the correct type, and have an input
-            # we require an input in that column so we don't waste time trying to fit neurons that are getting limited input
-            is_correct_type = (self.cell_types == i) & ~np.isnan(self.column_indices) & np.isin(self.column_indices, input_column_indices)
-            neuron_index = np.arange(self.num_neurons)
-
-            readout_dict[i] = {
-                'column_indices': torch.tensor(self.column_indices[is_correct_type], device=self.device, dtype=torch.int64),
-                'neuron_indices': torch.tensor(neuron_index[is_correct_type], device=self.device, dtype=torch.int64),
+        # Handle readouts (either compute from names list, or reuse provided dict of indices)
+        if isinstance(output_neurons, list):
+            # if the output is columnar get the columns where we have all the readouts
+            readout_dict = {}
+            for i in output_neurons:
+                # only use output neurons that have an assigned column, are of the correct type, and have an input
+                # we require an input in that column so we don't waste time trying to fit neurons that are getting limited input
+                is_correct_type = (self.cell_types == i) & ~np.isnan(self.column_indices) & np.isin(self.column_indices, input_column_indices_np)
+                neuron_index = np.arange(self.num_neurons)
+                readout_dict[i] = {
+                    'column_indices': torch.tensor(self.column_indices[is_correct_type], device=self.device, dtype=torch.int64),
+                    'neuron_indices': torch.tensor(neuron_index[is_correct_type], device=self.device, dtype=torch.int64),
                 }
+            readout_keys = output_neurons
+        else:
+            # assume provided mapping dict keyed by readout names
+            readout_dict = output_neurons
+            readout_keys = list(readout_dict.keys())
 
         # initial neural activity values
         x = inputs.new_zeros(num_batches, self.num_neurons)
         # outputs for each neuron in output_neurons are (batches, time, number of columns)
         outputs = {}
-        for i in output_neurons:
+        for i in readout_keys:
             outputs[i] = torch.full((num_batches, num_time, self.num_columns), float('nan'),
                                     device=self.device, dtype=self.dtype)
                                     
         for t in range(num_time):
             x = self(x, inputs[:, t, :], stim_to_cell_mapping)
 
-            for i in output_neurons:
+            for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
                 ni = readout_dict[i]['neuron_indices']
                 # Ensure we only write to valid column positions
@@ -287,7 +303,10 @@ class NeuralRnn(torch.nn.Module):
                 if torch.any(valid):
                     outputs[i][:, t, ci[valid]] = x[:, ni[valid]]
 
-        return outputs
+        if return_mappings:
+            return outputs, {'stim_to_cell_mapping': stim_to_cell_mapping, 'readout_dict': readout_dict}
+        else:
+            return outputs
 
     def save(self, path):
         p = Path(path)
