@@ -78,7 +78,6 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, stim_to_cell_mapping=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    num_readouts = len(target.keys())
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -96,7 +95,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
     for step in range(num_steps):
         opt.zero_grad()
         pred = model.predict(inputs, input_neurons=input_neurons, output_neurons=output_neurons)
-        calc_loss(loss_fn, pred, target)
+        loss = calc_loss(loss_fn, pred, target)
 
         # Detect if you've found the best loss so far BEFORE updating weights
         loss_list.append(loss.item())

@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251104_203752_21Loss_SqrtInit_SpecNorm')
+model_folder = Path('models/20251111_195638')
 
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()

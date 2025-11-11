@@ -51,11 +51,6 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
                      device=config['model']['device'], dtype=config['model']['dtype'],
                      use_sparse=config['model']['use_sparse'], use_layer_norm=config['model']['use_layer_norm'])
 
-
-checkpoint = torch.load('/workspace/drosophila_model/models/20251104_203752_21Loss_SqrtInit_SpecNorm/model.pt', map_location='cpu', weights_only=False)
-model.load_state_dict(checkpoint['state_dict'])
-model.save('/workspace/drosophila_model/models/20251104_203752_21Loss_SqrtInit_SpecNorm/model.pt')
-
 # --- get a sign wave stimulus ---
 # generate a sine wave on a cylinder around the fly
 sine_waves, sine_wave_tfs, contrast_scaling_factor = mu.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 

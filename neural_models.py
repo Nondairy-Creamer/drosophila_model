@@ -6,7 +6,7 @@ from functools import reduce
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True, trainable=True):
+                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -116,12 +116,11 @@ class NeuralRnn(torch.nn.Module):
                     scale_factor = (target_rho / rho)**damping_factor
                     self.output_strength_log.add_(np.log(scale_factor))
 
-        if trainable:
-            self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
-            self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
-            self.offset = torch.nn.Parameter(self.offset)
-            self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
-            self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+        self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
+        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
+        self.offset = torch.nn.Parameter(self.offset)
+        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
 
     def forward(self, x_prev, u_t, stim_to_cell_mapping=None):
         diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
@@ -325,7 +324,7 @@ class NeuralRnn(torch.nn.Module):
         return selected_neuron_indices, selected_column_indices
         
     @classmethod
-    def load(cls, path, device=None, dtype=None):
+    def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
         data = torch.load(Path(path), map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
         if device is not None:
@@ -335,10 +334,14 @@ class NeuralRnn(torch.nn.Module):
 
         # construct directly from saved (or overridden) inputs
         inputs['set_spectral_radius'] = False
-        # inputs['trainable'] = False
         model = cls(**inputs)
 
         model.load_state_dict(data['state_dict'])
+
+        # Optionally freeze all parameters to disable gradients
+        if freeze_params:
+            for param in model.parameters():
+                param.requires_grad_(False)
 
         return model
 
