@@ -164,7 +164,8 @@ column_info_df['z'] = xyz[2, :]
 visual_neurons_df['column_id'] = np.nan
 row_pos = pd.Index(visual_neurons_df.root_id).get_indexer(column_info_df.root_id)
 row_pos = row_pos[row_pos >= 0] # don't index into neurons that don't have a column
-visual_neurons_df['column_id'].iloc[row_pos] = column_info_df['column_id'].to_numpy().astype(int)
+col_idx = visual_neurons_df.columns.get_loc('column_id')
+visual_neurons_df.iloc[row_pos, col_idx] = column_info_df['column_id'].to_numpy().astype(int)
 visual_neurons_df['column_index'] = visual_neurons_df['column_id'] - 1
 
 # get a df that just has all the unique columns and where they are in space. can map to the visual_neurons_df via column_id
