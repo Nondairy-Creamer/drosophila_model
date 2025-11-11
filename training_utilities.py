@@ -2,6 +2,7 @@ import torch
 import plotting_utilities as pu
 import numpy as np
 import neural_models as nm
+import time
 
 def nannorm(unormalized_tensor, keepdim=False, dim=None, eps=1e-6):
     return torch.nansum(torch.abs(unormalized_tensor)**2, dim=dim, keepdim=keepdim).sqrt().clamp_min(eps)
@@ -75,7 +76,7 @@ def calc_loss(loss_fn, pred, target):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, stim_to_cell_mapping=None):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
 
@@ -93,6 +94,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
     grad_norm = 0
 
     for step in range(num_steps):
+        start = time.time()
         opt.zero_grad()
         pred = model.predict(inputs, input_neurons=input_neurons, output_neurons=output_neurons)
         loss = calc_loss(loss_fn, pred, target)
@@ -128,7 +130,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         loss_diff = 0
         if len(loss_list) > 1:
             loss_diff = loss_list[-2] - loss_list[-1]
-        print(f'step {step + 1} / {num_steps} | loss = {loss.item():4g} | loss diff = {loss_diff:.4e} | lr = {alpha:.2e} | grad magnitude = {grad_norm:.3g} | path = {model_save_folder}')
+        print(f'step {step + 1} / {num_steps} | dt = {(time.time()-start):.3g} | loss = {loss.item():.4g} | loss diff = {loss_diff:.4e} | lr = {alpha:.2e} | grad magnitude = {grad_norm:.3g} | path = {model_save_folder}')
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if time_since_best > patience:
