@@ -40,7 +40,6 @@ def corr_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
     return 1.0 - ave_corr
 
 def cos_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
-    # Compute a single correlation across all elements by normalizing globally
     y_hat = y_hat / nannorm(y_hat, dim=dim, keepdim=True).clamp_min(eps)
     y = y / nannorm(y, dim=dim, keepdim=True).clamp_min(eps)
     cosine_sim = torch.nansum(y_hat * y, dim=dim, keepdim=True)

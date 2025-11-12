@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251111_215658')
+model_folder = Path('models/20251112_172753_good_mapping')
 
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
