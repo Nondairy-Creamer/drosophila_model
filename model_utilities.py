@@ -18,7 +18,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     pre_stim_index = int(pre_stim_time / dt)
     post_stim_index = int((pre_stim_time + stim_time) / dt)
     t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index]
+    t[post_stim_index:] = t[post_stim_index - 1]
     t_mesh, phi_mesh = np.meshgrid(t, sample_phi, indexing='ij')
     t_mesh, theta_mesh = np.meshgrid(t, sample_theta, indexing='ij')
 
