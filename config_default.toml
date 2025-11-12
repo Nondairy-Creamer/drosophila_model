@@ -1,47 +1,40 @@
-# Drosophila Neural Model Configuration
-
 [model]
-# Device and data type settings
-device = 'cpu'  # 'cpu' or 'cuda'
-dtype = 'float32'  # 'float32' or 'float64'
+device = "cuda"
+dtype = "float32"
 use_sparse = true
 use_layer_norm = false
-
-# Model architecture parameters
-nonlinearity = 'Softplus'  # 'linear', 'relu', 'tanh', 'sigmoid'
+nonlinearity = "Softplus"
+dt = 0.01
 
 [training]
-num_steps = 100  # number of training steps
-save_every = 10  # number of steps before printing loss
-loss_fn = 'cos_loss'
-
-# Learning parameters
-alpha = 1e-1  # learning rate
-readout_weight_init = 1e0  # initial readout weight
-readout_bias_init = 0e0  # initial readout weight
-clip_norm = 0.1
+num_steps = 100000
+save_every = 10
+loss_fn = "cos_loss"
+alpha = 0.01
+clip_norm = 1.0
 
 [stimulus]
-# Time parameters
-dt = 0.01  # time step in seconds
-max_time = 1.5  # maximum simulation time in seconds
-pre_stim = 0.5
-# Temporal frequency parameters
-temporal_frequencies = [2, 4, 8]
+stim_time = 1.0
+pre_stim_time = 0.25
+post_stim_time = 0.25
+temporal_frequencies = [
+    2,
+    4,
+    8,
+]
 
 [data]
-# Data paths and settings
-connectome_folder = '../connectome_data'
-fly_eye = 'right'  # 'left' or 'right'
+connectome_folder = "../connectome_data"
+fly_eye = "right"
 use_intrinsic = false
-hemisphere_coverage = 0.85  # fraction of hemisphere the fly's vision covers
+hemisphere_coverage = 0.85
 normalize_rows = false
-
-# Neurotransmitter classifications
-excitatory_nt = ['ACH']
-inhibitory_nt = ['GABA', 'GLUT']
-
-# Data types
-synapse_count_dtype = 'float64'
-root_id_dtype = 'int64'
-
+excitatory_nt = [
+    "ACH",
+]
+inhibitory_nt = [
+    "GABA",
+    "GLUT",
+]
+synapse_count_dtype = "float64"
+root_id_dtype = "int64"

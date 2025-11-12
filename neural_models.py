@@ -6,7 +6,7 @@ from functools import reduce
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True):
+                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True, dt=0.01):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -36,6 +36,7 @@ class NeuralRnn(torch.nn.Module):
         self.synapse_counts_coo = synapse_counts_coo
         self.column_indices = column_indices
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
+        self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)

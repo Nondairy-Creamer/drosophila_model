@@ -4,7 +4,7 @@ import pandas as pd
 
 
 def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
-                     dt=0.01, max_time=1, pre_stim=0):
+                     dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # positive tfs correspond to rightward. negative tfs correspond to leftward
@@ -14,7 +14,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     temporal_frequency = [np.abs(tf) for tf in temporal_frequency]
 
     filter_std_base = 2.5 * np.pi / 180  # radians
-    t = np.arange(0, max_time, step=dt)
+    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
     t_mesh, phi_mesh = np.meshgrid(t, sample_phi, indexing='ij')
     t_mesh, theta_mesh = np.meshgrid(t, sample_theta, indexing='ij')
 
@@ -36,7 +36,8 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     # generate sine waves at a specific temporal frequency for up down left right
     # at phase 0, 180, 
     for tf in temporal_frequency:
-        tf_vect = (t[:, None] > pre_stim) * tf
+        stim_is_moving = (pre_stim_time < t[:, None]) & (t[:, None] < (pre_stim_time + stim_time))
+        tf_vect = stim_is_moving * tf
 
         # -- rightward sine wave --
         sine_wave_right = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf_vect * t_mesh))
