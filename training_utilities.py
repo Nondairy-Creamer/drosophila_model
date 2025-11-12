@@ -75,7 +75,7 @@ def calc_loss(loss_fn, pred, target):
     return loss
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
-                clip_grad_norm=None, clip_grad_value=None, readout_xy=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
+                clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
