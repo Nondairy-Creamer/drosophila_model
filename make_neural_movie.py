@@ -16,6 +16,9 @@ from movie_utilities import (
     make_movie,
     make_scatter_plot_factory,
     make_quiver_plot_factory,
+    make_scatter_grid_factory,
+    make_scatter_diamond_factory,
+    make_scatter_diamond_sequence_factory,
 )
 import model_utilities as mu
 
@@ -31,12 +34,11 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
-frame_rate = int(1 / model_config['model']['dt'])
+frame_rate = int(1 / model_config['model']['dt'] / 2)
 color_percentile = 90
 
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
 # --- load the sine wave stimuli ---
 directions = ['right', 'left', 'up', 'down']
@@ -80,8 +82,9 @@ output_neurons = ['L1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)
+column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
-cell_x = column_info_df.x.to_numpy()
+cell_x = -column_info_df.x.to_numpy()
 cell_z = column_info_df.z.to_numpy()
 cell_theta = column_info_df.theta.to_numpy()
 cell_phi = column_info_df.phi.to_numpy()
@@ -92,6 +95,9 @@ data_out = {}
 data_out['dt'] = model_config['model']['dt']
 
 def interp_nan_column(time_by_neurons):
+    if time_by_neurons.ndim == 2:
+        time_by_neurons = time_by_neurons[None, :, :]
+        
     num_neurons = time_by_neurons.shape[2]
     distance = 10 * np.pi / 180
     nan_neurons = np.any(np.isnan(time_by_neurons), axis=(0, 1))
@@ -114,9 +120,12 @@ pred_plot_l1 /= np.nanpercentile(pred_plot_l1, color_percentile)
 pred_plot = interp_nan_column(pred_plot_l1)
 
 data_out['L1'] = pred_plot_l1
+data_out['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5
 
-init_scatter = make_scatter_plot_factory(pred_plot_l1, cell_x, cell_z)
-make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="L1")
+# init_scatter = make_scatter_plot_factory(pred_plot_l1, cell_x, cell_z)
+# make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="L1")
+# init_scatter = make_scatter_plot_factory(data_out['stimulus'], cell_x, cell_z)
+# make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="stimulus")
 
 # --- T4 and T5 pairings ---
 pairs = {'right_cells': ['T4a', 'T5a'], 
@@ -125,24 +134,64 @@ pairs = {'right_cells': ['T4a', 'T5a'],
          'down_cells': ['T4d', 'T5d']}
 
 pair_resp = {}
+pair_resp_t4 = {}
+pair_resp_t4['stimulus'] = data_out['stimulus']
+pair_resp_t5 = {}
 
-for pkey, pval in pairs.items():
-    # normalize
-    pred_plot_0 = pred[pval[0]].detach().cpu().numpy()
-    pred_plot_0 /= np.nanpercentile(pred_plot_0, color_percentile)
-    pred_plot_0 = np.exp(pred_plot_0) / np.exp(1)
-    pred_plot_0 = interp_nan_column(pred_plot_0)
 
-    pred_plot_1 = pred[pval[1]].detach().cpu().numpy()
-    pred_plot_1 /= np.nanpercentile(pred_plot_1, color_percentile)
-    pred_plot_1 = np.exp(pred_plot_1) / np.exp(1)
-    pred_plot_1 = interp_nan_column(pred_plot_1)
+# for pkey, pval in pairs.items():
+#     # normalize
+#     pred_plot_0 = pred[pval[0]].detach().cpu().numpy()
+#     pred_plot_0 /= np.nanpercentile(pred_plot_0, color_percentile)
+#     pred_plot_0 = np.exp(pred_plot_0) / np.exp(1)
+#     pred_plot_0 = interp_nan_column(pred_plot_0)
 
-    pair_resp[pkey] = (pred_plot_0 + pred_plot_1) / 2
-    data_out[pkey] = (pred_plot_0 + pred_plot_1) / 2
+#     pred_plot_1 = pred[pval[1]].detach().cpu().numpy()
+#     pred_plot_1 /= np.nanpercentile(pred_plot_1, color_percentile)
+#     pred_plot_1 = np.exp(pred_plot_1) / np.exp(1)
+#     pred_plot_1 = interp_nan_column(pred_plot_1)
 
-    # init_scatter = make_scatter_plot_factory(pred_plot, cell_x, cell_z)
-    # make_movie(init_scatter, directions, fig_folder, frame_rate, save_name=pval[0])
+#     pair_resp_t4[pkey] = pred_plot_0
+#     pair_resp_t5[pkey] = pred_plot_1
+#     pair_resp[pkey] = (pred_plot_0 + pred_plot_1) / 2
+#     data_out[pkey] = (pred_plot_0 + pred_plot_1) / 2
+
+    # init_scatter = make_scatter_plot_factory(pair_resp[pkey], cell_x, cell_z)
+    # make_movie(init_scatter, directions, fig_folder, frame_rate, save_name=pkey)
+
+# --- Diamond single-axes movie for all pairs ---
+# get the response of each cell type to each different stimulus
+stim_resp = {}
+measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
+for si, s in enumerate(directions):
+        stim_resp[s] = {}
+        stim_resp[s]['stimulus'] = stimulus[si, :, :].detach().cpu().numpy() / 2 + 0.5
+        stim_resp[s]['responses'] = {}
+
+for mct in measured_cell_types:
+    cell_resp = pred[mct].detach().cpu().numpy()
+    cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+    cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
+    cell_resp = interp_nan_column(cell_resp)
+
+    for si, s in enumerate(directions):
+        stim_resp[s]['responses'][mct] = cell_resp[si, :, :]
+
+init_scatter_diamond = make_scatter_diamond_factory(stim_resp, cell_x, cell_z, scale=1.8, size_scale=0.6, label=False)
+make_movie(init_scatter_diamond, directions, fig_folder, frame_rate, save_name="t4")
+
+init_scatter_diamond = make_scatter_diamond_sequence_factory(stim_resp, cell_x, cell_z, scale=1.8, size_scale=0.6, label=False)
+make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="sequence_t4")
+
+# init_scatter_diamond = make_scatter_diamond_sequence_factory(stim_resp, cell_x, cell_z, scale=1.8, size_scale=0.6, label=False)
+# make_movie(init_scatter_diamond, directions, fig_folder, frame_rate, save_name="pairs_diamond_t4")
+
+
+# init_scatter_grid = make_scatter_grid_factory(pair_resp_t5, cell_x, cell_z)
+# make_movie(init_scatter_grid, directions, fig_folder, frame_rate, save_name="pairs_grid_t5")
+
+# init_scatter_grid = make_scatter_grid_factory(pair_resp, cell_x, cell_z)
+# make_movie(init_scatter_grid, directions, fig_folder, frame_rate, save_name="pairs_grid")
 
 # --- Predicted direction ---
 scaling = 0.2
