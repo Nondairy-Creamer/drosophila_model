@@ -38,7 +38,7 @@ def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
 
     return init_plot_for_direction
 
-def make_scatter_diamond_sequence_factory(pair_resp, cell_x, cell_z, offset=2.6, label=False, scale=1.0, size_scale=1.0, order=('left','right','up','down')):
+def make_scatter_diamond_sequence_factory(pair_resp, cell_x, cell_z, offset=2.6, label=False, scale=1.0, size_scale=1.0, order=('right','left','up','down')):
     """
     New-format only, single input dict (same format as make_scatter_diamond_factory).
     Returns a factory callable that, for any direction index, initializes a single-axes
