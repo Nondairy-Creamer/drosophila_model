@@ -19,7 +19,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251110_234900')
+model_folder = Path('models/20251104_203752_21Loss_SqrtInit_SpecNorm')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -31,7 +31,7 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
-frame_rate = int(1 / model_config['stimulus']['dt'])
+frame_rate = int(1 / model_config['model']['dt'])
 color_percentile = 90
 
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
@@ -39,39 +39,39 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
 # --- load the sine wave stimuli ---
-# directions = ['right', 'left', 'up', 'down']
-# stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
+directions = ['right', 'left', 'up', 'down']
+stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
 
-# # restrict the stimulus to 8 Hz, one phase
-# num_phase = 4
-# num_dir = len(directions)
-# num_vel = 3
-# stimulus = stimulus[::num_phase, :, :]
-# stimulus = stimulus[(num_vel - 1)::num_vel, :, :]
+# restrict the stimulus to 8 Hz, one phase
+num_phase = 4
+num_dir = len(directions)
+num_vel = 3
+stimulus = stimulus[::num_phase, :, :]
+stimulus = stimulus[(num_vel - 1)::num_vel, :, :]
 
-# --- load the stimuli from the camera ---
-directions = ['real_movie']
-stimulus = np.load(connectome_folder / 'fly_view3.npy')
-# encoding_mean = 255 / 2
-stimulus = np.log(stimulus)  # use logarithmic encoding?
-encoding_mean = np.log(255) / 2
-stimulus -= encoding_mean
-stimulus /= encoding_mean
+# # --- load the stimuli from the camera ---
+# directions = ['real_movie']
+# stimulus = np.load(connectome_folder / 'fly_view3.npy')
+# # encoding_mean = 255 / 2
+# stimulus = np.log(stimulus)  # use logarithmic encoding?
+# encoding_mean = np.log(255) / 2
+# stimulus -= encoding_mean
+# stimulus /= encoding_mean
 
-# Resample stimulus from original 20 Hz (dt=0.05s) to target dt using linear interpolation
-orig_dt = 1.0 / 20.0
-target_dt = float(model_config['stimulus']['dt'])
-num_t0, num_neurons = stimulus.shape
-t0 = np.arange(num_t0, dtype=np.float64) * orig_dt
-t_end = t0[-1]
-num_t1 = int(np.floor(t_end / target_dt)) + 1
-t1 = np.arange(num_t1, dtype=np.float64) * target_dt
-stimulus_resampled = np.empty((num_t1, num_neurons), dtype=stimulus.dtype)
-for j in range(num_neurons):
-    stimulus_resampled[:, j] = np.interp(t1, t0, stimulus[:, j])
-stimulus = stimulus_resampled
-stimulus = stimulus[None, :, :]
-stimulus = torch.tensor(stimulus, dtype=dtype, device=model.device)
+# # Resample stimulus from original 20 Hz (dt=0.05s) to target dt using linear interpolation
+# orig_dt = 1.0 / 20.0
+# target_dt = float(model_config['model']['dt'])
+# num_t0, num_neurons = stimulus.shape
+# t0 = np.arange(num_t0, dtype=np.float64) * orig_dt
+# t_end = t0[-1]
+# num_t1 = int(np.floor(t_end / target_dt)) + 1
+# t1 = np.arange(num_t1, dtype=np.float64) * target_dt
+# stimulus_resampled = np.empty((num_t1, num_neurons), dtype=stimulus.dtype)
+# for j in range(num_neurons):
+#     stimulus_resampled[:, j] = np.interp(t1, t0, stimulus[:, j])
+# stimulus = stimulus_resampled
+# stimulus = stimulus[None, :, :]
+# stimulus = torch.tensor(stimulus, dtype=dtype, device=model.device)
 
 # --- feed the stimulus into the model ---
 input_neurons = ['L1', 'L2', 'L3']
@@ -89,7 +89,7 @@ num_stim, num_time, num_columns = stimulus.shape
 num_neurons = model.num_neurons
 
 data_out = {}
-data_out['dt'] = model_config['stimulus']['dt']
+data_out['dt'] = model_config['model']['dt']
 
 def interp_nan_column(time_by_neurons):
     num_neurons = time_by_neurons.shape[2]

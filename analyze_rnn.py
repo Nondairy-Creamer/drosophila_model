@@ -95,7 +95,7 @@ pu.plot_readout_target(pred_trained, target, save_folder=model_folder / 'analysi
 # # --- get a sign wave stimulus ---
 # # generate a sine wave on a cylinder around the fly
 # import model_utilities as mu
-# dt = model_config['stimulus']['dt']
+# dt = model_config['model']['dt']
 # max_time = 8
 # input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 # output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
