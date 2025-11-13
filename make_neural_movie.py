@@ -22,7 +22,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251104_203752_21Loss_SqrtInit_SpecNorm')
+model_folder = Path('models/20251113_201943')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -41,15 +41,16 @@ cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parque
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 
 # --- load the sine wave stimuli ---
-directions = ['right', 'left', 'up', 'down']
+# directions = ['right', 'left', 'up', 'down']
+directions = ['right_left', 'up_down']
 stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
 
 # restrict the stimulus to 8 Hz, one phase
 num_phase = 4
 num_dir = len(directions)
-num_vel = 3
+num_stim = 10
 stimulus = stimulus[::num_phase, :, :]
-stimulus = stimulus[(num_vel - 1)::num_vel, :, :]
+stimulus = stimulus[(num_stim - 2)::num_stim, :, :]
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']

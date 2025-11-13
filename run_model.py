@@ -45,7 +45,8 @@ num_columns = len(column_info_df)
 # we'll use the columns that have all our input and output neurons
 input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
+# output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
+output_neurons_direction = ['right_left', 'right_left', 'up_down', 'up_down', 'right_left', 'right_left', 'up_down', 'up_down']
 
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
@@ -57,37 +58,60 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 
 # # --- get a sign wave stimulus ---
 # # generate a sine wave on a cylinder around the fly
-# sine_waves, sine_wave_tfs, contrast_scaling_factor = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
+# sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
 #     temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
 # sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 # sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
 # --- generate a sine wave with random tf over time
-sine_waves, sine_wave_tfs, contrast_scaling_factor = su.create_random_tf_sine_wave(
-    column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), tf_amp=2, tf_std=0.25, dt=dt, stim_time=stim_time)
+sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_random_tf_sine_wave(
+    column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
+    tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
+    num_stim=config['stimulus']['num_stim'], dt=dt, stim_time=stim_time)
+sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
+sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
 # --- plot the stimuli ---
 pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_df.x, column_info_df.z, save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
 num_stimuli = sine_waves.shape[0]
-directions = ['right', 'left', 'up', 'down']
 target = {}
 
+# for i in range(len(output_neurons)):
+#     this_neuron = output_neurons[i]
+#     this_block = output_neurons_direction[i]
+#     this_block_index = blocks.index(this_block)
+#     num_blocks = len(blocks)
+#     stimulus_block_size = num_stimuli // num_blocks  # limits this cell preference to one of the right left up down blocks
+
+#     # get the index of the stimuli that this neruon will respond to, based on the direction
+#     stim_resp_inds = torch.arange(this_block_index * stimulus_block_size, (this_block_index + 1) * stimulus_block_size)
+
+#     target[this_neuron] = torch.zeros((num_stimuli, num_time, num_columns), device=device, dtype=dtype)
+#     start_index = int(pre_stim_time / dt)
+#     stop_index = int((pre_stim_time + stim_time) / dt)
+#     target[this_neuron][stim_resp_inds, start_index:stop_index, :] = sine_wave_tfs[stim_resp_inds, None, None]
+
+# --- make stimulus for random velocity sine wave ---
 for i in range(len(output_neurons)):
     this_neuron = output_neurons[i]
-    this_direction = output_neurons_direction[i]
-    this_direction_index = directions.index(this_direction)
-    num_direction = len(directions)
-    stimulus_block_size = num_stimuli // num_direction  # limits this cell prefernce to one of the right left up down blocks
+    this_block = output_neurons_direction[i]
+    this_block_index = blocks.index(this_block)
+    num_blocks = len(blocks)
+    stimulus_block_size = num_stimuli // num_blocks  # limits this cell preference to one of the right_left or up_down blocks
 
     # get the index of the stimuli that this neruon will respond to, based on the direction
-    stim_resp_inds = torch.arange(this_direction_index * stimulus_block_size, (this_direction_index + 1) * stimulus_block_size)
+    stim_resp_inds = torch.arange(this_block_index * stimulus_block_size, (this_block_index + 1) * stimulus_block_size)
 
-    target[this_neuron] = torch.zeros((num_stimuli, num_time, num_columns), device=device, dtype=dtype)
-    start_index = int(pre_stim_time / dt)
-    stop_index = int((pre_stim_time + stim_time) / dt)
-    target[this_neuron][stim_resp_inds, start_index:stop_index, :] = sine_wave_tfs[stim_resp_inds, None, None]
+    target[this_neuron] = torch.zeros_like(sine_wave_tfs)
+    target[this_neuron][stim_resp_inds, :, :] = sine_wave_tfs[stim_resp_inds, :, :]
+    
+    if this_neuron in ['T4a', 'T5a', 'T4c', 'T5c']:
+        target[this_neuron][target[this_neuron] < 0] = 0
+    elif this_neuron in ['T4b', 'T5b', 'T4d', 'T5d']:
+        target[this_neuron] = -target[this_neuron]
+        target[this_neuron][target[this_neuron] < 0] = 0
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
