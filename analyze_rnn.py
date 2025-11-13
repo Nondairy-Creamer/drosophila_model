@@ -7,6 +7,7 @@ import neural_models as nm
 import data_utilities as du
 import plotting_utilities as pu
 import training_utilities as tu
+import stimulus_utilities as su
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
@@ -105,7 +106,7 @@ pu.plot_readout_target(pred_trained, target, save_folder=model_folder / 'analysi
 # column_info_input_df, column_ids_input = du.get_column_df(cell_info_df, input_neurons)
 # column_info_output_df, column_ids_output = du.get_column_df(cell_info_df, output_neurons)
 
-# sine_waves, sine_wave_tfs, contrast_scaling_function = mu.create_sine_wave(column_info_input_df.phi.to_numpy(), column_info_input_df.theta.to_numpy(), 
+# sine_waves, sine_wave_tfs, contrast_scaling_function = su.create_sine_wave(column_info_input_df.phi.to_numpy(), column_info_input_df.theta.to_numpy(), 
 #     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
 # sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 # stim_to_cell_mapping = mu.get_stim_to_cell_mapping(cell_info_df, column_info_input_df, input_neurons=input_neurons)

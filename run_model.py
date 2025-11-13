@@ -9,6 +9,7 @@ import time
 import data_utilities as du
 from datetime import datetime
 import training_utilities as tu
+import stimulus_utilities as su
 
 
 # Load configuration from TOML file
@@ -54,12 +55,16 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
                      use_sparse=config['model']['use_sparse'], use_layer_norm=config['model']['use_layer_norm'],
                      dt=dt)
 
-# --- get a sign wave stimulus ---
-# generate a sine wave on a cylinder around the fly
-sine_waves, sine_wave_tfs, contrast_scaling_factor = mu.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
-    temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
-sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
-sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
+# # --- get a sign wave stimulus ---
+# # generate a sine wave on a cylinder around the fly
+# sine_waves, sine_wave_tfs, contrast_scaling_factor = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
+#     temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
+# sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
+# sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
+
+# --- generate a sine wave with random tf over time
+sine_waves, sine_wave_tfs, contrast_scaling_factor = su.create_random_tf_sine_wave(
+    column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), tf_amp=2, tf_std=0.25, dt=dt, stim_time=stim_time)
 
 # --- plot the stimuli ---
 pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_df.x, column_info_df.z, save_folder='figures/stimulus')
