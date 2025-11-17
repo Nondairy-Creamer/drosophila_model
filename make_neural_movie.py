@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import matplotlib.colors as mcolors
-import imageio.v3 as iio  # pip install imageio[ffmpeg]
+
 from movie_utilities import (
     make_movie,
     make_scatter_plot_factory,
@@ -22,7 +22,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251113_201943')
+model_folder = Path('models/20251113_213941_largeDrift')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -50,7 +50,8 @@ num_phase = 4
 num_dir = len(directions)
 num_stim = 10
 stimulus = stimulus[::num_phase, :, :]
-stimulus = stimulus[(num_stim - 2)::num_stim, :, :]
+# stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
+# stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
@@ -125,96 +126,23 @@ data_out['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5
 
 # init_scatter = make_scatter_plot_factory(pred_plot_l1, cell_x, cell_z)
 # make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="L1")
-# init_scatter = make_scatter_plot_factory(data_out['stimulus'], cell_x, cell_z)
-# make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="stimulus")
 
-# --- T4 and T5 pairings ---
-pairs = {'right_cells': ['T4a', 'T5a'], 
-         'left_cells': ['T4b', 'T5b'], 
-         'up_cells': ['T4c', 'T5c'],
-         'down_cells': ['T4d', 'T5d']}
-
-pair_resp = {}
-pair_resp_t4 = {}
-pair_resp_t4['stimulus'] = data_out['stimulus']
-pair_resp_t5 = {}
-
-
-# for pkey, pval in pairs.items():
-#     # normalize
-#     pred_plot_0 = pred[pval[0]].detach().cpu().numpy()
-#     pred_plot_0 /= np.nanpercentile(pred_plot_0, color_percentile)
-#     pred_plot_0 = np.exp(pred_plot_0) / np.exp(1)
-#     pred_plot_0 = interp_nan_column(pred_plot_0)
-
-#     pred_plot_1 = pred[pval[1]].detach().cpu().numpy()
-#     pred_plot_1 /= np.nanpercentile(pred_plot_1, color_percentile)
-#     pred_plot_1 = np.exp(pred_plot_1) / np.exp(1)
-#     pred_plot_1 = interp_nan_column(pred_plot_1)
-
-#     pair_resp_t4[pkey] = pred_plot_0
-#     pair_resp_t5[pkey] = pred_plot_1
-#     pair_resp[pkey] = (pred_plot_0 + pred_plot_1) / 2
-#     data_out[pkey] = (pred_plot_0 + pred_plot_1) / 2
-
-    # init_scatter = make_scatter_plot_factory(pair_resp[pkey], cell_x, cell_z)
-    # make_movie(init_scatter, directions, fig_folder, frame_rate, save_name=pkey)
-
-# --- Diamond single-axes movie for all pairs ---
-# get the response of each cell type to each different stimulus
-stim_resp = {}
+# --- Diamond sequence movie for measured cell types + stimulus ---
 measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
-for si, s in enumerate(directions):
-        stim_resp[s] = {}
-        stim_resp[s]['stimulus'] = stimulus[si, :, :].detach().cpu().numpy() / 2 + 0.5
-        stim_resp[s]['responses'] = {}
 
+# Build responses dictionary limited to measured cell types, and add stimulus
+seq_data = {}
 for mct in measured_cell_types:
     cell_resp = pred[mct].detach().cpu().numpy()
     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
     cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
     cell_resp = interp_nan_column(cell_resp)
+    seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
-    for si, s in enumerate(directions):
-        stim_resp[s]['responses'][mct] = cell_resp[si, :, :]
+seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
 
-init_scatter_diamond = make_scatter_diamond_factory(stim_resp, cell_x, cell_z, scale=1.8, size_scale=0.6, label=False)
-make_movie(init_scatter_diamond, directions, fig_folder, frame_rate, save_name="t4")
-
-init_scatter_diamond = make_scatter_diamond_sequence_factory(stim_resp, cell_x, cell_z, scale=1.8, size_scale=0.6, label=False)
-make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="sequence_t4")
-
-# init_scatter_diamond = make_scatter_diamond_sequence_factory(stim_resp, cell_x, cell_z, scale=1.8, size_scale=0.6, label=False)
-# make_movie(init_scatter_diamond, directions, fig_folder, frame_rate, save_name="pairs_diamond_t4")
-
-
-# init_scatter_grid = make_scatter_grid_factory(pair_resp_t5, cell_x, cell_z)
-# make_movie(init_scatter_grid, directions, fig_folder, frame_rate, save_name="pairs_grid_t5")
-
-# init_scatter_grid = make_scatter_grid_factory(pair_resp, cell_x, cell_z)
-# make_movie(init_scatter_grid, directions, fig_folder, frame_rate, save_name="pairs_grid")
-
-# --- Predicted direction ---
-scaling = 0.2
-eps = 1e-3
-
-x_motion = scaling * (pair_resp['right_cells'] - pair_resp['left_cells']) / (pair_resp['right_cells'] + pair_resp['left_cells'] + eps)
-z_motion = scaling * (pair_resp['up_cells'] - pair_resp['down_cells']) / (pair_resp['up_cells'] + pair_resp['down_cells'] + eps)
-
-data_out['motion_vector'] = [x_motion, z_motion]
-
-init_quiver = make_quiver_plot_factory(x_motion, z_motion, cell_x, cell_z)
-make_movie(init_quiver, directions, fig_folder, frame_rate, save_name="flow")
-
-# --- Motion Magnitude ---
-# Create boolean mask for cells in the full cell_info_df (for indexing predictions)
-motion_magnitude = (np.abs(x_motion) + np.abs(z_motion)) / 2
-motion_magnitude /= np.nanpercentile(motion_magnitude, color_percentile)
-
-data_out['motion_magnitude'] = motion_magnitude
-
-init_scatter = make_scatter_plot_factory(motion_magnitude, cell_x, cell_z)
-make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="motion_magnitude")
+init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
+make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4")
 
 np.savez_compressed(fig_folder / 'fly_model_responses.npz', **data_out)
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)

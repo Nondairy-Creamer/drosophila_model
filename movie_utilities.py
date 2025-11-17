@@ -36,26 +36,38 @@ def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
 
         return fig, update, num_frames
 
+    # Expose metadata for movie maker
+    init_plot_for_direction.num_stimuli = int(pred_plot.shape[0])
+    init_plot_for_direction.uses_stimuli_index = True
     return init_plot_for_direction
 
-def make_scatter_diamond_sequence_factory(pair_resp, cell_x, cell_z, offset=2.6, label=False, scale=1.0, size_scale=1.0, order=('right','left','up','down')):
+def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0):
     """
-    New-format only, single input dict (same format as make_scatter_diamond_factory).
-    Returns a factory callable that, for any direction index, initializes a single-axes
-    diamond layout and plays the four direction blocks back-to-back in the specified order,
-    inserting 25 zero frames between them AND after the last block.
-      - pair_resp: dict with keys ['right','left','up','down'], each with:
-          - 'stimulus': [time, columns]
-          - 'responses': dict of four entries (insertion order), each [time, columns]
-      - order: tuple specifying playback order of direction keys
-    The returned init callable conforms to make_movie: init(d, di) -> (fig, update, num_frames).
+    New simple interface:
+      - responses_dict: dict with 5 keys (in insertion order):
+          ['<right>', '<left>', '<up>', '<down>', 'stimulus']
+        Each value is a numpy array shaped [num_stimuli, num_time, num_columns].
+      - The four non-'stimulus' keys are plotted simultaneously in a diamond:
+          order (in insertion): Right at (+offset, 0), Left at (-offset, 0),
+          Up at (0, +offset), Down at (0, -offset).
+        'stimulus' is plotted at the center with half spatial scale and smaller markers.
+      - For each stimulus index, we render its full time series, followed by 25 blank frames.
+    The returned init callable conforms to make_movie: init(d, di) -> (fig, update(frame_t), num_frames).
+    This factory concatenates ALL stimuli back-to-back into a single movie (with gaps),
+    so the stimulus index parameter is ignored.
     """
     norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    positions = {
-        'up': (0.0, +offset),
-        'right': (+offset, 0.0),
-        'left': (-offset, 0.0),
-        'down': (0.0, -offset),
+    # Extract ordering of cell-type keys and stimulus
+    keys_in_order = list(responses_dict.keys())
+    cell_keys = [k for k in keys_in_order if k != 'stimulus']
+    # Constrain to four positions, preserving insertion order
+    cell_keys = cell_keys[:4]
+    # Position mapping for the four entries by index
+    position_by_index = {
+        0: (+offset, 0.0),   # right
+        1: (-offset, 0.0),   # left
+        2: (0.0, +offset),   # up
+        3: (0.0, -offset),   # down
     }
 
     def init_plot_for_direction(d, di):
@@ -66,15 +78,15 @@ def make_scatter_diamond_sequence_factory(pair_resp, cell_x, cell_z, offset=2.6,
         except Exception:
             pass
 
-        # Compute tight limits once (independent of which dict is playing)
+        # Precompute scaled/shifted coordinates and set tight limits
         coords = []
-        for dir_name in ['up', 'right', 'left', 'down']:
-            dx, dz = positions[dir_name]
+        for idx in range(len(cell_keys)):
+            dx, dz = position_by_index[idx]
             coords.append((scale * cell_x + dx, scale * cell_z + dz))
         # include stimulus footprint
         coords.append(((0.5 * scale) * cell_x, (0.5 * scale) * cell_z))
-        x_all = np.concatenate([xy[0] for xy in coords])
-        y_all = np.concatenate([xy[1] for xy in coords])
+        x_all = np.concatenate([xy[0] for xy in coords]) if coords else (scale * cell_x)
+        y_all = np.concatenate([xy[1] for xy in coords]) if coords else (scale * cell_z)
         x_min, x_max = np.min(x_all), np.max(x_all)
         y_min, y_max = np.min(y_all), np.max(y_all)
         x_span = max(1e-6, x_max - x_min)
@@ -96,105 +108,85 @@ def make_scatter_diamond_sequence_factory(pair_resp, cell_x, cell_z, offset=2.6,
         base_ms = plt.rcParams.get("lines.markersize", 6.0)
         base_s = float(base_ms) ** 2
         s_dir = max(1.0, base_s * size_scale)
-        s_stim = max(1.0, s_dir * 0.2)  # keep consistent with diamond factory default
+        s_stim = max(1.0, s_dir * 0.2)
 
-        # Create artists for four directions
-        dir_order = ['up', 'right', 'left', 'down']
-        dir_scatters = {}
-        for dir_name in dir_order:
-            dx, dz = positions[dir_name]
+        # Determine shapes
+        # Use stimulus (preferred) to infer dimensions; fall back to first cell key
+        stim_all = responses_dict.get('stimulus', None)
+        if stim_all is not None:
+            num_stimuli, L, num_cols = stim_all.shape
+        elif len(cell_keys) > 0:
+            num_stimuli, L, num_cols = responses_dict[cell_keys[0]].shape
+        else:
+            num_stimuli, L, num_cols = 1, 0, cell_x.shape[0]
+
+        # Create artists for cell types
+        dir_scatters = []
+        for idx, key in enumerate(cell_keys):
+            arr_all = responses_dict.get(key, None)
+            dx, dz = position_by_index[idx]
+            initial = np.zeros(num_cols, dtype=float)
+            if arr_all is not None and num_stimuli > 0 and L > 0:
+                initial = arr_all[0, 0, :]
             sc = ax.scatter(
                 scale * cell_x + dx,
                 scale * cell_z + dz,
-                c=np.zeros_like(cell_x),
+                c=initial,
                 cmap="viridis",
                 norm=norm,
                 s=s_dir
             )
-            if label:
-                ax.text(dx, dz + 0.9 * scale, dir_name, ha='center', va='bottom', fontsize=10, color='black')
-            dir_scatters[dir_name] = sc
+            dir_scatters.append((key, sc))
 
-        # Stimulus artist (always present but may be zeroed)
+        # Stimulus artist at center
+        stim_initial = np.zeros(num_cols, dtype=float)
+        if stim_all is not None and num_stimuli > 0 and L > 0:
+            stim_initial = stim_all[0, 0, :]
         stim_scatter = ax.scatter(
             (0.5 * scale) * cell_x,
             (0.5 * scale) * cell_z,
-            c=np.zeros_like(cell_x),
+            c=stim_initial,
             cmap="viridis",
             norm=norm,
             s=s_stim
         )
-        if label:
-            ax.text(0.0, 0.9 * 0.5 * scale, 'stimulus', ha='center', va='bottom', fontsize=10, color='black')
 
-        num_cols = cell_x.shape[0]
-
-        # Helper to extract arrays for a single direction block
-        def extract_block_arrays(block):
-            values_in_order = list(block.get('responses', {}).values()) if isinstance(block.get('responses', {}), dict) else []
-            mapping_dirs = ['right', 'left', 'up', 'down']
-            # Determine frame count for this block
-            L_candidates = []
-            stim_arr = block.get('stimulus', None)
-            if isinstance(stim_arr, np.ndarray):
-                L_candidates.append(stim_arr.shape[0])
-            for arr in values_in_order:
-                if isinstance(arr, np.ndarray):
-                    L_candidates.append(arr.shape[0])
-            L = min(L_candidates) if L_candidates else 0
-            # Build directional arrays, clipped to L
-            dir_arrays = {}
-            for pos, dir_name in enumerate(mapping_dirs):
-                if pos < len(values_in_order) and isinstance(values_in_order[pos], np.ndarray):
-                    dir_arrays[dir_name] = values_in_order[pos][:L, :]
-                else:
-                    dir_arrays[dir_name] = np.zeros((L, num_cols), dtype=float)
-            if isinstance(stim_arr, np.ndarray):
-                stim_array = stim_arr[:L, :]
-            else:
-                stim_array = np.zeros((L, num_cols), dtype=float)
-            return L, dir_arrays, stim_array
-
-        # Build segment schedule from the single input dict ordered by `order`
-        segments = []
-        segment_data = []
-        total_frames = 0
         blanks = 25
-        for i, dir_key in enumerate(order):
-            block = pair_resp.get(dir_key, {})
-            L, dir_arrays, stim_array = extract_block_arrays(block)
-            segments.append(('data', i, L))
-            segment_data.append((dir_arrays, stim_array))
-            total_frames += L
-            # Always add a blank segment after each block, including the last
-            segments.append(('blank', None, blanks))
-            total_frames += blanks
+        total_frames = num_stimuli * (L + blanks)
 
         def update(frame_t):
-            # Determine which segment and local frame
-            t = frame_t
-            for seg_type, idx, length in segments:
-                if t < length:
-                    if seg_type == 'blank':
-                        zero_vec = np.zeros(num_cols, dtype=float)
-                        for sc in dir_scatters.values():
-                            sc.set_array(zero_vec)
-                        stim_scatter.set_array(zero_vec)
-                    else:  # data
-                        dir_arrays, stim_array = segment_data[idx]
-                        for dir_name, sc in dir_scatters.items():
-                            sc.set_array(dir_arrays[dir_name][t, :])
-                        stim_scatter.set_array(stim_array[t, :])
-                    return
-                t -= length
-            # Safety: if out of range, show blank
-            zero_vec = np.zeros(num_cols, dtype=float)
-            for sc in dir_scatters.values():
-                sc.set_array(zero_vec)
-            stim_scatter.set_array(zero_vec)
+            if total_frames == 0 or L == 0:
+                zero_vec = np.zeros(num_cols, dtype=float)
+                for _, sc in dir_scatters:
+                    sc.set_array(zero_vec)
+                stim_scatter.set_array(zero_vec)
+                return
+            block = L + blanks
+            stim_idx = min(num_stimuli - 1, frame_t // block)
+            within = frame_t % block
+            if within < L:
+                t = within
+                for key, sc in dir_scatters:
+                    arr_all = responses_dict.get(key, None)
+                    if arr_all is not None and stim_idx < arr_all.shape[0]:
+                        sc.set_array(arr_all[stim_idx, t, :])
+                    else:
+                        sc.set_array(np.zeros(num_cols, dtype=float))
+                if stim_all is not None and stim_idx < stim_all.shape[0]:
+                    stim_scatter.set_array(stim_all[stim_idx, t, :])
+                else:
+                    stim_scatter.set_array(np.zeros(num_cols, dtype=float))
+            else:
+                zero_vec = np.zeros(num_cols, dtype=float)
+                for _, sc in dir_scatters:
+                    sc.set_array(zero_vec)
+                stim_scatter.set_array(zero_vec)
 
         return fig, update, total_frames
 
+    # Expose metadata for movie maker: single movie that ignores stimuli indexing
+    init_plot_for_direction.num_stimuli = 1
+    init_plot_for_direction.uses_stimuli_index = False
     return init_plot_for_direction
 
 
@@ -239,32 +231,66 @@ def make_quiver_plot_factory(x_flow, z_flow, cell_x, cell_z):
 
         return fig, update, num_frames
 
+    # Expose metadata for movie maker
+    init_plot_for_direction.num_stimuli = int(x_flow.shape[0])
+    init_plot_for_direction.uses_stimuli_index = True
     return init_plot_for_direction
 
 
 def make_movie(init_plot_for_direction, directions, fig_folder, frame_rate, save_name=''):
     """
-    Generic movie maker. Accepts an initializer factory for the chosen figure type.
-      - init_plot_for_direction(d, di) -> (fig, update(frame_t), num_frames)
+    Generic movie maker that supports multiple stimuli per direction.
+    - Determines the number of stimuli from the initializer's `num_stimuli` attribute.
+    - Splits the stimuli into consecutive blocks across len(directions) directions.
+    - If the initializer does not use a stimuli index (uses_stimuli_index=False), falls back to one movie per direction.
+    - Output filenames: {save_name}_{direction}_{stimulus_index}.mp4 when per-stimulus; else {save_name}_{direction}.mp4
     """
-    for di, d in enumerate(directions):
-        frames = []
-        fig, update, num_frames = init_plot_for_direction(d, di)
+    num_directions = len(directions)
+    total_stimuli = getattr(init_plot_for_direction, 'num_stimuli', num_directions)
+    uses_index = getattr(init_plot_for_direction, 'uses_stimuli_index', True)
 
-        for t in range(num_frames):
-            update(t)
-            frames.append(fig_to_rgb(fig))
+    if not uses_index:
+        # One movie per direction, ignoring stimulus index
+        for di, d in enumerate(directions):
+            frames = []
+            fig, update, num_frames = init_plot_for_direction(d, di)
+            for t in range(num_frames):
+                update(t)
+                frames.append(fig_to_rgb(fig))
+            plt.close(fig)
+            stack = np.stack(frames, axis=0)
+            iio.imwrite(
+                fig_folder / f"{save_name}_{d}.mp4",
+                stack,
+                fps=frame_rate,
+                codec="libx264",
+                pixelformat="yuv420p",
+            )
+        return
 
-        plt.close(fig)
-
-        stack = np.stack(frames, axis=0)
-        iio.imwrite(
-            fig_folder / f"{save_name}_{d}.mp4",
-            stack,
-            fps=frame_rate,
-            codec="libx264",
-            pixelformat="yuv420p",
-        )
+    # Split total stimuli into consecutive blocks across directions as evenly as possible
+    base = total_stimuli // num_directions
+    remainder = total_stimuli % num_directions
+    start_index = 0
+    for dir_index, d in enumerate(directions):
+        block_size = base + (1 if dir_index < remainder else 0)
+        for stim_index in range(block_size):
+            di = start_index + stim_index
+            frames = []
+            fig, update, num_frames = init_plot_for_direction(d, di)
+            for t in range(num_frames):
+                update(t)
+                frames.append(fig_to_rgb(fig))
+            plt.close(fig)
+            stack = np.stack(frames, axis=0)
+            iio.imwrite(
+                fig_folder / f"{save_name}_{d}_{stim_index}.mp4",
+                stack,
+                fps=frame_rate,
+                codec="libx264",
+                pixelformat="yuv420p",
+            )
+        start_index += block_size
 
  
 def make_scatter_grid_factory(pair_resp, cell_x, cell_z):
@@ -318,6 +344,12 @@ def make_scatter_grid_factory(pair_resp, cell_x, cell_z):
 
         return fig, update, num_frames
 
+    # Expose metadata for movie maker
+    if len(keys) > 0:
+        init_plot_for_direction.num_stimuli = int(pair_resp[keys[0]].shape[0])
+    else:
+        init_plot_for_direction.num_stimuli = 1
+    init_plot_for_direction.uses_stimuli_index = True
     return init_plot_for_direction
 
 def make_scatter_grid_3x3_factory(pair_resp, cell_x, cell_z):
@@ -396,6 +428,12 @@ def make_scatter_grid_3x3_factory(pair_resp, cell_x, cell_z):
 
         return fig, update, num_frames
 
+    # Expose metadata for movie maker
+    if len(keys) > 0:
+        init_plot_for_direction.num_stimuli = int(pair_resp[keys[0]].shape[0])
+    else:
+        init_plot_for_direction.num_stimuli = 1
+    init_plot_for_direction.uses_stimuli_index = True
     return init_plot_for_direction
 
 def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=False, scale=1.0, size_scale=1.0):
@@ -537,5 +575,8 @@ def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=Fa
 
         return fig, update, num_frames
 
+    # This factory does not use a stimuli index; one movie per direction only
+    init_plot_for_direction.num_stimuli = 1
+    init_plot_for_direction.uses_stimuli_index = False
     return init_plot_for_direction
 

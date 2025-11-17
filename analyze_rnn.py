@@ -12,7 +12,12 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-model_folder = Path('models/20251112_172753_good_mapping')
+model_folder = Path('models/20251113_214447_smallDrift')
+
+# Clear and recreate the analysis folder so outputs are always fresh
+analysis_folder = model_folder / 'analysis'
+shutil.rmtree(analysis_folder, ignore_errors=True)
+analysis_folder.mkdir(parents=True, exist_ok=True)
 
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
@@ -24,10 +29,10 @@ stimulus = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
-
+time_point = 20
 input_neurons = ['L1', 'L2', 'L3']
-cells_to_plot = ['L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T5a', 'L1', 'Mi1', 'T4a']
 
+# --- print out model parameters ---
 # for ctp in cells_to_plot:
 #     print('--- Model parameters for', ctp, '---')
 #     chosen_neuron_bool = model.unique_cell_types == ctp
@@ -50,47 +55,90 @@ loss_scaled = tu.get_scaled_loss_fn(loss_fn, contrast_scaling_factor)
 connectome_folder = Path(model_config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+# Get sort indices based on the phi location of the cells
+phi_sort_inds = np.argsort(column_info_df.phi.to_numpy())[::-1]
 
+# --- get model prediction on the cells it was trained on ---
 trained_cells = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 pred_trained = model.predict(stimulus, input_neurons=input_neurons, output_neurons=trained_cells)
 # get the correlation and cosine similarity
 correlation_similarity = 1.0 - tu.calc_loss(tu.corr_loss, pred_trained, target).detach().cpu().numpy()
 cosine_similarity = 1.0 - tu.calc_loss(tu.cos_loss, pred_trained, target).detach().cpu().numpy()
+print('correlation:', correlation_similarity)
+print('cosine similarity:', cosine_similarity)
 
+pu.plot_readout_target(pred_trained, target, save_folder=analysis_folder)
+
+# --- make XT plots of the cell responses next to the target ---
+for ctp in trained_cells:
+    ctp_dir = analysis_folder / ctp
+    ctp_dir.mkdir(parents=True, exist_ok=True)
+    # plot the response to every fourth stimulus
+    # this is to skip the repeats over phase
+    num_phase_rep = 4
+    pred_plot = pred_trained[ctp][::num_phase_rep, :, :].detach().cpu().numpy()
+    target_plot = target[ctp][::num_phase_rep, :, :].detach().cpu().numpy()
+    # pu.plot_response_over_space(pred_plot[:, time_point, :], column_info_df.x, column_info_df.z, save_folder=model_folder / 'analysis' / ctp)
+
+    valid_cells = ~np.any(np.isnan(pred_plot), axis=(0, 1))
+    sort_inds_no_nan = phi_sort_inds[valid_cells[phi_sort_inds]]
+
+    for pi in range(pred_plot.shape[0]):
+        plt.figure()
+        plt.subplot(1, 2, 1)
+        plt.imshow(pred_plot[pi, :, sort_inds_no_nan], interpolation='nearest', aspect='auto', vmin=0)
+        plt.ylabel('phi')
+        plt.xlabel('time')
+        plt.title('prediction')
+        plt.colorbar()
+        plt.subplot(1, 2, 2)
+        plt.imshow(target_plot[pi, :, sort_inds_no_nan], interpolation='nearest', aspect='auto', vmin=0)
+        plt.xlabel('time')
+        plt.ylabel('phi')
+        plt.title('target')
+        plt.colorbar()
+        plt.savefig(ctp_dir / ('xt_resp' + str(pi) + '.png'))
+        plt.close()
+
+    # --- scatter prediction vs target ---
+    plt.figure()
+    plt.scatter(target_plot.reshape(-1), pred_plot.reshape(-1))
+    plt.xlabel('target')
+    plt.ylabel('prediction')
+    plt.title('ctp')
+    plt.savefig(ctp_dir / 'scatter.png')
+
+
+# --- select some additional neurons for plotting ---
+cells_to_plot = ['L1', 'Tm1']
 pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=cells_to_plot)
 stim_fig_folder = Path('figures/analysis')
 shutil.rmtree(stim_fig_folder, ignore_errors=True)
 stim_fig_folder.mkdir(parents=True, exist_ok=True)
-time_point = 20
 
-print('correlation:', correlation_similarity)
-print('cosine similarity:', cosine_similarity)
-
+# --- make XT plots of the cell responses next to the target ---
 for ctp in cells_to_plot:
+    ctp_dir = analysis_folder / ctp
+    ctp_dir.mkdir(parents=True, exist_ok=True)
     # plot the response to every fourth stimulus
     # this is to skip the repeats over phase
     num_phase_rep = 4
     pred_plot = pred[ctp][::num_phase_rep, :, :].detach().cpu().numpy()
-    pu.plot_response_over_space(pred_plot[:, time_point, :], column_info_df.x, column_info_df.z, save_folder=model_folder / 'analysis' / ctp)
+    # pu.plot_response_over_space(pred_plot[:, time_point, :], column_info_df.x, column_info_df.z, save_folder=model_folder / 'analysis' / ctp)
+
+    valid_cells = ~np.any(np.isnan(pred_plot), axis=(0, 1))
+    sort_inds_no_nan = phi_sort_inds[valid_cells[phi_sort_inds]]
 
     # Get sort indices for just this cell type
-    sort_inds_for_cell = np.argsort(column_info_df.phi.to_numpy())[::-1]
-    for ri, r in enumerate(pred_plot):
+    for pi, r in enumerate(pred_plot):
         plt.figure()
-        plt.imshow(r[:, sort_inds_for_cell], interpolation='nearest', aspect='auto', vmin=0)
-        plt.xlabel('phi')
-        plt.ylabel('time')
+        plt.imshow(r[:, sort_inds_no_nan], interpolation='nearest', aspect='auto', vmin=0)
+        plt.ylabel('phi')
+        plt.xlabel('time')
+        plt.title('prediction')
         plt.colorbar()
-        plt.savefig(model_folder / 'analysis' / ctp / ('xt_resp' + str(ri) + '.png'))
+        plt.savefig(ctp_dir / ('xt_resp' + str(pi) + '.png'))
         plt.close()
-
-pu.plot_readout_target(pred_trained, target, save_folder=model_folder / 'analysis')
-
-
-
-
-
-
 
 # # do a full sine wave sweep
 # # --- get a sign wave stimulus ---
