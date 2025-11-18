@@ -19,7 +19,7 @@ pre_stim_time = 0.0
 post_stim_time = 0.0
 tf_amp = 5.0
 tf_time_scale = 0.15
-num_stim = 10
+num_stim = 5
 temporal_frequencies = [
     2,
     4,

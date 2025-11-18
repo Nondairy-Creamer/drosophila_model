@@ -96,21 +96,23 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     return stimulus, tf_out, contrast_scaling_factor, blocks
 
 def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, rng=np.random.default_rng(),
-                               dt=0.01, stim_time=1.0, num_stim=10):
+                               dt=0.01, stim_time=1.0, num_stim=5):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # the velocity of this sine wave is a smoothed gaussian random walk 
     
     # --- generate the space time coordinates ---
     filter_std_base = 2.5 * np.pi / 180  # radians
-    time_vect = np.arange(0, stim_time * num_stim, step=dt)
+    # double the number of stim because we want to symmetrize the temporal frequnecies
+    time_vect = np.arange(0, stim_time * num_stim * 2, step=dt)
     t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
     t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
     num_time, num_cell = phi_mesh.shape
     time_per_stim = num_time // num_stim
 
     # --- generate the shifting temporal frequency ---
-    tf = rng.standard_normal(num_time)
+    tf = rng.standard_normal(num_time // 2)
+    tf = np.concatenate((tf, -tf), axis=0)
     tf_filter = 1 / (np.sqrt(2 * np.pi * tf_time_scale**2)) * np.exp(-(time_vect-time_vect.mean())**2 / (2 * tf_time_scale**2)) * dt
     tf_filter /= tf_filter.sum()
     tf_filter = np.fft.ifftshift(tf_filter)  # shift for our circular convolution

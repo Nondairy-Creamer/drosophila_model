@@ -18,6 +18,7 @@ class NeuralRnn(torch.nn.Module):
         diagonal_init = 0.5
         stimulus_strength_init = 10.0
         offset_init = 0.0
+        self.max_allowed_sigma = 0.95
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -36,6 +37,9 @@ class NeuralRnn(torch.nn.Module):
         self.column_indices = column_indices
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
+        # Initialize persistent power-iteration vector for warm starts
+        self._power_vec = torch.randn(self.num_neurons, device=self.device, dtype=self.dtype)
+        self._power_vec = self._power_vec / (self._power_vec.norm() + 1e-12)
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -92,7 +96,6 @@ class NeuralRnn(torch.nn.Module):
         if set_spectral_radius:
             with torch.no_grad():
                 # Iteratively scale output_strength to achieve target spectral radius
-                target_rho = 0.90
                 max_scaling_iters = 100
                 rho_tolerance = 0.001
                 damping_factor = 0.5
@@ -103,11 +106,11 @@ class NeuralRnn(torch.nn.Module):
                     print(iter_idx, ':', rho)
                     assert converged, f'spectral radius calculation did not converge at scaling iteration {iter_idx}'
                     
-                    if abs(rho - target_rho) < rho_tolerance:
+                    if abs(rho - self.max_allowed_sigma) < rho_tolerance:
                         break
                     
                     # Scale output_strength to move toward target
-                    scale_factor = (target_rho / rho)**damping_factor
+                    scale_factor = (self.max_allowed_sigma / rho)**damping_factor
                     self.output_strength_log.add_(torch.log(scale_factor))
 
         self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
@@ -179,10 +182,7 @@ class NeuralRnn(torch.nn.Module):
             y = y * D_in
             return y + diagonal * v
 
-        # Use seeded random initialization for reproducibility
-        rng = torch.Generator(device=device).manual_seed(42)
-        x = torch.randn(n, device=device, generator=rng)
-        x = x / (x.norm() + 1e-12)
+        x = self._power_vec
 
         prev = None
         rho = torch.tensor(float("inf"), device=device)
@@ -193,12 +193,18 @@ class NeuralRnn(torch.nn.Module):
             lam = (x * z).sum()
             zn = z.norm()
             if zn == 0:
-                return 0.0, k, True
+                # Update stored vector even on degenerate case
+                self._power_vec = x.detach()
+                return torch.tensor(0.0, device=device, dtype=self.dtype), k, True
             x = z / zn
             rho = torch.sqrt(torch.clamp(lam, min=0.0))
             if prev is not None and torch.abs(rho - prev) / (prev + 1e-12) < tol:
+                # Persist warm-start vector for next call
+                self._power_vec = x.detach()
                 return rho, k, True
             prev = rho
+        # Persist vector even if not fully converged
+        self._power_vec = x.detach()
         return rho, max_iter, False
 
     def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], init_state=None, return_mappings=False):

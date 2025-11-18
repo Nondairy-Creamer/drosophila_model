@@ -105,11 +105,6 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         if (step % reset_init_every) == 0:
             last_state = None
 
-        if last_state is None:
-            print('none')
-        else:
-            print(last_state.shape)
-
         start = time.time()
         opt.zero_grad()
         if cached_mappings is None:
@@ -120,8 +115,8 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         print(torch.max(last_state).cpu().numpy())
 
         loss = calc_loss(loss_fn, pred, target)
-        # add a regularizer based on the spectral radius of the model
-        spectral_radius_loss = model.calc_sigma_max(max_iter=5)[0]**2
+        # add a regularizer based on the operator norm of the model
+        spectral_radius_loss = torch.relu(model.calc_sigma_max(max_iter=10)[0] - model.max_allowed_sigma)
         loss = loss + 1e-2 * spectral_radius_loss
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
