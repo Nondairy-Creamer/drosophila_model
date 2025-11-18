@@ -60,7 +60,7 @@ phi_sort_inds = np.argsort(column_info_df.phi.to_numpy())[::-1]
 
 # --- get model prediction on the cells it was trained on ---
 trained_cells = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-pred_trained = model.predict(stimulus, input_neurons=input_neurons, output_neurons=trained_cells)
+pred_trained = model.predict(stimulus, input_neurons=input_neurons, output_neurons=trained_cells)[0]
 # get the correlation and cosine similarity
 correlation_similarity = 1.0 - tu.calc_loss(tu.corr_loss, pred_trained, target).detach().cpu().numpy()
 cosine_similarity = 1.0 - tu.calc_loss(tu.cos_loss, pred_trained, target).detach().cpu().numpy()
@@ -111,7 +111,7 @@ for ctp in trained_cells:
 
 # --- select some additional neurons for plotting ---
 cells_to_plot = ['L1', 'Tm1']
-pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=cells_to_plot)
+pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=cells_to_plot)[0]
 stim_fig_folder = Path('figures/analysis')
 shutil.rmtree(stim_fig_folder, ignore_errors=True)
 stim_fig_folder.mkdir(parents=True, exist_ok=True)

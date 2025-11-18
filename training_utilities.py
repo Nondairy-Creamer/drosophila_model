@@ -75,10 +75,11 @@ def calc_loss(loss_fn, pred, target):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     cached_mappings = None
+    last_state = None
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -101,12 +102,23 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
     last_saved_idx = -1
 
     for step in range(num_steps):
+        if (step % reset_init_every) == 0:
+            last_state = None
+
+        if last_state is None:
+            print('none')
+        else:
+            print(last_state.shape)
+
         start = time.time()
         opt.zero_grad()
         if cached_mappings is None:
-            pred, cached_mappings = model.predict(inputs, input_neurons=input_neurons, output_neurons=output_neurons, return_mappings=True)
+            pred, last_state, cached_mappings = model.predict(inputs, init_state=last_state, input_neurons=input_neurons, output_neurons=output_neurons, return_mappings=True)
         else:
-            pred = model.predict(inputs, input_neurons=cached_mappings['stim_to_cell_mapping'], output_neurons=cached_mappings['readout_dict'])
+            pred, last_state = model.predict(inputs, init_state=last_state, input_neurons=cached_mappings['stim_to_cell_mapping'], output_neurons=cached_mappings['readout_dict'])
+
+        print(torch.max(last_state).cpu().numpy())
+
         loss = calc_loss(loss_fn, pred, target)
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)

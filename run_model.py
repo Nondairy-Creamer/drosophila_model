@@ -137,5 +137,6 @@ tu.train_model(model, sine_waves, target, output_neurons, input_neurons,
     save_every=config['training']['save_every'], 
     alpha=config['training']['alpha'], 
     clip_grad_norm=config['training']['clip_norm'],
+    reset_init_every=config['training']['reset_init_every'],
     loss_fn=loss_scaled)
 

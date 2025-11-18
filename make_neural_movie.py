@@ -22,7 +22,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251113_214447_smallDrift')
+model_folder = Path('models/20251118_161055')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -34,7 +34,7 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
-frame_rate = int(1 / model_config['model']['dt'] / 2)
+frame_rate = int(1 / model_config['model']['dt'])
 color_percentile = 90
 
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
@@ -43,18 +43,22 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 # --- load the sine wave stimuli ---
 # directions = ['right', 'left', 'up', 'down']
 directions = ['right_left', 'up_down']
-directions = ['all']
-stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
+stimulus_in = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
 
 # restrict the stimulus to 8 Hz, one phase
 num_phase = 4
 num_dir = len(directions)
-num_stim = 10
-stimulus = stimulus[::num_phase, :, :]
+num_stim = 4
+stimulus_dephased = stimulus_in[::num_phase, :, :]
 # stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
 # stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
 
-stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
+# split the stimuli into directions and remove extra stim for simplicity
+stim_split = torch.split(stimulus_dephased, stimulus_dephased.shape[0] // num_dir, dim=0)
+stim_split = [i[:num_stim, :, :] for i in stim_split]
+stimulus = torch.cat(stim_split, dim=0)
+
+# stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
@@ -87,7 +91,7 @@ output_neurons = ['L1', 'R7', 'R8', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T
 model.input_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 model.output_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 
-pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)
+pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
