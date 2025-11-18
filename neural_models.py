@@ -108,7 +108,7 @@ class NeuralRnn(torch.nn.Module):
                     
                     # Scale output_strength to move toward target
                     scale_factor = (target_rho / rho)**damping_factor
-                    self.output_strength_log.add_(np.log(scale_factor))
+                    self.output_strength_log.add_(torch.log(scale_factor))
 
         self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
@@ -160,48 +160,46 @@ class NeuralRnn(torch.nn.Module):
         return x_next
 
     def calc_sigma_max(self, max_iter=200, tol=1e-4):
-        with torch.no_grad():
-            A = self.synapse_counts.coalesce()
-            At = A.T
-            n = self.num_neurons
-            device = self.device
-            diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
-            D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
-            D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
+        A = self.synapse_counts.coalesce()
+        n = self.num_neurons
+        device = self.device
+        diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
+        D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
+        D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
 
-            def mv(v):   # y = M @ v = D_out * (A @ (D_in * v)) + diagonal * v
-                v_scaled = v * D_in
-                y = v_scaled @ A.T
-                y = y * D_out
-                return y + diagonal * v
+        def mv(v):   # y = M @ v = D_out * (A @ (D_in * v)) + diagonal * v
+            v_scaled = v * D_in
+            y = v_scaled @ A.T
+            y = y * D_out
+            return y + diagonal * v
 
-            def mtv(v):  # y = M^T @ v = D_in * (A^T @ (D_out * v)) + diagonal * v
-                v_scaled = v * D_out
-                y = v_scaled @ A
-                y = y * D_in
-                return y + diagonal * v
+        def mtv(v):  # y = M^T @ v = D_in * (A^T @ (D_out * v)) + diagonal * v
+            v_scaled = v * D_out
+            y = v_scaled @ A
+            y = y * D_in
+            return y + diagonal * v
 
-            # Use seeded random initialization for reproducibility
-            rng = torch.Generator(device=device).manual_seed(42)
-            x = torch.randn(n, device=device, generator=rng)
-            x = x / (x.norm() + 1e-12)
+        # Use seeded random initialization for reproducibility
+        rng = torch.Generator(device=device).manual_seed(42)
+        x = torch.randn(n, device=device, generator=rng)
+        x = x / (x.norm() + 1e-12)
 
-            prev = None
-            rho = torch.tensor(float("inf"), device=device)
-            for k in range(1, max_iter + 1):
-                y = mv(x)
-                z = mtv(y)                 # z = (A^T A)_scaled x
-                # Rayleigh quotient λ = x^T (A^T A) x must be computed BEFORE updating x
-                lam = (x * z).sum()
-                zn = z.norm()
-                if zn == 0:
-                    return 0.0, k, True
-                x = z / zn
-                rho = torch.sqrt(torch.clamp(lam, min=0.0))
-                if prev is not None and torch.abs(rho - prev) / (prev + 1e-12) < tol:
-                    return rho.item(), k, True
-                prev = rho
-            return rho.item(), max_iter, False
+        prev = None
+        rho = torch.tensor(float("inf"), device=device)
+        for k in range(1, max_iter + 1):
+            y = mv(x)
+            z = mtv(y)                 # z = (A^T A)_scaled x
+            # Rayleigh quotient λ = x^T (A^T A) x must be computed BEFORE updating x
+            lam = (x * z).sum()
+            zn = z.norm()
+            if zn == 0:
+                return 0.0, k, True
+            x = z / zn
+            rho = torch.sqrt(torch.clamp(lam, min=0.0))
+            if prev is not None and torch.abs(rho - prev) / (prev + 1e-12) < tol:
+                return rho, k, True
+            prev = rho
+        return rho, max_iter, False
 
     def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], init_state=None, return_mappings=False):
         # given some input, generate the outputs of the rnn

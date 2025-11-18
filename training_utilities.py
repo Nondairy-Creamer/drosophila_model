@@ -120,6 +120,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         print(torch.max(last_state).cpu().numpy())
 
         loss = calc_loss(loss_fn, pred, target)
+        # add a regularizer based on the spectral radius of the model
+        spectral_radius_loss = model.calc_sigma_max(max_iter=5)[0]**2
+        loss = loss + 1e-2 * spectral_radius_loss
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
         if loss < best_loss:
