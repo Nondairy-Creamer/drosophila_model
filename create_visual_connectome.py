@@ -63,6 +63,19 @@ inhibitory = synaptic_connections_df.nt_type.isin(inhibitory_nt)
 synapse_sign[excitatory_connections] = 1
 synapse_sign[inhibitory] = -1
 
+# corrections: there are some synapses that don't follow convention.
+# C2 and C3 for excitatory connections onto L1 and L2, but inhibitory elsewhere
+c2c3_bool = (presynaptic_ids == 'C2') | (presynaptic_ids == 'C3')
+l1l2_bool = (postsynaptic_ids == 'L1') | (postsynaptic_ids == 'L2')
+synapse_sign[c2c3_bool & l1l2_bool] = 1
+
+# exclude R7 and R8
+r7r8_bool = (presynaptic_ids == 'R7') | (presynaptic_ids == 'R8') | (postsynaptic_ids == 'R7') | (postsynaptic_ids == 'R8')
+presynaptic_ids = presynaptic_ids[~r7r8_bool]
+postsynaptic_ids = postsynaptic_ids[~r7r8_bool]
+synapse_counts = synapse_counts[~r7r8_bool]
+synapse_sign = synapse_sign[~r7r8_bool]
+
 # make synapse counts signed
 synapse_counts *= synapse_sign
 

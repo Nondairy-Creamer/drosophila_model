@@ -22,7 +22,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251113_213941_largeDrift')
+model_folder = Path('models/20251113_214447_smallDrift')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -43,6 +43,7 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 # --- load the sine wave stimuli ---
 # directions = ['right', 'left', 'up', 'down']
 directions = ['right_left', 'up_down']
+directions = ['all']
 stimulus = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
 
 # restrict the stimulus to 8 Hz, one phase
@@ -52,6 +53,8 @@ num_stim = 10
 stimulus = stimulus[::num_phase, :, :]
 # stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
 # stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
+
+stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
@@ -79,7 +82,10 @@ stimulus = stimulus[::num_phase, :, :]
 
 # --- feed the stimulus into the model ---
 input_neurons = ['L1', 'L2', 'L3']
-output_neurons = ['L1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+output_neurons = ['L1', 'R7', 'R8', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+
+model.input_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
+model.output_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 
 pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)
 shutil.rmtree(fig_folder, ignore_errors=True)
