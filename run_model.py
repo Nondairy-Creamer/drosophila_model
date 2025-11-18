@@ -53,8 +53,7 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
                      column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(), 
                      nonlinearity=config['model']['nonlinearity'],
                      device=config['model']['device'], dtype=config['model']['dtype'],
-                     use_sparse=config['model']['use_sparse'], use_layer_norm=config['model']['use_layer_norm'],
-                     dt=dt)
+                     use_layer_norm=config['model']['use_layer_norm'], dt=dt)
 
 # # --- get a sign wave stimulus ---
 # # generate a sine wave on a cylinder around the fly

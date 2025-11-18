@@ -6,7 +6,7 @@ from functools import reduce
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_sparse=False, use_layer_norm=False, set_spectral_radius=True, dt=0.01):
+                 use_layer_norm=False, set_spectral_radius=True, dt=0.01):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -28,7 +28,6 @@ class NeuralRnn(torch.nn.Module):
         self.cell_types = cell_types
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype)
-        self.use_sparse = use_sparse
         self.use_layer_norm = use_layer_norm
         self.num_neurons = cell_types.shape[0]
         self.unique_cell_types = np.unique(cell_types)
@@ -54,15 +53,9 @@ class NeuralRnn(torch.nn.Module):
         cols = torch.tensor(self.synapse_counts_coo[:, 0], device=device, dtype=torch.int64)
         values = torch.tensor(self.synapse_counts_coo[:, 2], device=device, dtype=self.dtype)
 
-        if use_sparse:
-            # indices must be int64
-            indices = torch.stack([rows, cols], dim=0)
-            self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
-            self.synapse_counts = self.synapse_counts.coalesce()
-        else:
-            # create a dense matrix
-            self.synapse_counts = torch.zeros((self.num_neurons, self.num_neurons), device=self.device, dtype=self.dtype)
-            self.synapse_counts.index_put_((rows, cols), values, accumulate=True).to(device=self.device, dtype=self.dtype)
+        indices = torch.stack([rows, cols], dim=0)
+        self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
+        self.synapse_counts = self.synapse_counts.coalesce()
 
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1

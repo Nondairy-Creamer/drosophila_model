@@ -1,7 +1,6 @@
 [model]
 device = "cuda"
 dtype = "float32"
-use_sparse = true
 use_layer_norm = false
 nonlinearity = "Softplus"
 dt = 0.01
