@@ -44,7 +44,7 @@ def plot_loss(loss, save_folder=Path('figures')):
     plt.plot(loss)
     plt.ylabel('1 - cosine similarity')
     plt.xlabel('epochs')
-    plt.ylim((0, 1))
+    # plt.ylim((0, 1))
     plt.savefig(save_folder / 'loss.png')
     plt.close()
 

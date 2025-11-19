@@ -15,10 +15,10 @@ class NeuralRnn(torch.nn.Module):
         self.init_inputs = params
         super().__init__()
 
-        diagonal_init = 0.5
+        diagonal_init = 0.7
         stimulus_strength_init = 10.0
         offset_init = 0.0
-        self.max_allowed_sigma = 0.95
+        self.max_allowed_sigma = 0.85
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -98,7 +98,7 @@ class NeuralRnn(torch.nn.Module):
                 # Iteratively scale output_strength to achieve target spectral radius
                 max_scaling_iters = 100
                 rho_tolerance = 0.001
-                damping_factor = 0.5
+                damping_factor = 0.1
 
                 for iter_idx in range(max_scaling_iters):
                     rho, iterations, converged = self.calc_sigma_max()
@@ -136,7 +136,7 @@ class NeuralRnn(torch.nn.Module):
         # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
 
         x_scaled = x_prev * input_strength[None, :]
-        z = x_scaled @ self.synapse_counts.T
+        z = torch.sparse.mm(self.synapse_counts, x_scaled.transpose(0, 1)).transpose(0, 1)
         z = z * output_strength[None, :]
         z = z + x_prev * diagonal[None, :]
         
@@ -172,13 +172,13 @@ class NeuralRnn(torch.nn.Module):
 
         def mv(v):   # y = M @ v = D_out * (A @ (D_in * v)) + diagonal * v
             v_scaled = v * D_in
-            y = v_scaled @ A.T
+            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
             y = y * D_out
             return y + diagonal * v
 
         def mtv(v):  # y = M^T @ v = D_in * (A^T @ (D_out * v)) + diagonal * v
             v_scaled = v * D_out
-            y = v_scaled @ A
+            y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
             y = y * D_in
             return y + diagonal * v
 
