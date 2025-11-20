@@ -22,7 +22,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251118_161055')
+model_folder = Path('models/20251119_222256')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -34,8 +34,9 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
-frame_rate = int(1 / model_config['model']['dt'])
+frame_rate = int(1 / model_config['model']['dt'] / 2)
 color_percentile = 90
+concat_all = False
 
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
@@ -58,7 +59,8 @@ stim_split = torch.split(stimulus_dephased, stimulus_dephased.shape[0] // num_di
 stim_split = [i[:num_stim, :, :] for i in stim_split]
 stimulus = torch.cat(stim_split, dim=0)
 
-# stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
+if concat_all:
+    stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
@@ -86,12 +88,13 @@ stimulus = torch.cat(stim_split, dim=0)
 
 # --- feed the stimulus into the model ---
 input_neurons = ['L1', 'L2', 'L3']
-output_neurons = ['L1', 'R7', 'R8', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+output_neurons = ['L1', 'Mi1', 'Mi9', 'C3', 'L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 model.input_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 model.output_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 
-pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
+with torch.no_grad():
+    pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
@@ -102,9 +105,6 @@ cell_theta = column_info_df.theta.to_numpy()
 cell_phi = column_info_df.phi.to_numpy()
 num_stim, num_time, num_columns = stimulus.shape
 num_neurons = model.num_neurons
-
-data_out = {}
-data_out['dt'] = model_config['model']['dt']
 
 def interp_nan_column(time_by_neurons):
     if time_by_neurons.ndim == 2:
@@ -125,17 +125,7 @@ def interp_nan_column(time_by_neurons):
 
     return time_by_neurons
 
-# --- L1 activity ---
-# Create boolean mask for cells in the full cell_info_df (for indexing predictions)
-pred_plot_l1 = pred['L1'].detach().cpu().numpy()
-pred_plot_l1 /= np.nanpercentile(pred_plot_l1, color_percentile)
-pred_plot = interp_nan_column(pred_plot_l1)
-
-data_out['L1'] = pred_plot_l1
-data_out['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5
-
-# init_scatter = make_scatter_plot_factory(pred_plot_l1, cell_x, cell_z)
-# make_movie(init_scatter, directions, fig_folder, frame_rate, save_name="L1")
+column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
 # --- Diamond sequence movie for measured cell types + stimulus ---
 measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
@@ -154,7 +144,35 @@ seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli
 init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
 make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4")
 
-np.savez_compressed(fig_folder / 'fly_model_responses.npz', **data_out)
-column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
+# # --- activity for light pathway ---
+# # Build responses dictionary limited to measured cell types, and add stimulus
+# measured_cell_types = ['L1', 'Mi1', 'Mi9', 'C3']
+# seq_data = {}
+# for mct in measured_cell_types:
+#     cell_resp = pred[mct].detach().cpu().numpy()
+#     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+#     cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
+#     cell_resp = interp_nan_column(cell_resp)
+#     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
+# seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+
+# init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
+# make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="light")
+
+# # --- activity for dark pathway ---
+# # Build responses dictionary limited to measured cell types, and add stimulus
+# measured_cell_types = ['L2', 'Tm1', 'Tm4', 'Tm9']
+# seq_data = {}
+# for mct in measured_cell_types:
+#     cell_resp = pred[mct].detach().cpu().numpy()
+#     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+#     cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
+#     cell_resp = interp_nan_column(cell_resp)
+#     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
+
+# seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+
+# init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
+# make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="dark")
 

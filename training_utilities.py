@@ -78,7 +78,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    cached_mappings = None
+    cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
     last_state = None
 
     if opt_state_dict is not None:
@@ -107,16 +107,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
         start = time.time()
         opt.zero_grad()
-        if cached_mappings is None:
-            pred, last_state, cached_mappings = model.predict(inputs, init_state=last_state, input_neurons=input_neurons, output_neurons=output_neurons, return_mappings=True)
-        else:
-            pred, last_state = model.predict(inputs, init_state=last_state, input_neurons=cached_mappings['stim_to_cell_mapping'], output_neurons=cached_mappings['readout_dict'])
+        pred, last_state, cached_mappings = model.predict(inputs, init_state=last_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
 
         print(torch.max(last_state).cpu().numpy())
 
         loss = calc_loss(loss_fn, pred, target)
         # add a regularizer based on the operator norm of the model
-        spectral_radius_loss = torch.relu(model.calc_sigma_max(max_iter=10)[0] - model.max_allowed_sigma)
+        spectral_radius_loss = model.calc_sigma_max(max_iter=10)[0]**2
         loss = loss + 1e-2 * spectral_radius_loss
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)

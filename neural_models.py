@@ -207,7 +207,7 @@ class NeuralRnn(torch.nn.Module):
         self._power_vec = x.detach()
         return rho, max_iter, False
 
-    def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], init_state=None, return_mappings=False):
+    def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], init_state=None):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
@@ -268,10 +268,7 @@ class NeuralRnn(torch.nn.Module):
                 if torch.any(valid):
                     outputs[i][:, t, ci[valid]] = x[:, ni[valid]]
 
-        if return_mappings:
-            return outputs, x.detach(), {'stim_to_cell_mapping': stim_to_cell_mapping, 'readout_dict': readout_dict}
-        else:
-            return outputs, x.detach()
+        return outputs, x.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def save(self, path):
         p = Path(path)

@@ -3,11 +3,14 @@ import matplotlib
 from matplotlib import pyplot as plt
 import matplotlib.colors as mcolors
 import imageio.v3 as iio
+import imageio as iio_v2
 
 
 def fig_to_rgb(fig):
     fig.canvas.draw()
-    buf, (w, h) = fig.canvas.print_to_buffer()
+    w, h = fig.canvas.get_width_height()
+    # Use buffer_rgba for robust support across Matplotlib versions
+    buf = np.asarray(fig.canvas.buffer_rgba())
     return np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
 
 
@@ -120,23 +123,26 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
         else:
             num_stimuli, L, num_cols = 1, 0, cell_x.shape[0]
 
-        # Create artists for cell types
+        zero_vec = np.zeros(num_cols, dtype=float)
+
+        # Create artists for cell types (cache arrays to avoid dict lookups in update)
         dir_scatters = []
         for idx, key in enumerate(cell_keys):
             arr_all = responses_dict.get(key, None)
             dx, dz = position_by_index[idx]
-            initial = np.zeros(num_cols, dtype=float)
-            if arr_all is not None and num_stimuli > 0 and L > 0:
-                initial = arr_all[0, 0, :]
+            initial = arr_all[0, 0, :] if (arr_all is not None and num_stimuli > 0 and L > 0) else zero_vec
             sc = ax.scatter(
                 scale * cell_x + dx,
                 scale * cell_z + dz,
                 c=initial,
                 cmap="viridis",
                 norm=norm,
-                s=s_dir
+                s=s_dir,
+                edgecolors='none',
+                linewidths=0.0,
+                antialiased=False,
             )
-            dir_scatters.append((key, sc))
+            dir_scatters.append((sc, arr_all))
 
         # Stimulus artist at center
         stim_initial = np.zeros(num_cols, dtype=float)
@@ -148,7 +154,10 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
             c=stim_initial,
             cmap="viridis",
             norm=norm,
-            s=s_stim
+            s=s_stim,
+            edgecolors='none',
+            linewidths=0.0,
+            antialiased=False,
         )
 
         blanks = 25
@@ -156,29 +165,27 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
 
         def update(frame_t):
             if total_frames == 0 or L == 0:
-                zero_vec = np.zeros(num_cols, dtype=float)
-                for _, sc in dir_scatters:
+                for sc, _arr in dir_scatters:
                     sc.set_array(zero_vec)
                 stim_scatter.set_array(zero_vec)
                 return
             block = L + blanks
-            stim_idx = min(num_stimuli - 1, frame_t // block)
-            within = frame_t % block
+            stim_idx, within = divmod(frame_t, block)
+            if stim_idx >= num_stimuli:
+                stim_idx = num_stimuli - 1
             if within < L:
                 t = within
-                for key, sc in dir_scatters:
-                    arr_all = responses_dict.get(key, None)
+                for sc, arr_all in dir_scatters:
                     if arr_all is not None and stim_idx < arr_all.shape[0]:
                         sc.set_array(arr_all[stim_idx, t, :])
                     else:
-                        sc.set_array(np.zeros(num_cols, dtype=float))
+                        sc.set_array(zero_vec)
                 if stim_all is not None and stim_idx < stim_all.shape[0]:
                     stim_scatter.set_array(stim_all[stim_idx, t, :])
                 else:
-                    stim_scatter.set_array(np.zeros(num_cols, dtype=float))
+                    stim_scatter.set_array(zero_vec)
             else:
-                zero_vec = np.zeros(num_cols, dtype=float)
-                for _, sc in dir_scatters:
+                for sc, _arr in dir_scatters:
                     sc.set_array(zero_vec)
                 stim_scatter.set_array(zero_vec)
 
@@ -189,6 +196,143 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
     init_plot_for_direction.uses_stimuli_index = False
     return init_plot_for_direction
 
+
+def make_scatter_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0):
+    """
+    Side-by-side sequence view for a single cell type vs stimulus.
+      - responses_dict: dict containing exactly one non-'stimulus' key (treated as the cell)
+        and an optional 'stimulus' key.
+        Values are numpy arrays shaped [num_stimuli, num_time, num_columns].
+      - Plots the cell on the RIGHT at (+offset, 0) and the stimulus on the LEFT at (-offset, 0).
+      - Concatenates all stimuli back-to-back with a blank gap between them (like diamond sequence).
+    Returns an init callable suitable for make_movie that ignores the stimuli index parameter.
+    """
+    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+
+    # Identify the single cell key and stimulus
+    keys_in_order = list(responses_dict.keys())
+    cell_keys = [k for k in keys_in_order if k != 'stimulus']
+    cell_key = cell_keys[0] if len(cell_keys) > 0 else None
+    stim_all = responses_dict.get('stimulus', None)
+
+    def init_plot_for_direction(d, di):
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
+        try:
+            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+            ax.set_position([0, 0, 1, 1])
+        except Exception:
+            pass
+
+        # Coordinates for left (stimulus) and right (cell)
+        left_x = -offset
+        right_x = +offset
+        coords = [
+            (scale * cell_x + left_x, scale * cell_z + 0.0),
+            (scale * cell_x + right_x, scale * cell_z + 0.0),
+        ]
+        x_all = np.concatenate([xy[0] for xy in coords])
+        y_all = np.concatenate([xy[1] for xy in coords])
+        x_min, x_max = np.min(x_all), np.max(x_all)
+        y_min, y_max = np.min(y_all), np.max(y_all)
+        x_span = max(1e-6, x_max - x_min)
+        y_span = max(1e-6, y_max - y_min)
+        span = max(x_span, y_span)
+        margin_frac = 0.02
+        half = 0.5 * span * (1.0 + margin_frac)
+        x_center = 0.5 * (x_min + x_max)
+        y_center = 0.5 * (y_min + y_max)
+        ax.set_xlim(x_center - half, x_center + half)
+        ax.set_ylim(y_center - half, y_center + half)
+        ax.set_aspect('equal', 'box')
+        ax.set_xticks([]); ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_axis_off()
+
+        # Marker sizes
+        base_ms = plt.rcParams.get("lines.markersize", 6.0)
+        base_s = float(base_ms) ** 2
+        s_cell = max(1.0, base_s * size_scale)
+        s_stim = max(1.0, s_cell * 0.8)
+
+        # Determine dimensions
+        if stim_all is not None:
+            num_stimuli, L, num_cols = stim_all.shape
+        else:
+            # Fall back to cell if no stimulus provided
+            cell_all = responses_dict.get(cell_key, None)
+            if cell_all is not None:
+                num_stimuli, L, num_cols = cell_all.shape
+            else:
+                num_stimuli, L, num_cols = 1, 0, cell_x.shape[0]
+
+        zero_vec = np.zeros(num_cols, dtype=float)
+
+        # Create stimulus scatter (left)
+        stim_initial = np.zeros(num_cols, dtype=float)
+        if stim_all is not None and num_stimuli > 0 and L > 0:
+            stim_initial = stim_all[0, 0, :]
+        stim_scatter = ax.scatter(
+            scale * cell_x + left_x,
+            scale * cell_z + 0.0,
+            c=stim_initial,
+            cmap="viridis",
+            norm=norm,
+            s=s_stim,
+            edgecolors='none',
+            linewidths=0.0,
+            antialiased=False,
+        )
+
+        # Create cell scatter (right)
+        cell_initial = np.zeros(num_cols, dtype=float)
+        cell_all = responses_dict.get(cell_key, None)
+        if cell_all is not None and num_stimuli > 0 and L > 0:
+            cell_initial = cell_all[0, 0, :]
+        cell_scatter = ax.scatter(
+            scale * cell_x + right_x,
+            scale * cell_z + 0.0,
+            c=cell_initial,
+            cmap="viridis",
+            norm=norm,
+            s=s_cell,
+            edgecolors='none',
+            linewidths=0.0,
+            antialiased=False,
+        )
+
+        blanks = 25
+        total_frames = num_stimuli * (L + blanks)
+
+        def update(frame_t):
+            if total_frames == 0 or L == 0:
+                stim_scatter.set_array(zero_vec)
+                cell_scatter.set_array(zero_vec)
+                return
+            block = L + blanks
+            stim_idx, within = divmod(frame_t, block)
+            if stim_idx >= num_stimuli:
+                stim_idx = num_stimuli - 1
+            if within < L:
+                t = within
+                if stim_all is not None and stim_idx < stim_all.shape[0]:
+                    stim_scatter.set_array(stim_all[stim_idx, t, :])
+                else:
+                    stim_scatter.set_array(zero_vec)
+                if cell_all is not None and stim_idx < cell_all.shape[0]:
+                    cell_scatter.set_array(cell_all[stim_idx, t, :])
+                else:
+                    cell_scatter.set_array(zero_vec)
+            else:
+                stim_scatter.set_array(zero_vec)
+                cell_scatter.set_array(zero_vec)
+
+        return fig, update, total_frames
+
+    # Expose metadata for movie maker: single movie that ignores stimuli indexing
+    init_plot_for_direction.num_stimuli = 1
+    init_plot_for_direction.uses_stimuli_index = False
+    return init_plot_for_direction
 
 def make_quiver_plot_factory(x_flow, z_flow, cell_x, cell_z):
     """
@@ -252,20 +396,13 @@ def make_movie(init_plot_for_direction, directions, fig_folder, frame_rate, save
     if not uses_index:
         # One movie per direction, ignoring stimulus index
         for di, d in enumerate(directions):
-            frames = []
             fig, update, num_frames = init_plot_for_direction(d, di)
-            for t in range(num_frames):
-                update(t)
-                frames.append(fig_to_rgb(fig))
+            out_path = fig_folder / f"{save_name}_{d}.mp4"
+            with iio_v2.get_writer(out_path, codec="libx264", fps=frame_rate) as writer:
+                for t in range(num_frames):
+                    update(t)
+                    writer.append_data(fig_to_rgb(fig))
             plt.close(fig)
-            stack = np.stack(frames, axis=0)
-            iio.imwrite(
-                fig_folder / f"{save_name}_{d}.mp4",
-                stack,
-                fps=frame_rate,
-                codec="libx264",
-                pixelformat="yuv420p",
-            )
         return
 
     # Split total stimuli into consecutive blocks across directions as evenly as possible
@@ -276,20 +413,13 @@ def make_movie(init_plot_for_direction, directions, fig_folder, frame_rate, save
         block_size = base + (1 if dir_index < remainder else 0)
         for stim_index in range(block_size):
             di = start_index + stim_index
-            frames = []
             fig, update, num_frames = init_plot_for_direction(d, di)
-            for t in range(num_frames):
-                update(t)
-                frames.append(fig_to_rgb(fig))
+            out_path = fig_folder / f"{save_name}_{d}_{stim_index}.mp4"
+            with iio_v2.get_writer(out_path, codec="libx264", fps=frame_rate) as writer:
+                for t in range(num_frames):
+                    update(t)
+                    writer.append_data(fig_to_rgb(fig))
             plt.close(fig)
-            stack = np.stack(frames, axis=0)
-            iio.imwrite(
-                fig_folder / f"{save_name}_{d}_{stim_index}.mp4",
-                stack,
-                fps=frame_rate,
-                codec="libx264",
-                pixelformat="yuv420p",
-            )
         start_index += block_size
 
  
@@ -529,17 +659,22 @@ def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=Fa
             lengths.append(block['stimulus'].shape[0])
         num_frames = min(lengths) if lengths else 0
 
+        zero_vec = np.zeros_like(cell_x)
+
         # Create direction scatters
         for dir_name, arr in resp_arrays:
             dx, dz = positions[dir_name]
-            initial = arr[0, :] if (arr is not None and num_frames > 0) else np.zeros_like(cell_x)
+            initial = arr[0, :] if (arr is not None and num_frames > 0) else zero_vec
             sc = ax.scatter(
                 scale * cell_x + dx,
                 scale * cell_z + dz,
                 c=initial,
                 cmap="viridis",
                 norm=norm,
-                s=s_val
+                s=s_val,
+                edgecolors='none',
+                linewidths=0.0,
+                antialiased=False,
             )
             if label:
                 ax.text(dx, dz + 0.9 * scale, dir_name, ha='center', va='bottom', fontsize=10, color='black')
@@ -548,14 +683,17 @@ def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=Fa
 
         # Center stimulus
         stim_arr = block.get('stimulus', None)
-        stim_initial = stim_arr[0, :] if (stim_arr is not None and num_frames > 0) else np.zeros_like(cell_x)
+        stim_initial = stim_arr[0, :] if (stim_arr is not None and num_frames > 0) else zero_vec
         sc = ax.scatter(
             (0.5 * scale) * cell_x,
             (0.5 * scale) * cell_z,
             c=stim_initial,
             cmap="viridis",
             norm=norm,
-            s=max(1.0, s_val * 0.2)
+            s=max(1.0, s_val * 0.2),
+            edgecolors='none',
+            linewidths=0.0,
+            antialiased=False,
         )
         if label:
             ax.text(0.0, 0.9 * 0.5 * scale, 'stimulus', ha='center', va='bottom', fontsize=10, color='black')
@@ -568,7 +706,7 @@ def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=Fa
             for sc, chosen_activity in zip(scatters, activities):
                 # Safeguard for zero-length arrays
                 if chosen_activity.shape[0] == 0:
-                    sc.set_array(np.zeros(cell_x.shape[0], dtype=float))
+                    sc.set_array(zero_vec)
                 else:
                     t = min(frame_t, chosen_activity.shape[0] - 1)
                     sc.set_array(chosen_activity[t, :])
