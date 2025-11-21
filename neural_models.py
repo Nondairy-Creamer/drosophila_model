@@ -15,10 +15,10 @@ class NeuralRnn(torch.nn.Module):
         self.init_inputs = params
         super().__init__()
 
-        membrane_persistence_init = 0.7
+        membrane_persistence_init = 0.5
         stimulus_strength_init = 10.0
         offset_init = 0.0
-        self.max_allowed_sigma = 0.85
+        self.max_allowed_sigma = 0.95
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -88,34 +88,37 @@ class NeuralRnn(torch.nn.Module):
             synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
 
         # Initialize strength per cell type based on the inverse of its fan in / out
-        input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
-        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
+        input_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
+        output_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         self.input_strength_log = torch.log(input_strength_init)
         self.output_strength_log = torch.log(output_strength_init)
 
         if set_max_sigma:
-            with torch.no_grad():
-                # Iteratively scale output_strength to achieve target max sigma
-                max_scaling_iters = 100
-                rho_tolerance = 0.01
-                damping_factor = 0.2
-
-                for iter_idx in range(max_scaling_iters):
-                    sigma_max = self.calc_sigma_max()
-
-                    print(iter_idx, ':', sigma_max)                    
-                    if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
-                        break
-                    
-                    # Scale output_strength to move toward target
-                    scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
-                    self.output_strength_log.add_(torch.log(scale_factor))
+            self.set_sigma_max()
 
         self.membrane_persistence_logit = torch.nn.Parameter(self.membrane_persistence_logit)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
         self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
         self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+
+    def set_sigma_max(self):
+        with torch.no_grad():
+            # Iteratively scale output_strength to achieve target max sigma (spectral norm, largest singular value)
+            max_scaling_iters = 100
+            rho_tolerance = 0.01
+            damping_factor = 0.3
+
+            for iter_idx in range(max_scaling_iters):
+                sigma_max = self.calc_sigma_max()
+
+                print(iter_idx, ':', sigma_max)                    
+                if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
+                    break
+                
+                # Scale output_strength to move toward target
+                scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
+                self.output_strength_log.add_(torch.log(scale_factor))
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
         membrane_persistence = self.membrane_persistence_logit.sigmoid()[self.neuron_to_type_index]
@@ -273,7 +276,7 @@ class NeuralRnn(torch.nn.Module):
                 valid = ci >= 0
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
-                    outputs['firing_rate'][i][:, t, ci[valid]] = self.nonlinearity(v[:, ni[valid]])
+                    outputs['firing_rate'][i] = self.nonlinearity(outputs['voltage'][i])
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 

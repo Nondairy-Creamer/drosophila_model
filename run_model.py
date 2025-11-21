@@ -66,12 +66,12 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_random_tf_sine_wave(
     column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
     tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
-    num_stim=config['stimulus']['num_stim'], dt=dt, stim_time=stim_time)
+    num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time)
 sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
 # --- plot the stimuli ---
-pu.plot_response_over_space(sine_waves.detach().cpu().numpy()[:, 0, :], column_info_df.x, column_info_df.z, save_folder='figures/stimulus')
+pu.xt_plot(sine_waves.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
 num_stimuli = sine_waves.shape[0]

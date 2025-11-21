@@ -96,7 +96,7 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
     return stimulus, tf_out, contrast_scaling_factor, blocks
 
 def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, rng=np.random.default_rng(),
-                               dt=0.01, stim_time=1.0, num_stim=5):
+                               dt=0.01, stim_time=1.0, num_repeats=5):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # the velocity of this sine wave is a smoothed gaussian random walk 
@@ -104,11 +104,12 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     # --- generate the space time coordinates ---
     filter_std_base = 2.5 * np.pi / 180  # radians
     # double the number of stim because we want to symmetrize the temporal frequnecies
-    time_vect = np.arange(0, stim_time * num_stim * 2, step=dt)
+    num_repeats = num_repeats * 2
+    time_vect = np.arange(0, stim_time * num_repeats, step=dt)
     t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
     t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
     num_time, num_cell = phi_mesh.shape
-    time_per_stim = num_time // num_stim
+    time_per_stim = num_time // num_repeats
 
     # --- generate the shifting temporal frequency ---
     tf = rng.standard_normal(num_time // 2)
@@ -161,24 +162,24 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_up_down_shifted = make_lr_sine_wave(phase_init=np.pi/2)
     sine_wave_up_down_left *= contrast_scaling_factor[None, :]
     sine_wave_up_down_shifted *= contrast_scaling_factor[None, :]
-    sine_wave_dict['right_left'].append(sine_wave_up_down_left.reshape(num_stim, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append(sine_wave_up_down_shifted.reshape(num_stim, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append((-sine_wave_up_down_left).reshape(num_stim, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append((-sine_wave_up_down_shifted).reshape(num_stim, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append(sine_wave_up_down_left.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append(sine_wave_up_down_shifted.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append((-sine_wave_up_down_left).reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
     tf_mat = np.tile(tf, (num_cell, 1)).T
-    tf_dict['right_left'] += [tf_mat.reshape(num_stim, time_per_stim, num_cell)] * 4
+    tf_dict['right_left'] += [tf_mat.reshape(num_repeats, time_per_stim, num_cell)] * 4
 
     # -- updown sine wave -- 
     sine_wave_up_down_left = make_ud_sine_wave(phase_init=0)
     sine_wave_up_down_shifted = make_ud_sine_wave(phase_init=np.pi/2)
     sine_wave_up_down_left *= contrast_scaling_factor[None, :]
     sine_wave_up_down_shifted *= contrast_scaling_factor[None, :]
-    sine_wave_dict['up_down'].append(sine_wave_up_down_left.reshape(num_stim, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append(sine_wave_up_down_shifted.reshape(num_stim, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append((-sine_wave_up_down_left).reshape(num_stim, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_stim, time_per_stim, num_cell))
+    sine_wave_dict['up_down'].append(sine_wave_up_down_left.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['up_down'].append(sine_wave_up_down_shifted.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['up_down'].append((-sine_wave_up_down_left).reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
     tf_mat = np.tile(tf, (num_cell, 1)).T
-    tf_dict['up_down'] += [tf_mat.reshape(num_stim, time_per_stim, num_cell)] * 4
+    tf_dict['up_down'] += [tf_mat.reshape(num_repeats, time_per_stim, num_cell)] * 4
 
     stimulus, target = consolidate_stim(sine_wave_dict, tf_dict)
 

@@ -107,3 +107,35 @@ def scatter_3d_with_origin_axes(xyz, save_folder=Path('figures')):
     plt.savefig(save_folder / '3d_column_position.png')
     plt.close()
 
+def xt_plot(pred_plot, x, target_plot=None, save_folder=Path('figures')):
+    save_folder = convert_and_create_save_folder(save_folder)
+    
+    sort_inds = np.argsort(x)[::-1]
+    x_sorted = x[sort_inds]
+    valid_cells = ~np.any(np.isnan(pred_plot), axis=(0, 1))
+    sort_inds_no_nan = sort_inds[valid_cells[sort_inds]]
+
+    for pi in range(pred_plot.shape[0]):
+        plt.figure()
+        if target_plot is not None:
+            plt.subplot(1, 2, 1)
+        plt.imshow(pred_plot[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
+        if np.all(pred_plot[pi, :, sort_inds_no_nan] >= 0):
+            plt.clim(vmin=0)
+        plt.xlabel('phi')
+        plt.ylabel('time')
+        plt.title('prediction')
+        plt.colorbar()
+
+        if target_plot is not None:
+            plt.subplot(1, 2, 2)
+            plt.imshow(target_plot[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
+            if np.all(pred_plot[pi, :, sort_inds_no_nan] >= 0):
+                plt.clim(vmin=0)
+            plt.xlabel('phi')
+            plt.ylabel('time')
+            plt.title('target')
+            plt.colorbar()
+        
+        plt.savefig(save_folder / ('xt_plot_' + str(pi) + '.png'))
+        plt.close()
