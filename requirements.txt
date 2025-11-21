@@ -13,5 +13,5 @@ tomli>=1.2.0; python_version<"3.11"
 tomli-w
 imageio
 imageio-ffmpeg
-imageio-pyav
+av
 debugpy
