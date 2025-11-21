@@ -71,7 +71,7 @@ sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
 sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
 # --- plot the stimuli ---
-pu.xt_plot(sine_waves.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), save_folder='figures/stimulus')
+pu.xt_plot(sine_waves.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), target=sine_wave_tfs.detach().cpu().numpy(), save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
 num_stimuli = sine_waves.shape[0]
@@ -103,12 +103,16 @@ for i in range(len(output_neurons)):
     # get the index of the stimuli that this neruon will respond to, based on the direction
     stim_resp_inds = torch.arange(this_block_index * stimulus_block_size, (this_block_index + 1) * stimulus_block_size)
 
+    # limit the left-right neurons to only respond to the left-right stimulus
+    # same for up-down to up-down stimulus. respond 0 otherwise
     target[this_neuron] = torch.zeros_like(sine_wave_tfs)
     target[this_neuron][stim_resp_inds, :, :] = sine_wave_tfs[stim_resp_inds, :, :]
     
     if this_neuron in ['T4a', 'T5a', 'T4c', 'T5c']:
+        # front-to-back and up responding neurons respond positively to positive TFs in their preferred direction
         target[this_neuron][target[this_neuron] < 0] = 0
     elif this_neuron in ['T4b', 'T5b', 'T4d', 'T5d']:
+        # back-to-front and down respond neurons respond positively to negative TFs in their preferred direction
         target[this_neuron] = -target[this_neuron]
         target[this_neuron][target[this_neuron] < 0] = 0
 

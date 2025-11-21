@@ -78,7 +78,7 @@ for ctp in trained_cells:
     pred_plot = pred_trained[ctp][::num_phase_rep, :, :].detach().cpu().numpy()
     target_plot = target[ctp][::num_phase_rep, :, :].detach().cpu().numpy()
     # pu.plot_response_over_space(pred_plot[:, time_point, :], column_info_df.x, column_info_df.z, save_folder=model_folder / 'analysis' / ctp)
-    pu.xt_plot(pred_plot, column_info_df['phi'].to_numpy(), target_plot=target_plot, save_folder=ctp_dir)
+    pu.xt_plot(pred_plot, column_info_df['phi'].to_numpy(), target=target_plot, save_folder=ctp_dir)
 
     # --- scatter prediction vs target ---
     plt.figure()
