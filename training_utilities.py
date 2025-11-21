@@ -75,7 +75,7 @@ def calc_loss(loss_fn, pred, target):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, sigma_lambda=0):
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
@@ -111,10 +111,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
         print(torch.max(last_state).cpu().numpy())
 
-        loss = calc_loss(loss_fn, pred, target)
-        # add a regularizer based on the operator norm of the model
-        spectral_radius_loss = model.calc_sigma_max(max_iter=10)[0]**2
-        loss = loss + 1e-2 * spectral_radius_loss
+        loss = calc_loss(loss_fn, pred['firing_rate'], target)
+
+        if sigma_lambda > 0:
+            # add a regularizer based on the operator norm of the model
+            max_sigma_regularizer = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
+            loss = loss + sigma_lambda * max_sigma_regularizer
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
         if loss < best_loss:
@@ -173,7 +175,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 last_saved_idx = len(loss_list) - 1
 
                 # Print last CPU loss value only at save cadence
-                pu.plot_readout_target(pred, target, save_folder=model_save_folder)
+                # pu.plot_readout_target(pred, target, save_folder=model_save_folder)
                 pu.plot_loss(loss_plot, save_folder=model_save_folder)
 
         print(f'step {step + 1} / {num_steps} | dt = {(time.time()-start):.3g} | lr = {alpha:.2e} | path = {model_save_folder}')

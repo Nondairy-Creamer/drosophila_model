@@ -12,6 +12,7 @@ loss_fn = "cos_loss"
 alpha = 0.01
 clip_norm = 1.0
 reset_init_every = 1
+sigma_lambda = 0.0
 
 [stimulus]
 stim_time = 1.0

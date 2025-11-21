@@ -22,7 +22,7 @@ from movie_utilities import (
 )
 import model_utilities as mu
 
-model_folder = Path('models/20251119_222256')
+model_folder = Path('models/20251120_212210')
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -90,11 +90,14 @@ if concat_all:
 input_neurons = ['L1', 'L2', 'L3']
 output_neurons = ['L1', 'Mi1', 'Mi9', 'C3', 'L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
+print(model.calc_sigma_max())
+
 model.input_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 model.output_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 
 with torch.no_grad():
     pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
+    pred = pred['firing_rate']
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)

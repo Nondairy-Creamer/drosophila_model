@@ -6,7 +6,7 @@ from functools import reduce
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_layer_norm=False, set_spectral_radius=True, dt=0.01):
+                 use_layer_norm=False, set_max_sigma=True, dt=0.01):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -15,7 +15,7 @@ class NeuralRnn(torch.nn.Module):
         self.init_inputs = params
         super().__init__()
 
-        diagonal_init = 0.7
+        membrane_persistence_init = 0.7
         stimulus_strength_init = 10.0
         offset_init = 0.0
         self.max_allowed_sigma = 0.85
@@ -46,7 +46,7 @@ class NeuralRnn(torch.nn.Module):
             return np.log(p / (1 - p))
 
         # --- model parameters
-        self.diagonal_logit = torch.full((self.num_cell_types,), logit(diagonal_init), dtype=self.dtype, device=self.device)
+        self.membrane_persistence_logit = torch.full((self.num_cell_types,), logit(membrane_persistence_init), dtype=self.dtype, device=self.device)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
         self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype) + offset_init
 
@@ -93,34 +93,32 @@ class NeuralRnn(torch.nn.Module):
         self.input_strength_log = torch.log(input_strength_init)
         self.output_strength_log = torch.log(output_strength_init)
 
-        if set_spectral_radius:
+        if set_max_sigma:
             with torch.no_grad():
-                # Iteratively scale output_strength to achieve target spectral radius
+                # Iteratively scale output_strength to achieve target max sigma
                 max_scaling_iters = 100
-                rho_tolerance = 0.001
-                damping_factor = 0.1
+                rho_tolerance = 0.01
+                damping_factor = 0.2
 
                 for iter_idx in range(max_scaling_iters):
-                    rho, iterations, converged = self.calc_sigma_max()
+                    sigma_max = self.calc_sigma_max()
 
-                    print(iter_idx, ':', rho)
-                    assert converged, f'spectral radius calculation did not converge at scaling iteration {iter_idx}'
-                    
-                    if abs(rho - self.max_allowed_sigma) < rho_tolerance:
+                    print(iter_idx, ':', sigma_max)                    
+                    if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
                         break
                     
                     # Scale output_strength to move toward target
-                    scale_factor = (self.max_allowed_sigma / rho)**damping_factor
+                    scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
                     self.output_strength_log.add_(torch.log(scale_factor))
 
-        self.diagonal_logit = torch.nn.Parameter(self.diagonal_logit)
+        self.membrane_persistence_logit = torch.nn.Parameter(self.membrane_persistence_logit)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
         self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
         self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
 
-    def forward(self, x_prev, u_t, stim_to_cell_mapping=None):
-        diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        membrane_persistence = self.membrane_persistence_logit.sigmoid()[self.neuron_to_type_index]
         input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
         output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
@@ -128,17 +126,16 @@ class NeuralRnn(torch.nn.Module):
 
         # model is
         # dynamics_matrix = out_scaling_column_vector * synapse_counts * in_scaling_row_vector + diagonal
-        # x_next = nonlin( dynamics_matrix @ x_prev + stimulus * stimulus_strength + offset )
+        # x_next = dynamics_matrix @ relu(x_prev) + stimulus * stimulus_strength + offset
         # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
         # issues with passing gradients due to pytorch's limited sparse support.
         # we can't precompute the dynamics matrix because the broacast opperation of hte input/output vectors doesn't
         # allow for passing the gradient when synapse_counts is sparse
         # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
 
-        x_scaled = x_prev * input_strength[None, :]
-        z = torch.sparse.mm(self.synapse_counts, x_scaled.transpose(0, 1)).transpose(0, 1)
+        v_scaled = self.nonlinearity(v_prev) * input_strength[None, :]
+        z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
         z = z * output_strength[None, :]
-        z = z + x_prev * diagonal[None, :]
         
         # Apply layer normalization before nonlinearity if enabled
         if self.use_layer_norm:
@@ -158,54 +155,63 @@ class NeuralRnn(torch.nn.Module):
                 si = stim_idx[valid]
                 z.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
 
-        x_next = self.nonlinearity(z + offset_all_neurons[None, :])
+        v_next = membrane_persistence[None, :] * v_prev + (1 - membrane_persistence[None, :]) * (z + offset_all_neurons[None, :])
 
-        return x_next
+        return v_next
 
-    def calc_sigma_max(self, max_iter=200, tol=1e-4):
+    def calc_sigma_max(self, max_iter=100, eps=1e-12):
         A = self.synapse_counts.coalesce()
         n = self.num_neurons
         device = self.device
-        diagonal = self.diagonal_logit.sigmoid()[self.neuron_to_type_index]
+        dtype = self.dtype
+        # Per-neuron scalings
         D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
         D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
+        d = self.membrane_persistence_logit.sigmoid()[self.neuron_to_type_index]       # (n,)
+        one_minus_d = 1.0 - d
 
-        def mv(v):   # y = M @ v = D_out * (A @ (D_in * v)) + diagonal * v
+        # M v = D_out * (A @ (D_in * v))
+        def apply_M(v):
             v_scaled = v * D_in
-            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
-            y = y * D_out
-            return y + diagonal * v
-
-        def mtv(v):  # y = M^T @ v = D_in * (A^T @ (D_out * v)) + diagonal * v
-            v_scaled = v * D_out
             y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
-            y = y * D_in
-            return y + diagonal * v
+            return y * D_out
 
-        x = self._power_vec
+        # M^T v = D_in * (A^T @ (D_out * v))
+        def apply_M_T(v):
+            v_scaled = v * D_out
+            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
+            return y * D_in
 
-        prev = None
-        rho = torch.tensor(float("inf"), device=device)
-        for k in range(1, max_iter + 1):
-            y = mv(x)
-            z = mtv(y)                 # z = (A^T A)_scaled x
-            # Rayleigh quotient λ = x^T (A^T A) x must be computed BEFORE updating x
-            lam = (x * z).sum()
-            zn = z.norm()
-            if zn == 0:
-                # Update stored vector even on degenerate case
-                self._power_vec = x.detach()
-                return torch.tensor(0.0, device=device, dtype=self.dtype), k, True
-            x = z / zn
-            rho = torch.sqrt(torch.clamp(lam, min=0.0))
-            if prev is not None and torch.abs(rho - prev) / (prev + 1e-12) < tol:
-                # Persist warm-start vector for next call
-                self._power_vec = x.detach()
-                return rho, k, True
-            prev = rho
-        # Persist vector even if not fully converged
+        # S v = diag(d) v + diag(1-d) (M v)
+        def apply_S(v):
+            return d * v + one_minus_d * apply_M(v)
+
+        # S^T v = diag(d) v + M^T (diag(1-d) v)
+        def apply_S_T(v):
+            return d * v + apply_M_T(one_minus_d * v)
+
+        # Warm start (buffer, no grad needed)
+        if getattr(self, "_power_vec", None) is None or self._power_vec.numel() != n:
+            x = torch.randn(n, device=device, dtype=dtype)
+        else:
+            x = self._power_vec
+
+        x = x / (x.norm() + eps)  # normalize, but no gradient needed w.r.t x
+        # x is treated as a constant initial direction for autograd
+
+        for _ in range(max_iter):
+            y = apply_S(x)     # y ≈ σ u
+            x = apply_S_T(y)   # x ≈ σ^2 v
+            x = x / (x.norm() + eps)
+
+        # At convergence, ||S v||_2 ≈ σ_max
+        y = apply_S(x)
+        sigma = y.norm()  # differentiable w.r.t. parameters in S
+
+        # Update warm-start vector, but cut history
         self._power_vec = x.detach()
-        return rho, max_iter, False
+
+        return sigma
 
     def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], init_state=None):
         # given some input, generate the outputs of the rnn
@@ -247,18 +253,18 @@ class NeuralRnn(torch.nn.Module):
 
         # initial neural activity values
         if init_state is None:
-            x = inputs.new_zeros(num_batches, self.num_neurons)
+            v = inputs.new_zeros(num_batches, self.num_neurons)
         else:
-            x = init_state
+            v = init_state
 
         # outputs for each neuron in output_neurons are (batches, time, number of columns)
-        outputs = {}
+        outputs = {'voltage': {}, 'firing_rate': {}}
         for i in readout_keys:
-            outputs[i] = torch.full((num_batches, num_time, self.num_columns), float('nan'),
-                                    device=self.device, dtype=self.dtype)
+            outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
+            outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
                                     
         for t in range(num_time):
-            x = self(x, inputs[:, t, :], stim_to_cell_mapping)
+            v = self(v, inputs[:, t, :], stim_to_cell_mapping)
 
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
@@ -266,9 +272,10 @@ class NeuralRnn(torch.nn.Module):
                 # Ensure we only write to valid column positions
                 valid = ci >= 0
                 if torch.any(valid):
-                    outputs[i][:, t, ci[valid]] = x[:, ni[valid]]
+                    outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
+                    outputs['firing_rate'][i][:, t, ci[valid]] = self.nonlinearity(v[:, ni[valid]])
 
-        return outputs, x.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
+        return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def save(self, path):
         p = Path(path)
@@ -314,9 +321,8 @@ class NeuralRnn(torch.nn.Module):
             inputs['dtype'] = dtype
 
         # construct directly from saved (or overridden) inputs
-        inputs['set_spectral_radius'] = False
+        inputs['set_max_sigma'] = False
         model = cls(**inputs)
-
         model.load_state_dict(data['state_dict'])
 
         # Optionally freeze all parameters to disable gradients
