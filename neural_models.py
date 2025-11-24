@@ -88,8 +88,8 @@ class NeuralRnn(torch.nn.Module):
             synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
 
         # Initialize strength per cell type based on the inverse of its fan in / out
-        input_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        output_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
+        input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
+        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
         self.input_strength_log = torch.log(input_strength_init)
         self.output_strength_log = torch.log(output_strength_init)
 
@@ -128,19 +128,20 @@ class NeuralRnn(torch.nn.Module):
         offset_all_neurons = self.offset[self.neuron_to_type_index]
 
         # model is
-        # dynamics_matrix = out_scaling_column_vector * synapse_counts * in_scaling_row_vector + diagonal
-        # x_next = dynamics_matrix @ relu(x_prev) + stimulus * stimulus_strength + offset
+        # z = D_in @ synapse_counts @ D_out @ nonlinearity(v_prev) + stimulus * stimulus_strength
+        # where D_in scales post-synaptic (rows) and D_out scales pre-synaptic (columns)
+        # v_next = membrane_persistence * v_prev + (1 - membrane_persistence) * (z + offset)
         # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
         # issues with passing gradients due to pytorch's limited sparse support.
-        # we can't precompute the dynamics matrix because the broacast opperation of hte input/output vectors doesn't
+        # we can't precompute the dynamics matrix because the broadcast operation of the input/output vectors doesn't
         # allow for passing the gradient when synapse_counts is sparse
         # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
 
-        v_scaled = self.nonlinearity(v_prev) * input_strength[None, :]
+        v_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
         z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
-        z = z * output_strength[None, :]
+        z = z * input_strength[None, :]
         
-        # Apply layer normalization before nonlinearity if enabled
+        # Optionally normalize recurrent term before adding inputs/offset
         if self.use_layer_norm:
             z = self.layer_norm(z)
         
@@ -173,17 +174,17 @@ class NeuralRnn(torch.nn.Module):
         d = self.membrane_persistence_logit.sigmoid()[self.neuron_to_type_index]       # (n,)
         one_minus_d = 1.0 - d
 
-        # M v = D_out * (A @ (D_in * v))
+        # M v = D_in * (A @ (D_out * v))
         def apply_M(v):
-            v_scaled = v * D_in
-            y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
-            return y * D_out
-
-        # M^T v = D_in * (A^T @ (D_out * v))
-        def apply_M_T(v):
             v_scaled = v * D_out
-            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
+            y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
             return y * D_in
+
+        # M^T v = D_out * (A^T @ (D_in * v))
+        def apply_M_T(v):
+            v_scaled = v * D_in
+            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
+            return y * D_out
 
         # S v = diag(d) v + diag(1-d) (M v)
         def apply_S(v):

@@ -23,7 +23,7 @@ model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
-model = nm.NeuralRnn.load(model_folder / 'model_init.pt', device=device)
+model = nm.NeuralRnn.load(model_folder / 'model.pt', device=device)
 stimulus = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 # target is now a dict of tensors; load and move entries to the right device/dtype
 _target_loaded = torch.load(model_folder / 'target.pt')
@@ -65,8 +65,6 @@ correlation_similarity = 1.0 - tu.calc_loss(tu.corr_loss, pred_trained, target).
 cosine_similarity = 1.0 - tu.calc_loss(tu.cos_loss, pred_trained, target).detach().cpu().numpy()
 print('correlation:', correlation_similarity)
 print('cosine similarity:', cosine_similarity)
-
-pu.plot_readout_target(pred_trained, target, save_folder=analysis_folder)
 
 # --- make XT plots of the cell responses next to the target ---
 for ctp in trained_cells:
