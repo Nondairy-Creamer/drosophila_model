@@ -718,3 +718,182 @@ def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=Fa
     init_plot_for_direction.uses_stimuli_index = False
     return init_plot_for_direction
 
+
+def make_quiver_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, arrow_scale=1.0):
+    """
+    Side-by-side sequence view: stimulus (left) and quiver vector field (right).
+    - responses_dict: dict containing at least four non-'stimulus' keys (treated in insertion order
+      as cell_1, cell_2, cell_3, cell_4) and an optional 'stimulus' key.
+      Each value is a numpy array shaped [num_stimuli, num_time, num_columns].
+    - The quiver vector at each point is [cell_1 - cell_2, cell_3 - cell_4].
+    - Concatenates all stimuli back-to-back with a blank gap between them.
+    Returns an init callable suitable for make_movie that ignores the stimuli index parameter.
+    """
+    # For stimulus scatter we keep [0,1] normalization; for quiver we normalize color by vector magnitude
+    stim_norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+
+    # Identify cell keys and stimulus
+    keys_in_order = list(responses_dict.keys())
+    cell_keys = [k for k in keys_in_order if k != 'stimulus'][:4]
+    # Pad with None if fewer than 4 keys
+    while len(cell_keys) < 4:
+        cell_keys.append(None)
+    stim_all = responses_dict.get('stimulus', None)
+
+    # Pull arrays for convenience
+    arr1 = responses_dict.get(cell_keys[0], None) if cell_keys[0] is not None else None
+    arr2 = responses_dict.get(cell_keys[1], None) if cell_keys[1] is not None else None
+    arr3 = responses_dict.get(cell_keys[2], None) if cell_keys[2] is not None else None
+    arr4 = responses_dict.get(cell_keys[3], None) if cell_keys[3] is not None else None
+
+    # Determine base dimensions
+    def first_shape(*candidates):
+        for a in candidates:
+            if a is not None:
+                return a.shape
+        return None
+
+    shape = None
+    if stim_all is not None:
+        shape = stim_all.shape
+    else:
+        shape = first_shape(arr1, arr2, arr3, arr4)
+    if shape is None:
+        num_stimuli, L, num_cols = 1, 0, cell_x.shape[0]
+    else:
+        num_stimuli, L, num_cols = shape
+
+    # Precompute magnitude normalization for quiver colors
+    def safe_diff(a, b):
+        if a is None and b is None:
+            return None
+        if a is None:
+            return -b
+        if b is None:
+            return a
+        return a - b
+
+    d1 = safe_diff(arr1, arr2)
+    d2 = safe_diff(arr3, arr4)
+    if d1 is not None and d2 is not None and d1.size > 0 and d2.size > 0:
+        magnitude = np.hypot(d1, d2)
+        max_mag = np.percentile(magnitude, 99) if np.any(magnitude) else 1.0
+    else:
+        max_mag = 1.0
+    quiver_norm = mcolors.Normalize(vmin=0.0, vmax=max(1e-9, max_mag))
+
+    def init_plot_for_direction(d, di):
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
+        try:
+            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+            ax.set_position([0, 0, 1, 1])
+        except Exception:
+            pass
+
+        # Coordinates for left (stimulus) and right (quiver field)
+        left_x = -offset
+        right_x = +offset
+        coords = [
+            (scale * cell_x + left_x, scale * cell_z + 0.0),
+            (scale * cell_x + right_x, scale * cell_z + 0.0),
+        ]
+        x_all = np.concatenate([xy[0] for xy in coords])
+        y_all = np.concatenate([xy[1] for xy in coords])
+        x_min, x_max = np.min(x_all), np.max(x_all)
+        y_min, y_max = np.min(y_all), np.max(y_all)
+        x_span = max(1e-6, x_max - x_min)
+        y_span = max(1e-6, y_max - y_min)
+        span = max(x_span, y_span)
+        margin_frac = 0.02
+        half = 0.5 * span * (1.0 + margin_frac)
+        x_center = 0.5 * (x_min + x_max)
+        y_center = 0.5 * (y_min + y_max)
+        ax.set_xlim(x_center - half, x_center + half)
+        ax.set_ylim(y_center - half, y_center + half)
+        ax.set_aspect('equal', 'box')
+        ax.set_xticks([]); ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_axis_off()
+
+        # Marker sizes (use same convention as scatter pair)
+        base_ms = plt.rcParams.get("lines.markersize", 6.0)
+        base_s = float(base_ms) ** 2
+        s_stim = max(1.0, base_s * 0.8)
+
+        zero_vec = np.zeros(num_cols, dtype=float)
+
+        # Stimulus scatter (left)
+        stim_initial = np.zeros(num_cols, dtype=float)
+        if stim_all is not None and num_stimuli > 0 and L > 0:
+            stim_initial = stim_all[0, 0, :]
+        stim_scatter = ax.scatter(
+            scale * cell_x + left_x,
+            scale * cell_z + 0.0,
+            c=stim_initial,
+            cmap="viridis",
+            norm=stim_norm,
+            s=s_stim,
+            edgecolors='none',
+            linewidths=0.0,
+            antialiased=False,
+        )
+
+        # Quiver (right)
+        # Initial u,v from first available frame
+        if L > 0 and num_stimuli > 0:
+            u0 = (arr1[0, 0, :] if arr1 is not None else 0.0) - (arr2[0, 0, :] if arr2 is not None else 0.0)
+            v0 = (arr3[0, 0, :] if arr3 is not None else 0.0) - (arr4[0, 0, :] if arr4 is not None else 0.0)
+        else:
+            u0 = np.zeros(num_cols, dtype=float)
+            v0 = np.zeros(num_cols, dtype=float)
+        q = ax.quiver(
+            scale * cell_x + right_x,
+            scale * cell_z + 0.0,
+            u0, v0,
+            np.hypot(u0, v0),
+            cmap="viridis",
+            norm=quiver_norm,
+            angles='xy',
+            scale_units='xy',
+            scale=max(1e-9, 1.0 / float(arrow_scale)),
+        )
+        cbar = fig.colorbar(q, ax=ax)
+
+        blanks = 25
+        total_frames = num_stimuli * (L + blanks)
+
+        def update(frame_t):
+            if total_frames == 0 or L == 0:
+                stim_scatter.set_array(zero_vec)
+                q.set_UVC(zero_vec, zero_vec, zero_vec)
+                return
+            block = L + blanks
+            stim_idx, within = divmod(frame_t, block)
+            if stim_idx >= num_stimuli:
+                stim_idx = num_stimuli - 1
+            if within < L:
+                t = within
+                # Update stimulus
+                if stim_all is not None and stim_idx < stim_all.shape[0]:
+                    stim_scatter.set_array(stim_all[stim_idx, t, :])
+                else:
+                    stim_scatter.set_array(zero_vec)
+                # Update quiver
+                u = ((arr1[stim_idx, t, :] if arr1 is not None and stim_idx < arr1.shape[0] else 0.0) -
+                     (arr2[stim_idx, t, :] if arr2 is not None and stim_idx < arr2.shape[0] else 0.0))
+                v = ((arr3[stim_idx, t, :] if arr3 is not None and stim_idx < arr3.shape[0] else 0.0) -
+                     (arr4[stim_idx, t, :] if arr4 is not None and stim_idx < arr4.shape[0] else 0.0))
+                mag = np.hypot(u, v)
+                q.set_UVC(u, v, mag)
+                cbar.update_normal(q)
+            else:
+                stim_scatter.set_array(zero_vec)
+                q.set_UVC(zero_vec, zero_vec, zero_vec)
+
+        return fig, update, total_frames
+
+    # One movie per direction, ignoring stimulus index
+    init_plot_for_direction.num_stimuli = 1
+    init_plot_for_direction.uses_stimuli_index = False
+    return init_plot_for_direction
