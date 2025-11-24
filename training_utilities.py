@@ -75,7 +75,11 @@ def calc_loss(loss_fn, pred, target):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, sigma_lambda=0):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, sigma_lambda=0, l2_lambda=0):
+
+    assert sigma_lambda >= 0, 'lambdas must be positive'
+    assert l2_lambda >= 0, 'lambdas must be positive'
+
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
@@ -115,8 +119,15 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
         if sigma_lambda > 0:
             # add a regularizer based on the operator norm of the model
-            max_sigma_regularizer = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
-            loss = loss + sigma_lambda * max_sigma_regularizer
+            max_sigma_penalty = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
+            loss = loss + sigma_lambda * max_sigma_penalty
+
+        if l2_lambda > 0:
+            l2_vals = torch.stack([
+                torch.nanmean(pred['firing_rate'][i]**2)
+                for i in pred['firing_rate']
+            ])
+            loss = loss + calc_loss(loss_fn, pred['firing_rate'], target)
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
         if loss < best_loss:

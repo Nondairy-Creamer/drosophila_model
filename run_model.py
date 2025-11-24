@@ -143,5 +143,6 @@ tu.train_model(model, sine_waves, target, output_neurons, input_neurons,
     clip_grad_norm=config['training']['clip_norm'],
     reset_init_every=config['training']['reset_init_every'],
     sigma_lambda=config['training']['sigma_lambda'],
+    l2_lambda=config['training']['l2_lambda'],
     loss_fn=loss_scaled)
 
