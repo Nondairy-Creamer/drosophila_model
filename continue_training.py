@@ -38,10 +38,16 @@ else:
 # --- train the model ---
 tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     model_save_folder=model_folder,
-    num_steps=config['training']['num_steps'],
+    num_steps=num_steps,
     save_every=config['training']['save_every'], 
-    alpha=config['training']['alpha'], 
+    alpha=alpha,
     clip_grad_norm=config['training']['clip_norm'],
-    loss_fn=loss_scaled)
+    loss_fn=loss_scaled,
+    opt_state_dict=opt_state['optimizer_state_dict'],
+    loss_history=opt_state['loss'],
+    sigma_lambda=config['training']['sigma_lambda'],
+    peak_lambda=config['training']['peak_lambda'],    
+    reset_init_every=config['training']['reset_init_every'],
+    )
 
                
