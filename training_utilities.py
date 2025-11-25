@@ -22,6 +22,17 @@ def nanstd(x, dim, keepdim=False, eps=1e-6):
         return std
     return std.squeeze(dim)
 
+def log_nanmean_exp(x, dim=None):
+    """Log of mean of exp, ignoring NaNs. Numerically stable."""
+    if dim is None:
+        x = x.flatten()
+        dim = 0
+    # Replace NaNs with -inf so exp(-inf) = 0
+    x_clean = torch.where(torch.isnan(x), torch.full_like(x, -float('inf')), x)
+    # Count non-NaN elements
+    n = (~torch.isnan(x)).sum(dim=dim).clamp_min(1)
+    return torch.logsumexp(x_clean, dim=dim) - torch.log(n.float())
+
 def corr_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
     # Compute a single correlation across all elements by normalizing globally
     y_hat = y_hat - torch.nanmean(y_hat, dim=dim, keepdim=True)
@@ -75,10 +86,10 @@ def calc_loss(loss_fn, pred, target):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, sigma_lambda=0, l2_lambda=0):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, sigma_lambda=0, peak_lambda=0):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
-    assert l2_lambda >= 0, 'lambdas must be positive'
+    assert peak_lambda >= 0, 'lambdas must be positive'
 
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
@@ -122,12 +133,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
             max_sigma_penalty = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
             loss = loss + sigma_lambda * max_sigma_penalty
 
-        if l2_lambda > 0:
-            l2_val = torch.stack([
-                torch.nanmean(pred['firing_rate'][i]**2)
-                for i in pred['firing_rate']
+        if peak_lambda > 0:
+            # add a regularizer to penalize high values (logmeanexp)
+            peak_val = torch.stack([
+                log_nanmean_exp(v)
+                for v in pred['firing_rate'].values()
             ]).mean()
-            loss = loss + l2_lambda * l2_val
+            loss = loss + peak_lambda * peak_val
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
         if loss < best_loss:
