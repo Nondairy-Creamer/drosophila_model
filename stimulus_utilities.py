@@ -157,26 +157,26 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
             sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + phase))
         return sine_wave
 
-    # -- rightleft sine wave --
-    sine_wave_up_down_left = make_lr_sine_wave(phase_init=0)
-    sine_wave_up_down_shifted = make_lr_sine_wave(phase_init=np.pi/2)
-    sine_wave_up_down_left *= contrast_scaling_factor[None, :]
-    sine_wave_up_down_shifted *= contrast_scaling_factor[None, :]
-    sine_wave_dict['right_left'].append(sine_wave_up_down_left.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append(sine_wave_up_down_shifted.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append((-sine_wave_up_down_left).reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
+    # -- right/left sine wave --
+    sine_wave_right_left = make_lr_sine_wave(phase_init=0)
+    sine_wave_right_left_shifted = make_lr_sine_wave(phase_init=np.pi/2)
+    sine_wave_right_left *= contrast_scaling_factor[None, :]
+    sine_wave_right_left_shifted *= contrast_scaling_factor[None, :]
+    sine_wave_dict['right_left'].append(sine_wave_right_left.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append(sine_wave_right_left_shifted.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append((-sine_wave_right_left).reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['right_left'].append((-sine_wave_right_left_shifted).reshape(num_repeats, time_per_stim, num_cell))
     tf_mat = np.tile(tf, (num_cell, 1)).T
     tf_dict['right_left'] += [tf_mat.reshape(num_repeats, time_per_stim, num_cell)] * 4
 
     # -- updown sine wave -- 
-    sine_wave_up_down_left = make_ud_sine_wave(phase_init=0)
+    sine_wave_up_down = make_ud_sine_wave(phase_init=0)
     sine_wave_up_down_shifted = make_ud_sine_wave(phase_init=np.pi/2)
-    sine_wave_up_down_left *= contrast_scaling_factor[None, :]
+    sine_wave_up_down *= contrast_scaling_factor[None, :]
     sine_wave_up_down_shifted *= contrast_scaling_factor[None, :]
-    sine_wave_dict['up_down'].append(sine_wave_up_down_left.reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['up_down'].append(sine_wave_up_down.reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['up_down'].append(sine_wave_up_down_shifted.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append((-sine_wave_up_down_left).reshape(num_repeats, time_per_stim, num_cell))
+    sine_wave_dict['up_down'].append((-sine_wave_up_down).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
     tf_mat = np.tile(tf, (num_cell, 1)).T
     tf_dict['up_down'] += [tf_mat.reshape(num_repeats, time_per_stim, num_cell)] * 4
