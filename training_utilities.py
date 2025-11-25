@@ -123,11 +123,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
             loss = loss + sigma_lambda * max_sigma_penalty
 
         if l2_lambda > 0:
-            l2_vals = torch.stack([
+            l2_val = torch.stack([
                 torch.nanmean(pred['firing_rate'][i]**2)
                 for i in pred['firing_rate']
-            ])
-            loss = loss + calc_loss(loss_fn, pred['firing_rate'], target)
+            ]).mean()
+            loss = loss + l2_lambda * l2_val
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
         if loss < best_loss:
