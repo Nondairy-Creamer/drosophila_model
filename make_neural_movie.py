@@ -22,8 +22,13 @@ from movie_utilities import (
     make_quiver_pair_sequence_factory
 )
 import model_utilities as mu
+import sys
 
-model_folder = Path('models/20251121_172245')
+if len(sys.argv) == 1:
+    model_folder = Path('models/20251124_171131')
+else:
+    model_folder = Path(sys.argv[1])
+
 model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
@@ -145,11 +150,11 @@ for mct in measured_cell_types:
 
 seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
 
-# init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
-# make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4")
+init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
+make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4")
 
-init_quiver = make_quiver_pair_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, arrow_scale=0.1)
-make_movie(init_quiver, ['sequence'], fig_folder, frame_rate, save_name="quiver")
+# init_quiver = make_quiver_pair_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, arrow_scale=0.1)
+# make_movie(init_quiver, ['sequence'], fig_folder, frame_rate, save_name="quiver")
 
 
 # # --- activity for light pathway ---

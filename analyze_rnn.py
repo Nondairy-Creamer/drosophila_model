@@ -11,8 +11,12 @@ import stimulus_utilities as su
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
+import sys
 
-model_folder = Path('models/20251121_172245')
+if len(sys.argv) == 1:
+    model_folder = Path('models/20251124_171131')
+else:
+    model_folder = Path(sys.argv[1])
 
 # Clear and recreate the analysis folder so outputs are always fresh
 analysis_folder = model_folder / 'analysis'
@@ -106,47 +110,45 @@ for ctp in cells_to_plot:
     # pu.plot_response_over_space(pred_plot[:, time_point, :], column_info_df.x, column_info_df.z, save_folder=model_folder / 'analysis' / ctp)
     pu.xt_plot(pred_plot, column_info_df.phi.to_numpy(), save_folder=ctp_dir)
 
-# # do a full sine wave sweep
-# # --- get a sign wave stimulus ---
-# # generate a sine wave on a cylinder around the fly
-# import model_utilities as mu
-# dt = model_config['model']['dt']
-# max_time = 8
-# input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
-# output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-# temporal_frequencies = [0.25, 1, 4, 16]
 
-# # get the column id for each column that has all of the neurons in input_neurons
-# column_info_input_df, column_ids_input = du.get_column_df(cell_info_df, input_neurons)
-# column_info_output_df, column_ids_output = du.get_column_df(cell_info_df, output_neurons)
+# do a full sine wave sweep
+# --- get a sign wave stimulus ---
+# generate a sine wave on a cylinder around the fly
+dt = model_config['model']['dt']
+stim_time = 2
+input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
+output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+temporal_frequencies = [0.25, 0.5, 1, 2, 4, 8, 16]
 
-# sine_waves, sine_wave_tfs, contrast_scaling_function = su.create_sine_wave(column_info_input_df.phi.to_numpy(), column_info_input_df.theta.to_numpy(), 
-#     temporal_frequency=temporal_frequencies, dt=dt, max_time=max_time)
-# sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
-# stim_to_cell_mapping = mu.get_stim_to_cell_mapping(cell_info_df, column_info_input_df, input_neurons=input_neurons)
-# stim_to_cell_mapping = torch.tensor(stim_to_cell_mapping, device=model.device)
+sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
+    temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=0, post_stim_time=0)
+sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
+sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
-# pred, readout = model.predict(sine_waves, stim_to_cell_mapping=stim_to_cell_mapping)
+pred = model.predict(sine_waves, input_neurons=input_neurons, output_neurons=output_neurons)[0]
 
-# ave_sine_resp = readout.detach().cpu().numpy().mean(axis=(2, 3))
-# sine_wave_dir = ['right', 'left', 'up', 'down']
-# num_phase = 4
-# ave_sine_resp = ave_sine_resp[:, ::num_phase] # skip the different phases for now
-# num_sine_dir = len(sine_wave_dir)
-# ave_sine_resp = ave_sine_resp.reshape((ave_sine_resp.shape[0], ave_sine_resp.shape[1] // num_sine_dir, num_sine_dir))
+num_phase = 4
+sine_wave_dir = ['right', 'left', 'up', 'down']
+num_tf = len(temporal_frequencies)
+num_dir = len(sine_wave_dir)
 
-# for ni, n in enumerate(output_neurons):
-#     plt.figure()
-#     fig, ax = plt.subplots()
-#     ax.plot(np.log(temporal_frequencies), ave_sine_resp[ni])
-#     ax.set_xticks(np.log(temporal_frequencies))
-#     ax.set_xticklabels(temporal_frequencies)
-#     plt.title(n)
-#     plt.legend(sine_wave_dir)
-#     plt.savefig(model_folder / 'analysis' / (n + '_sine_wave_sweep.png'))
-#     plt.close()
+ave_resp = {}
+for ons in output_neurons:
+    ave_resp[ons] = np.nanmean(pred['firing_rate'][ons].detach().cpu().numpy(), axis=(1, 2))
+    ave_resp[ons] = ave_resp[ons][::num_phase] # skip the different phases for now
+    ave_resp[ons] = ave_resp[ons].reshape((num_dir, num_tf)).T
 
-
+for ni, n in enumerate(output_neurons):
+    plt.figure()
+    fig, ax = plt.subplots()
+    ax.plot(np.log(temporal_frequencies), ave_resp[n])
+    ax.set_xticks(np.log(temporal_frequencies))
+    ax.set_xticklabels(temporal_frequencies)
+    plt.title(n)
+    plt.legend(sine_wave_dir)
+    plt.ylim(bottom=0, top=None)
+    plt.savefig(model_folder / 'analysis' / (n + '_sine_wave_sweep.png'))
+    plt.close()
 
 
 
