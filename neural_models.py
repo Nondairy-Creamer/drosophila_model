@@ -15,7 +15,7 @@ class NeuralRnn(torch.nn.Module):
         self.init_inputs = params
         super().__init__()
 
-        membrane_persistence_init = 0.5
+        persistence_init = 0.5
         stimulus_strength_init = 10.0
         offset_init = 0.0
         self.max_allowed_sigma = 0.95
@@ -46,7 +46,7 @@ class NeuralRnn(torch.nn.Module):
             return np.log(p / (1 - p))
 
         # --- model parameters
-        self.membrane_persistence_logit = torch.full((self.num_cell_types,), logit(membrane_persistence_init), dtype=self.dtype, device=self.device)
+        self.persistence_logit = torch.full((self.num_cell_types,), logit(persistence_init), dtype=self.dtype, device=self.device)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
         self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype) + offset_init
 
@@ -96,7 +96,7 @@ class NeuralRnn(torch.nn.Module):
         if set_max_sigma:
             self.set_sigma_max()
 
-        self.membrane_persistence_logit = torch.nn.Parameter(self.membrane_persistence_logit)
+        self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
         self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
         self.offset = torch.nn.Parameter(self.offset)
         self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
@@ -121,7 +121,7 @@ class NeuralRnn(torch.nn.Module):
                 self.output_strength_log.add_(torch.log(scale_factor))
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
-        membrane_persistence = self.membrane_persistence_logit.sigmoid()[self.neuron_to_type_index]
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
         input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
         output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
@@ -130,7 +130,7 @@ class NeuralRnn(torch.nn.Module):
         # model is
         # z = D_in @ synapse_counts @ D_out @ nonlinearity(v_prev) + stimulus * stimulus_strength
         # where D_in scales post-synaptic (rows) and D_out scales pre-synaptic (columns)
-        # v_next = membrane_persistence * v_prev + (1 - membrane_persistence) * (z + offset)
+        # v_next = persistence * v_prev + (1 - persistence) * (z + offset)
         # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
         # issues with passing gradients due to pytorch's limited sparse support.
         # we can't precompute the dynamics matrix because the broadcast operation of the input/output vectors doesn't
@@ -159,7 +159,7 @@ class NeuralRnn(torch.nn.Module):
                 si = stim_idx[valid]
                 z.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
 
-        v_next = membrane_persistence[None, :] * v_prev + (1 - membrane_persistence[None, :]) * (z + offset_all_neurons[None, :])
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
 
         return v_next
 
@@ -171,7 +171,7 @@ class NeuralRnn(torch.nn.Module):
         # Per-neuron scalings
         D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
         D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
-        d = self.membrane_persistence_logit.sigmoid()[self.neuron_to_type_index]       # (n,)
+        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]       # (n,)
         one_minus_d = 1.0 - d
 
         # M v = D_in * (A @ (D_out * v))
