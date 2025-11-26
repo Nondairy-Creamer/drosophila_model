@@ -8,6 +8,7 @@ pip install -r requirements.txt
 
 # gdown --folder "https://drive.google.com/drive/folders/1I5c9Q48eqas6mbjhoTXLPlRk7S4iTR1p" -O ../connectome_data
 
+mkdir -p ../connectome_data/
 gdown 11fa8BvQWHKF3dUVaXBpz2-Lm41flELGZ -O ../connectome_data/column_assignment.csv
 gdown 15GdWFPG94Sm0EIrShthk6myyU3DniWzR -O ../connectome_data/config.toml
 gdown 1ZzVnAXyxHnQboFE2ZBbITCJF3vNhtqVS -O ../connectome_data/connections_princeton.csv
