@@ -40,8 +40,8 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
-frame_rate = int(1 / model_config['model']['dt'])
-color_percentile = 90
+frame_rate = int(1 / model_config['model']['dt'] / 4)
+color_percentile = 99
 concat_all = False
 
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
@@ -97,9 +97,6 @@ input_neurons = ['L1', 'L2', 'L3']
 output_neurons = ['L1', 'Mi1', 'Mi9', 'C3', 'L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 print(model.calc_sigma_max())
-
-model.input_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
-model.output_strength_log[(model.unique_cell_types == 'R7') | (model.unique_cell_types == 'R8')] = np.log(1e-10)
 
 with torch.no_grad():
     pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
