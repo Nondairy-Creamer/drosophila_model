@@ -33,34 +33,68 @@ def log_nanmean_exp(x, dim=None):
     n = (~torch.isnan(x)).sum(dim=dim).clamp_min(1)
     return torch.logsumexp(x_clean, dim=dim) - torch.log(n.float())
 
-def corr_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
-    # Compute a single correlation across all elements by normalizing globally
-    y_hat = y_hat - torch.nanmean(y_hat, dim=dim, keepdim=True)
-    y = y - torch.nanmean(y, dim=dim, keepdim=True)
-    y_hat = y_hat / nanstd(y_hat, dim=dim, keepdim=True).clamp_min(eps)
-    y = y / nanstd(y, dim=dim, keepdim=True).clamp_min(eps)
-    corr = torch.nanmean(y_hat * y, dim=dim, keepdim=True)
+def corr_loss(y_hat, y, dim=(0, 1, 2), neuron_scaling=None, eps=1e-6):
+    # Create mask of positions valid in BOTH tensors
+    valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
+    valid_count = valid_mask.sum(dim=dim, keepdim=True).clamp_min(1)
+    
+    # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
+    y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
+    y = torch.where(torch.isnan(y), torch.zeros_like(y), y)
+    
+    # Compute means over valid positions only
+    y_hat_mean = (y_hat * valid_mask).sum(dim=dim, keepdim=True) / valid_count
+    y_mean = (y * valid_mask).sum(dim=dim, keepdim=True) / valid_count
+    
+    # Center the data (mask zeros out invalid positions)
+    y_hat_centered = (y_hat - y_hat_mean) * valid_mask
+    y_centered = (y - y_mean) * valid_mask
+    
+    # Compute std over valid positions
+    y_hat_std = (y_hat_centered.pow(2).sum(dim=dim, keepdim=True) / valid_count).sqrt().clamp_min(eps)
+    y_std = (y_centered.pow(2).sum(dim=dim, keepdim=True) / valid_count).sqrt().clamp_min(eps)
+    
+    # Normalize
+    y_hat_norm = y_hat_centered / y_hat_std
+    y_norm = y_centered / y_std
+    
+    # Compute correlation over valid positions
+    corr = (y_hat_norm * y_norm).sum(dim=dim, keepdim=True) / valid_count
 
     if neuron_scaling is not None:
         assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        corr = torch.nansum(corr * neuron_scaling[None, None, :], dim=2)
+        corr = torch.sum(corr * neuron_scaling[None, None, :], dim=2)
         
-    ave_corr = torch.nanmean(corr)
+    ave_corr = torch.mean(corr)
 
     return 1.0 - ave_corr
 
-def cos_loss(y_hat, y, dim=(0, 1), neuron_scaling=None, eps=1e-6):
-    y_hat = y_hat / nannorm(y_hat, dim=dim, keepdim=True).clamp_min(eps)
-    y = y / nannorm(y, dim=dim, keepdim=True).clamp_min(eps)
-    cosine_sim = torch.nansum(y_hat * y, dim=dim, keepdim=True)
+def cos_loss(y_hat, y, dim=(0, 1, 2), neuron_scaling=None, eps=1e-6):
+    # Create mask of positions valid in BOTH tensors
+    valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
+    
+    # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
+    y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
+    y = torch.where(torch.isnan(y), torch.zeros_like(y), y)
+    
+    # Apply mask so norms are computed only over valid positions
+    y_hat_masked = y_hat * valid_mask
+    y_masked = y * valid_mask
+    
+    # Normalize (nannorm uses nansum internally, but all values are now valid)
+    y_hat_norm = y_hat_masked / nannorm(y_hat_masked, dim=dim, keepdim=True).clamp_min(eps)
+    y_norm = y_masked / nannorm(y_masked, dim=dim, keepdim=True).clamp_min(eps)
+    
+    # Cosine similarity over valid positions
+    cosine_sim = torch.sum(y_hat_norm * y_norm, dim=dim, keepdim=True)
 
     if neuron_scaling is not None:
         assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
         neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        cosine_sim = torch.nansum(cosine_sim * neuron_scaling[None, None, :], dim=2)
+        cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, :], dim=2)
         
-    ave_cosine_sim = torch.nanmean(cosine_sim)
+    ave_cosine_sim = torch.mean(cosine_sim)
 
     return 1.0 - ave_cosine_sim
 
