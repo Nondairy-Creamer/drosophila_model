@@ -33,7 +33,7 @@ def log_nanmean_exp(x, dim=None):
     n = (~torch.isnan(x)).sum(dim=dim).clamp_min(1)
     return torch.logsumexp(x_clean, dim=dim) - torch.log(n.float())
 
-def corr_loss(y_hat, y, dim=(0, 1, 2), neuron_scaling=None, eps=1e-6):
+def corr_loss(y_hat, y, dim=None, eps=1e-6):
     # Create mask of positions valid in BOTH tensors
     valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
     valid_count = valid_mask.sum(dim=dim, keepdim=True).clamp_min(1)
@@ -60,17 +60,12 @@ def corr_loss(y_hat, y, dim=(0, 1, 2), neuron_scaling=None, eps=1e-6):
     
     # Compute correlation over valid positions
     corr = (y_hat_norm * y_norm).sum(dim=dim, keepdim=True) / valid_count
-
-    if neuron_scaling is not None:
-        assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
-        neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        corr = torch.sum(corr * neuron_scaling[None, None, :], dim=2)
         
     ave_corr = torch.mean(corr)
 
     return 1.0 - ave_corr
 
-def cos_loss(y_hat, y, dim=(0, 1, 2), neuron_scaling=None, eps=1e-6):
+def cos_loss(y_hat, y, dim=None, eps=1e-6):
     # Create mask of positions valid in BOTH tensors
     valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
     
@@ -88,11 +83,6 @@ def cos_loss(y_hat, y, dim=(0, 1, 2), neuron_scaling=None, eps=1e-6):
     
     # Cosine similarity over valid positions
     cosine_sim = torch.sum(y_hat_norm * y_norm, dim=dim, keepdim=True)
-
-    if neuron_scaling is not None:
-        assert torch.all(neuron_scaling >= 0) & ~torch.all(neuron_scaling == 0), 'contrast scaling cant be negative or all zeros'
-        neuron_scaling = neuron_scaling / neuron_scaling.sum()
-        cosine_sim = torch.sum(cosine_sim * neuron_scaling[None, None, :], dim=2)
         
     ave_cosine_sim = torch.mean(cosine_sim)
 
@@ -102,11 +92,6 @@ def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
     cos_loss_val = cos_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
-
-def get_scaled_loss_fn(loss_fn, neuron_scaling=None):
-    def loss_out(y_hat, y):
-        return loss_fn(y_hat, y, neuron_scaling=neuron_scaling)
-    return loss_out
 
 def calc_loss(loss_fn, pred, target):
     keys = list(pred.keys())

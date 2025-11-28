@@ -55,7 +55,6 @@ for ctp in input_neurons:
 contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
 contrast_scaling_factor = torch.load(contrast_scaling_factor_path).to(device=model.device)
 loss_fn = getattr(tu, model_config['training']['loss_fn'])
-loss_scaled = tu.get_scaled_loss_fn(loss_fn, contrast_scaling_factor)
 
 connectome_folder = Path(model_config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')

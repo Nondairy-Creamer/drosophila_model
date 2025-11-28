@@ -129,8 +129,6 @@ torch.save(contrast_scaling_factor.detach().cpu(), model_save_folder / "contrast
 
 # get the loss function
 loss_fn = getattr(tu, config['training']['loss_fn'])
-loss_scaled = tu.get_scaled_loss_fn(loss_fn, contrast_scaling_factor)
-
 model.save(model_save_folder / 'model_init.pt')
 model.save(model_save_folder / 'model.pt')
 
@@ -144,5 +142,5 @@ tu.train_model(model, sine_waves, target, output_neurons, input_neurons,
     reset_init_every=config['training']['reset_init_every'],
     sigma_lambda=config['training']['sigma_lambda'],
     peak_lambda=config['training']['peak_lambda'],
-    loss_fn=loss_scaled)
+    loss_fn=loss_fn)
 

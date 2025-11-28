@@ -23,7 +23,6 @@ output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
 contrast_scaling_factor = torch.load(contrast_scaling_factor_path).to(device=model.device)
 loss_fn = getattr(tu, config['training']['loss_fn'])
-loss_scaled = tu.get_scaled_loss_fn(loss_fn, contrast_scaling_factor)
 
 # Load the best optimizer state and reduce learning rate
 opt_state = torch.load(model_folder / 'model_opt.pt', map_location='cpu', weights_only=False)
@@ -42,7 +41,7 @@ tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     save_every=config['training']['save_every'], 
     alpha=alpha,
     clip_grad_norm=config['training']['clip_norm'],
-    loss_fn=loss_scaled,
+    loss_fn=loss_fn,
     opt_state_dict=opt_state['optimizer_state_dict'],
     loss_history=opt_state['loss'],
     sigma_lambda=config['training']['sigma_lambda'],
