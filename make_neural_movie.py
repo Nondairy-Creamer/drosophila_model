@@ -25,7 +25,7 @@ import model_utilities as mu
 import sys
 
 if len(sys.argv) == 1:
-    model_folder = Path('models/20251124_171131')
+    model_folder = Path('models/20251125_171505')
 else:
     model_folder = Path(sys.argv[1])
 
@@ -40,7 +40,7 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
-frame_rate = int(1 / model_config['model']['dt'] / 4)
+frame_rate = int(1 / model_config['model']['dt'])
 color_percentile = 99
 concat_all = False
 
@@ -52,17 +52,19 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 directions = ['right_left', 'up_down']
 stimulus_in = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
 
-# restrict the stimulus to 8 Hz, one phase
+# restrict the stimulus to one phase (select consecutive repeats, not every Nth)
 num_phase = 4
 num_dir = len(directions)
-num_stim = 4
-stimulus_dephased = stimulus_in[::num_phase, :, :]
-# stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
-# stimulus = stimulus[(num_stim - 1)::num_stim, :, :]
+num_stim = 4  # number of consecutive repeats to use per direction
 
-# split the stimuli into directions and remove extra stim for simplicity
-stim_split = torch.split(stimulus_dephased, stimulus_dephased.shape[0] // num_dir, dim=0)
-stim_split = [i[:num_stim, :, :] for i in stim_split]
+# split by direction first
+stim_per_dir = stimulus_in.shape[0] // num_dir
+stim_split = torch.split(stimulus_in, stim_per_dir, dim=0)
+
+# within each direction, select first num_stim repeats from ONE phase (they are consecutive and continuous)
+# structure per direction: [phase0 x num_repeats, phase1 x num_repeats, phase2 x num_repeats, phase3 x num_repeats]
+num_repeats_per_phase = stim_per_dir // num_phase
+stim_split = [s[:num_stim, :, :] for s in stim_split]  # take first num_stim from phase 0 (consecutive/continuous)
 stimulus = torch.cat(stim_split, dim=0)
 
 if concat_all:

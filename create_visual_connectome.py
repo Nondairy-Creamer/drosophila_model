@@ -22,11 +22,11 @@ hemisphere_coverage = config["data"]["hemisphere_coverage"]
 # each neuron in the drosophila connectome has a unique "root id"
 # This data set that includes the root ID for each visual neuron, whether that neuron is intrinsic to the optic lobes
 # and whether that neuron is on the right or left side
-visual_neurons_df = pd.read_csv(connectome_folder / 'visual_neuron_types.csv', dtype={"root_id": root_id_dtype})
+visual_neurons_df = pd.read_csv(connectome_folder / 'visual_neuron_types_no_threshold.csv', dtype={"root_id": root_id_dtype})
 
 # data set that specifies the number of synaptic contacts between one individual neuron and another
 # this also specifies the neurotransmitter used as the synapse which we'll use to estimate synapse sign
-synaptic_connections_df = pd.read_csv(connectome_folder / 'connections_princeton.csv',
+synaptic_connections_df = pd.read_csv(connectome_folder / 'connections_no_threshold.csv',
                                       dtype={"pre_root_id": root_id_dtype,
                                              "post_root_id": root_id_dtype,
                                              "syn_count": synapse_count_dtype}
@@ -34,7 +34,7 @@ synaptic_connections_df = pd.read_csv(connectome_folder / 'connections_princeton
 
 # The optic lobes are organized into retinotopic visual columns and this data set specifies the column id and location
 # of each cell on a hexagonal grid. not all visual neurons have this column information
-columns_df = pd.read_csv(connectome_folder / 'column_assignment.csv', dtype={"root_id": root_id_dtype})
+columns_df = pd.read_csv(connectome_folder / 'column_assignments_no_threshold.csv', dtype={"root_id": root_id_dtype})
 
 # --- process the incoming data ---
 # restrict neurons to intrinsic visual neurons in the left eye
@@ -69,12 +69,13 @@ c2c3_bool = (presynaptic_ids == 'C2') | (presynaptic_ids == 'C3')
 l1l2_bool = (postsynaptic_ids == 'L1') | (postsynaptic_ids == 'L2')
 synapse_sign[c2c3_bool & l1l2_bool] = 1
 
-# exclude R7 and R8
-r7r8_bool = (presynaptic_ids == 'R7') | (presynaptic_ids == 'R8') | (postsynaptic_ids == 'R7') | (postsynaptic_ids == 'R8')
-presynaptic_ids = presynaptic_ids[~r7r8_bool]
-postsynaptic_ids = postsynaptic_ids[~r7r8_bool]
-synapse_counts = synapse_counts[~r7r8_bool]
-synapse_sign = synapse_sign[~r7r8_bool]
+# exclude photoreceptors
+neurons_to_exclude = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8']
+exclude_bool = np.isin(presynaptic_ids, neurons_to_exclude)
+presynaptic_ids = presynaptic_ids[~exclude_bool]
+postsynaptic_ids = postsynaptic_ids[~exclude_bool]
+synapse_counts = synapse_counts[~exclude_bool]
+synapse_sign = synapse_sign[~exclude_bool]
 
 # make synapse counts signed
 synapse_counts *= synapse_sign
