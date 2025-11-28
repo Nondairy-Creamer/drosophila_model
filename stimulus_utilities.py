@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.signal import fftconvolve
 
 
 def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
