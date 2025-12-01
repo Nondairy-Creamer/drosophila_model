@@ -88,9 +88,9 @@ def cos_loss(y_hat, y, dim=None, eps=1e-6):
 
     return 1.0 - ave_cosine_sim
 
-def combined_loss(y_hat, y, neuron_scaling=None, eps=1e-6):
-    cos_loss_val = cos_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
-    corr_loss_val = corr_loss(y_hat, y, neuron_scaling=neuron_scaling, eps=eps)
+def combined_loss(y_hat, y, eps=1e-6):
+    cos_loss_val = cos_loss(y_hat, y, eps=eps)
+    corr_loss_val = corr_loss(y_hat, y, eps=eps)
     return 0.5 * cos_loss_val + 0.5 * corr_loss_val
 
 def calc_loss(loss_fn, pred, target):
@@ -168,6 +168,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
             # track and save the best checkpoint for easy rollback
             # Save BEFORE opt.step() so we save the weights that achieved this loss
             if model_save_folder:
+                # Sync GPU losses to loss_plot before saving so checkpoint has up-to-date history
+                for i in range(last_saved_idx + 1, len(loss_list)):
+                    loss_plot.append(loss_list[i].item())
+                last_saved_idx = len(loss_list) - 1
+                
                 model.save(model_save_folder / 'model.pt')
                 torch.save({
                     'optimizer_state_dict': opt.state_dict(),
@@ -203,6 +208,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 alpha = alpha * alpha_factor
                 for param_group in opt.param_groups:
                     param_group['lr'] = alpha
+                
+                # Reset hidden state to avoid mismatch with reloaded weights
+                last_state = None
                     
                 time_since_best = 0
                 print(' -------------------------------- ')
