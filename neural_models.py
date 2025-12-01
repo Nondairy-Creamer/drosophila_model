@@ -20,6 +20,7 @@ class NeuralRnn(torch.nn.Module):
         offset_init = 0.0
         self.max_allowed_sigma = 0.95
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
+        self.input_strength_minimum = 1e-4
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -90,7 +91,7 @@ class NeuralRnn(torch.nn.Module):
         # Initialize strength per cell type based on the inverse of its fan in / out
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        self.input_strength_log = torch.log(input_strength_init)
+        self.input_strength_log = torch.log(input_strength_init) - self.input_strength_minimum
         self.output_strength_log = torch.log(output_strength_init)
 
         if set_max_sigma:
@@ -122,7 +123,7 @@ class NeuralRnn(torch.nn.Module):
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
         persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
-        input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
+        input_strength = self.input_strength_log.exp()[self.neuron_to_type_index] + self.input_strength_minimum
         output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
         offset_all_neurons = self.offset[self.neuron_to_type_index]
@@ -169,7 +170,7 @@ class NeuralRnn(torch.nn.Module):
         device = self.device
         dtype = self.dtype
         # Per-neuron scalings
-        D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]   # (n,)
+        D_in  = self.input_strength_log.exp()[self.neuron_to_type_index] + self.input_strength_minimum   # (n,)
         D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
         d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]       # (n,)
         one_minus_d = 1.0 - d
@@ -325,7 +326,6 @@ class NeuralRnn(torch.nn.Module):
 
             with torch.no_grad():
                 self.output_strength_log.data[chosen_neurons] = np.log(self.silence_val)
-                self.input_strength_log.data[chosen_neurons] = np.log(self.silence_val)
         else:
             print('No neurons selected for silencing')
 

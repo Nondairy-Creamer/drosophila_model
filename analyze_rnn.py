@@ -118,7 +118,7 @@ for ns in cells_to_plot:
     print('--- Model parameters for', ns, '---')
     cell_index = np.where(model.unique_cell_types == ns)[0][0]
     chosen_persistence = model.persistence_logit[cell_index].sigmoid().detach().cpu().numpy()
-    chosen_strength_in = model.input_strength_log[cell_index].exp().detach().cpu().numpy()
+    chosen_strength_in = model.input_strength_log[cell_index].exp().detach().cpu().numpy() + model.input_strength_minimum.detach().cpu().numpy()
     chosen_strength_out = model.output_strength_log[cell_index].exp().detach().cpu().numpy()
     chosen_offset = model.offset[cell_index].detach().cpu().numpy()
     chosen_stimulus_strength = model.stimulus_strength_log[cell_index].exp().detach().cpu().numpy()
