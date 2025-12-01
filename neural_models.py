@@ -20,7 +20,7 @@ class NeuralRnn(torch.nn.Module):
         offset_init = 0.0
         self.max_allowed_sigma = 0.95
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
-        self.input_strength_minimum = 1e-4
+        self.input_strength_minimum = 0
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):

@@ -45,8 +45,7 @@ num_columns = len(column_info_df)
 # we'll use the columns that have all our input and output neurons
 input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-# output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
-output_neurons_direction = ['right_left', 'right_left', 'up_down', 'up_down', 'right_left', 'right_left', 'up_down', 'up_down']
+output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
 # create the model
 model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(), 
@@ -63,69 +62,50 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 # sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
 # --- generate a sine wave with random tf over time
-sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_random_tf_sine_wave(
-    column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
-    tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
-    num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time)
-sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
-sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
+# stimulus, optic_flow = su.create_random_tf_sine_wave(
+#     column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
+#     tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
+#     num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time)
+# stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+# optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+
+# --- grab the natural movie stimulus ---
+stimulus, optic_flow = su.load_natural_movie()
+stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
 # --- plot the stimuli ---
-pu.xt_plot(sine_waves.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), target=sine_wave_tfs.detach().cpu().numpy(), save_folder='figures/stimulus')
+pu.xt_plot(stimulus.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), target=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
-num_stimuli = sine_waves.shape[0]
+num_stimuli = stimulus.shape[0]
 target = {}
 
-# for i in range(len(output_neurons)):
-#     this_neuron = output_neurons[i]
-#     this_block = output_neurons_direction[i]
-#     this_block_index = blocks.index(this_block)
-#     num_blocks = len(blocks)
-#     stimulus_block_size = num_stimuli // num_blocks  # limits this cell preference to one of the right left up down blocks
-
-#     # get the index of the stimuli that this neruon will respond to, based on the direction
-#     stim_resp_inds = torch.arange(this_block_index * stimulus_block_size, (this_block_index + 1) * stimulus_block_size)
-
-#     target[this_neuron] = torch.zeros((num_stimuli, num_time, num_columns), device=device, dtype=dtype)
-#     start_index = int(pre_stim_time / dt)
-#     stop_index = int((pre_stim_time + stim_time) / dt)
-#     target[this_neuron][stim_resp_inds, start_index:stop_index, :] = sine_wave_tfs[stim_resp_inds, None, None]
-
 # --- make stimulus for random velocity sine wave ---
-for i in range(len(output_neurons)):
-    this_neuron = output_neurons[i]
-    this_block = output_neurons_direction[i]
-    this_block_index = blocks.index(this_block)
-    num_blocks = len(blocks)
-    stimulus_block_size = num_stimuli // num_blocks  # limits this cell preference to one of the right_left or up_down blocks
+for n, d in zip(output_neurons, output_neurons_direction):
+    if d == 'right':
+        target[n] = optic_flow[:, :, :, 0]
+        target[n][target[n] < 0] = 0
 
-    # get the index of the stimuli that this neruon will respond to, based on the direction
-    stim_resp_inds = torch.arange(this_block_index * stimulus_block_size, (this_block_index + 1) * stimulus_block_size)
+    elif d == 'left':
+        target[n] = -optic_flow[:, :, :, 0]
+        target[n][target[n] < 0] = 0
 
-    # limit the left-right neurons to only respond to the left-right stimulus
-    # same for up-down to up-down stimulus. respond 0 otherwise
-    target[this_neuron] = torch.zeros_like(sine_wave_tfs)
-    target[this_neuron][stim_resp_inds, :, :] = sine_wave_tfs[stim_resp_inds, :, :]
-    
-    if this_neuron in ['T4a', 'T5a', 'T4c', 'T5c']:
-        # front-to-back and up responding neurons respond positively to positive TFs in their preferred direction
-        target[this_neuron][target[this_neuron] < 0] = 0
-    elif this_neuron in ['T4b', 'T5b', 'T4d', 'T5d']:
-        # back-to-front and down respond neurons respond positively to negative TFs in their preferred direction
-        target[this_neuron] = -target[this_neuron]
-        target[this_neuron][target[this_neuron] < 0] = 0
+    elif d == 'up':
+        target[n] = optic_flow[:, :, :, 1]
+        target[n][target[n] < 0] = 0
+
+    elif d == 'down':
+        target[n] = -optic_flow[:, :, :, 1]
+        target[n][target[n] < 0] = 0
 
 # save the config file and inputs
 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 model_save_folder = Path('models/' + timestamp)
 model_save_folder.mkdir(parents=True, exist_ok=True)
 du.save_config(config, model_save_folder / 'config.toml')
-torch.save(sine_waves.detach().cpu(), model_save_folder / "cell_inputs.pt")
-torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
-
-contrast_scaling_factor = torch.tensor(contrast_scaling_factor, dtype=dtype, device=device)
-torch.save(contrast_scaling_factor.detach().cpu(), model_save_folder / "contrast_scaling_factor.pt")
+torch.save(stimulus.detach().cpu(), model_save_folder / "cell_inputs.pt")
+torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in optic_flow.items()}, model_save_folder / "target.pt")
 
 # get the loss function
 loss_fn = getattr(tu, config['training']['loss_fn'])
@@ -133,7 +113,7 @@ model.save(model_save_folder / 'model_init.pt')
 model.save(model_save_folder / 'model.pt')
 
 # --- train the model ---
-tu.train_model(model, sine_waves, target, output_neurons, input_neurons,
+tu.train_model(model, stimulus, optic_flow, output_neurons, input_neurons,
     model_save_folder=model_save_folder,
     num_steps=config['training']['num_steps'],
     save_every=config['training']['save_every'], 

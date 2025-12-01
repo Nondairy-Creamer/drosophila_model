@@ -25,7 +25,7 @@ import model_utilities as mu
 import sys
 
 if len(sys.argv) == 1:
-    model_folder = Path('models/20251125_171505')
+    model_folder = Path('models/20251128_224751')
 else:
     model_folder = Path(sys.argv[1])
 
@@ -71,8 +71,7 @@ if concat_all:
     stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
 
 # --- silence some neurons ---
-neurons_to_silence = ['L1', 'L3']
-neurons_to_silence = ['L5']
+neurons_to_silence = []
 model.silence_neurons(neurons_to_silence)
 
 # # --- load the stimuli from the camera ---
@@ -148,7 +147,6 @@ seq_data = {}
 for mct in measured_cell_types:
     cell_resp = pred[mct].detach().cpu().numpy()
     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
-    cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
     cell_resp = interp_nan_column(cell_resp)
     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
@@ -165,7 +163,6 @@ seq_data = {}
 for mct in measured_cell_types:
     cell_resp = pred[mct].detach().cpu().numpy()
     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
-    cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
     cell_resp = interp_nan_column(cell_resp)
     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
@@ -185,7 +182,6 @@ make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name
 # for mct in measured_cell_types:
 #     cell_resp = pred[mct].detach().cpu().numpy()
 #     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
-#     cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
 #     cell_resp = interp_nan_column(cell_resp)
 #     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
@@ -201,7 +197,6 @@ make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name
 # for mct in measured_cell_types:
 #     cell_resp = pred[mct].detach().cpu().numpy()
 #     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
-#     cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
 #     cell_resp = interp_nan_column(cell_resp)
 #     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 

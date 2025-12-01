@@ -1,4 +1,6 @@
 import numpy as np
+import pickle
+from pathlib import Path
 
 
 def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
@@ -196,3 +198,29 @@ def consolidate_stim(stim_dict, target_dict):
         target = np.concatenate((target, this_target))
 
     return stimulus, target
+
+
+def load_natural_movie():
+    stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
+    with open(stimulus_path, 'rb') as f:
+        stimulus_in = pickle.load(f)
+
+    # most stimuli are 99 points long. some are 199. shorten so they're all the same
+    expected_length = 99
+    for i in reversed(range(len(stimulus_in['responses']))):
+        if stimulus_in['responses'][i].shape[0] > expected_length:
+            long_run = stimulus_in['responses'].pop(i)
+            stimulus_in['responses'].append(long_run[:expected_length])
+            stimulus_in['responses'].append(long_run[expected_length:2*expected_length])
+
+            long_run_vect = stimulus_in['forward_flows'].pop(i)
+            stimulus_in['forward_flows'].append(long_run_vect[:expected_length])
+            stimulus_in['forward_flows'].append(long_run_vect[expected_length:2*expected_length])
+
+    stimulus_out = np.stack(stimulus_in['responses'])
+    target = np.stack(stimulus_in['forward_flows'])
+    stimulus_out /= 127.5
+    stimulus_out -= 0.5
+
+    return stimulus_out, target
+
