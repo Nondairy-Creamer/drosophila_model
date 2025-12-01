@@ -19,6 +19,7 @@ class NeuralRnn(torch.nn.Module):
         stimulus_strength_init = 10.0
         offset_init = 0.0
         self.max_allowed_sigma = 0.95
+        self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -33,7 +34,6 @@ class NeuralRnn(torch.nn.Module):
         self.num_neurons = cell_types.shape[0]
         self.unique_cell_types = np.unique(cell_types)
         self.num_cell_types = self.unique_cell_types.shape[0]
-        self.synapse_counts_coo = synapse_counts_coo
         self.column_indices = column_indices
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
@@ -53,9 +53,9 @@ class NeuralRnn(torch.nn.Module):
         # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
         # synapse counts sparse must be in the form N x 3 with [indices, (pre_synaptic, post_synaptic, count)]
-        rows = torch.tensor(self.synapse_counts_coo[:, 1], device=device, dtype=torch.int64)
-        cols = torch.tensor(self.synapse_counts_coo[:, 0], device=device, dtype=torch.int64)
-        values = torch.tensor(self.synapse_counts_coo[:, 2], device=device, dtype=self.dtype)
+        rows = torch.tensor(synapse_counts_coo[:, 1], device=device, dtype=torch.int64)
+        cols = torch.tensor(synapse_counts_coo[:, 0], device=device, dtype=torch.int64)
+        values = torch.tensor(synapse_counts_coo[:, 2], device=device, dtype=self.dtype)
 
         indices = torch.stack([rows, cols], dim=0)
         self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
@@ -314,7 +314,21 @@ class NeuralRnn(torch.nn.Module):
         selected_column_indices = self.column_indices[neuron_is_in_list]
 
         return selected_neuron_indices, selected_column_indices
-        
+    
+    def silence_neurons(self, neurons_to_silence):
+        if len(neurons_to_silence) > 0:
+            print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
+            # set the input and output strength of these neurons to a small value
+            chosen_neurons = np.zeros(self.num_cell_types) == 1
+            for ns in neurons_to_silence:
+                chosen_neurons[self.unique_cell_types == ns] = True
+
+            with torch.no_grad():
+                self.output_strength_log.data[chosen_neurons] = np.log(self.silence_val)
+                self.input_strength_log.data[chosen_neurons] = np.log(self.silence_val)
+        else:
+            print('No neurons selected for silencing')
+
     @classmethod
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
         data = torch.load(Path(path), map_location='cpu', weights_only=False)

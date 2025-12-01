@@ -70,6 +70,11 @@ stimulus = torch.cat(stim_split, dim=0)
 if concat_all:
     stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
 
+# --- silence some neurons ---
+neurons_to_silence = ['L1', 'L3']
+neurons_to_silence = ['L5']
+model.silence_neurons(neurons_to_silence)
+
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
 # stimulus = np.load(connectome_folder / 'fly_view3.npy')
@@ -135,7 +140,7 @@ def interp_nan_column(time_by_neurons):
 
 column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
-# --- Diamond sequence movie for measured cell types + stimulus ---
+# --- Diamond sequence movie for T4 ---
 measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
 
 # Build responses dictionary limited to measured cell types, and add stimulus
@@ -151,6 +156,23 @@ seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli
 
 init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
 make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4")
+
+
+# --- Diamond sequence movie for T5 ---
+measured_cell_types = ['T5a', 'T5b', 'T5c', 'T5d']
+
+seq_data = {}
+for mct in measured_cell_types:
+    cell_resp = pred[mct].detach().cpu().numpy()
+    cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+    cell_resp = (np.exp(cell_resp) - 1) / (np.exp(1) - 1)
+    cell_resp = interp_nan_column(cell_resp)
+    seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
+
+seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+
+init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
+make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t5")
 
 # init_quiver = make_quiver_pair_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, arrow_scale=0.1)
 # make_movie(init_quiver, ['sequence'], fig_folder, frame_rate, save_name="quiver")

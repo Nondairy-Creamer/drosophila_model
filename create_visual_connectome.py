@@ -70,7 +70,7 @@ l1l2_bool = (postsynaptic_ids == 'L1') | (postsynaptic_ids == 'L2')
 synapse_sign[c2c3_bool & l1l2_bool] = 1
 
 # exclude photoreceptors
-neurons_to_exclude = ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8']
+neurons_to_exclude = ['R1-6', 'R7', 'R8']
 exclude_bool = np.isin(presynaptic_ids, neurons_to_exclude)
 presynaptic_ids = presynaptic_ids[~exclude_bool]
 postsynaptic_ids = postsynaptic_ids[~exclude_bool]
