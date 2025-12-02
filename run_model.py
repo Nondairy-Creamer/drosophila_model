@@ -105,7 +105,7 @@ model_save_folder = Path('models/' + timestamp)
 model_save_folder.mkdir(parents=True, exist_ok=True)
 du.save_config(config, model_save_folder / 'config.toml')
 torch.save(stimulus.detach().cpu(), model_save_folder / "cell_inputs.pt")
-torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in optic_flow.items()}, model_save_folder / "target.pt")
+torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
 
 # get the loss function
 loss_fn = getattr(tu, config['training']['loss_fn'])
@@ -113,7 +113,7 @@ model.save(model_save_folder / 'model_init.pt')
 model.save(model_save_folder / 'model.pt')
 
 # --- train the model ---
-tu.train_model(model, stimulus, optic_flow, output_neurons, input_neurons,
+tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     model_save_folder=model_save_folder,
     num_steps=config['training']['num_steps'],
     save_every=config['training']['save_every'], 

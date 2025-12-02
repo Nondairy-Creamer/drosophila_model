@@ -116,26 +116,36 @@ def xt_plot(stim_time_space, x, target=None, save_folder=Path('figures')):
     sort_inds_no_nan = sort_inds[valid_cells[sort_inds]]
 
     for pi in range(stim_time_space.shape[0]):
-        plt.figure()
         if target is not None:
-            plt.subplot(1, 2, 1)
-        plt.imshow(stim_time_space[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
+            fig, axes = plt.subplots(1, 3, gridspec_kw={'width_ratios': [2, 1, 1]})
+            ax_pred, ax_lr, ax_ud = axes
+        else:
+            fig, ax_pred = plt.subplots()
+        
+        im_pred = ax_pred.imshow(stim_time_space[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
         if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
-            plt.clim(vmin=0)
-        plt.xlabel('phi')
-        plt.ylabel('time')
-        plt.title('prediction')
-        plt.colorbar()
+            im_pred.set_clim(vmin=0)
+        ax_pred.set_xlabel('phi')
+        ax_pred.set_ylabel('time')
+        ax_pred.set_title('prediction')
+        fig.colorbar(im_pred, ax=ax_pred)
 
         if target is not None:
-            plt.subplot(1, 2, 2)
-            plt.imshow(target[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
+            im_lr = ax_lr.imshow(target[pi, :, sort_inds_no_nan, 0].T, interpolation='nearest', aspect='auto')
             if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
-                plt.clim(vmin=0)
-            plt.xlabel('phi')
-            plt.ylabel('time')
-            plt.title('target')
-            plt.colorbar()
+                im_lr.set_clim(vmin=0)
+            ax_lr.set_xlabel('phi')
+            ax_lr.set_ylabel('time')
+            ax_lr.set_title('left right flow')
+            fig.colorbar(im_lr, ax=ax_lr)
+
+            im_ud = ax_ud.imshow(target[pi, :, sort_inds_no_nan, 1].T, interpolation='nearest', aspect='auto')
+            if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
+                im_ud.set_clim(vmin=0)
+            ax_ud.set_xlabel('phi')
+            ax_ud.set_ylabel('time')
+            ax_ud.set_title('up down flow')
+            fig.colorbar(im_ud, ax=ax_ud)
         
         plt.savefig(save_folder / ('xt_plot_' + str(pi) + '.png'))
         plt.close()
