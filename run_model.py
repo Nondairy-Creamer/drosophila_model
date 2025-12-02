@@ -69,6 +69,7 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
 # stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
 # optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
+# TODO switch this back to sinewaves and update sine waves to work with the new stimulus format
 # --- grab the natural movie stimulus ---
 stimulus, optic_flow = su.load_natural_movie()
 stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
