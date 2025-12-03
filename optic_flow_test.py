@@ -98,7 +98,7 @@ def format_vec(v, name):
     return f"{name} = [{v[0]:+.3f}, {v[1]:+.3f}, {v[2]:+.3f}]"
 
 
-# Threshold for detecting zero translation (based on RMS of de-rotated flow)
+# Threshold for detecting zero translation (based on ||T_star||)
 TRANSLATION_THRESHOLD = 1e-5
 
 
@@ -216,7 +216,10 @@ def test_rotation_only():
     d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred, trans_mag = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    
+    # ||T_pred|| now represents translation magnitude (scaled by 1/Z)
+    trans_mag = T_pred.norm().item()
     
     # Detect zero translation
     has_translation = trans_mag > TRANSLATION_THRESHOLD
@@ -258,27 +261,32 @@ def test_translation_only():
     d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred, trans_mag = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    trans_mag = T_pred.norm().item()
+    
+    # Normalize T_pred to compare direction (T_pred is now scaled)
+    T_pred_dir = T_pred / T_pred.norm() if T_pred.norm() > 0 else T_pred
     
     # Translation direction is only determined up to sign
-    if (T_pred - T_true).norm() > (T_pred + T_true).norm():
+    if (T_pred_dir - T_true).norm() > (T_pred_dir + T_true).norm():
         T_pred = -T_pred
+        T_pred_dir = -T_pred_dir
         Z_pred = -Z_pred
     
-    print(f"Predicted T:         {T_pred.numpy()}")
-    print(f"Translation error:   {(T_pred - T_true).norm():.6f}")
+    print(f"Predicted T (dir):   {T_pred_dir.numpy()}")
+    print(f"Predicted ||T||:     {trans_mag:.6f}")
+    print(f"Direction error:     {(T_pred_dir - T_true).norm():.6f}")
     print(f"True depth:          {Z[0]:.3f}")
     print(f"Predicted depth (mean): {Z_pred.mean():.3f}")
-    print(f"Translation signal:  {trans_mag:.6f}")
     
     # Plot flow field
     plot_flow_field(
         theta, phi, d_theta, d_phi,
         title="Pure Translation Flow Field",
         omega_true=omega_true, T_true=T_true,
-        omega_pred=omega_pred, T_pred=T_pred,
+        omega_pred=omega_pred, T_pred=T_pred_dir,
         filename='figures/analysis/flow_translation_only.png',
-        extra_info=f"Trans signal: {trans_mag:.3f}\n(ω=0, depth Z={Z[0]:.1f})"
+        extra_info=f"||T|| = {trans_mag:.3f}\n(ω=0, depth Z={Z[0]:.1f})"
     )
     
     return omega_pred, T_pred, Z_pred
@@ -303,27 +311,32 @@ def test_combined_motion():
     d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred, trans_mag = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    trans_mag = T_pred.norm().item()
+    
+    # Normalize T_pred to compare direction
+    T_pred_dir = T_pred / T_pred.norm() if T_pred.norm() > 0 else T_pred
     
     # Translation direction is only determined up to sign
-    if (T_pred - T_true).norm() > (T_pred + T_true).norm():
+    if (T_pred_dir - T_true).norm() > (T_pred_dir + T_true).norm():
         T_pred = -T_pred
+        T_pred_dir = -T_pred_dir
         Z_pred = -Z_pred
     
     print(f"Predicted omega:     {omega_pred.numpy()}")
-    print(f"Predicted T:         {T_pred.numpy()}")
+    print(f"Predicted T (dir):   {T_pred_dir.numpy()}")
+    print(f"Predicted ||T||:     {trans_mag:.6f}")
     print(f"Rotation error:      {(omega_pred - omega_true).norm():.6f}")
-    print(f"Translation error:   {(T_pred - T_true).norm():.6f}")
-    print(f"Translation signal:  {trans_mag:.6f}")
+    print(f"Direction error:     {(T_pred_dir - T_true).norm():.6f}")
     
     # Plot flow field
     plot_flow_field(
         theta, phi, d_theta, d_phi,
         title="Combined Rotation + Translation Flow Field",
         omega_true=omega_true, T_true=T_true,
-        omega_pred=omega_pred, T_pred=T_pred,
+        omega_pred=omega_pred, T_pred=T_pred_dir,
         filename='figures/analysis/flow_combined.png',
-        extra_info=f"Trans signal: {trans_mag:.3f}\n(depth Z={Z[0]:.1f})"
+        extra_info=f"||T|| = {trans_mag:.3f}\n(depth Z={Z[0]:.1f})"
     )
     
     return omega_pred, T_pred, Z_pred
@@ -353,19 +366,24 @@ def test_varying_depth():
     d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred, trans_mag = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    trans_mag = T_pred.norm().item()
+    
+    # Normalize T_pred to compare direction
+    T_pred_dir = T_pred / T_pred.norm() if T_pred.norm() > 0 else T_pred
     
     # Translation direction is only determined up to sign
-    if (T_pred - T_true).norm() > (T_pred + T_true).norm():
+    if (T_pred_dir - T_true).norm() > (T_pred_dir + T_true).norm():
         T_pred = -T_pred
+        T_pred_dir = -T_pred_dir
         Z_pred = -Z_pred
     
     print(f"Predicted omega:     {omega_pred.numpy()}")
-    print(f"Predicted T:         {T_pred.numpy()}")
+    print(f"Predicted T (dir):   {T_pred_dir.numpy()}")
+    print(f"Predicted ||T||:     {trans_mag:.6f}")
     print(f"Rotation error:      {(omega_pred - omega_true).norm():.6f}")
-    print(f"Translation error:   {(T_pred - T_true).norm():.6f}")
+    print(f"Direction error:     {(T_pred_dir - T_true).norm():.6f}")
     print(f"Pred depth range:    [{Z_pred.min():.2f}, {Z_pred.max():.2f}]")
-    print(f"Translation signal:  {trans_mag:.6f}")
     
     # Correlation between true and predicted depth
     corr = torch.corrcoef(torch.stack([Z, Z_pred]))[0, 1]
@@ -376,9 +394,9 @@ def test_varying_depth():
         theta, phi, d_theta, d_phi,
         title="Varying Depth Flow Field (Forward Motion)",
         omega_true=omega_true, T_true=T_true,
-        omega_pred=omega_pred, T_pred=T_pred,
+        omega_pred=omega_pred, T_pred=T_pred_dir,
         filename='figures/analysis/flow_varying_depth.png',
-        extra_info=f"Z ∈ [{Z.min():.1f}, {Z.max():.1f}]\nDepth corr: {corr:.4f}"
+        extra_info=f"||T|| = {trans_mag:.3f}\nZ ∈ [{Z.min():.1f}, {Z.max():.1f}]\nDepth corr: {corr:.4f}"
     )
     
     return omega_pred, T_pred, Z_pred
@@ -412,18 +430,23 @@ def test_noisy_flow():
     print(f"Flow magnitude:      {torch.sqrt(d_theta**2 + d_phi**2).mean():.4f}")
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred, trans_mag = get_self_motion(theta, phi, d_theta_noisy, d_phi_noisy)
+    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta_noisy, d_phi_noisy)
+    trans_mag = T_pred.norm().item()
+    
+    # Normalize T_pred to compare direction
+    T_pred_dir = T_pred / T_pred.norm() if T_pred.norm() > 0 else T_pred
     
     # Translation direction is only determined up to sign
-    if (T_pred - T_true).norm() > (T_pred + T_true).norm():
+    if (T_pred_dir - T_true).norm() > (T_pred_dir + T_true).norm():
         T_pred = -T_pred
+        T_pred_dir = -T_pred_dir
         Z_pred = -Z_pred
     
     print(f"Predicted omega:     {omega_pred.numpy()}")
-    print(f"Predicted T:         {T_pred.numpy()}")
+    print(f"Predicted T (dir):   {T_pred_dir.numpy()}")
+    print(f"Predicted ||T||:     {trans_mag:.6f}")
     print(f"Rotation error:      {(omega_pred - omega_true).norm():.6f}")
-    print(f"Translation error:   {(T_pred - T_true).norm():.6f}")
-    print(f"Translation signal:  {trans_mag:.6f}")
+    print(f"Direction error:     {(T_pred_dir - T_true).norm():.6f}")
     
     return omega_pred, T_pred, Z_pred
 

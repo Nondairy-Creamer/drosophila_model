@@ -85,7 +85,9 @@ def get_self_motion(theta, phi, d_theta, d_phi):
 
     # === Solve C T = 0 via smallest singular vector ===
     _, _, Vh = torch.linalg.svd(C, full_matrices=False)
-    T_star = Vh[-1]                        # smallest singular value direction
+    # scale T estimate by translation magnitude so that it is proportional
+    # to true translation across frames
+    T_star = Vh[-1] * translation_magnitude    # smallest singular value direction
 
     # === w_i = Π_i T* ===
     w_i = (P @ T_star)                     # (N,3)
@@ -93,4 +95,4 @@ def get_self_motion(theta, phi, d_theta, d_phi):
     # Depth from: v = -(1/Z) * Π * T  =>  Z = -||w||² / (v · w)
     Z_star = -(w_i.norm(dim=1)**2) / (v * w_i).sum(dim=1)
 
-    return omega_star, T_star, Z_star, translation_magnitude
+    return omega_star, T_star, Z_star
