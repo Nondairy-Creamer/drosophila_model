@@ -86,7 +86,7 @@
 
 \begin_body
 
-\begin_layout Standard
+\begin_layout Subsection*
 Problem:
 \end_layout
 
@@ -210,7 +210,7 @@ a_{z} & 0 & -a_{x}\\
 
 \end_layout
 
-\begin_layout Standard
+\begin_layout Subsection*
 Algorithm
 \end_layout
 
@@ -228,12 +228,16 @@ Algorithm
 \begin_layout Standard
 \begin_inset Formula 
 \[
-T^{*}=\sigma_{min}^{right}(C)
+T^{*}=\sigma_{min}^{right}(C)\text{RMS}(v)
 \]
 
 \end_inset
 
+ where 
+\begin_inset Formula $\sigma_{min}^{right}$
+\end_inset
 
+ is admittedly poor notation which means the right hand singular vector with the smallest sigma
 \end_layout
 
 \begin_layout Standard
@@ -332,7 +336,7 @@ w_{i}=\Pi_{i}T^{*}
 
 \end_layout
 
-\begin_layout Standard
+\begin_layout Subsection*
 Derivation
 \end_layout
 
@@ -441,7 +445,7 @@ A=\left[\begin{array}{c}
 \begin_layout Standard
 \begin_inset Formula 
 \[
-\hat{\mathbf{\Omega}}=(A^{\intercal}A)^{-1}A^{\intercal}\mathbf{u} 
+\hat{\mathbf{\Omega}}=(A^{\intercal}A)^{-1}A^{\intercal}\mathbf{u}
 \]
 
 \end_inset
@@ -550,6 +554,8 @@ T
 C
 \series default
  corresponding to the smallest singular value.
+ The singular value itself just gives the direction of motion,
+ but you can give it a scale by multiplying the vector by RMS(v) which makes it proportional to T/Z
 \end_layout
 
 \begin_layout Standard
