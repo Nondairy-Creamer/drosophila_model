@@ -23,20 +23,7 @@ def run_single_model(seed=None, device_override=None, run_id=None):
         device_override: Override device from config (e.g., 'cuda:0', 'cuda:1', 'cpu')
         run_id: Optional identifier for this run (appended to timestamp)
     """
-    # Set random seeds
-    if seed is not None:
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-        # Set deterministic behavior for reproducibility
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        rng = np.random.default_rng(seed)
-    else:
-        rng = np.random.default_rng()
-    
+
     # Load configuration from TOML file
     config = du.load_config()
     
@@ -79,7 +66,7 @@ def run_single_model(seed=None, device_override=None, run_id=None):
                          column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(), 
                          nonlinearity=config['model']['nonlinearity'],
                          device=config['model']['device'], dtype=config['model']['dtype'],
-                         use_layer_norm=config['model']['use_layer_norm'], dt=dt)
+                         use_layer_norm=config['model']['use_layer_norm'], dt=dt, seed=seed)
     
     # --- get a sign wave stimulus ---
     # generate a sine wave on a cylinder around the fly
@@ -92,7 +79,7 @@ def run_single_model(seed=None, device_override=None, run_id=None):
     stimulus, optic_flow = su.create_random_tf_sine_wave(
         column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
         tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
-        num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time, rng=rng)
+        num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time, seed=seed)
     stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
     optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
     

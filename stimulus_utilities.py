@@ -112,12 +112,18 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
 
     return stimulus, optic_flow
 
-def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, rng=np.random.default_rng(),
+def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, seed=None,
                                dt=0.01, stim_time=1.0, num_repeats=5):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # the velocity of this sine wave is a smoothed gaussian random walk 
     # positive / negative temporal frequency is right / left and down / up sine waves
+    
+    # Create RNG from seed
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng()
     
     # --- generate the space time coordinates ---
     filter_std_base = 2.5 * np.pi / 180  # radians

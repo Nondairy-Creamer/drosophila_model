@@ -6,7 +6,7 @@ from functools import reduce
 
 class NeuralRnn(torch.nn.Module):
     def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_layer_norm=False, set_max_sigma=True, dt=0.01):
+                 use_layer_norm=False, set_max_sigma=True, dt=0.01, seed=None, init_std=0.1):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -21,6 +21,12 @@ class NeuralRnn(torch.nn.Module):
         self.max_allowed_sigma = 0.95
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
         self.input_strength_minimum = 0
+
+        # Create RNG from seed for random initialization
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+        else:
+            self.rng = np.random.default_rng()
 
         # --- model properties ---
         if nonlinearity in ("identity", "linear"):
@@ -38,18 +44,27 @@ class NeuralRnn(torch.nn.Module):
         self.column_indices = column_indices
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
-        # Initialize persistent power-iteration vector for warm starts
-        self._power_vec = torch.randn(self.num_neurons, device=self.device, dtype=self.dtype)
+        # Initialize persistent power-iteration vector for warm starts using RNG
+        power_vec_np = self.rng.standard_normal(self.num_neurons)
+        self._power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
         self._power_vec = self._power_vec / (self._power_vec.norm() + 1e-12)
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
             return np.log(p / (1 - p))
 
-        # --- model parameters
-        self.persistence_logit = torch.full((self.num_cell_types,), logit(persistence_init), dtype=self.dtype, device=self.device)
-        self.stimulus_strength_log = torch.full((self.num_cell_types,), np.log(stimulus_strength_init), device=self.device, dtype=self.dtype)
-        self.offset = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype) + offset_init
+        # --- model parameters with random initialization
+        # Initialize as numpy arrays with Gaussian noise, then convert to torch tensors
+        persistence_logit_init = logit(persistence_init)
+        persistence_logit_np = persistence_logit_init + self.rng.normal(0, init_std, self.num_cell_types)
+        self.persistence_logit = torch.tensor(persistence_logit_np, dtype=self.dtype, device=self.device)
+        
+        stimulus_strength_log_init = np.log(stimulus_strength_init)
+        stimulus_strength_log_np = stimulus_strength_log_init + self.rng.normal(0, init_std, self.num_cell_types)
+        self.stimulus_strength_log = torch.tensor(stimulus_strength_log_np, dtype=self.dtype, device=self.device)
+        
+        offset_np = offset_init + self.rng.normal(0, init_std, self.num_cell_types)
+        self.offset = torch.tensor(offset_np, dtype=self.dtype, device=self.device)
 
         # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
@@ -91,8 +106,14 @@ class NeuralRnn(torch.nn.Module):
         # Initialize strength per cell type based on the inverse of its fan in / out
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        self.input_strength_log = torch.log(input_strength_init) - self.input_strength_minimum
-        self.output_strength_log = torch.log(output_strength_init)
+        input_strength_log_init = torch.log(input_strength_init) - self.input_strength_minimum
+        output_strength_log_init = torch.log(output_strength_init)
+        
+        # Add Gaussian noise to strength parameters
+        input_strength_log_np = input_strength_log_init.detach().cpu().numpy() + self.rng.normal(0, init_std, self.num_cell_types)
+        output_strength_log_np = output_strength_log_init.detach().cpu().numpy() + self.rng.normal(0, init_std, self.num_cell_types)
+        self.input_strength_log = torch.tensor(input_strength_log_np, dtype=self.dtype, device=self.device)
+        self.output_strength_log = torch.tensor(output_strength_log_np, dtype=self.dtype, device=self.device)
 
         if set_max_sigma:
             self.set_sigma_max()
@@ -197,7 +218,9 @@ class NeuralRnn(torch.nn.Module):
 
         # Warm start (buffer, no grad needed)
         if getattr(self, "_power_vec", None) is None or self._power_vec.numel() != n:
-            x = torch.randn(n, device=device, dtype=dtype)
+            # Fallback: create random vector if _power_vec doesn't exist using numpy RNG
+            power_vec_np = self.rng.standard_normal(n)
+            x = torch.tensor(power_vec_np, device=device, dtype=dtype)
         else:
             x = self._power_vec
 
