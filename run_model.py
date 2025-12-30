@@ -54,29 +54,28 @@ model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'po
                      device=config['model']['device'], dtype=config['model']['dtype'],
                      use_layer_norm=config['model']['use_layer_norm'], dt=dt)
 
-# # --- get a sign wave stimulus ---
-# # generate a sine wave on a cylinder around the fly
-# sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
+# --- get a sign wave stimulus ---
+# generate a sine wave on a cylinder around the fly
+# stimulus, optic_flow = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
 #     temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
-# sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
-# sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
-
-# --- generate a sine wave with random tf over time
-# stimulus, optic_flow = su.create_random_tf_sine_wave(
-#     column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
-#     tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
-#     num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time)
 # stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
 # optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
-# TODO switch this back to sinewaves and update sine waves to work with the new stimulus format
-# --- grab the natural movie stimulus ---
-stimulus, optic_flow = su.load_natural_movie()
+# --- generate a sine wave with random tf over time
+stimulus, optic_flow = su.create_random_tf_sine_wave(
+    column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
+    tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'], 
+    num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time)
 stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
 optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
+# --- grab the natural movie stimulus ---
+# stimulus, optic_flow = su.load_natural_movie()
+# stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+# optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+
 # --- plot the stimuli ---
-pu.xt_plot(stimulus.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), target=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus')
+pu.xt_plot(stimulus.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus')
 
 # specify the target responses you expect for each cell type. this is what we will train on
 num_stimuli = stimulus.shape[0]
@@ -93,11 +92,11 @@ for n, d in zip(output_neurons, output_neurons_direction):
         target[n][target[n] < 0] = 0
 
     elif d == 'up':
-        target[n] = optic_flow[:, :, :, 1]
+        target[n] = -optic_flow[:, :, :, 1]
         target[n][target[n] < 0] = 0
 
     elif d == 'down':
-        target[n] = -optic_flow[:, :, :, 1]
+        target[n] = optic_flow[:, :, :, 1]
         target[n][target[n] < 0] = 0
 
 # save the config file and inputs

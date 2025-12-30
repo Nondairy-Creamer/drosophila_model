@@ -2,6 +2,9 @@ import numpy as np
 import pickle
 from pathlib import Path
 
+# All stimulus generating function should return
+# Stimulus: [examples, time, points in space]
+# Optic Flow: [examples, time, points in space, LR/UD optic flow]
 
 def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
                      dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
@@ -37,70 +40,84 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
 
     blocks = ['right', 'left', 'up', 'down']
     sine_wave_dict = {i: [] for i in blocks}
-    tf_dict = {i: [] for i in blocks}
+    optic_flow_dict = {i: [] for i in blocks}
     # generate sine waves at a specific temporal frequency for up down left right
     # at phase 0, 180, 
     for tf in temporal_frequency:
         # -- rightward sine wave --
-        sine_wave_right = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))
-        sine_wave_right_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh) + np.pi / 2)
-        sine_wave_right *= contrast_scaling_factor[None, :]
-        sine_wave_right_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_right = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh))[None, :, :]
+        sine_wave_right_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + tf * t_mesh) + np.pi / 2)[None, :, :]
+        sine_wave_right *= contrast_scaling_factor[None, None, :]
+        sine_wave_right_shifted *= contrast_scaling_factor[None, None, :]
         sine_wave_dict['right'].append(sine_wave_right)
         sine_wave_dict['right'].append(sine_wave_right_shifted)
         sine_wave_dict['right'].append(-sine_wave_right)
         sine_wave_dict['right'].append(-sine_wave_right_shifted)
-        tf_dict['right'] += [tf] * 4
+
+        # add what the optic flow for the sine wave is at each point
+        optic_flow_mat = np.zeros_like(sine_wave_right) + tf / wavelength
+        # this optic flow is only left/right so set the up/down flow to 0
+        optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+        optic_flow_dict['right'] += [optic_flow_mat] * 4
 
         # -- leftward sine wave --
-        sine_wave_left = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))
-        sine_wave_left_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh) + np.pi / 2)
-        sine_wave_left *= contrast_scaling_factor[None, :]
-        sine_wave_left_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_left = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh))[None, :, :]
+        sine_wave_left_shifted = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength - tf * t_mesh) + np.pi / 2)[None, :, :]
+        sine_wave_left *= contrast_scaling_factor[None, None, :]
+        sine_wave_left_shifted *= contrast_scaling_factor[None, None, :]
         sine_wave_dict['left'].append(sine_wave_left)
         sine_wave_dict['left'].append(sine_wave_left_shifted)
         sine_wave_dict['left'].append(-sine_wave_left)
         sine_wave_dict['left'].append(-sine_wave_left_shifted)
-        tf_dict['left'] += [tf] * 4
+
+        # add what the optic flow for the sine wave is at each point
+        optic_flow_mat = np.zeros_like(sine_wave_right) - tf / wavelength
+        # this optic flow is only left/right so set the up/down flow to 0
+        optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+        optic_flow_dict['left'] += [optic_flow_mat] * 4
 
         # -- upward sine wave -- 
-        sine_wave_up = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))
-        sine_wave_up_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh) + np.pi / 2)
-        sine_wave_up *= contrast_scaling_factor[None, :]
-        sine_wave_up_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_up = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh))[None, :, :]
+        sine_wave_up_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + tf * t_mesh) + np.pi / 2)[None, :, :]
+        sine_wave_up *= contrast_scaling_factor[None, None, :]
+        sine_wave_up_shifted *= contrast_scaling_factor[None, None, :]
         sine_wave_dict['up'].append(sine_wave_up)
         sine_wave_dict['up'].append(sine_wave_up_shifted)
         sine_wave_dict['up'].append(-sine_wave_up)
         sine_wave_dict['up'].append(-sine_wave_up_shifted)
-        tf_dict['up'] += [tf] * 4
+
+        # add what the optic flow for the sine wave is at each point
+        optic_flow_mat = np.zeros_like(sine_wave_right) - tf / wavelength
+        # this optic flow is only left/right so set the up/down flow to 0
+        optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+        optic_flow_dict['up'] += [optic_flow_mat] * 4
 
         # -- downward sine wave --
-        sine_wave_down = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))
-        sine_wave_down_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh) + np.pi / 2)
-        sine_wave_down *= contrast_scaling_factor[None, :]
-        sine_wave_down_shifted *= contrast_scaling_factor[None, :]
+        sine_wave_down = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh))[None, :, :]
+        sine_wave_down_shifted = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength - tf * t_mesh) + np.pi / 2)[None, :, :]
+        sine_wave_down *= contrast_scaling_factor[None, None, :]
+        sine_wave_down_shifted *= contrast_scaling_factor[None, None, :]
         sine_wave_dict['down'].append(sine_wave_down)
         sine_wave_dict['down'].append(sine_wave_down_shifted)
         sine_wave_dict['down'].append(-sine_wave_down)
         sine_wave_dict['down'].append(-sine_wave_down_shifted)
-        tf_dict['down'] += [tf] * 4
 
-    num_time, num_cell = phi_mesh.shape
-    stimulus = np.zeros((0, num_time, num_cell))
-    tf_out = np.zeros(0)
-    for b in blocks:
-        this_stim = np.stack(sine_wave_dict[b])
-        stimulus = np.concatenate((stimulus, this_stim), axis=0)
-        this_tf = np.stack(tf_dict[b])
-        tf_out = np.concatenate((tf_out, this_tf))
+        # add what the optic flow for the sine wave is at each point
+        optic_flow_mat = np.zeros_like(sine_wave_right) + tf / wavelength
+        # this optic flow is only left/right so set the up/down flow to 0
+        optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+        optic_flow_dict['down'] += [optic_flow_mat] * 4
 
-    return stimulus, tf_out, contrast_scaling_factor, blocks
+    stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
+
+    return stimulus, optic_flow
 
 def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, rng=np.random.default_rng(),
                                dt=0.01, stim_time=1.0, num_repeats=5):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # the velocity of this sine wave is a smoothed gaussian random walk 
+    # positive / negative temporal frequency is right / left and down / up sine waves
     
     # --- generate the space time coordinates ---
     filter_std_base = 2.5 * np.pi / 180  # radians
@@ -138,7 +155,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
 
     blocks = ['right_left', 'up_down']
     sine_wave_dict = {i: [] for i in blocks}
-    tf_dict = {i: [] for i in blocks}
+    optic_flow_dict = {i: [] for i in blocks}
 
     def make_lr_sine_wave(phase_init=0):
         phase = phase_init
@@ -147,6 +164,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
         for ti in range(time_vect.shape[0]):
             phase += tf[ti] * dt
             sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (sample_phi / wavelength + phase))
+
         return sine_wave
 
     def make_ud_sine_wave(phase_init=0):
@@ -154,8 +172,9 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
         sine_wave = np.zeros_like(t_mesh)
 
         for ti in range(time_vect.shape[0]):
-            phase += tf[ti] * dt
+            phase -= tf[ti] * dt
             sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + phase))
+
         return sine_wave
 
     # -- right/left sine wave --
@@ -167,8 +186,13 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['right_left'].append(sine_wave_right_left_shifted.reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['right_left'].append((-sine_wave_right_left).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['right_left'].append((-sine_wave_right_left_shifted).reshape(num_repeats, time_per_stim, num_cell))
-    tf_mat = np.tile(tf, (num_cell, 1)).T
-    tf_dict['right_left'] += [tf_mat.reshape(num_repeats, time_per_stim, num_cell)] * 4
+
+    # add what the optic flow for the sine wave is at each point
+    optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
+    # this optic flow is only left/right so set the up/down flow to 0
+    optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+
+    optic_flow_dict['right_left'] += [optic_flow_mat] * 4
 
     # -- updown sine wave -- 
     sine_wave_up_down = make_ud_sine_wave(phase_init=0)
@@ -179,25 +203,29 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['up_down'].append(sine_wave_up_down_shifted.reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['up_down'].append((-sine_wave_up_down).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
-    tf_mat = np.tile(tf, (num_cell, 1)).T
-    tf_dict['up_down'] += [tf_mat.reshape(num_repeats, time_per_stim, num_cell)] * 4
 
-    stimulus, target = consolidate_stim(sine_wave_dict, tf_dict)
+    # add what the optic flow for the sine wave is at each point
+    optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
+    # this optic flow is only up/down so set the left/right flow to 0
+    optic_flow_mat = np.concatenate((np.zeros_like(optic_flow_mat[:, :, :, None]), optic_flow_mat[:, :, :, None]), axis=3)
+    optic_flow_dict['up_down'] += [optic_flow_mat] * 4
 
-    return stimulus, target, contrast_scaling_factor, blocks
+    stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
 
-def consolidate_stim(stim_dict, target_dict):
+    return stimulus, optic_flow
+
+def consolidate_stim(stim_dict, optic_flow_dict):
     time_per_stim, num_cell = next(iter(stim_dict.values()))[0].shape[1:]
     stimulus = np.zeros((0, time_per_stim, num_cell))
-    target = np.zeros((0, time_per_stim, num_cell))
+    optic_flow = np.zeros((0, time_per_stim, num_cell, 2))
 
     for b in stim_dict:
         this_stim = np.concatenate(stim_dict[b])
         stimulus = np.concatenate((stimulus, this_stim), axis=0)
-        this_target = np.concatenate(target_dict[b])
-        target = np.concatenate((target, this_target))
+        this_optic_flow = np.concatenate(optic_flow_dict[b])
+        optic_flow = np.concatenate((optic_flow, this_optic_flow))
 
-    return stimulus, target
+    return stimulus, optic_flow
 
 
 def load_natural_movie():
@@ -218,9 +246,9 @@ def load_natural_movie():
             stimulus_in['forward_flows'].append(long_run_vect[expected_length:2*expected_length])
 
     stimulus_out = np.stack(stimulus_in['responses'])
-    target = np.stack(stimulus_in['forward_flows'])
+    optic_flow = np.stack(stimulus_in['forward_flows'])
     stimulus_out /= 127.5
     stimulus_out -= 0.5
 
-    return stimulus_out, target
+    return stimulus_out, optic_flow
 

@@ -107,7 +107,7 @@ def scatter_3d_with_origin_axes(xyz, save_folder=Path('figures')):
     plt.savefig(save_folder / '3d_column_position.png')
     plt.close()
 
-def xt_plot(stim_time_space, x, target=None, save_folder=Path('figures')):
+def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures')):
     save_folder = convert_and_create_save_folder(save_folder)
     
     sort_inds = np.argsort(x)[::-1]
@@ -116,9 +116,9 @@ def xt_plot(stim_time_space, x, target=None, save_folder=Path('figures')):
     sort_inds_no_nan = sort_inds[valid_cells[sort_inds]]
 
     for pi in range(stim_time_space.shape[0]):
-        if target is not None:
-            fig, axes = plt.subplots(1, 3, gridspec_kw={'width_ratios': [2, 1, 1]})
-            ax_pred, ax_lr, ax_ud = axes
+        if optic_flow is not None:
+            fig, axes = plt.subplots(1, 2, gridspec_kw={'width_ratios': [2, 1]})
+            ax_pred, ax_of = axes
         else:
             fig, ax_pred = plt.subplots()
         
@@ -130,22 +130,15 @@ def xt_plot(stim_time_space, x, target=None, save_folder=Path('figures')):
         ax_pred.set_title('prediction')
         fig.colorbar(im_pred, ax=ax_pred)
 
-        if target is not None:
-            im_lr = ax_lr.imshow(target[pi, :, sort_inds_no_nan, 0].T, interpolation='nearest', aspect='auto')
+        if optic_flow is not None:
+            optic_flow_magnitude = np.linalg.norm(optic_flow, axis=3)
+            im_of = ax_of.imshow(optic_flow_magnitude[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
             if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
-                im_lr.set_clim(vmin=0)
-            ax_lr.set_xlabel('phi')
-            ax_lr.set_ylabel('time')
-            ax_lr.set_title('left right flow')
-            fig.colorbar(im_lr, ax=ax_lr)
-
-            im_ud = ax_ud.imshow(target[pi, :, sort_inds_no_nan, 1].T, interpolation='nearest', aspect='auto')
-            if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
-                im_ud.set_clim(vmin=0)
-            ax_ud.set_xlabel('phi')
-            ax_ud.set_ylabel('time')
-            ax_ud.set_title('up down flow')
-            fig.colorbar(im_ud, ax=ax_ud)
+                im_of.set_clim(vmin=0)
+            ax_of.set_xlabel('phi')
+            ax_of.set_ylabel('time')
+            ax_of.set_title('left right flow')
+            fig.colorbar(im_of, ax=ax_of)
         
         plt.savefig(save_folder / ('xt_plot_' + str(pi) + '.png'))
         plt.close()
