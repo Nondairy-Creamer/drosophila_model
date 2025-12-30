@@ -177,7 +177,8 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 last_saved_idx = len(loss_list) - 1
                 
                 model.save(model_save_folder / 'model.pt')
-                # Use atomic write for optimizer state to prevent corruption
+                # Use atomic write for optimizer state to prevent corruption on network filesystems
+                # Ensures all-or-nothing writes and prevents partial/corrupted files
                 opt_path = Path(model_save_folder / 'model_opt.pt')
                 opt_payload = {
                     'optimizer_state_dict': opt.state_dict(),

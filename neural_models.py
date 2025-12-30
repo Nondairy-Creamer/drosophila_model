@@ -2,6 +2,8 @@ import torch
 import numpy as np
 from pathlib import Path
 from functools import reduce
+import tempfile
+import os
 
 
 class NeuralRnn(torch.nn.Module):
@@ -315,8 +317,25 @@ class NeuralRnn(torch.nn.Module):
             'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
         }
 
-        # torch.save uses pickle under the hood and handles tensors well
-        torch.save(payload, p)
+        # Use atomic write to prevent corruption on network filesystems
+        # Write to temporary file first, then atomically replace target
+        # This ensures all-or-nothing writes and prevents partial/corrupted files
+        dir_fd = os.open(str(p.parent), os.O_RDONLY)
+        try:
+            with tempfile.NamedTemporaryFile('wb', delete=False, dir=str(p.parent), suffix='.tmp') as tmp:
+                tmp_path = tmp.name
+                # torch.save uses pickle under the hood and handles tensors well
+                torch.save(payload, tmp_path)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            # Atomically replace target file
+            os.replace(tmp_path, str(p))
+            os.fsync(dir_fd)
+        finally:
+            try:
+                os.close(dir_fd)
+            except Exception:
+                pass
 
     def get_shared_columns(self, neuron_list):
         # get all the neurons that are of the type in the list and their indices
