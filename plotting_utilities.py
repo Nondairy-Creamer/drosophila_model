@@ -107,7 +107,7 @@ def scatter_3d_with_origin_axes(xyz, save_folder=Path('figures')):
     plt.savefig(save_folder / '3d_column_position.png')
     plt.close()
 
-def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures')):
+def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), run_tag=None, plot_every=4):
     save_folder = convert_and_create_save_folder(save_folder)
     
     sort_inds = np.argsort(x)[::-1]
@@ -115,7 +115,10 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures')):
     valid_cells = ~np.any(np.isnan(stim_time_space), axis=(0, 1))
     sort_inds_no_nan = sort_inds[valid_cells[sort_inds]]
 
-    for pi in range(stim_time_space.shape[0]):
+    # Only plot every plot_every stimuli
+    plot_indices = np.arange(0, stim_time_space.shape[0], plot_every)
+    
+    for pi in plot_indices:
         if optic_flow is not None:
             fig, axes = plt.subplots(1, 2, gridspec_kw={'width_ratios': [2, 1]})
             ax_pred, ax_of = axes
@@ -140,5 +143,10 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures')):
             ax_of.set_title('left right flow')
             fig.colorbar(im_of, ax=ax_of)
         
-        plt.savefig(save_folder / ('xt_plot_' + str(pi) + '.png'))
+        # Build filename with optional run_tag prefix
+        filename = 'xt_plot_' + str(pi) + '.png'
+        if run_tag is not None:
+            filename = str(run_tag) + '_' + filename
+        
+        plt.savefig(save_folder / filename)
         plt.close()
