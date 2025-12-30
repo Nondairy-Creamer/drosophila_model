@@ -16,6 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 import time
+from datetime import datetime
 
 
 def get_available_gpus():
@@ -46,7 +47,7 @@ def get_available_gpus():
     return available_gpus if available_gpus else ['cpu']
 
 
-def run_training_job(seed, device, run_id, script_path='run_model.py'):
+def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py'):
     """
     Run a single training job with specified parameters.
     
@@ -54,6 +55,7 @@ def run_training_job(seed, device, run_id, script_path='run_model.py'):
         seed: Random seed for this run
         device: Device to run on (e.g., 'cuda:0')
         run_id: Identifier for this run
+        timestamp: Timestamp string to use for all runs in this batch
         script_path: Path to the run_model.py script
     
     Returns:
@@ -66,6 +68,8 @@ def run_training_job(seed, device, run_id, script_path='run_model.py'):
         '--device', device,
         '--run-id', str(run_id)
     ]
+    if timestamp is not None:
+        cmd.extend(['--timestamp', timestamp])
     
     print(f"Starting run: seed={seed}, device={device}, run_id={run_id}")
     print(f"Command: {' '.join(cmd)}")
@@ -90,6 +94,10 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
         base_seed: Base seed value (each run gets base_seed + run_index)
         script_path: Path to the run_model.py script
     """
+    # Generate a single timestamp for all runs in this batch
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    print(f"Using timestamp for all runs: {timestamp}")
+    
     # Detect available GPUs
     gpus = get_available_gpus()
     print(f"Found {len(gpus)} available device(s): {gpus}")
@@ -125,6 +133,7 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
             seed=run_config['seed'],
             device=run_config['device'],
             run_id=run_config['run_id'],
+            timestamp=timestamp,
             script_path=script_path
         )
         processes.append((process, run_config))
@@ -196,4 +205,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

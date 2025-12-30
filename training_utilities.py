@@ -3,6 +3,9 @@ import plotting_utilities as pu
 import numpy as np
 import neural_models as nm
 import time
+import tempfile
+import os
+from pathlib import Path
 
 def nannorm(unormalized_tensor, keepdim=False, dim=None, eps=1e-6):
     return torch.nansum(torch.abs(unormalized_tensor)**2, dim=dim, keepdim=keepdim).sqrt().clamp_min(eps)
@@ -174,11 +177,27 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 last_saved_idx = len(loss_list) - 1
                 
                 model.save(model_save_folder / 'model.pt')
-                torch.save({
+                # Use atomic write for optimizer state to prevent corruption
+                opt_path = Path(model_save_folder / 'model_opt.pt')
+                opt_payload = {
                     'optimizer_state_dict': opt.state_dict(),
                     'loss': loss_plot,
                     'step': step
-                }, model_save_folder / 'model_opt.pt')
+                }
+                dir_fd = os.open(str(opt_path.parent), os.O_RDONLY)
+                try:
+                    with tempfile.NamedTemporaryFile('wb', delete=False, dir=str(opt_path.parent), suffix='.tmp') as tmp:
+                        tmp_path = tmp.name
+                        torch.save(opt_payload, tmp_path)
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                    os.replace(tmp_path, str(opt_path))
+                    os.fsync(dir_fd)
+                finally:
+                    try:
+                        os.close(dir_fd)
+                    except Exception:
+                        pass
         else:
             time_since_best += 1
             
