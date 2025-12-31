@@ -40,30 +40,30 @@ def corr_loss(y_hat, y, dim=None, eps=1e-6):
     # Create mask of positions valid in BOTH tensors
     valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
     valid_count = valid_mask.sum(dim=dim, keepdim=True).clamp_min(1)
-    
+
     # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
     y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
     y = torch.where(torch.isnan(y), torch.zeros_like(y), y)
-    
+
     # Compute means over valid positions only
     y_hat_mean = (y_hat * valid_mask).sum(dim=dim, keepdim=True) / valid_count
     y_mean = (y * valid_mask).sum(dim=dim, keepdim=True) / valid_count
-    
+
     # Center the data (mask zeros out invalid positions)
     y_hat_centered = (y_hat - y_hat_mean) * valid_mask
     y_centered = (y - y_mean) * valid_mask
-    
+
     # Compute std over valid positions
     y_hat_std = (y_hat_centered.pow(2).sum(dim=dim, keepdim=True) / valid_count).sqrt().clamp_min(eps)
     y_std = (y_centered.pow(2).sum(dim=dim, keepdim=True) / valid_count).sqrt().clamp_min(eps)
-    
+
     # Normalize
     y_hat_norm = y_hat_centered / y_hat_std
     y_norm = y_centered / y_std
-    
+
     # Compute correlation over valid positions
     corr = (y_hat_norm * y_norm).sum(dim=dim, keepdim=True) / valid_count
-        
+
     ave_corr = torch.mean(corr)
 
     return 1.0 - ave_corr
@@ -71,22 +71,22 @@ def corr_loss(y_hat, y, dim=None, eps=1e-6):
 def cos_loss(y_hat, y, dim=None, eps=1e-6):
     # Create mask of positions valid in BOTH tensors
     valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
-    
+
     # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
     y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
     y = torch.where(torch.isnan(y), torch.zeros_like(y), y)
-    
+
     # Apply mask so norms are computed only over valid positions
     y_hat_masked = y_hat * valid_mask
     y_masked = y * valid_mask
-    
+
     # Normalize (nannorm uses nansum internally, but all values are now valid)
     y_hat_norm = y_hat_masked / nannorm(y_hat_masked, dim=dim, keepdim=True).clamp_min(eps)
     y_norm = y_masked / nannorm(y_masked, dim=dim, keepdim=True).clamp_min(eps)
-    
+
     # Cosine similarity over valid positions
     cosine_sim = torch.sum(y_hat_norm * y_norm, dim=dim, keepdim=True)
-        
+
     ave_cosine_sim = torch.mean(cosine_sim)
 
     return 1.0 - ave_cosine_sim
@@ -175,7 +175,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 for i in range(last_saved_idx + 1, len(loss_list)):
                     loss_plot.append(loss_list[i].item())
                 last_saved_idx = len(loss_list) - 1
-                
+
                 model.save(model_save_folder / 'model.pt')
                 # Use atomic write for optimizer state to prevent corruption on network filesystems
                 # Ensures all-or-nothing writes and prevents partial/corrupted files
@@ -185,23 +185,27 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                     'loss': loss_plot,
                     'step': step
                 }
-                dir_fd = os.open(str(opt_path.parent), os.O_RDONLY)
                 try:
                     with tempfile.NamedTemporaryFile('wb', delete=False, dir=str(opt_path.parent), suffix='.tmp') as tmp:
                         tmp_path = tmp.name
                         torch.save(opt_payload, tmp_path)
                         tmp.flush()
                         os.fsync(tmp.fileno())
+                    # Atomically replace target file
+                    # Note: Removed os.fsync(dir_fd) to prevent deadlock on network filesystems
+                    # when multiple processes sync the same directory simultaneously
                     os.replace(tmp_path, str(opt_path))
-                    os.fsync(dir_fd)
-                finally:
+                except Exception:
+                    # Clean up temp file on error
                     try:
-                        os.close(dir_fd)
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
                     except Exception:
                         pass
+                    raise
         else:
             time_since_best += 1
-            
+
         # Update weights AFTER checking/saving best model
         loss.backward()
 
@@ -211,7 +215,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         elif clip_grad_value is not None:
             torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
         opt.step()
-        
+
         # Record GPU-side loss scalar without sync
         loss_list.append(loss.detach())
 
@@ -220,18 +224,18 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 # Load the best model state into the existing model
                 checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
                 model.load_state_dict(checkpoint['state_dict'])
-                
+
                 # Load the best optimizer state and reduce learning rate
                 opt_state = torch.load(model_save_folder / 'model_opt.pt', map_location='cpu', weights_only=False)
                 opt.load_state_dict(opt_state['optimizer_state_dict'])
-                
+
                 alpha = alpha * alpha_factor
                 for param_group in opt.param_groups:
                     param_group['lr'] = alpha
-                
+
                 # Reset hidden state to avoid mismatch with reloaded weights
                 last_state = None
-                    
+
                 time_since_best = 0
                 print(' -------------------------------- ')
                 print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')

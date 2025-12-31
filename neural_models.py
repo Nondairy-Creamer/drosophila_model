@@ -35,7 +35,7 @@ class NeuralRnn(torch.nn.Module):
             self.nonlinearity = torch.nn.Identity()
         else:
             self.nonlinearity = getattr(torch.nn, nonlinearity)()
-            
+
         self.cell_types = cell_types
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype)
@@ -60,11 +60,11 @@ class NeuralRnn(torch.nn.Module):
         persistence_logit_init = logit(persistence_init)
         persistence_logit_np = persistence_logit_init + self.rng.normal(0, init_std, self.num_cell_types)
         self.persistence_logit = torch.tensor(persistence_logit_np, dtype=self.dtype, device=self.device)
-        
+
         stimulus_strength_log_init = np.log(stimulus_strength_init)
         stimulus_strength_log_np = stimulus_strength_log_init + self.rng.normal(0, init_std, self.num_cell_types)
         self.stimulus_strength_log = torch.tensor(stimulus_strength_log_np, dtype=self.dtype, device=self.device)
-        
+
         offset_np = offset_init + self.rng.normal(0, init_std, self.num_cell_types)
         self.offset = torch.tensor(offset_np, dtype=self.dtype, device=self.device)
 
@@ -86,7 +86,7 @@ class NeuralRnn(torch.nn.Module):
             ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
             self.neuron_to_type_index[ct_mask] = cti
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
-        
+
         # Optional layer normalization for better signal propagation
         if self.use_layer_norm:
             self.layer_norm = torch.nn.LayerNorm(self.num_neurons, elementwise_affine=False, device=self.device, dtype=self.dtype)
@@ -110,7 +110,7 @@ class NeuralRnn(torch.nn.Module):
         output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
         input_strength_log_init = torch.log(input_strength_init) - self.input_strength_minimum
         output_strength_log_init = torch.log(output_strength_init)
-        
+
         # Add Gaussian noise to strength parameters
         input_strength_log_np = input_strength_log_init.detach().cpu().numpy() + self.rng.normal(0, init_std, self.num_cell_types)
         output_strength_log_np = output_strength_log_init.detach().cpu().numpy() + self.rng.normal(0, init_std, self.num_cell_types)
@@ -136,10 +136,10 @@ class NeuralRnn(torch.nn.Module):
             for iter_idx in range(max_scaling_iters):
                 sigma_max = self.calc_sigma_max()
 
-                print(iter_idx, ':', sigma_max)                    
+                print(iter_idx, ':', sigma_max)
                 if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
                     break
-                
+
                 # Scale output_strength to move toward target
                 scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
                 self.output_strength_log.add_(torch.log(scale_factor))
@@ -164,11 +164,11 @@ class NeuralRnn(torch.nn.Module):
         v_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
         z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
         z = z * input_strength[None, :]
-        
+
         # Optionally normalize recurrent term before adding inputs/offset
         if self.use_layer_norm:
             z = self.layer_norm(z)
-        
+
         if stim_to_cell_mapping is None:
             z = z + u_t * stimulus_strength[None, :]
         else:
@@ -176,7 +176,7 @@ class NeuralRnn(torch.nn.Module):
             # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
             cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
             stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
-            # Guard against any negative indices 
+            # Guard against any negative indices
             valid = (cell_idx >= 0) & (stim_idx >= 0)
             if torch.any(valid):
                 ci = cell_idx[valid]
@@ -292,7 +292,7 @@ class NeuralRnn(torch.nn.Module):
         for i in readout_keys:
             outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
             outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
-                                    
+
         for t in range(num_time):
             v = self(v, inputs[:, t, :], stim_to_cell_mapping)
 
@@ -320,7 +320,6 @@ class NeuralRnn(torch.nn.Module):
         # Use atomic write to prevent corruption on network filesystems
         # Write to temporary file first, then atomically replace target
         # This ensures all-or-nothing writes and prevents partial/corrupted files
-        dir_fd = os.open(str(p.parent), os.O_RDONLY)
         try:
             with tempfile.NamedTemporaryFile('wb', delete=False, dir=str(p.parent), suffix='.tmp') as tmp:
                 tmp_path = tmp.name
@@ -329,13 +328,16 @@ class NeuralRnn(torch.nn.Module):
                 tmp.flush()
                 os.fsync(tmp.fileno())
             # Atomically replace target file
+
             os.replace(tmp_path, str(p))
-            os.fsync(dir_fd)
-        finally:
+        except Exception:
+            # Clean up temp file on error
             try:
-                os.close(dir_fd)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
             except Exception:
                 pass
+            raise
 
     def get_shared_columns(self, neuron_list):
         # get all the neurons that are of the type in the list and their indices
@@ -357,7 +359,7 @@ class NeuralRnn(torch.nn.Module):
         selected_column_indices = self.column_indices[neuron_is_in_list]
 
         return selected_neuron_indices, selected_column_indices
-    
+
     def silence_neurons(self, neurons_to_silence):
         if len(neurons_to_silence) > 0:
             print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
