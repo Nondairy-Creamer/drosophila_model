@@ -110,21 +110,21 @@ def scatter_3d_with_origin_axes(xyz, save_folder=Path('figures')):
 def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), run_tag=None, plot_every=4):
     save_folder = convert_and_create_save_folder(save_folder)
     
-    sort_inds = np.argsort(x)[::-1]
-    x_sorted = x[sort_inds]
     valid_cells = ~np.any(np.isnan(stim_time_space), axis=(0, 1))
-    sort_inds_no_nan = sort_inds[valid_cells[sort_inds]]
-    x_sorted_no_nan = x_sorted[valid_cells[sort_inds]]
-    
-    # Extent for imshow: [x_min, x_max, y_max, y_min] (y is flipped for image coordinates)
-    # Data is (time, phi_sorted) where phi_sorted goes HIGH to LOW
-    # We want x-axis = phi (high on left, low on right), y-axis = time (0 at top)
-    num_time = stim_time_space.shape[1]
-    extent = [x_sorted_no_nan.max(), x_sorted_no_nan.min(), num_time, 0]
+    valid_stim = stim_time_space[:, :, valid_cells]
+    valid_x = x[valid_cells]
+    sort_inds = np.argsort(valid_x)
+    x_sorted = valid_x[sort_inds]
+    stim_sorted = valid_stim[:, :, sort_inds]
+
+    if optic_flow is not None:
+        valid_optic_flow = optic_flow[:, :, valid_cells, :]
+        optic_flow_sorted = valid_optic_flow[:, :, sort_inds, :]
 
     # Only plot every plot_every stimuli
-    plot_indices = np.arange(0, stim_time_space.shape[0], plot_every)
-    
+    plot_indices = np.arange(0, stim_sorted.shape[0], plot_every)
+    extent = [x_sorted.min(), x_sorted.max(), 0, valid_stim.shape[1]]
+
     for pi in plot_indices:
         if optic_flow is not None:
             fig, axes = plt.subplots(1, 3, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1, 1]})
@@ -133,8 +133,8 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
             fig, ax_pred = plt.subplots()
         
         # No transpose: rows=time (y-axis), cols=phi_sorted high-to-low (x-axis)
-        im_pred = ax_pred.imshow(stim_time_space[pi, :, sort_inds_no_nan], interpolation='nearest', aspect='auto', extent=extent)
-        if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
+        im_pred = ax_pred.imshow(stim_sorted[pi, :, :], interpolation='nearest', aspect='auto', extent=extent)
+        if np.all(stim_sorted[pi, :, :] >= 0):
             im_pred.set_clim(vmin=0)
         ax_pred.set_xlabel('phi')
         ax_pred.set_ylabel('time')
@@ -142,9 +142,10 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
         fig.colorbar(im_pred, ax=ax_pred)
 
         if optic_flow is not None:
-            # X optic flow (left/right): index 0
-            # No transpose: rows=time (y-axis), cols=phi_sorted (x-axis)
-            optic_flow_x = optic_flow[pi, :, sort_inds_no_nan, 0]
+            optic_flow_x = optic_flow_sorted[pi, :, :, 0]
+            optic_flow_y = optic_flow_sorted[pi, :, :, 1]
+
+            # horizontal flow
             im_of_x = ax_of_x.imshow(optic_flow_x, interpolation='nearest', aspect='auto', cmap='coolwarm', extent=extent)
             max_abs_x = np.nanmax(np.abs(optic_flow_x))
             if max_abs_x > 1e-10:
@@ -156,9 +157,7 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
             ax_of_x.set_title('left/right flow')
             fig.colorbar(im_of_x, ax=ax_of_x)
 
-            # Y optic flow (up/down): index 1
-            # No transpose: rows=time (y-axis), cols=phi_sorted (x-axis)
-            optic_flow_y = optic_flow[pi, :, sort_inds_no_nan, 1]
+            # vertical flow
             im_of_y = ax_of_y.imshow(optic_flow_y, interpolation='nearest', aspect='auto', cmap='coolwarm', extent=extent)
             max_abs_y = np.nanmax(np.abs(optic_flow_y))
             if max_abs_y > 1e-10:
@@ -179,3 +178,5 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
         
         plt.savefig(save_folder / filename)
         plt.close()
+
+    a=1
