@@ -21,8 +21,8 @@ def get_self_motion(theta, phi, d_theta, d_phi):
     Args:
         theta: (N,) polar angles of viewing directions
         phi: (N,) azimuthal angles of viewing directions  
-        d_theta: (N,) angular flow in theta direction. right / left is positive / negative respectively
-        d_phi: (N,) angular flow in phi direction. up / down is positive / negative respectively
+        d_theta: (N,) angular flow in theta direction. up / down is positive / negative respectively
+        d_phi: (N,) angular flow in phi direction. right / left is positive / negative respectively
     
     Returns:
         omega_star: (3,) estimated rotation vector
@@ -55,7 +55,8 @@ def get_self_motion(theta, phi, d_theta, d_phi):
          torch.zeros_like(phi)
     ), dim=1)                              # (N,3)
 
-    u = d_theta[:, None] * e_theta + d_phi[:, None] * e_phi   # (N,3)
+    # Negate d_theta because e_theta points downward but we want up=positive
+    u = -d_theta[:, None] * e_theta + d_phi[:, None] * e_phi   # (N,3)
 
     # === Rotation estimation: solve u ≈ [x]_× Ω ===
     A = cross_matrix(x)                    # (N,3,3)

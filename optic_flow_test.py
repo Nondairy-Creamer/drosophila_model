@@ -85,7 +85,8 @@ def generate_optic_flow(theta, phi, omega, T, Z):
     u = u_rot + u_trans
     
     # Project onto spherical basis to get angular flow
-    d_theta = (u * e_theta).sum(dim=1)
+    # Negate d_theta because e_theta points downward but we want up=positive
+    d_theta = -(u * e_theta).sum(dim=1)
     d_phi = (u * e_phi).sum(dim=1)
     
     return d_theta, d_phi
