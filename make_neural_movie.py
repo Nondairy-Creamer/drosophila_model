@@ -70,6 +70,16 @@ stimulus = torch.cat(stim_split, dim=0)
 if concat_all:
     stimulus = torch.cat(torch.split(stimulus, 1, dim=0), dim=1)
 
+# --- apply the same filtering to target data ---
+target_filtered = {}
+for k, v in target.items():
+    t_per_dir = v.shape[0] // num_dir
+    t_split = torch.split(v, t_per_dir, dim=0)
+    t_split = [t[:num_stim, :, :] for t in t_split]
+    target_filtered[k] = torch.cat(t_split, dim=0)
+    if concat_all:
+        target_filtered[k] = torch.cat(torch.split(target_filtered[k], 1, dim=0), dim=1)
+
 # --- silence some neurons ---
 neurons_to_silence = []
 model.silence_neurons(neurons_to_silence)
@@ -173,6 +183,38 @@ make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name
 
 # init_quiver = make_quiver_pair_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, arrow_scale=0.1)
 # make_movie(init_quiver, ['sequence'], fig_folder, frame_rate, save_name="quiver")
+
+
+# --- Diamond sequence movie for T4 TARGETS ---
+measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
+
+seq_data_target = {}
+for mct in measured_cell_types:
+    cell_resp = target_filtered[mct].detach().cpu().numpy()
+    cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+    cell_resp = interp_nan_column(cell_resp)
+    seq_data_target[mct] = cell_resp  # [num_stimuli, time, columns]
+
+seq_data_target['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+
+init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data_target, cell_x, cell_z, scale=1.8, size_scale=0.6)
+make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4_target")
+
+
+# --- Diamond sequence movie for T5 TARGETS ---
+measured_cell_types = ['T5a', 'T5b', 'T5c', 'T5d']
+
+seq_data_target = {}
+for mct in measured_cell_types:
+    cell_resp = target_filtered[mct].detach().cpu().numpy()
+    cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+    cell_resp = interp_nan_column(cell_resp)
+    seq_data_target[mct] = cell_resp  # [num_stimuli, time, columns]
+
+seq_data_target['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+
+init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data_target, cell_x, cell_z, scale=1.8, size_scale=0.6)
+make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t5_target")
 
 
 # # --- activity for light pathway ---
