@@ -47,7 +47,7 @@ def get_available_gpus():
     return available_gpus if available_gpus else ['cpu']
 
 
-def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py'):
+def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py', log_dir='logs'):
     """
     Run a single training job with specified parameters.
     
@@ -57,9 +57,10 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
         run_id: Identifier for this run
         timestamp: Timestamp string to use for all runs in this batch
         script_path: Path to the run_model.py script
+        log_dir: Directory to store log files
     
     Returns:
-        subprocess.Popen object for the process
+        tuple of (subprocess.Popen object, log file handle)
     """
     cmd = [
         sys.executable,
@@ -74,15 +75,21 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     print(f"Starting run: seed={seed}, device={device}, run_id={run_id}")
     print(f"Command: {' '.join(cmd)}")
     
-    # Run in background (non-blocking)
+    # Create log directory
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    
+    # Open log file for this run (redirect both stdout and stderr to avoid pipe deadlock)
+    log_file = open(log_path / f'{timestamp}_{run_id}.log', 'w')
+    
+    # Run in background (non-blocking) with output to file
     process = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
+        stdout=log_file,
+        stderr=subprocess.STDOUT
     )
     
-    return process
+    return process, log_file
 
 
 def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
@@ -129,23 +136,23 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
     processes = []
     print("\nRunning jobs in parallel...")
     for run_config in runs:
-        process = run_training_job(
+        process, log_file = run_training_job(
             seed=run_config['seed'],
             device=run_config['device'],
             run_id=run_config['run_id'],
             timestamp=timestamp,
             script_path=script_path
         )
-        processes.append((process, run_config))
+        processes.append((process, run_config, log_file))
     
     # Wait for all processes to complete
     print(f"\nWaiting for {len(processes)} jobs to complete...")
-    for process, run_config in processes:
-        stdout, stderr = process.communicate()
+    print(f"Logs are being written to logs/{timestamp}_*.log")
+    for process, run_config, log_file in processes:
+        process.wait()
+        log_file.close()
         if process.returncode != 0:
-            print(f"Error in run {run_config['run_id']}:")
-            print(f"STDOUT: {stdout}")
-            print(f"STDERR: {stderr}")
+            print(f"Error in run {run_config['run_id']} (exit code {process.returncode}). Check logs/{timestamp}_{run_config['run_id']}.log")
         else:
             print(f"Completed run {run_config['run_id']} successfully")
     
