@@ -77,7 +77,6 @@ class NeuralRnn(torch.nn.Module):
 
         indices = torch.stack([rows, cols], dim=0)
         self.synapse_counts = torch.sparse_coo_tensor(indices, values, size=(self.num_neurons, self.num_neurons), dtype=self.dtype, device=self.device).coalesce()
-        self.synapse_counts = self.synapse_counts.coalesce()
 
         # Pre-compute the mapping from a cell type to the indicies of its individual neurons
         self.neuron_to_type_index = torch.zeros(self.num_neurons, device=self.device, dtype=torch.int64) - 1

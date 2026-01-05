@@ -146,8 +146,6 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         opt.zero_grad()
         pred, last_state, cached_mappings = model.predict(inputs, init_state=last_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
 
-        print(torch.max(last_state).cpu().numpy())
-
         loss = calc_loss(loss_fn, pred['firing_rate'], target)
 
         if sigma_lambda > 0:
