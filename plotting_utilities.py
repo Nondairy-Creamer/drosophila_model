@@ -117,8 +117,10 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
     x_sorted_no_nan = x_sorted[valid_cells[sort_inds]]
     
     # Extent for imshow: [x_min, x_max, y_max, y_min] (y is flipped for image coordinates)
+    # Data is (time, phi_sorted) where phi_sorted goes HIGH to LOW
+    # We want x-axis = phi (high on left, low on right), y-axis = time (0 at top)
     num_time = stim_time_space.shape[1]
-    extent = [x_sorted_no_nan.min(), x_sorted_no_nan.max(), num_time, 0]
+    extent = [x_sorted_no_nan.max(), x_sorted_no_nan.min(), num_time, 0]
 
     # Only plot every plot_every stimuli
     plot_indices = np.arange(0, stim_time_space.shape[0], plot_every)
@@ -130,7 +132,8 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
         else:
             fig, ax_pred = plt.subplots()
         
-        im_pred = ax_pred.imshow(stim_time_space[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto', extent=extent)
+        # No transpose: rows=time (y-axis), cols=phi_sorted high-to-low (x-axis)
+        im_pred = ax_pred.imshow(stim_time_space[pi, :, sort_inds_no_nan], interpolation='nearest', aspect='auto', extent=extent)
         if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
             im_pred.set_clim(vmin=0)
         ax_pred.set_xlabel('phi')
@@ -140,7 +143,8 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
 
         if optic_flow is not None:
             # X optic flow (left/right): index 0
-            optic_flow_x = optic_flow[pi, :, sort_inds_no_nan, 0].T
+            # No transpose: rows=time (y-axis), cols=phi_sorted (x-axis)
+            optic_flow_x = optic_flow[pi, :, sort_inds_no_nan, 0]
             im_of_x = ax_of_x.imshow(optic_flow_x, interpolation='nearest', aspect='auto', cmap='coolwarm', extent=extent)
             max_abs_x = np.nanmax(np.abs(optic_flow_x))
             if max_abs_x > 1e-10:
@@ -153,7 +157,8 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
             fig.colorbar(im_of_x, ax=ax_of_x)
 
             # Y optic flow (up/down): index 1
-            optic_flow_y = optic_flow[pi, :, sort_inds_no_nan, 1].T
+            # No transpose: rows=time (y-axis), cols=phi_sorted (x-axis)
+            optic_flow_y = optic_flow[pi, :, sort_inds_no_nan, 1]
             im_of_y = ax_of_y.imshow(optic_flow_y, interpolation='nearest', aspect='auto', cmap='coolwarm', extent=extent)
             max_abs_y = np.nanmax(np.abs(optic_flow_y))
             if max_abs_y > 1e-10:

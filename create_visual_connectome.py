@@ -143,10 +143,11 @@ xyz = mu.rtp_to_xyz(rtp)
 # https://www.evernote.com/client/web#/notes/0e9caaaf-0a32-585c-55a5-f1687890c2a7
 # goal is to align the fly looking forward down the x axis. +z is up. +y is left
 # this means that in this frame, theta = 90 is directly in front of the fly
-# the right eye is phi [0, 180] and left eye is phi [0, 180)
-# positive phi rotation corresponds to rightward motion
-# progressive / regressive => +/- phi
-# dorsal / ventral => +/- theta
+# the right eye is phi < 0 (negative Y) and left eye is phi > 0 (positive Y)
+# positive phi rotation corresponds to leftward motion (toward +Y)
+# negative phi rotation corresponds to rightward motion (toward -Y)
+# rightward / leftward optic flow => positive / negative optic_flow[..., 0]
+# upward / downward optic flow => positive / negative optic_flow[..., 1]
 
 # procedure
 # flip x so that x 0 will align with the front of the font of the fly
