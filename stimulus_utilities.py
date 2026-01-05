@@ -87,9 +87,10 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         sine_wave_dict['up'].append(-sine_wave_up_shifted)
 
         # add what the optic flow for the sine wave is at each point
-        optic_flow_mat = np.zeros_like(sine_wave_right) - tf / wavelength
-        # this optic flow is only left/right so set the up/down flow to 0
-        optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+        # upward motion = positive optic flow (index 1)
+        optic_flow_mat = np.zeros_like(sine_wave_right) + tf / wavelength
+        # this optic flow is only up/down so set the left/right flow to 0
+        optic_flow_mat = np.concatenate((np.zeros_like(optic_flow_mat[:, :, :, None]), optic_flow_mat[:, :, :, None]), axis=3)
         optic_flow_dict['up'] += [optic_flow_mat] * 4
 
         # -- downward sine wave --
@@ -103,9 +104,10 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         sine_wave_dict['down'].append(-sine_wave_down_shifted)
 
         # add what the optic flow for the sine wave is at each point
-        optic_flow_mat = np.zeros_like(sine_wave_right) + tf / wavelength
-        # this optic flow is only left/right so set the up/down flow to 0
-        optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+        # downward motion = negative optic flow (index 1)
+        optic_flow_mat = np.zeros_like(sine_wave_right) - tf / wavelength
+        # this optic flow is only up/down so set the left/right flow to 0
+        optic_flow_mat = np.concatenate((np.zeros_like(optic_flow_mat[:, :, :, None]), optic_flow_mat[:, :, :, None]), axis=3)
         optic_flow_dict['down'] += [optic_flow_mat] * 4
 
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
@@ -117,7 +119,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # the velocity of this sine wave is a smoothed gaussian random walk 
-    # positive / negative temporal frequency is right / left and down / up sine waves
+    # positive / negative temporal frequency is right / left and up / down sine waves
     
     # Create RNG from seed
     if seed is not None:
@@ -168,7 +170,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
         sine_wave = np.zeros_like(t_mesh)
 
         for ti in range(time_vect.shape[0]):
-            phase += tf[ti] * dt
+            phase -= tf[ti] * dt
             sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (sample_phi / wavelength + phase))
 
         return sine_wave
@@ -211,6 +213,8 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
 
     # add what the optic flow for the sine wave is at each point
+    # phase increases for upward motion (tf > 0), so upward flow should be positive
+    # phase decreases for downward motion (tf < 0), so downward flow should be negative
     optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
     # this optic flow is only up/down so set the left/right flow to 0
     optic_flow_mat = np.concatenate((np.zeros_like(optic_flow_mat[:, :, :, None]), optic_flow_mat[:, :, :, None]), axis=3)

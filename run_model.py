@@ -91,28 +91,22 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
     # --- plot the stimuli ---
-    # pu.xt_plot(stimulus.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
+    pu.xt_plot(stimulus.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
 
     # specify the target responses you expect for each cell type. this is what we will train on
     target = {}
 
     # --- make stimulus for random velocity sine wave ---
+    # Use torch.relu to create independent copies and avoid in-place modification bugs
     for n, d in zip(output_neurons, output_neurons_direction):
         if d == 'right':
-            target[n] = optic_flow[:, :, :, 0]
-            target[n][target[n] < 0] = 0
-
+            target[n] = torch.relu(optic_flow[:, :, :, 0])
         elif d == 'left':
-            target[n] = -optic_flow[:, :, :, 0]
-            target[n][target[n] < 0] = 0
-
+            target[n] = torch.relu(-optic_flow[:, :, :, 0])
         elif d == 'up':
-            target[n] = -optic_flow[:, :, :, 1]
-            target[n][target[n] < 0] = 0
-
+            target[n] = torch.relu(optic_flow[:, :, :, 1])
         elif d == 'down':
-            target[n] = optic_flow[:, :, :, 1]
-            target[n][target[n] < 0] = 0
+            target[n] = torch.relu(-optic_flow[:, :, :, 1])
 
     # save the config file and inputs
     if timestamp is None:

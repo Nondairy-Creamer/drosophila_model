@@ -114,34 +114,58 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
     x_sorted = x[sort_inds]
     valid_cells = ~np.any(np.isnan(stim_time_space), axis=(0, 1))
     sort_inds_no_nan = sort_inds[valid_cells[sort_inds]]
+    x_sorted_no_nan = x_sorted[valid_cells[sort_inds]]
+    
+    # Extent for imshow: [x_min, x_max, y_max, y_min] (y is flipped for image coordinates)
+    num_time = stim_time_space.shape[1]
+    extent = [x_sorted_no_nan.min(), x_sorted_no_nan.max(), num_time, 0]
 
     # Only plot every plot_every stimuli
     plot_indices = np.arange(0, stim_time_space.shape[0], plot_every)
     
     for pi in plot_indices:
         if optic_flow is not None:
-            fig, axes = plt.subplots(1, 2, gridspec_kw={'width_ratios': [2, 1]})
-            ax_pred, ax_of = axes
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1, 1]})
+            ax_pred, ax_of_x, ax_of_y = axes
         else:
             fig, ax_pred = plt.subplots()
         
-        im_pred = ax_pred.imshow(stim_time_space[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
+        im_pred = ax_pred.imshow(stim_time_space[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto', extent=extent)
         if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
             im_pred.set_clim(vmin=0)
         ax_pred.set_xlabel('phi')
         ax_pred.set_ylabel('time')
-        ax_pred.set_title('prediction')
+        ax_pred.set_title('stimulus')
         fig.colorbar(im_pred, ax=ax_pred)
 
         if optic_flow is not None:
-            optic_flow_magnitude = np.linalg.norm(optic_flow, axis=3)
-            im_of = ax_of.imshow(optic_flow_magnitude[pi, :, sort_inds_no_nan].T, interpolation='nearest', aspect='auto')
-            if np.all(stim_time_space[pi, :, sort_inds_no_nan] >= 0):
-                im_of.set_clim(vmin=0)
-            ax_of.set_xlabel('phi')
-            ax_of.set_ylabel('time')
-            ax_of.set_title('left right flow')
-            fig.colorbar(im_of, ax=ax_of)
+            # X optic flow (left/right): index 0
+            optic_flow_x = optic_flow[pi, :, sort_inds_no_nan, 0].T
+            im_of_x = ax_of_x.imshow(optic_flow_x, interpolation='nearest', aspect='auto', cmap='coolwarm', extent=extent)
+            max_abs_x = np.nanmax(np.abs(optic_flow_x))
+            if max_abs_x > 1e-10:
+                im_of_x.set_clim(vmin=-max_abs_x, vmax=max_abs_x)
+            else:
+                im_of_x.set_clim(vmin=-1, vmax=1)
+            ax_of_x.set_xlabel('phi')
+            ax_of_x.set_ylabel('time')
+            ax_of_x.set_title('left/right flow')
+            fig.colorbar(im_of_x, ax=ax_of_x)
+
+            # Y optic flow (up/down): index 1
+            optic_flow_y = optic_flow[pi, :, sort_inds_no_nan, 1].T
+            im_of_y = ax_of_y.imshow(optic_flow_y, interpolation='nearest', aspect='auto', cmap='coolwarm', extent=extent)
+            max_abs_y = np.nanmax(np.abs(optic_flow_y))
+            if max_abs_y > 1e-10:
+                im_of_y.set_clim(vmin=-max_abs_y, vmax=max_abs_y)
+            else:
+                im_of_y.set_clim(vmin=-1, vmax=1)
+            ax_of_y.set_xlabel('phi')
+            ax_of_y.set_ylabel('time')
+            ax_of_y.set_title('up/down flow')
+            fig.colorbar(im_of_y, ax=ax_of_y)
+        
+        plt.tight_layout()
         
         # Build filename with optional run_tag prefix
         filename = 'xt_plot_' + str(pi) + '.png'

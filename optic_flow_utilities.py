@@ -22,7 +22,7 @@ def get_self_motion(theta, phi, d_theta, d_phi):
         theta: (N,) polar angles of viewing directions
         phi: (N,) azimuthal angles of viewing directions  
         d_theta: (N,) angular flow in theta direction. right / left is positive / negative respectively
-        d_phi: (N,) angular flow in phi direction. down / up is positive / negative respectively
+        d_phi: (N,) angular flow in phi direction. up / down is positive / negative respectively
     
     Returns:
         omega_star: (3,) estimated rotation vector
