@@ -170,7 +170,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
         sine_wave = np.zeros_like(t_mesh)
 
         for ti in range(time_vect.shape[0]):
-            phase -= tf[ti] * dt
+            phase += tf[ti] * dt
             sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (sample_phi / wavelength + phase))
 
         return sine_wave
@@ -180,7 +180,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
         sine_wave = np.zeros_like(t_mesh)
 
         for ti in range(time_vect.shape[0]):
-            phase -= tf[ti] * dt
+            phase += tf[ti] * dt
             sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + phase))
 
         return sine_wave
