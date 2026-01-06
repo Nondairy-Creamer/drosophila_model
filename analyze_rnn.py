@@ -81,17 +81,14 @@ computer_config = du.load_config()
 device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
 model = nm.NeuralRnn.load(model_folder / 'model.pt', device=device)
-stimulus = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
+stimulus = torch.load(model_folder / 'cell_inputs.pt', weights_only=True).to(device=model.device)
 # target is now a dict of tensors; load and move entries to the right device/dtype
-_target_loaded = torch.load(model_folder / 'target.pt')
+_target_loaded = torch.load(model_folder / 'target.pt', weights_only=False)
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 time_point = 20
 input_neurons = ['L1', 'L2', 'L3']
 
-# Load contrast scaling factor and create loss function
-contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
-contrast_scaling_factor = torch.load(contrast_scaling_factor_path).to(device=model.device)
 loss_fn = getattr(tu, model_config['training']['loss_fn'])
 
 connectome_folder = Path(model_config['data']['connectome_folder'])
@@ -149,8 +146,8 @@ indices = model.synapse_counts.indices().cpu().numpy()  # shape (2, nnz)
 values = model.synapse_counts.values().cpu().numpy()    # shape (nnz,)
 
 # Get cell type index for each pre and post neuron in the synapse list
-pre_types = model.neuron_to_type_index[indices[0]]
-post_types = model.neuron_to_type_index[indices[1]]
+pre_types = model.neuron_to_type_index[indices[0]].cpu().numpy()
+post_types = model.neuron_to_type_index[indices[1]].cpu().numpy()
 
 # Use pandas groupby to compute mean for each (pre_type, post_type) pair
 synapse_df = pd.DataFrame({
@@ -170,7 +167,8 @@ for ns in cells_to_plot:
     print('--- Model parameters for', ns, '---')
     cell_index = np.where(model.unique_cell_types == ns)[0][0]
     chosen_persistence = model.persistence_logit[cell_index].sigmoid().detach().cpu().numpy()
-    chosen_strength_in = model.input_strength_log[cell_index].exp().detach().cpu().numpy() + model.input_strength_minimum.detach().cpu().numpy()
+    input_strength_min = model.input_strength_minimum.detach().cpu().numpy() if torch.is_tensor(model.input_strength_minimum) else model.input_strength_minimum
+    chosen_strength_in = model.input_strength_log[cell_index].exp().detach().cpu().numpy() + input_strength_min
     chosen_strength_out = model.output_strength_log[cell_index].exp().detach().cpu().numpy()
     chosen_offset = model.offset[cell_index].detach().cpu().numpy()
     chosen_stimulus_strength = model.stimulus_strength_log[cell_index].exp().detach().cpu().numpy()
