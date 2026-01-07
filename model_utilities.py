@@ -32,7 +32,7 @@ def rotate_3d(xyz, angle, axis):
 
 def xyz_to_rtp(xyz):
     r = np.sqrt(xyz[0, :]**2 + xyz[1, :]**2 + xyz[2, :]**2)
-    theta = np.acos(xyz[2, :] / r)
+    theta = np.arccos(xyz[2, :] / r)
     phi = np.arctan2(xyz[1, :], xyz[0, :])
 
     return np.vstack((r, theta, phi))

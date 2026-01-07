@@ -64,14 +64,21 @@ synapse_sign[excitatory_connections] = 1
 synapse_sign[inhibitory] = -1
 
 # corrections: there are some synapses that don't follow convention.
-# C2 and C3 for excitatory connections onto L1 and L2, but inhibitory elsewhere
-c2c3_bool = (presynaptic_ids == 'C2') | (presynaptic_ids == 'C3')
-l1l2_bool = (postsynaptic_ids == 'L1') | (postsynaptic_ids == 'L2')
+# C2 and C3 make excitatory connections onto L1 and L2, but inhibitory elsewhere
+# Need to look up root IDs for these cell types
+c2c3_root_ids = visual_neurons_df[visual_neurons_df['type'].isin(['C2', 'C3'])]['root_id'].values
+l1l2_root_ids = visual_neurons_df[visual_neurons_df['type'].isin(['L1', 'L2'])]['root_id'].values
+c2c3_bool = np.isin(presynaptic_ids, c2c3_root_ids)
+l1l2_bool = np.isin(postsynaptic_ids, l1l2_root_ids)
 synapse_sign[c2c3_bool & l1l2_bool] = 1
 
-# exclude photoreceptors
+# exclude photoreceptors and other neurons that interfere with learning
+# Note: neurons_to_exclude uses cell TYPE names, not root IDs
+# We need to find the root IDs of neurons with these types
 neurons_to_exclude = ['R1-6', 'R7', 'R8', 'Y1']
-exclude_bool = np.isin(presynaptic_ids, neurons_to_exclude)
+excluded_root_ids = visual_neurons_df[visual_neurons_df['type'].isin(neurons_to_exclude)]['root_id'].values
+# Exclude connections where these neurons are pre-synaptic OR post-synaptic
+exclude_bool = np.isin(presynaptic_ids, excluded_root_ids) | np.isin(postsynaptic_ids, excluded_root_ids)
 presynaptic_ids = presynaptic_ids[~exclude_bool]
 postsynaptic_ids = postsynaptic_ids[~exclude_bool]
 synapse_counts = synapse_counts[~exclude_bool]
@@ -133,8 +140,8 @@ xy *= xy_scalar
 
 # convert to spherical angles
 rho = np.sqrt(np.sum(xy ** 2, axis=0))
-theta = 2 * np.asin(rho / np.sqrt(2))
-phi = np.atan2(xy[1, :], xy[0, :])
+theta = 2 * np.arcsin(rho / np.sqrt(2))
+phi = np.arctan2(xy[1, :], xy[0, :])
 r = np.ones_like(theta)
 rtp = np.vstack((r, theta, phi))
 xyz = mu.rtp_to_xyz(rtp)
