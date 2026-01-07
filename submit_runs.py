@@ -14,6 +14,7 @@ import torch
 import subprocess
 import argparse
 import sys
+import os
 from pathlib import Path
 import time
 from datetime import datetime
@@ -64,6 +65,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     """
     cmd = [
         sys.executable,
+        '-u',  # Unbuffered output so logs appear immediately
         str(script_path),
         '--seed', str(seed),
         '--device', device,
@@ -80,13 +82,19 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     log_path.mkdir(parents=True, exist_ok=True)
     
     # Open log file for this run (redirect both stdout and stderr to avoid pipe deadlock)
-    log_file = open(log_path / f'{timestamp}_{run_id}.log', 'w')
+    # Use line buffering so output appears immediately
+    log_file = open(log_path / f'{timestamp}_{run_id}.log', 'w', buffering=1)
+    
+    # Set environment variable to ensure unbuffered output
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
     
     # Run in background (non-blocking) with output to file
     process = subprocess.Popen(
         cmd,
         stdout=log_file,
-        stderr=subprocess.STDOUT
+        stderr=subprocess.STDOUT,
+        env=env
     )
     
     return process, log_file
