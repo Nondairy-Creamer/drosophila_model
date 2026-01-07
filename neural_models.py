@@ -366,13 +366,21 @@ class NeuralRnn(torch.nn.Module):
 
         return selected_neuron_indices, selected_column_indices
 
-    def silence_neurons(self, neurons_to_silence):
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
         if len(neurons_to_silence) > 0:
-            print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
-            # set the input and output strength of these neurons to a small value
-            chosen_neurons = np.zeros(self.num_cell_types) == 1
-            for ns in neurons_to_silence:
-                chosen_neurons[self.unique_cell_types == ns] = True
+
+            if not invert_silencing:
+                print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
+                # set the input and output strength of these neurons to a small value
+                chosen_neurons = np.zeros(self.num_cell_types) == 1
+                for ns in neurons_to_silence:
+                    chosen_neurons[self.unique_cell_types == ns] = True
+            else:
+                print("\n--- WARNING silencing everything but", neurons_to_silence, '---\n')
+                # set the input and output strength of these neurons to a small value
+                chosen_neurons = np.zeros(self.num_cell_types) == 0
+                for ns in neurons_to_silence:
+                    chosen_neurons[self.unique_cell_types == ns] = False
 
             with torch.no_grad():
                 self.output_strength_log.data[chosen_neurons] = np.log(self.silence_val)
