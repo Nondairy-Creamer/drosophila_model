@@ -100,13 +100,13 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # Use torch.relu to create independent copies and avoid in-place modification bugs
     for n, d in zip(output_neurons, output_neurons_direction):
         if d == 'right':
-            target[n] = torch.relu(optic_flow[:, :, :, 0])**(1/2)
+            target[n] = torch.relu(optic_flow[:, :, :, 0])
         elif d == 'left':
-            target[n] = torch.relu(-optic_flow[:, :, :, 0])**(1/2)
+            target[n] = torch.relu(-optic_flow[:, :, :, 0])
         elif d == 'up':
-            target[n] = torch.relu(optic_flow[:, :, :, 1])**(1/2)
+            target[n] = torch.relu(optic_flow[:, :, :, 1])
         elif d == 'down':
-            target[n] = torch.relu(-optic_flow[:, :, :, 1])**(1/2)
+            target[n] = torch.relu(-optic_flow[:, :, :, 1])
 
     # save the config file and inputs
     if timestamp is None:

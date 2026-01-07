@@ -47,9 +47,11 @@ class NeuralRnn(torch.nn.Module):
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
         # Initialize persistent power-iteration vector for warm starts using RNG
+        # Register as buffer so it's saved/restored with state_dict
         power_vec_np = self.rng.standard_normal(self.num_neurons)
-        self._power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
-        self._power_vec = self._power_vec / (self._power_vec.norm() + 1e-12)
+        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
+        power_vec = power_vec / (power_vec.norm() + 1e-12)
+        self.register_buffer('_power_vec', power_vec)
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -217,13 +219,8 @@ class NeuralRnn(torch.nn.Module):
         def apply_S_T(v):
             return d * v + apply_M_T(one_minus_d * v)
 
-        # Warm start (buffer, no grad needed)
-        if getattr(self, "_power_vec", None) is None or self._power_vec.numel() != n:
-            # Fallback: create random vector if _power_vec doesn't exist using numpy RNG
-            power_vec_np = self.rng.standard_normal(n)
-            x = torch.tensor(power_vec_np, device=device, dtype=dtype)
-        else:
-            x = self._power_vec
+        # Warm start from registered buffer (saved/restored with state_dict)
+        x = self._power_vec.clone()
 
         x = x / (x.norm() + eps)  # normalize, but no gradient needed w.r.t x
         # x is treated as a constant initial direction for autograd
@@ -237,8 +234,8 @@ class NeuralRnn(torch.nn.Module):
         y = apply_S(x)
         sigma = y.norm()  # differentiable w.r.t. parameters in S
 
-        # Update warm-start vector, but cut history
-        self._power_vec = x.detach()
+        # Update warm-start vector in-place (registered buffer), but cut history
+        self._power_vec.copy_(x.detach())
 
         return sigma
 
