@@ -222,10 +222,6 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
 
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
 
-    # double with a different contrast
-    stimulus = np.concatenate((stimulus, 0.5 * stimulus), axis=0)
-    optic_flow = np.concatenate((optic_flow, optic_flow), axis=0)
-
     return stimulus, optic_flow
 
 def consolidate_stim(stim_dict, optic_flow_dict):
