@@ -85,7 +85,7 @@ postsynaptic_ids = postsynaptic_ids[~exclude_bool]
 synapse_counts = synapse_counts[~exclude_bool]
 synapse_sign = synapse_sign[~exclude_bool]
 
-# remove connections with 2 or fewer synapses
+# remove connections with fewer than synapse_count_threshold synapses
 keep_connections = synapse_counts >= synapse_count_threshold
 presynaptic_ids = presynaptic_ids[keep_connections]
 postsynaptic_ids = postsynaptic_ids[keep_connections]
