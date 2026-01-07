@@ -299,7 +299,11 @@ class NeuralRnn(torch.nn.Module):
                 valid = ci >= 0
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
-                    outputs['firing_rate'][i][:, t, ci[valid]] = self.nonlinearity(v[:, ni[valid]])
+
+        # Compute firing_rate from the complete voltage tensor (more memory efficient)
+        # This creates one computation graph node instead of one per timestep
+        for i in readout_keys:
+            outputs['firing_rate'][i] = self.nonlinearity(outputs['voltage'][i])
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
