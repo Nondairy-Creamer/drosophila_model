@@ -17,6 +17,7 @@ inhibitory_nt = config["data"]["inhibitory_nt"]
 fly_eye = config["data"]["fly_eye"]
 use_intrinsic = config["data"]["use_intrinsic"]
 hemisphere_coverage = config["data"]["hemisphere_coverage"]
+synapse_count_threshold = config['data']['synapse_count_threshold']
 
 # --- data sets ---
 # each neuron in the drosophila connectome has a unique "root id"
@@ -83,6 +84,13 @@ presynaptic_ids = presynaptic_ids[~exclude_bool]
 postsynaptic_ids = postsynaptic_ids[~exclude_bool]
 synapse_counts = synapse_counts[~exclude_bool]
 synapse_sign = synapse_sign[~exclude_bool]
+
+# remove connections with 2 or fewer synapses
+keep_connections = synapse_counts >= synapse_count_threshold
+presynaptic_ids = presynaptic_ids[keep_connections]
+postsynaptic_ids = postsynaptic_ids[keep_connections]
+synapse_counts = synapse_counts[keep_connections]
+synapse_sign = synapse_sign[keep_connections]
 
 # make synapse counts signed
 synapse_counts *= synapse_sign
