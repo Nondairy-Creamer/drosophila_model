@@ -299,7 +299,7 @@ class NeuralRnn(torch.nn.Module):
                 valid = ci >= 0
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
-                    outputs['firing_rate'][i] = self.nonlinearity(outputs['voltage'][i])
+                    outputs['firing_rate'][i][:, t, ci[valid]] = self.nonlinearity(v[:, ni[valid]])
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
