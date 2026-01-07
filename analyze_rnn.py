@@ -127,7 +127,7 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 
 
 # --- select some additional neurons for plotting ---
-cells_to_plot = ['L1', 'L2', 'Mi1', 'Tm3', 'Mi9', 'Mi4', 'C3', 'CT1', 'T4a', 'T4b', 'T4c', 'T4d']
+cells_to_plot = ['L1', 'L2', 'Mi1', 'Tm3', 'Mi9', 'Mi4', 'C3', 'CT1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 # --- silence certain neurons ---
 neurons_to_silence = []
