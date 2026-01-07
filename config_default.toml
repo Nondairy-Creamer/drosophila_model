@@ -34,6 +34,8 @@ fly_eye = "right"
 use_intrinsic = false
 hemisphere_coverage = 0.85
 normalize_rows = false
+synapse_count_threshold = 0
+neurons_to_exclude = ['R1-6', 'R7', 'R8']
 excitatory_nt = [
     "ACH",
 ]

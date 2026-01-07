@@ -18,6 +18,7 @@ fly_eye = config["data"]["fly_eye"]
 use_intrinsic = config["data"]["use_intrinsic"]
 hemisphere_coverage = config["data"]["hemisphere_coverage"]
 synapse_count_threshold = config['data']['synapse_count_threshold']
+neurons_to_exclude = config['data']['neurons_to_exclude']
 
 # --- data sets ---
 # each neuron in the drosophila connectome has a unique "root id"
@@ -76,7 +77,6 @@ synapse_sign[c2c3_bool & l1l2_bool] = 1
 # exclude photoreceptors and other neurons that interfere with learning
 # Note: neurons_to_exclude uses cell TYPE names, not root IDs
 # We need to find the root IDs of neurons with these types
-neurons_to_exclude = ['R1-6', 'R7', 'R8', 'Y1', 'LLPC1', 'TmY20']
 excluded_root_ids = visual_neurons_df[visual_neurons_df['type'].isin(neurons_to_exclude)]['root_id'].values
 # Exclude connections where these neurons are pre-synaptic OR post-synaptic
 exclude_bool = np.isin(presynaptic_ids, excluded_root_ids) | np.isin(postsynaptic_ids, excluded_root_ids)
