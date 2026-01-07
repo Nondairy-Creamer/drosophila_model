@@ -22,7 +22,10 @@ class NeuralRnn(torch.nn.Module):
         offset_init = 0.0
         self.max_allowed_sigma = 0.95
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
-        self.input_strength_minimum = 0
+        # Prevent input strength from going to exactly zero, which would silence cells
+        # This is especially important for cells with sparse targets (like T4a/T5a for rightward motion)
+        # where predicting zero can give misleadingly good correlation scores
+        self.input_strength_minimum = 0  # minimum input strength (prevents complete silencing)
 
         # Create RNG from seed for random initialization
         if seed is not None:
@@ -109,7 +112,10 @@ class NeuralRnn(torch.nn.Module):
         # Initialize strength per cell type based on the inverse of its fan in / out
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        input_strength_log_init = torch.log(input_strength_init) - self.input_strength_minimum
+        # Ensure input_strength_init is at least input_strength_minimum to prevent cells from being silenced
+        input_strength_init = input_strength_init.clamp_min(self.input_strength_minimum * 2)  # Start above minimum
+        # Initialize log such that exp(log) + minimum = input_strength_init
+        input_strength_log_init = torch.log(input_strength_init - self.input_strength_minimum + 1e-10)
         output_strength_log_init = torch.log(output_strength_init)
 
         # Add Gaussian noise to strength parameters
