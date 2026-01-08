@@ -245,7 +245,8 @@ class NeuralRnn(torch.nn.Module):
 
         return sigma
 
-    def predict(self, inputs, input_neurons=['L1'], output_neurons=['T4a'], init_state=None):
+    def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'], 
+                output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], init_state=None):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
@@ -312,6 +313,27 @@ class NeuralRnn(torch.nn.Module):
             outputs['firing_rate'][i] = self.nonlinearity(outputs['voltage'][i])
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
+
+    def calculate_optic_flow(self, inputs, scalar=1):
+        outputs = self.predict(self, inputs, input_neurons=['L1', 'L2', 'L3'], 
+                               output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], init_state=None)[0]
+
+        # TODO normalizing the outputs can have bad consequences... consider a more objective way of handling
+        # activity level differences between neurons
+        firing_rate = {}
+        for i in outputs['firing_rate']:
+            firing_rate[i] = outputs['firing_rate'][i] / torch.mean(outputs['firing_rate'][i])
+        
+        right = (firing_rate['T4a'] + firing_rate['T5a']) / 2
+        left = (firing_rate['T4b'] + firing_rate['T5b']) / 2
+        up = (firing_rate['T4c'] + firing_rate['T5c']) / 2
+        down = (firing_rate['T4d'] + firing_rate['T5d']) / 2
+
+        horizontal = right - left
+        vertical = up - down
+        optic_flow = scalar * torch.stack((horizontal, vertical), axis=-1)
+        
+        return optic_flow
 
     def save(self, path):
         p = Path(path)
