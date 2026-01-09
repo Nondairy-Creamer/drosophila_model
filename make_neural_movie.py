@@ -25,7 +25,7 @@ import model_utilities as mu
 import sys
 
 if len(sys.argv) == 1:
-    model_folder = Path('models/20251128_224751')
+    model_folder = Path('models/best_model')
 else:
     model_folder = Path(sys.argv[1])
 
@@ -36,7 +36,7 @@ device = torch.device(computer_config['model']['device'])  # what device you use
 dtype = getattr(torch, model_config['model']['dtype'])
 connectome_folder = Path(model_config['data']['connectome_folder'])
 model = nm.NeuralRnn.load(model_folder / 'model.pt', device=device)
-_target_loaded = torch.load(model_folder / 'target.pt')
+_target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 
@@ -50,7 +50,7 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 # --- load the sine wave stimuli ---
 # directions = ['right', 'left', 'up', 'down']
 directions = ['right_left', 'up_down']
-stimulus_in = torch.load(model_folder / 'cell_inputs.pt').to(model.device)
+stimulus_in = torch.load(model_folder / 'cell_inputs.pt', map_location=device).to(model.device)
 
 # restrict the stimulus to one phase (select consecutive repeats, not every Nth)
 num_phase = 4
@@ -81,8 +81,9 @@ for k, v in target.items():
         target_filtered[k] = torch.cat(torch.split(target_filtered[k], 1, dim=0), dim=1)
 
 # --- silence some neurons ---
-neurons_to_silence = []
-model.silence_neurons(neurons_to_silence)
+relevant_neurons = mu.path_from_a_to_b(model, ['L1', 'L2', 'L3'], ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'])
+# relevant_neurons = model.unique_cell_types
+model.silence_neurons(relevant_neurons, invert_silencing=True)
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
@@ -185,36 +186,36 @@ make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name
 # make_movie(init_quiver, ['sequence'], fig_folder, frame_rate, save_name="quiver")
 
 
-# --- Diamond sequence movie for T4 TARGETS ---
-measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
+# # --- Diamond sequence movie for T4 TARGETS ---
+# measured_cell_types = ['T4a', 'T4b', 'T4c', 'T4d']
 
-seq_data_target = {}
-for mct in measured_cell_types:
-    cell_resp = target_filtered[mct].detach().cpu().numpy()
-    cell_resp /= np.nanpercentile(cell_resp, color_percentile)
-    cell_resp = interp_nan_column(cell_resp)
-    seq_data_target[mct] = cell_resp  # [num_stimuli, time, columns]
+# seq_data_target = {}
+# for mct in measured_cell_types:
+#     cell_resp = target_filtered[mct].detach().cpu().numpy()
+#     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+#     cell_resp = interp_nan_column(cell_resp)
+#     seq_data_target[mct] = cell_resp  # [num_stimuli, time, columns]
 
-seq_data_target['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+# seq_data_target['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
 
-init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data_target, cell_x, cell_z, scale=1.8, size_scale=0.6)
-make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4_target")
+# init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data_target, cell_x, cell_z, scale=1.8, size_scale=0.6)
+# make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4_target")
 
 
-# --- Diamond sequence movie for T5 TARGETS ---
-measured_cell_types = ['T5a', 'T5b', 'T5c', 'T5d']
+# # --- Diamond sequence movie for T5 TARGETS ---
+# measured_cell_types = ['T5a', 'T5b', 'T5c', 'T5d']
 
-seq_data_target = {}
-for mct in measured_cell_types:
-    cell_resp = target_filtered[mct].detach().cpu().numpy()
-    cell_resp /= np.nanpercentile(cell_resp, color_percentile)
-    cell_resp = interp_nan_column(cell_resp)
-    seq_data_target[mct] = cell_resp  # [num_stimuli, time, columns]
+# seq_data_target = {}
+# for mct in measured_cell_types:
+#     cell_resp = target_filtered[mct].detach().cpu().numpy()
+#     cell_resp /= np.nanpercentile(cell_resp, color_percentile)
+#     cell_resp = interp_nan_column(cell_resp)
+#     seq_data_target[mct] = cell_resp  # [num_stimuli, time, columns]
 
-seq_data_target['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+# seq_data_target['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
 
-init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data_target, cell_x, cell_z, scale=1.8, size_scale=0.6)
-make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t5_target")
+# init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data_target, cell_x, cell_z, scale=1.8, size_scale=0.6)
+# make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t5_target")
 
 
 # # --- activity for light pathway ---
