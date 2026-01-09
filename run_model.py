@@ -117,8 +117,9 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         model_save_folder = Path('models/' + timestamp)
     model_save_folder.mkdir(parents=True, exist_ok=True)
 
-    # Save seed info to config
-    config['run_info'] = {'seed': seed, 'device': str(device), 'run_id': run_id}
+    # Save seed info to config (filter out None values since TOML doesn't support them)
+    run_info = {'seed': seed, 'device': str(device), 'run_id': run_id}
+    config['run_info'] = {k: v for k, v in run_info.items() if v is not None}
     du.save_config(config, model_save_folder / 'config.toml')
     torch.save(stimulus.detach().cpu(), model_save_folder / "cell_inputs.pt")
     torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
