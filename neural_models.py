@@ -57,12 +57,13 @@ class NeuralRnn(torch.nn.Module):
         self.register_buffer('_power_vec', power_vec)
 
         # readout from the neurons to optic flow in units of degrees per second
-        self.optical_flow_readout = {
-            'horizontal_cells': ['T4a', 'T4b', 'T5a', 'T5b'],
-            'horizontal_readout': torch.tensor([1, -1, 1, -1, 0], device=self.device, dtype=self.dtype), # linear weighting and offset
-            'vertical_cells': ['T4c', 'T4d', 'T5c', 'T5d'],
-            'vertical_readout': torch.tensor([1, -1, 1, -1, 0], device=self.device, dtype=self.dtype),
-        }
+        # Cell lists stored as attributes, readout tensors as buffers (auto-saved in state_dict)
+        self.optical_flow_horizontal_cells = ['T4a', 'T4b', 'T5a', 'T5b']
+        self.optical_flow_vertical_cells = ['T4c', 'T4d', 'T5c', 'T5d']
+        self.register_buffer('optical_flow_horizontal_readout', 
+                             torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
+        self.register_buffer('optical_flow_vertical_readout',
+                             torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
 
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
@@ -323,38 +324,37 @@ class NeuralRnn(torch.nn.Module):
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def calculate_optical_flow(self, inputs):
-        horizontal_cells = self.optical_flow_readout['horizontal_cells']
-        vertical_cells = self.optical_flow_readout['vertical_cells']
+        horizontal_cells = self.optical_flow_horizontal_cells
+        vertical_cells = self.optical_flow_vertical_cells
         outputs = self.predict(inputs, input_neurons=['L1', 'L2', 'L3'], 
                                output_neurons=horizontal_cells+vertical_cells, init_state=None)[0]
 
-        horizontal = torch.zeros_like(outputs['firing_rate'][horizontal_cells[0]]) + self.optical_flow_readout['horizontal_readout'][-1]
-        vertical = torch.zeros_like(outputs['firing_rate'][vertical_cells[0]]) + self.optical_flow_readout['vertical_readout'][-1]
+        horizontal = torch.zeros_like(outputs['firing_rate'][horizontal_cells[0]]) + self.optical_flow_horizontal_readout[-1]
+        vertical = torch.zeros_like(outputs['firing_rate'][vertical_cells[0]]) + self.optical_flow_vertical_readout[-1]
 
         for hi, h in enumerate(horizontal_cells):
-            horizontal += self.optical_flow_readout['horizontal_readout'][hi] * outputs['firing_rate'][h]
+            horizontal += self.optical_flow_horizontal_readout[hi] * outputs['firing_rate'][h]
 
         for vi, v in enumerate(vertical_cells):
-            vertical += self.optical_flow_readout['vertical_readout'][vi] * outputs['firing_rate'][v]
+            vertical += self.optical_flow_vertical_readout[vi] * outputs['firing_rate'][v]
 
         optic_flow = torch.stack((horizontal, vertical), axis=-1)
         
         return optic_flow
 
     def fit_optical_flow_readout(self, inputs, target):
-        horizontal_cells = self.optical_flow_readout['horizontal_cells']
-        vertical_cells = self.optical_flow_readout['vertical_cells']
         outputs = self.predict(inputs, input_neurons=['L1', 'L2', 'L3'], 
-                               output_neurons=horizontal_cells+vertical_cells, init_state=None)[0]
+                               output_neurons=self.optical_flow_horizontal_cells+self.optical_flow_vertical_cells, 
+                               init_state=None)[0]
 
         horizontal_target = target[:, :, :, 0].reshape(-1)
         vertical_target = target[:, :, :, 1].reshape(-1)
         horizontal_list = []
         vertical_list = []
 
-        for h in horizontal_cells:
+        for h in self.optical_flow_horizontal_cells:
             horizontal_list.append(outputs['firing_rate'][h].reshape(-1))
-        for v in vertical_cells:
+        for v in self.optical_flow_vertical_cells:
             vertical_list.append(outputs['firing_rate'][v].reshape(-1))
 
         horizontal_list.append(torch.ones_like(horizontal_list[0]))
@@ -363,16 +363,18 @@ class NeuralRnn(torch.nn.Module):
         horizontal_rates = torch.stack(horizontal_list, axis=-1)
         vertical_rates = torch.stack(vertical_list, axis=-1)
 
+        # get the indices where there are no nans and keep the non nan values
         horizontal_valid_inds = ~torch.any(torch.isnan(horizontal_rates), axis=1) & ~torch.isnan(horizontal_target)
         horizontal_rates = horizontal_rates[horizontal_valid_inds, :]
         horizontal_target = horizontal_target[horizontal_valid_inds]
+
         vertical_valid_inds = ~torch.any(torch.isnan(vertical_rates), axis=1) & ~torch.isnan(vertical_target)
         vertical_rates = vertical_rates[vertical_valid_inds, :]
         vertical_target = vertical_target[vertical_valid_inds]
 
         # find the best fit between the rates and the target
-        self.optical_flow_readout['horizontal_readout'] = torch.linalg.lstsq(horizontal_rates.double(), horizontal_target.double())[0]
-        self.optical_flow_readout['vertical_readout'] = torch.linalg.lstsq(vertical_rates.double(), vertical_target.double())[0]
+        self.optical_flow_horizontal_readout = torch.linalg.lstsq(horizontal_rates.double(), horizontal_target.double())[0]
+        self.optical_flow_vertical_readout = torch.linalg.lstsq(vertical_rates.double(), vertical_target.double())[0]
 
         return
 
@@ -382,7 +384,7 @@ class NeuralRnn(torch.nn.Module):
 
         payload = {
             'inputs': self.init_inputs,
-            # store weights on CPU for portability
+            # store weights on CPU for portability (includes buffers like optical_flow_*_readout)
             'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
         }
 
