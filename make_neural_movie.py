@@ -81,9 +81,10 @@ for k, v in target.items():
         target_filtered[k] = torch.cat(torch.split(target_filtered[k], 1, dim=0), dim=1)
 
 # --- silence some neurons ---
-relevant_neurons = mu.path_from_a_to_b(model, ['L1', 'L2', 'L3'], ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'])
+# relevant_neurons = mu.path_from_a_to_b(model, ['L1', 'L2', 'L3'], ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'])
 # relevant_neurons = model.unique_cell_types
-model.silence_neurons(relevant_neurons, invert_silencing=True)
+neurons_to_silence = []
+model.silence_neurons(neurons_to_silence, invert_silencing=False)
 
 # # --- load the stimuli from the camera ---
 # directions = ['real_movie']
