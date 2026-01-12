@@ -3,13 +3,30 @@ Test script for optic flow self-motion estimation.
 Generates synthetic optic flow from known rotations and translations,
 then verifies the model can recover these parameters.
 """
+import sys
 from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import pandas as pd
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from optic_flow_utilities import cross_matrix
 from neural_models import NeuralRnn
+
+def cross_matrix(a):
+    """
+    a: (..., 3) tensor
+    returns (..., 3, 3) skew-symmetric matrix [a]_x
+    """
+    ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+    O = torch.zeros_like(ax)
+    return torch.stack([
+        torch.stack([   O, -az,  ay], dim=-1),
+        torch.stack([  az,   O, -ax], dim=-1),
+        torch.stack([ -ay,  ax,   O], dim=-1)
+    ], dim=-2)
 
 # Load column info with theta/phi viewing directions
 connectome_folder = Path('../connectome_data')

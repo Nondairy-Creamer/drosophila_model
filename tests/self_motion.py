@@ -7,10 +7,15 @@ This script:
 3. Estimates self-motion (rotation and translation) from the optic flow
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import numpy as np
 import shutil
-from pathlib import Path
 from neural_models import NeuralRnn
 from stimulus_utilities import make_lr_sine_wave
 import plotting_utilities as pu
@@ -35,8 +40,7 @@ def main():
     wavelength = wavelength_deg * np.pi / 180  # convert to radians
     
     # Test multiple velocities
-    velocities = [-i for i in range(30, 270, 30)]  # degrees/second
-    velocities = [180]
+    velocities = [i for i in range(30, 270, 30)]  # degrees/second
 
     print(f"\nStimulus parameters:")
     print(f"  Spatial wavelength: {wavelength_deg} degrees")
@@ -69,7 +73,7 @@ def main():
             sample_phi=phi,
             sample_theta=theta,
             wavelength=wavelength,
-            temporal_frequency=-temporal_frequency,
+            temporal_frequency=temporal_frequency,
             phase_init=0,
             dt=0.01,
             stim_time=1.0
@@ -81,7 +85,7 @@ def main():
             sample_phi=-phi,
             sample_theta=theta,
             wavelength=wavelength,
-            temporal_frequency=-temporal_frequency,  # negative with -phi = rightward motion from left eye's perspective
+            temporal_frequency=temporal_frequency,  # negative with -phi = rightward motion from left eye's perspective
             phase_init=0,
             dt=0.01,
             stim_time=1.0

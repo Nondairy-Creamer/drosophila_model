@@ -1,6 +1,11 @@
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import pandas as pd
-from pathlib import Path
 import neural_models as nm
 import plotting_utilities as pu
 import data_utilities as du
