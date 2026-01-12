@@ -555,21 +555,26 @@ class NeuralRnn(torch.nn.Module):
         """
         Estimate self-motion (rotation and translation) from optic flow.
         
+        Coordinate system:
+            - +X: Forward (phi=0, theta=π/2)
+            - +Y: Left (phi=π/2, theta=π/2)  
+            - +Z: Up (theta=0)
+        
+        Flow sign convention:
+            - Positive d_phi: rightward motion on retina → leftward observer rotation
+            - Positive d_theta: upward motion on retina → downward observer motion
+        
         Args:
             phi: (N,) azimuthal angles of viewing directions  
             theta: (N,) polar angles of viewing directions
-            d_phi: (N,) angular flow in phi direction. right / left is positive / negative respectively
-            d_theta: (N,) angular flow in theta direction. up / down is positive / negative respectively
+            d_phi: (N,) angular flow in phi direction (positive = rightward on retina)
+            d_theta: (N,) angular flow in theta direction (positive = upward on retina)
         
         Returns:
-            omega_star: (3,) estimated rotation vector
-                Note: Rightward rotation (positive omega_y) should produce leftward optic flow
-                (negative d_phi). If rightward flow (positive d_phi) corresponds to positive
-                rotation in your coordinate system, there may be a sign convention issue.
-            T_star: (3,) estimated translation direction (unit vector)
-            Z_star: (N,) estimated depths
-            translation_magnitude: scalar indicating strength of translation signal
-                (RMS of de-rotated flow; near zero means no translation)
+            omega_star: (3,) estimated rotation vector [roll, pitch, yaw]
+                Positive omega_z = leftward rotation (world moves right on retina)
+            T_star: (3,) estimated translation direction (up to sign ambiguity)
+            Z_star: (N,) estimated depths (positive when T_star sign is correct)
         """
 
         def cross_matrix(a):
@@ -608,23 +613,24 @@ class NeuralRnn(torch.nn.Module):
             torch.zeros_like(phi)
         ), dim=1)                              # (N,3)
 
+        # Reconstruct 3D flow from angular components
+        # d_phi: positive = rightward motion on retina (leftward observer rotation)
+        # d_theta: positive = upward motion on retina (downward observer motion)
         # Negate d_theta because e_theta points downward but we want up=positive
-        u = -d_theta[:, None] * e_theta - d_phi[:, None] * e_phi   # (N,3)
+        u = -d_theta[:, None] * e_theta + d_phi[:, None] * e_phi   # (N,3)
 
         # === Rotation estimation: solve u ≈ [x]_× Ω ===
+        # Physical relationship: image motion u = Ω × x = -x × Ω = -[x]_× Ω
+        # So [x]_× Ω = -u, meaning Ω = -solve([x]_× Ω = u)
         A = cross_matrix(x)                    # (N,3,3)
         A_flat = A.reshape(3*N, 3)
         u_flat = u.reshape(3*N)
 
-        omega_star = torch.linalg.lstsq(A_flat, u_flat)[0]
+        omega_star = -torch.linalg.lstsq(A_flat, u_flat)[0]  # Negate for correct physical sign
 
-        # === De-rotated flow: v_i = u_i - [x_i]_× Ω* ===
-        v = u - (A @ omega_star)               # (N,3)
-        
-        # Since u was constructed with -d_phi (to match rotation convention),
-        # v has opposite sign from forward model. Forward model expects:
-        # v = -(1/Z) * Π * T, so we negate v to match this convention.
-        v = -v
+        # === De-rotated flow: v_i = u_i - u_rot where u_rot = -[x]_× Ω ===
+        # So v = u - (-[x]_× Ω) = u + [x]_× Ω
+        v = u + (A @ omega_star)               # (N,3)
         
         # === Measure translation signal strength ===
         # RMS of de-rotated flow - if near zero, there's no translation
@@ -644,15 +650,31 @@ class NeuralRnn(torch.nn.Module):
 
         # === Solve C T = 0 via smallest singular vector ===
         _, _, Vh = torch.linalg.svd(C, full_matrices=False)
-        # scale T estimate by translation magnitude so that it is proportional
-        # to true translation across frames
-        T_star = Vh[-1] * translation_magnitude    # smallest singular value direction
+        T_dir = Vh[-1]  # unit direction (sign ambiguous)
 
-        # === w_i = Π_i T* ===
-        w_i = (P @ T_star)                     # (N,3)
+        # === Disambiguate sign using physical constraint ===
+        # Convention: progressive flow (expansion) = positive T_x (forward motion)
+        # For expansion at point x: flow v points away from focus of expansion
+        # w = Π @ T points toward focus, so v · w < 0 for expansion with correct T
+        # We flip T if v · w > 0 (wrong sign), keeping v · w < 0
+        w_i = (P @ T_dir)                      # (N,3)
+        v_dot_w = (v * w_i).sum(dim=1)         # (N,)
+        
+        # Use weighted sum (weight by ||w||² to emphasize reliable points)
+        w_norm_sq = (w_i * w_i).sum(dim=1)     # (N,)
+        weighted_sign = (v_dot_w * w_norm_sq).sum()
+        
+        # Flip T if weighted_sign < 0 so that expansion gives positive T
+        if weighted_sign < 0:
+            T_dir = -T_dir
+            w_i = -w_i
+            v_dot_w = -v_dot_w
 
-        # Depth from: v = -(1/Z) * Π * T  =>  Z = -||w||² / (v · w)
-        Z_star = -(w_i.norm(dim=1)**2) / (v * w_i).sum(dim=1)
+        # Scale T by translation magnitude
+        T_star = T_dir * translation_magnitude
+
+        # Depth: Z = ||w||² / (v · w) with v · w > 0 after disambiguation
+        Z_star = w_norm_sq / (v_dot_w + 1e-12)
 
         return omega_star, T_star, Z_star
 

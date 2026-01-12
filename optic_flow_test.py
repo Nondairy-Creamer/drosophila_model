@@ -66,9 +66,10 @@ def generate_optic_flow(phi, theta, omega, T, Z):
         torch.zeros_like(phi)
     ), dim=1)
     
-    # Rotation contribution: u_rot = [x]_× omega
+    # Rotation contribution: u = Ω × x = -x × Ω = -[x]_× Ω
+    # Physical: leftward rotation (positive omega_z) → rightward image motion (positive d_phi)
     A = cross_matrix(x)  # (N, 3, 3)
-    u_rot = (A @ omega)  # (N, 3)
+    u_rot = -(A @ omega)  # (N, 3) - negate for correct physical sign
     
     # Translation contribution: u_trans = (1/Z) * Pi * T
     # where Pi = I - x x^T (projection onto tangent plane)
@@ -86,6 +87,8 @@ def generate_optic_flow(phi, theta, omega, T, Z):
     u = u_rot + u_trans
     
     # Project onto spherical basis to get angular flow
+    # d_phi: positive = rightward motion on retina (leftward observer rotation)
+    # d_theta: positive = upward motion on retina (downward observer motion)
     # Negate d_theta because e_theta points downward but we want up=positive
     d_theta = -(u * e_theta).sum(dim=1)
     d_phi = (u * e_phi).sum(dim=1)

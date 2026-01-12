@@ -36,7 +36,8 @@ def main():
     
     # Test multiple velocities
     velocities = [-i for i in range(30, 270, 30)]  # degrees/second
-    
+    velocities = [180]
+
     print(f"\nStimulus parameters:")
     print(f"  Spatial wavelength: {wavelength_deg} degrees")
     print(f"  Velocities to test: {velocities} deg/s")
@@ -61,20 +62,21 @@ def main():
     for velocity_deg_per_sec in velocities:
         temporal_frequency = velocity_deg_per_sec / wavelength_deg
         
-        # Generate right eye stimulus (rightward motion)
-        # For rightward rotation: right eye sees rightward motion (positive temporal_frequency)
+        # Generate right eye stimulus
+        # Positive temporal_frequency = rightward motion on retina = leftward observer rotation
+        # Negative temporal_frequency = leftward motion on retina = rightward observer rotation
         right_stimulus, right_optic_flow = make_lr_sine_wave(
             sample_phi=phi,
             sample_theta=theta,
             wavelength=wavelength,
-            temporal_frequency=temporal_frequency,  # positive = rightward motion
+            temporal_frequency=-temporal_frequency,
             phase_init=0,
             dt=0.01,
             stim_time=1.0
         )
         
-        # For left eye, sample at -phi (mirror across midline)
-        # For rightward rotation: left eye sees rightward motion (negative temporal_frequency with -phi)
+        # Generate left eye stimulus (mirrored across midline)
+        # Negate phi for the other eye
         left_stimulus, left_optic_flow = make_lr_sine_wave(
             sample_phi=-phi,
             sample_theta=theta,
@@ -129,6 +131,8 @@ def main():
         rotation_deg = np.degrees(rotation.detach().cpu().numpy())  # (3,) signed rotation vector
         
         # True rotation: [0, 0, velocity] for pure yaw rotation around z-axis
+        # Positive velocity → rightward motion on retina → leftward observer rotation (positive omega_z)
+        # Negative velocity → leftward motion on retina → rightward observer rotation (negative omega_z)
         true_rotation = np.array([0.0, 0.0, velocity_deg_per_sec])
         
         # True translation: [0, 0, 0] for pure rotation (no translation)
