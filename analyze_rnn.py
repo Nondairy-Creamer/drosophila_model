@@ -216,10 +216,9 @@ if do_sine_sweep:
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     temporal_frequencies = [0.25, 0.5, 1, 2, 4, 8, 16]
 
-    sine_waves, sine_wave_tfs, contrast_scaling_factor, blocks = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
+    sine_waves, optic_flow = su.create_balanced_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(), 
         temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=0, post_stim_time=0)
     sine_waves = torch.tensor(sine_waves, device=device, dtype=dtype)
-    sine_wave_tfs = torch.tensor(sine_wave_tfs, device=device, dtype=dtype)
 
     pred = model.predict(sine_waves, input_neurons=input_neurons, output_neurons=output_neurons)[0]
 

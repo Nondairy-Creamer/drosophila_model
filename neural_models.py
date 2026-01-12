@@ -1,3 +1,4 @@
+from logging import warning
 import torch
 import numpy as np
 from pathlib import Path
@@ -7,7 +8,7 @@ import os
 
 
 class NeuralRnn(torch.nn.Module):
-    def __init__(self, synapse_counts_coo, cell_types, column_indices, nonlinearity='relu', device='cpu', dtype='float32',
+    def __init__(self, synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
                  use_layer_norm=False, set_max_sigma=True, dt=0.01, seed=None, init_std=0.1):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
@@ -43,6 +44,7 @@ class NeuralRnn(torch.nn.Module):
         self.unique_cell_types = np.unique(cell_types)
         self.num_cell_types = self.unique_cell_types.shape[0]
         self.column_indices = column_indices
+        self.column_phi_theta = column_phi_theta
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
         # Initialize persistent power-iteration vector for warm starts using RNG
@@ -316,10 +318,20 @@ class NeuralRnn(torch.nn.Module):
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
-    def calculate_optical_flow(self, inputs):
+    def calculate_optical_flow(self, inputs, input_neurons=['L1', 'L2', 'L3'], eye='right'):
+        # The eye is assumed to be bilaterally symmetric and is trained on the right eye
+        # To estimate the response of the left eye, flip the inputs in space, calculate optic flow
+        # then flip the optic flow estimate to get the flow estimate in a consistant basis
+
+        # inputs should be given with the form (stimuli, time, columns) where columns correspond to
+        # ommatidia at the locations in self.column_phi_theta
+        # if eye='left' then the stimulus should be generated such that it corresponds to locations with
+        # self.column_phi_theta but with phi = -phi (flipped over the mid point of the fly)
+
         horizontal_cells = self.optical_flow_horizontal_cells
         vertical_cells = self.optical_flow_vertical_cells
-        outputs = self.predict(inputs, input_neurons=['L1', 'L2', 'L3'], 
+
+        outputs = self.predict(inputs, input_neurons=input_neurons, 
                                output_neurons=horizontal_cells+vertical_cells, init_state=None)[0]
 
         horizontal = torch.zeros_like(outputs['firing_rate'][horizontal_cells[0]]) + self.optical_flow_horizontal_readout[-1]
@@ -330,6 +342,9 @@ class NeuralRnn(torch.nn.Module):
 
         for vi, v in enumerate(vertical_cells):
             vertical += self.optical_flow_vertical_readout[vi] * outputs['firing_rate'][v]
+
+        if eye == 'left':
+            horizontal = -horizontal
 
         optic_flow = torch.stack((horizontal, vertical), axis=-1)
         
@@ -466,3 +481,179 @@ class NeuralRnn(torch.nn.Module):
 
         return model
 
+    def estimate_self_motion_from_image(self, right_eye_inputs, left_eye_inputs, equilibration_steps=0):
+        # right_eye_inputs: (stimuli, time, columns) where columns correspond to
+        # ommatidia at the locations in self.column_phi_theta
+        # left_eye_inputs: (stimuli, time, columns) where columns correspond to
+        # ommatidia at the locations in self.column_phi_theta but with phi = -phi (flipped over the mid point of the fly)
+        # equilibration_steps: number of time indices to skip at the beginning for equilibration (default: 0)
+
+        # calculate optic flow from the left eye and right eye stimulus. Concatenate them together for total optic flow
+        optic_flow_right = self.calculate_optical_flow(right_eye_inputs, eye='right')
+        optic_flow_left = self.calculate_optical_flow(left_eye_inputs, eye='left')
+        optic_flow = torch.cat((optic_flow_right, optic_flow_left), axis=2)
+        # optic_flow shape: (stimuli, time, columns*2, 2)
+
+        # generate the column locations for both eyes
+        left_column_locations = self.column_phi_theta.copy()
+        left_column_locations[:, 0] = -left_column_locations[:, 0]
+        column_locations = np.concatenate((self.column_phi_theta, left_column_locations), axis=0)
+
+        # Convert column locations to tensors for estimate_self_motion_from_flow
+        phi_tensor = torch.tensor(column_locations[:, 0], device=optic_flow.device, dtype=optic_flow.dtype)
+        theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
+
+        # Estimate self-motion for each stimulus and time point
+        num_stimuli, num_time, num_columns_total, _ = optic_flow.shape
+        num_columns_per_eye = self.column_phi_theta.shape[0]
+        rotations = []
+        translations = []
+        depths = []
+        
+        for s in range(num_stimuli):
+            rot_t = []
+            trans_t = []
+            depth_t = []
+            
+            # Skip equilibration_steps at the beginning
+            for t in range(equilibration_steps, num_time):
+                d_phi = optic_flow[s, t, :, 0]  # (columns*2,)
+                d_theta = optic_flow[s, t, :, 1]  # (columns*2,)
+                
+                # Filter out NaN values (columns without valid optic flow)
+                valid_mask = ~torch.isnan(d_phi) & ~torch.isnan(d_theta)
+                phi_valid = phi_tensor[valid_mask]
+                theta_valid = theta_tensor[valid_mask]
+                d_phi_valid = d_phi[valid_mask]
+                d_theta_valid = d_theta[valid_mask]
+                
+                rotation, translation, depth = self.estimate_self_motion_from_flow(
+                    phi_valid, theta_valid, d_phi_valid, d_theta_valid
+                )
+                rot_t.append(rotation)
+                trans_t.append(translation)
+                
+                # Expand depth back to full size with NaN for invalid columns
+                depth_full = torch.full((num_columns_total,), float('nan'), 
+                                        device=depth.device, dtype=depth.dtype)
+                depth_full[valid_mask] = depth
+                depth_t.append(depth_full)
+            
+            rotations.append(torch.stack(rot_t))      # (time, 3)
+            translations.append(torch.stack(trans_t))  # (time, 3)
+            depths.append(torch.stack(depth_t))        # (time, columns*2)
+        
+        # Stack results: (stimuli, time, ...) 
+        rotations = torch.stack(rotations)      # (stimuli, time, 3)
+        translations = torch.stack(translations) # (stimuli, time, 3)
+        depths = torch.stack(depths)             # (stimuli, time, columns*2)
+        
+        return rotations, translations, depths
+
+    @staticmethod
+    def estimate_self_motion_from_flow(phi, theta, d_phi, d_theta):
+        """
+        Estimate self-motion (rotation and translation) from optic flow.
+        
+        Args:
+            phi: (N,) azimuthal angles of viewing directions  
+            theta: (N,) polar angles of viewing directions
+            d_phi: (N,) angular flow in phi direction. right / left is positive / negative respectively
+            d_theta: (N,) angular flow in theta direction. up / down is positive / negative respectively
+        
+        Returns:
+            omega_star: (3,) estimated rotation vector
+                Note: Rightward rotation (positive omega_y) should produce leftward optic flow
+                (negative d_phi). If rightward flow (positive d_phi) corresponds to positive
+                rotation in your coordinate system, there may be a sign convention issue.
+            T_star: (3,) estimated translation direction (unit vector)
+            Z_star: (N,) estimated depths
+            translation_magnitude: scalar indicating strength of translation signal
+                (RMS of de-rotated flow; near zero means no translation)
+        """
+
+        def cross_matrix(a):
+            """
+            a: (..., 3) tensor
+            returns (..., 3, 3) skew-symmetric matrix [a]_x
+            """
+            ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+            O = torch.zeros_like(ax)
+            return torch.stack([
+                torch.stack([   O, -az,  ay], dim=-1),
+                torch.stack([  az,   O, -ax], dim=-1),
+                torch.stack([ -ay,  ax,   O], dim=-1)
+            ], dim=-2)
+
+        N = theta.shape[0]
+
+        # === Convert to 3D viewing directions (N,3) ===
+        x = torch.stack((
+            torch.sin(theta)*torch.cos(phi),
+            torch.sin(theta)*torch.sin(phi),
+            torch.cos(theta)
+        ), dim=1)                              # (N,3)
+
+        # === Convert angular flow to 3D tangent vectors u_i ∈ R^3 ===
+        # Basis vectors of sphere
+        e_theta = torch.stack((
+            torch.cos(theta)*torch.cos(phi),
+            torch.cos(theta)*torch.sin(phi),
+            -torch.sin(theta)
+        ), dim=1)                              # (N,3)
+
+        e_phi = torch.stack((
+            -torch.sin(phi),
+            torch.cos(phi),
+            torch.zeros_like(phi)
+        ), dim=1)                              # (N,3)
+
+        # Negate d_theta because e_theta points downward but we want up=positive
+        u = -d_theta[:, None] * e_theta - d_phi[:, None] * e_phi   # (N,3)
+
+        # === Rotation estimation: solve u ≈ [x]_× Ω ===
+        A = cross_matrix(x)                    # (N,3,3)
+        A_flat = A.reshape(3*N, 3)
+        u_flat = u.reshape(3*N)
+
+        omega_star = torch.linalg.lstsq(A_flat, u_flat)[0]
+
+        # === De-rotated flow: v_i = u_i - [x_i]_× Ω* ===
+        v = u - (A @ omega_star)               # (N,3)
+        
+        # Since u was constructed with -d_phi (to match rotation convention),
+        # v has opposite sign from forward model. Forward model expects:
+        # v = -(1/Z) * Π * T, so we negate v to match this convention.
+        v = -v
+        
+        # === Measure translation signal strength ===
+        # RMS of de-rotated flow - if near zero, there's no translation
+        translation_magnitude = torch.sqrt((v**2).mean())
+
+        # === Projection matrices Π_i = I - x_i x_iᵀ ===
+        # Each Pi is (N,3,3)
+        outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N,3,3)
+        I = torch.eye(3, device=x.device).expand(N,3,3)
+        P = I - outer
+
+        # === Construct stacked C matrix: each block = [v_i]_× Π_i ===
+        vx = cross_matrix(v)                   # (N,3,3)
+        C_blocks = vx @ P                      # (N,3,3)
+
+        C = C_blocks.reshape(3*N, 3)           # (3N,3)
+
+        # === Solve C T = 0 via smallest singular vector ===
+        _, _, Vh = torch.linalg.svd(C, full_matrices=False)
+        # scale T estimate by translation magnitude so that it is proportional
+        # to true translation across frames
+        T_star = Vh[-1] * translation_magnitude    # smallest singular value direction
+
+        # === w_i = Π_i T* ===
+        w_i = (P @ T_star)                     # (N,3)
+
+        # Depth from: v = -(1/Z) * Π * T  =>  Z = -||w||² / (v · w)
+        Z_star = -(w_i.norm(dim=1)**2) / (v * w_i).sum(dim=1)
+
+        return omega_star, T_star, Z_star
+
+    

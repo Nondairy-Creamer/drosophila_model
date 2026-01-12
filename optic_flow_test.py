@@ -8,7 +8,8 @@ import pandas as pd
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from optic_flow_utilities import get_self_motion, cross_matrix
+from optic_flow_utilities import cross_matrix
+from neural_models import NeuralRnn
 
 # Load column info with theta/phi viewing directions
 connectome_folder = Path('../connectome_data')
@@ -28,20 +29,20 @@ print(f"Theta range: [{theta.min():.3f}, {theta.max():.3f}] rad")
 print(f"Phi range: [{phi.min():.3f}, {phi.max():.3f}] rad")
 
 
-def generate_optic_flow(theta, phi, omega, T, Z):
+def generate_optic_flow(phi, theta, omega, T, Z):
     """
     Generate synthetic optic flow given rotation omega, translation T, and depths Z.
     
     Args:
-        theta: (N,) polar angles
         phi: (N,) azimuthal angles
+        theta: (N,) polar angles
         omega: (3,) rotation vector
         T: (3,) translation vector
         Z: (N,) or scalar depth values
     
     Returns:
-        d_theta: (N,) angular flow in theta direction
         d_phi: (N,) angular flow in phi direction
+        d_theta: (N,) angular flow in theta direction
     """
     N = theta.shape[0]
     
@@ -89,7 +90,7 @@ def generate_optic_flow(theta, phi, omega, T, Z):
     d_theta = -(u * e_theta).sum(dim=1)
     d_phi = (u * e_phi).sum(dim=1)
     
-    return d_theta, d_phi
+    return d_phi, d_theta
 
 
 def format_vec(v, name):
@@ -214,10 +215,10 @@ def test_rotation_only():
     print(f"True rotation omega: {omega_true.numpy()}")
     
     # Generate flow
-    d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
+    d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     
     # ||T_pred|| now represents translation magnitude (scaled by 1/Z)
     trans_mag = T_pred.norm().item()
@@ -259,10 +260,10 @@ def test_translation_only():
     print(f"True translation T:  {T_true.numpy()}")
     
     # Generate flow
-    d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
+    d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction (T_pred is now scaled)
@@ -309,10 +310,10 @@ def test_combined_motion():
     print(f"True T:              {T_true.numpy()}")
     
     # Generate flow
-    d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
+    d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction
@@ -364,10 +365,10 @@ def test_varying_depth():
     print(f"Depth range:         [{Z.min():.2f}, {Z.max():.2f}]")
     
     # Generate flow
-    d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
+    d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta, d_phi)
+    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction
@@ -419,7 +420,7 @@ def test_noisy_flow():
     print(f"True T:              {T_true.numpy()}")
     
     # Generate clean flow
-    d_theta, d_phi = generate_optic_flow(theta, phi, omega_true, T_true, Z)
+    d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Add noise
     noise_level = 0.01
@@ -431,7 +432,7 @@ def test_noisy_flow():
     print(f"Flow magnitude:      {torch.sqrt(d_theta**2 + d_phi**2).mean():.4f}")
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = get_self_motion(theta, phi, d_theta_noisy, d_phi_noisy)
+    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi_noisy, d_theta_noisy)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction

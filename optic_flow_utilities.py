@@ -14,15 +14,15 @@ def cross_matrix(a):
     ], dim=-2)
 
 
-def get_self_motion(theta, phi, d_theta, d_phi):
+def get_self_motion(phi, theta, d_phi, d_theta):
     """
     Estimate self-motion (rotation and translation) from optic flow.
     
     Args:
-        theta: (N,) polar angles of viewing directions
         phi: (N,) azimuthal angles of viewing directions  
-        d_theta: (N,) angular flow in theta direction. up / down is positive / negative respectively
+        theta: (N,) polar angles of viewing directions
         d_phi: (N,) angular flow in phi direction. right / left is positive / negative respectively
+        d_theta: (N,) angular flow in theta direction. up / down is positive / negative respectively
     
     Returns:
         omega_star: (3,) estimated rotation vector

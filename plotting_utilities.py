@@ -179,4 +179,161 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
         plt.savefig(save_folder / filename)
         plt.close()
 
-    a=1
+def xt_plot_flow_prediction(left_eye_input, right_eye_input, left_eye_flow, right_eye_flow, phi, save_folder=Path('figures'), save_tag=None):
+    """
+    Create a 2x2 plot showing left/right eye stimuli and their predicted optic flow.
+    
+    Args:
+        left_eye_input: (stimuli, time, columns) tensor or numpy array for left eye
+        right_eye_input: (stimuli, time, columns) tensor or numpy array for right eye
+        left_eye_flow: (stimuli, time, columns, 2) tensor or numpy array for left eye optic flow
+        right_eye_flow: (stimuli, time, columns, 2) tensor or numpy array for right eye optic flow
+        phi: (columns,) array of phi angles (azimuthal angles) for right eye
+        save_folder: Path to save the plot
+        save_tag: Optional tag appended to filename (before extension)
+    """
+    save_folder = convert_and_create_save_folder(save_folder)
+    
+    # Convert to numpy if tensors
+    if torch.is_tensor(left_eye_input):
+        left_eye_input_np = left_eye_input.detach().cpu().numpy()
+    else:
+        left_eye_input_np = left_eye_input
+    if torch.is_tensor(right_eye_input):
+        right_eye_input_np = right_eye_input.detach().cpu().numpy()
+    else:
+        right_eye_input_np = right_eye_input
+    
+    # Convert flow to numpy if tensors
+    if torch.is_tensor(left_eye_flow):
+        optic_flow_left = left_eye_flow.detach().cpu().numpy()
+    else:
+        optic_flow_left = left_eye_flow
+    if torch.is_tensor(right_eye_flow):
+        optic_flow_right = right_eye_flow.detach().cpu().numpy()
+    else:
+        optic_flow_right = right_eye_flow
+    
+    # Process each stimulus
+    num_stimuli = left_eye_input_np.shape[0]
+    
+    for si in range(num_stimuli):
+        # Get data for this stimulus
+        left_stim = left_eye_input_np[si, :, :]  # (time, columns)
+        right_stim = right_eye_input_np[si, :, :]  # (time, columns)
+        left_flow = optic_flow_left[si, :, :, :]  # (time, columns, 2)
+        right_flow = optic_flow_right[si, :, :, :]  # (time, columns, 2)
+        
+        # Sort phi from positive to negative (reverse order) so phi decreases along x-axis
+        # For right eye: use phi directly
+        # For left eye: use -phi (mirrored) for x-axis labels
+        sort_inds_right = np.argsort(phi)[::-1]  # Reverse sort: high to low
+        phi_sorted_right = phi[sort_inds_right]
+        
+        # For left eye, phi values are mirrored (-phi), so we sort by -phi
+        sort_inds_left = np.argsort(-phi)[::-1]  # Reverse sort: high to low
+        phi_sorted_left = -phi[sort_inds_left]
+        
+        # Sort stimuli and flow by phi
+        left_stim_sorted = left_stim[:, sort_inds_left]
+        right_stim_sorted = right_stim[:, sort_inds_right]
+        left_flow_sorted = left_flow[:, sort_inds_left, :]
+        right_flow_sorted = right_flow[:, sort_inds_right, :]
+        
+        # Create 3x2 subplot
+        fig, axes = plt.subplots(3, 2, figsize=(12, 15))
+        ax_top_left, ax_top_right, ax_mid_left, ax_mid_right, ax_bottom_left, ax_bottom_right = axes.flatten()
+        
+        # Set extent for plots: [xmin, xmax, bottom, top]
+        # For phi: decreasing from positive to negative (high to low)
+        # For time: increasing from top to bottom (0 at top, max at bottom)
+        # Note: With origin='upper', first row (time 0) is at top, last row (time num_time-1) is at bottom
+        # Extent format: [left, right, bottom, top] in data coordinates
+        num_time = left_stim.shape[0]
+        # Time 0 should be at top, time num_time-1 should be at bottom
+        extent_left = [phi_sorted_left.max(), phi_sorted_left.min(), num_time-1, 0]
+        extent_right = [phi_sorted_right.max(), phi_sorted_right.min(), num_time-1, 0]
+        
+        # Top left: Left eye stimulus
+        im_left_stim = ax_top_left.imshow(left_stim_sorted, interpolation='nearest', aspect='auto', 
+                                         extent=extent_left, origin='upper')
+        ax_top_left.set_xlabel('phi')
+        ax_top_left.set_ylabel('time')
+        ax_top_left.set_title('Left Eye Stimulus')
+        plt.colorbar(im_left_stim, ax=ax_top_left)
+        
+        # Top right: Right eye stimulus
+        im_right_stim = ax_top_right.imshow(right_stim_sorted, interpolation='nearest', aspect='auto', 
+                                            extent=extent_right, origin='upper')
+        ax_top_right.set_xlabel('phi')
+        ax_top_right.set_ylabel('time')
+        ax_top_right.set_title('Right Eye Stimulus')
+        plt.colorbar(im_right_stim, ax=ax_top_right)
+        
+        # Middle left: Left eye optic flow (horizontal/LR component)
+        left_flow_horizontal = left_flow_sorted[:, :, 0]
+        max_abs_left_h = np.nanmax(np.abs(left_flow_horizontal))
+        im_left_flow_h = ax_mid_left.imshow(left_flow_horizontal, interpolation='nearest', aspect='auto', 
+                                             cmap='coolwarm', extent=extent_left, origin='upper')
+        if max_abs_left_h > 1e-10:
+            im_left_flow_h.set_clim(vmin=-max_abs_left_h, vmax=max_abs_left_h)
+        else:
+            im_left_flow_h.set_clim(vmin=-1, vmax=1)
+        ax_mid_left.set_xlabel('phi')
+        ax_mid_left.set_ylabel('time')
+        ax_mid_left.set_title('Left Eye Optic Flow (LR)')
+        plt.colorbar(im_left_flow_h, ax=ax_mid_left)
+        
+        # Middle right: Right eye optic flow (horizontal/LR component)
+        right_flow_horizontal = right_flow_sorted[:, :, 0]
+        max_abs_right_h = np.nanmax(np.abs(right_flow_horizontal))
+        im_right_flow_h = ax_mid_right.imshow(right_flow_horizontal, interpolation='nearest', aspect='auto',
+                                               cmap='coolwarm', extent=extent_right, origin='upper')
+        if max_abs_right_h > 1e-10:
+            im_right_flow_h.set_clim(vmin=-max_abs_right_h, vmax=max_abs_right_h)
+        else:
+            im_right_flow_h.set_clim(vmin=-1, vmax=1)
+        ax_mid_right.set_xlabel('phi')
+        ax_mid_right.set_ylabel('time')
+        ax_mid_right.set_title('Right Eye Optic Flow (LR)')
+        plt.colorbar(im_right_flow_h, ax=ax_mid_right)
+        
+        # Bottom left: Left eye optic flow (vertical/UD component)
+        left_flow_vertical = left_flow_sorted[:, :, 1]
+        max_abs_left_v = np.nanmax(np.abs(left_flow_vertical))
+        im_left_flow_v = ax_bottom_left.imshow(left_flow_vertical, interpolation='nearest', aspect='auto', 
+                                             cmap='coolwarm', extent=extent_left, origin='upper')
+        if max_abs_left_v > 1e-10:
+            im_left_flow_v.set_clim(vmin=-max_abs_left_v, vmax=max_abs_left_v)
+        else:
+            im_left_flow_v.set_clim(vmin=-1, vmax=1)
+        ax_bottom_left.set_xlabel('phi')
+        ax_bottom_left.set_ylabel('time')
+        ax_bottom_left.set_title('Left Eye Optic Flow (UD)')
+        plt.colorbar(im_left_flow_v, ax=ax_bottom_left)
+        
+        # Bottom right: Right eye optic flow (vertical/UD component)
+        right_flow_vertical = right_flow_sorted[:, :, 1]
+        max_abs_right_v = np.nanmax(np.abs(right_flow_vertical))
+        im_right_flow_v = ax_bottom_right.imshow(right_flow_vertical, interpolation='nearest', aspect='auto',
+                                               cmap='coolwarm', extent=extent_right, origin='upper')
+        if max_abs_right_v > 1e-10:
+            im_right_flow_v.set_clim(vmin=-max_abs_right_v, vmax=max_abs_right_v)
+        else:
+            im_right_flow_v.set_clim(vmin=-1, vmax=1)
+        ax_bottom_right.set_xlabel('phi')
+        ax_bottom_right.set_ylabel('time')
+        ax_bottom_right.set_title('Right Eye Optic Flow (UD)')
+        plt.colorbar(im_right_flow_v, ax=ax_bottom_right)
+        
+        plt.tight_layout()
+        
+        # Build filename
+        filename = 'xt_plot_flow_prediction_' + str(si)
+
+        filename = filename + '.png'
+        if save_tag is not None:
+            filename = str(save_tag) + '_' + filename
+        
+        plt.savefig(save_folder / filename)
+        plt.close()

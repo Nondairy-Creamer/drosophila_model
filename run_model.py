@@ -72,7 +72,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     # --- get a sign wave stimulus ---
     # generate a sine wave on a cylinder around the fly
-    # stimulus, optic_flow = su.create_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
+    # stimulus, optic_flow = su.create_balanced_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
     #     temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
     # stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
     # optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
