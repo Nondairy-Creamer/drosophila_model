@@ -56,11 +56,11 @@ class NeuralRnn(torch.nn.Module):
 
         # readout from the neurons to optic flow in units of degrees per second
         # Cell lists stored as attributes, readout tensors as buffers (auto-saved in state_dict)
-        self.optical_flow_horizontal_cells = ['T4a', 'T4b', 'T5a', 'T5b']
-        self.optical_flow_vertical_cells = ['T4c', 'T4d', 'T5c', 'T5d']
-        self.register_buffer('optical_flow_horizontal_readout', 
+        self.optic_flow_horizontal_cells = ['T4a', 'T4b', 'T5a', 'T5b']
+        self.optic_flow_vertical_cells = ['T4c', 'T4d', 'T5c', 'T5d']
+        self.register_buffer('optic_flow_horizontal_readout', 
                              torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
-        self.register_buffer('optical_flow_vertical_readout',
+        self.register_buffer('optic_flow_vertical_readout',
                              torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
 
         def logit(p, eps=1e-6):
@@ -318,7 +318,7 @@ class NeuralRnn(torch.nn.Module):
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
-    def calculate_optical_flow(self, inputs, input_neurons=['L1', 'L2', 'L3'], eye='right'):
+    def calculate_optic_flow(self, inputs, input_neurons=['L1', 'L2', 'L3'], eye='right', initial_state=None):
         # The eye is assumed to be bilaterally symmetric and is trained on the right eye
         # To estimate the response of the left eye, flip the inputs in space, calculate optic flow
         # then flip the optic flow estimate to get the flow estimate in a consistant basis
@@ -328,31 +328,31 @@ class NeuralRnn(torch.nn.Module):
         # if eye='left' then the stimulus should be generated such that it corresponds to locations with
         # self.column_phi_theta but with phi = -phi (flipped over the mid point of the fly)
 
-        horizontal_cells = self.optical_flow_horizontal_cells
-        vertical_cells = self.optical_flow_vertical_cells
+        horizontal_cells = self.optic_flow_horizontal_cells
+        vertical_cells = self.optic_flow_vertical_cells
 
-        outputs = self.predict(inputs, input_neurons=input_neurons, 
-                               output_neurons=horizontal_cells+vertical_cells, init_state=None)[0]
+        outputs, final_state = self.predict(inputs, input_neurons=input_neurons, 
+                               output_neurons=horizontal_cells+vertical_cells, init_state=initial_state)[0:2]
 
-        horizontal = torch.zeros_like(outputs['firing_rate'][horizontal_cells[0]]) + self.optical_flow_horizontal_readout[-1]
-        vertical = torch.zeros_like(outputs['firing_rate'][vertical_cells[0]]) + self.optical_flow_vertical_readout[-1]
+        horizontal = torch.zeros_like(outputs['firing_rate'][horizontal_cells[0]]) + self.optic_flow_horizontal_readout[-1]
+        vertical = torch.zeros_like(outputs['firing_rate'][vertical_cells[0]]) + self.optic_flow_vertical_readout[-1]
 
         for hi, h in enumerate(horizontal_cells):
-            horizontal += self.optical_flow_horizontal_readout[hi] * outputs['firing_rate'][h]
+            horizontal += self.optic_flow_horizontal_readout[hi] * outputs['firing_rate'][h]
 
         for vi, v in enumerate(vertical_cells):
-            vertical += self.optical_flow_vertical_readout[vi] * outputs['firing_rate'][v]
+            vertical += self.optic_flow_vertical_readout[vi] * outputs['firing_rate'][v]
 
         if eye == 'left':
             horizontal = -horizontal
 
         optic_flow = torch.stack((horizontal, vertical), axis=-1)
         
-        return optic_flow
+        return optic_flow, final_state
 
-    def fit_optical_flow_readout(self, inputs, target):
+    def fit_optic_flow_readout(self, inputs, target):
         outputs = self.predict(inputs, input_neurons=['L1', 'L2', 'L3'], 
-                               output_neurons=self.optical_flow_horizontal_cells+self.optical_flow_vertical_cells, 
+                               output_neurons=self.optic_flow_horizontal_cells+self.optic_flow_vertical_cells, 
                                init_state=None)[0]
 
         horizontal_target = target[:, :, :, 0].reshape(-1)
@@ -360,9 +360,9 @@ class NeuralRnn(torch.nn.Module):
         horizontal_list = []
         vertical_list = []
 
-        for h in self.optical_flow_horizontal_cells:
+        for h in self.optic_flow_horizontal_cells:
             horizontal_list.append(outputs['firing_rate'][h].reshape(-1))
-        for v in self.optical_flow_vertical_cells:
+        for v in self.optic_flow_vertical_cells:
             vertical_list.append(outputs['firing_rate'][v].reshape(-1))
 
         horizontal_list.append(torch.ones_like(horizontal_list[0]))
@@ -381,8 +381,8 @@ class NeuralRnn(torch.nn.Module):
         vertical_target = vertical_target[vertical_valid_inds]
 
         # find the best fit between the rates and the target
-        self.optical_flow_horizontal_readout = torch.linalg.lstsq(horizontal_rates.double(), horizontal_target.double())[0]
-        self.optical_flow_vertical_readout = torch.linalg.lstsq(vertical_rates.double(), vertical_target.double())[0]
+        self.optic_flow_horizontal_readout = torch.linalg.lstsq(horizontal_rates.double(), horizontal_target.double())[0]
+        self.optic_flow_vertical_readout = torch.linalg.lstsq(vertical_rates.double(), vertical_target.double())[0]
 
         return
 
@@ -392,7 +392,7 @@ class NeuralRnn(torch.nn.Module):
 
         payload = {
             'inputs': self.init_inputs,
-            # store weights on CPU for portability (includes buffers like optical_flow_*_readout)
+            # store weights on CPU for portability (includes buffers like optic_flow_*_readout)
             'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
         }
 
@@ -489,8 +489,8 @@ class NeuralRnn(torch.nn.Module):
         # equilibration_steps: number of time indices to skip at the beginning for equilibration (default: 0)
 
         # calculate optic flow from the left eye and right eye stimulus. Concatenate them together for total optic flow
-        optic_flow_right = self.calculate_optical_flow(right_eye_inputs, eye='right')
-        optic_flow_left = self.calculate_optical_flow(left_eye_inputs, eye='left')
+        optic_flow_right = self.calculate_optic_flow(right_eye_inputs, eye='right')[0]
+        optic_flow_left = self.calculate_optic_flow(left_eye_inputs, eye='left')[0]
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), axis=2)
         # optic_flow shape: (stimuli, time, columns*2, 2)
 

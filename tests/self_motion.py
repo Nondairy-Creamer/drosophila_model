@@ -110,8 +110,8 @@ def main():
         )
         
         # Calculate optic flow predictions
-        optic_flow_left_pred = model.calculate_optical_flow(left_inputs, eye='left')
-        optic_flow_right_pred = model.calculate_optical_flow(right_inputs, eye='right')
+        optic_flow_left_pred = model.calculate_optic_flow(left_inputs, eye='left')[0]
+        optic_flow_right_pred = model.calculate_optic_flow(right_inputs, eye='right')[[0]]
         
         # Generate xt plots with flow predictions
         pu.xt_plot_flow_prediction(

@@ -29,11 +29,11 @@ if fit_model_readout:
     sine_wave_velocity = torch.zeros_like(torch.stack([stimulus, stimulus], axis=-1))
     sine_wave_velocity[:, :, :, 0] = target['T4a'] - target['T4b']
     sine_wave_velocity[:, :, :, 1] = target['T4c'] - target['T4d']
-    model.fit_optical_flow_readout(stimulus, sine_wave_velocity)
+    model.fit_optic_flow_readout(stimulus, sine_wave_velocity)
     model.save(model_folder / 'model.pt')
 
 # Calculate optic flow from model, format is [stimuli, time, ommatidia, (horizontal, vertical flow)]
-optic_flow = model.calculate_optical_flow(stimulus)
+optic_flow = model.calculate_optic_flow(stimulus)[0]
 
 # Plot XT plots with optic flow
 pu.xt_plot(
