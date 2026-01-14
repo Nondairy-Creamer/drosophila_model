@@ -129,7 +129,7 @@ class NeuralRnn(torch.nn.Module):
         self.input_strength_log = torch.tensor(input_strength_log_np, dtype=self.dtype, device=self.device)
         self.output_strength_log = torch.tensor(output_strength_log_np, dtype=self.dtype, device=self.device)
 
-        if False:#set_max_sigma:
+        if set_max_sigma:
             self.set_sigma_max()
 
         self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
