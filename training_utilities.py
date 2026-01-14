@@ -241,6 +241,10 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
+                # Find the model's new steady state should be close ish to the previous one
+                # so only do it every save_every steps
+                model.find_steady_state()
+
                 # Convert only new GPU losses to CPU floats for plotting/logging
                 for i in range(last_saved_idx + 1, len(loss_list)):
                     loss_plot.append(loss_list[i].item())

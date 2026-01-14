@@ -53,6 +53,7 @@ class NeuralRnn(torch.nn.Module):
         power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
         power_vec = power_vec / (power_vec.norm() + 1e-12)
         self.register_buffer('_power_vec', power_vec)
+        self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
 
         # readout from the neurons to optic flow in units of degrees per second
         # Cell lists stored as attributes, readout tensors as buffers (auto-saved in state_dict)
@@ -136,6 +137,10 @@ class NeuralRnn(torch.nn.Module):
         self.offset = torch.nn.Parameter(self.offset)
         self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
         self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+
+        if set_max_sigma:
+            # --- find the steady state of the model, use this as initial condition when making predictions ---
+            self.find_steady_state()
 
     def set_sigma_max(self):
         with torch.no_grad():
@@ -290,7 +295,7 @@ class NeuralRnn(torch.nn.Module):
 
         # initial neural activity values
         if init_state is None:
-            v = inputs.new_zeros(num_batches, self.num_neurons)
+            v = self.steady_state.unsqueeze(0).expand(num_batches, -1)
         else:
             v = init_state
 
@@ -317,6 +322,26 @@ class NeuralRnn(torch.nn.Module):
             outputs['firing_rate'][i] = self.nonlinearity(outputs['voltage'][i])
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
+
+    def find_steady_state(self, run_time=100, max_iter=100):
+        with torch.no_grad():
+            inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
+            initial_state = None
+
+            for i in range(max_iter):
+                final_state = self.predict(inputs, init_state=initial_state)[1]
+                
+                if initial_state is not None and torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
+                    print('steady state found after', i + 1, 'iterations')
+                    self.steady_state.copy_(final_state.detach().squeeze(0))
+                    return
+                
+                initial_state = final_state.detach().clone()
+            
+            print('steady state not found after', max_iter, 'iterations')
+            self.steady_state.copy_(final_state.detach().squeeze(0))
+
+        return
 
     def calculate_optic_flow(self, inputs, input_neurons=['L1', 'L2', 'L3'], eye='right', initial_state=None):
         # The eye is assumed to be bilaterally symmetric and is trained on the right eye
@@ -472,7 +497,7 @@ class NeuralRnn(torch.nn.Module):
         # construct directly from saved (or overridden) inputs
         inputs['set_max_sigma'] = False
         model = cls(**inputs)
-        model.load_state_dict(data['state_dict'])
+        model.load_state_dict(data['state_dict'], strict=False)
 
         # Optionally freeze all parameters to disable gradients
         if freeze_params:

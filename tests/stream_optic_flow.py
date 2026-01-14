@@ -4,12 +4,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import torch
-import numpy as np
-import shutil
 from neural_models import NeuralRnn
-from stimulus_utilities import make_lr_sine_wave
-import plotting_utilities as pu
 
 # This script loads the model and then iteratively calculates the optic flow in sequential stimuli
 
