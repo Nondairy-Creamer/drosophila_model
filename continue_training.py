@@ -4,7 +4,7 @@ import neural_models as nm
 import data_utilities as du
 import training_utilities as tu
 
-model_folder = Path('models/20251112_172753_good_mapping')
+model_folder = Path('models/best_model')
 
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralRnn.load(model_folder / 'model.pt', freeze_params=False)
@@ -14,14 +14,12 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=model.dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 num_steps = int(1e6)
-alpha = None
+alpha = 0.01
 
 input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
-# Load contrast scaling factor and create loss function
-contrast_scaling_factor_path = model_folder / 'contrast_scaling_factor.pt'
-contrast_scaling_factor = torch.load(contrast_scaling_factor_path).to(device=model.device)
+# Create loss function
 loss_fn = getattr(tu, config['training']['loss_fn'])
 
 # Load the best optimizer state and reduce learning rate
