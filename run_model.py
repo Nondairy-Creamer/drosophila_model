@@ -62,6 +62,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # create the model
     model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
                          column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(),
+                         column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
                          nonlinearity=config['model']['nonlinearity'],
                          device=config['model']['device'], dtype=config['model']['dtype'],
                          use_layer_norm=config['model']['use_layer_norm'], dt=dt, seed=seed)
