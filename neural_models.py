@@ -129,7 +129,7 @@ class NeuralRnn(torch.nn.Module):
         self.input_strength_log = torch.tensor(input_strength_log_np, dtype=self.dtype, device=self.device)
         self.output_strength_log = torch.tensor(output_strength_log_np, dtype=self.dtype, device=self.device)
 
-        if set_max_sigma:
+        if False:#set_max_sigma:
             self.set_sigma_max()
 
         self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
@@ -326,12 +326,14 @@ class NeuralRnn(torch.nn.Module):
     def find_steady_state(self, run_time=100, max_iter=100):
         with torch.no_grad():
             inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
-            initial_state = None
+            # Start from current steady state buffer
+            initial_state = self.steady_state.unsqueeze(0)
 
             for i in range(max_iter):
                 final_state = self.predict(inputs, init_state=initial_state)[1]
                 
-                if initial_state is not None and torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
+                # Check if state converged (didn't change from input to output)
+                if torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
                     print('steady state found after', i + 1, 'iterations')
                     self.steady_state.copy_(final_state.detach().squeeze(0))
                     return
