@@ -15,9 +15,31 @@ import subprocess
 import argparse
 import sys
 import os
+import signal
 from pathlib import Path
 import time
 from datetime import datetime
+
+# Global list to track running processes for cleanup
+_running_processes = []
+
+
+def cleanup_processes(signum=None, frame=None):
+    """Clean up all running child processes on exit or signal."""
+    for process, _, log_file in _running_processes:
+        if process.poll() is None:  # Process still running
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        try:
+            log_file.close()
+        except:
+            pass
+    if signum is not None:
+        sys.exit(1)
 
 
 def get_available_gpus():
@@ -140,8 +162,13 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
             })
             run_index += 1
     
+    # Register signal handlers for cleanup
+    signal.signal(signal.SIGINT, cleanup_processes)
+    signal.signal(signal.SIGTERM, cleanup_processes)
+    
     # Submit runs in parallel
-    processes = []
+    global _running_processes
+    _running_processes = []
     print("\nRunning jobs in parallel...")
     for run_config in runs:
         process, log_file = run_training_job(
@@ -151,12 +178,12 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
             timestamp=timestamp,
             script_path=script_path
         )
-        processes.append((process, run_config, log_file))
+        _running_processes.append((process, run_config, log_file))
     
     # Wait for all processes to complete
-    print(f"\nWaiting for {len(processes)} jobs to complete...")
+    print(f"\nWaiting for {len(_running_processes)} jobs to complete...")
     print(f"Logs are being written to logs/{timestamp}_*.log")
-    for process, run_config, log_file in processes:
+    for process, run_config, log_file in _running_processes:
         process.wait()
         log_file.close()
         if process.returncode != 0:
@@ -164,6 +191,7 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
         else:
             print(f"Completed run {run_config['run_id']} successfully")
     
+    _running_processes = []  # Clear after completion
     print("\nAll runs completed!")
 
 
