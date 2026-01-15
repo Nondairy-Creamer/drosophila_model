@@ -1,10 +1,14 @@
 import torch
 from pathlib import Path
+import sys
 import neural_models as nm
 import data_utilities as du
 import training_utilities as tu
 
-model_folder = Path('models/best_model')
+if len(sys.argv) == 1:
+    model_folder = Path('models/best_model')
+else:
+    model_folder = Path(sys.argv[1])
 
 local_config = du.load_config()
 local_device = local_config['model']['device']
