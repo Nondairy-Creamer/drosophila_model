@@ -108,7 +108,8 @@ def calc_loss(loss_fn, pred, target):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, sigma_lambda=0, peak_lambda=0):
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
+                sigma_lambda=0, peak_lambda=0, l1_lambda=0):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
@@ -160,6 +161,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 for v in pred['firing_rate'].values()
             ]).mean()
             loss = loss + peak_lambda * peak_val
+
+        if l1_lambda > 0:
+            # L1 regularizer to sparsify strength weights (encourage smaller magnitudes)
+            input_l1 = model.input_strength_log.exp().mean()
+            output_l1 = model.output_strength_log.exp().mean()
+            loss = loss + l1_lambda * (input_l1 + output_l1) / 2
 
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
         if loss < best_loss:
