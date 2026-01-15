@@ -54,6 +54,7 @@ else:
 
 # --- train the model ---
 loss_history = None if new_session else opt_state['loss']
+opt_state_dict = None if new_session else opt_state['optimizer_state_dict']
 
 tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     model_save_folder=model_folder,
@@ -62,7 +63,7 @@ tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     alpha=alpha,
     clip_grad_norm=config['training']['clip_norm'],
     loss_fn=loss_fn,
-    opt_state_dict=opt_state['optimizer_state_dict'],
+    opt_state_dict=opt_state_dict,
     loss_history=loss_history,
     sigma_lambda=config['training']['sigma_lambda'],
     peak_lambda=config['training']['peak_lambda'],    
