@@ -14,15 +14,18 @@ import numpy as np
 from neural_models import NeuralRnn
 import data_utilities as du
 import training_utilities as tu
+import model_utilities as mu
 
 # --- Configuration ---
 model_path = 'models/best_model/model.pt'
 loss_threshold = 1.10  # Stop when loss increases to 110% of starting value (10% worse)
+local_config = du.load_config()
 
 # --- Load the model ---
 print("Loading model...")
-model = NeuralRnn.load(model_path, device='cpu')
-device = model.device
+device = local_config['model']['device']
+print('running on', device)
+model = NeuralRnn.load(model_path, device=device)
 dtype = model.dtype
 
 # --- Load training data ---
@@ -31,31 +34,30 @@ stimulus = torch.load('models/best_model/cell_inputs.pt', map_location=device).t
 target = torch.load('models/best_model/target.pt', map_location=device)
 target = {k: v.to(dtype=dtype) for k, v in target.items()}
 
-# --- Calculate importance score for each neuron ---
-print("Calculating neuron importance scores...")
+# --- Calculate importance score for each cell type ---
+print("Calculating cell type importance scores...")
 
-# Get synapse counts (sparse matrix)
-synapse_counts = model.synapse_counts  # (num_neurons, num_neurons), sparse
+# Get average connections matrix (num_cell_types, num_cell_types)
+# ave_con[post_type, pre_type] = average synapse count from pre_type to post_type
+ave_con = mu.compute_average_connections(model)
 
-# Sum incoming synapses per neuron (sum over rows = sum of column)
-# synapse_counts[i, j] = synapses from j to i, so sum over dim=1 gives incoming to each neuron
-incoming_synapses = torch.sparse.sum(synapse_counts.abs(), dim=1).to_dense()  # (num_neurons,)
+# Sum average incoming connections per cell type (sum over pre_types)
+incoming_connections = np.abs(ave_con).sum(axis=1)  # (num_cell_types,)
 
-# Sum outgoing synapses per neuron (sum over columns = sum of row)
-outgoing_synapses = torch.sparse.sum(synapse_counts.abs(), dim=0).to_dense()  # (num_neurons,)
+# Sum average outgoing connections per cell type (sum over post_types)
+outgoing_connections = np.abs(ave_con).sum(axis=0)  # (num_cell_types,)
 
-# Get input and output strengths per neuron (mapped from cell type)
-input_strength = model.input_strength_log.exp()[model.neuron_to_type_index]  # (num_neurons,)
-output_strength = model.output_strength_log.exp()[model.neuron_to_type_index]  # (num_neurons,)
+# Get input and output strengths per cell type (already at cell type level)
+input_strength = model.input_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,)
+output_strength = model.output_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,)
 
-# Calculate importance score
-importance = incoming_synapses * outgoing_synapses * input_strength * output_strength
-importance = importance.detach().cpu().numpy()
+# Calculate importance score per cell type
+importance = incoming_connections * outgoing_connections * input_strength * output_strength
 
-# Sort neurons by importance (ascending - least important first)
+# Sort cell types by importance (ascending - least important first)
 sorted_indices = np.argsort(importance)
 
-print(f"Total neurons: {model.num_neurons}")
+print(f"Total cell types: {model.num_cell_types}")
 print(f"Importance range: {importance.min():.6f} to {importance.max():.6f}")
 
 # --- Calculate initial loss ---
@@ -70,52 +72,52 @@ with torch.no_grad():
 print(f"Initial loss: {initial_loss:.6f}")
 print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
 
-# --- Iteratively silence neurons ---
-print("\nStarting neuron trimming...")
+# --- Iteratively silence cell types ---
+print("\nStarting cell type trimming...")
 print("-" * 60)
 
-silenced_neurons = set()
+silenced_cell_types = ['5-HTPMPV01', 'OA-AL2i2', 'cM08a', 'cLM01', 'cLLP02', 'OA-AL2i3', 'PDt', 'OA-AL2i4', 'cL16', 'CB2685', 'AVLP593', 'DGI', 'cL10', 'LPi05', 'LPT28', 'CB0143', 'MeTu4d', 'LPT48_vCal3', 'mALD1', 'DNg33', 'LPT27', 'Dm4', 'Li29', 'LPT21', 'LT1c', 'mALC3', 'aMe17c', 'LTe28', 'LPi08', 'MeTu2a', 'LPC1', 'DN1a', 'LTe15', 'PLP248', 'LPi04', 'VS7', 'MTe13', 'VCH', 'LTe37', 'PLP081', 'LTe21', 'cL07', 'Dm13', 'Sm24', 'VS5', 'PLP177', 'VS2', 'LT33', 'LPT47_vCal2', 'CL104', 'LC19', 'LPT31', 'LT1b', 'LPTe02', 'PLP163', 'cL02b', 'MTe41', 'cM01b', 'Pm11', 'LC27', 'LPC2', 'Li22', 'LT72', 'LC25', 'Sm26', 'LC35', 'cM16', 'TmY4', 'LMt1', 'cLP04', 'LTe42a', 'LMa5', 'LTe74', 'Sm29', 'MTe09', 'DN1-l', 'PLP037b', 'Nod1', 'MTe18', 'Dm3v', 'LTe18', 'cM05', 'Pm05', 'LTe20', 'MTe08', 'Pm14', 'LT51', 'Tlp5', 'LPTe01', 'Li08', 'Sm36', 'MTe48', 'LPT26', 'LC45', 'TmY14', 'Pm12', 'DCH', 'Pm04', 'LTe49b', 'MTe02', 'LTe56', 'AVLP534', 'cLLPM02', 'PLP020', 'LC37a', 'MTe25', 'aMe17a1', 'Li17', 'VST1', 'PLP252', 'cL22c', 'Li26', 'PLP239', 'LT40', 'LC34', 'MTe44', 'LT65', 'Li14', 'PLP251', 'Li124_56', 'PLP231', 'Sm16', 'LTe41', 'LT86', 'Tm2', 'LMt2', 'DmDRA1', 'LCe01a', 'LCe07', 'MTe27', 'LTe38b', 'Sm20', 'OA-AL2i1', 'PLP104', 'LT76', 'Tm5d', 'APDN3', 'Li18', 'MTe26', 'LTe23']
+skipped_types = ['L1', 'L2', 'L3', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 current_loss = initial_loss
-neurons_silenced = 0
 
-for neuron_idx in sorted_indices:
-    # Get the cell type of this neuron
-    cell_type = model.cell_types[neuron_idx]
+for cell_type_idx in sorted_indices:
+    # Get the cell type name
+    cell_type = model.unique_cell_types[cell_type_idx]
     
-    # Skip if this cell type is already in our silenced set
-    # (since silencing works at cell type level, not individual neuron)
-    if cell_type in silenced_neurons:
+    if cell_type in skipped_types:
         continue
-    
-    # Silence this cell type
-    silenced_neurons.add(cell_type)
+
+    if cell_type in silenced_cell_types:
+        continue
+
+    # Add to silenced list
+    silenced_cell_types.append(cell_type)
     
     # Create a fresh model copy and apply silencing
-    model_copy = NeuralRnn.load(model_path, device='cpu')
-    model_copy.silence_neurons(list(silenced_neurons), invert_silencing=False)
+    model_copy = NeuralRnn.load(model_path, device=device)
+    model_copy.silence_neurons(silenced_cell_types, invert_silencing=False)
     
-    # Calculate loss with silenced neurons
+    # Calculate loss with silenced cell types
     with torch.no_grad():
         pred = model_copy.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
         current_loss = tu.calc_loss(tu.cos_loss, pred['firing_rate'], target).item()
     
-    neurons_silenced += 1
     loss_ratio = current_loss / initial_loss
     
-    print(f"Silenced {neurons_silenced} / {model.num_cell_types} cell types | Latest: {cell_type:10s} | "
+    print(f"Silenced {len(silenced_cell_types)} / {model.num_cell_types} cell types | Latest: {cell_type:10s} | "
           f"Loss: {current_loss:.6f} | Ratio: {loss_ratio:.4f}")
     
     # Check if we've reached the threshold
     if loss_ratio >= loss_threshold:
         print("-" * 60)
         print(f"\nStopped: Loss reached {loss_ratio:.2%} of initial value")
-        print(f"Total cell types silenced: {neurons_silenced}")
-        print(f"Silenced cell types: {sorted(silenced_neurons)}")
+        print(f"Total cell types silenced: {len(silenced_cell_types)}")
+        print(f"Silenced cell types: {sorted(silenced_cell_types)}")
         break
 
 else:
     print("-" * 60)
-    print(f"\nCompleted all neurons without reaching threshold")
+    print(f"\nCompleted all cell types without reaching threshold")
     print(f"Final loss ratio: {current_loss / initial_loss:.2%}")
 
 print("\nDone!")
