@@ -24,12 +24,14 @@ import imageio as iio_v2
 import data_utilities as du
 import stimulus_utilities as su
 from neural_models import NeuralRnn
+import training_utilities as tu
 
 # --- Configuration ---
 config = du.load_config()
 connectome_folder = Path(config['data']['connectome_folder'])
 output_folder = Path('figures/natural_movie')
 output_folder.mkdir(parents=True, exist_ok=True)
+stimulus_type = 'natural'
 
 frame_rate = 30  # fps for the output movie
 stim_index = 0   # which stimulus to visualize (first one)
@@ -42,10 +44,20 @@ device = model.device
 dtype = model.dtype
 
 # --- Load the natural movie stimulus and optic flow ---
-print("Loading natural movie data...")
-stimulus, optic_flow = su.load_natural_movie()
-# stimulus: (num_stimuli, time, columns)
-# optic_flow: (num_stimuli, time, columns, 2) where [:,:,:,0] is LR, [:,:,:,1] is UD
+if stimulus_type == 'natural':
+    print("Loading natural movie data...")
+    stimulus, optic_flow = su.load_natural_movie()
+    # stimulus: (num_stimuli, time, columns)
+    # optic_flow: (num_stimuli, time, columns, 2) where [:,:,:,0] is LR, [:,:,:,1] is UD
+elif stimulus_type == 'sine':
+    # instead create a sine wave stimulus
+    stimulus, optic_flow = su.make_lr_sine_wave(
+        model.column_phi_theta[:, 0], model.column_phi_theta[:, 1], contrast=1, wavelength=np.pi/6, temporal_frequency=-4,
+        phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0
+        )
+
+    stimulus = stimulus[None, :, :]
+    optic_flow = optic_flow[None, :, :, :]
 
 print(f"Stimulus shape: {stimulus.shape}")
 print(f"Optic flow shape: {optic_flow.shape}")
@@ -57,11 +69,13 @@ optic_flow_tensor = torch.tensor(optic_flow, device=device, dtype=dtype)
 # --- Run model to get predicted optic flow ---
 print("Running model prediction...")
 with torch.no_grad():
-    estimated_optic_flow = model.calculate_optic_flow(stimulus_tensor)[0]
+    estimated_optic_flow = model.calculate_optic_flow(stimulus_tensor * 4)[0]
 
 # Convert predictions to numpy
 pred_flow = estimated_optic_flow.cpu().numpy()
 print(f"Predicted optic flow shape: {pred_flow.shape}")
+
+print('Cosine similarity', 1 - tu.cos_loss(optic_flow_tensor, estimated_optic_flow))
 
 # --- Load column positions ---
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
