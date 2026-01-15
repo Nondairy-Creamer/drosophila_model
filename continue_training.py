@@ -1,14 +1,27 @@
 import torch
 from pathlib import Path
-import sys
+import argparse
+import shutil
 import neural_models as nm
 import data_utilities as du
 import training_utilities as tu
 
-if len(sys.argv) == 1:
-    model_folder = Path('models/best_model')
-else:
-    model_folder = Path(sys.argv[1])
+parser = argparse.ArgumentParser(description='Continue training a model from checkpoint')
+parser.add_argument('model_folder', nargs='?', default='models/best_model',
+                    help='Path to model folder (default: models/best_model)')
+parser.add_argument('--new-session', action='store_true', default=False,
+                    help='Start a new training session (do not carry over loss history)')
+args = parser.parse_args()
+
+model_folder = Path(args.model_folder)
+new_session = args.new_session
+
+# If new session, copy folder to <folder_name>_cont and use that
+if new_session:
+    new_folder = model_folder.parent / f"{model_folder.name}_cont"
+    print(f"New session: copying {model_folder} to {new_folder}")
+    shutil.copytree(model_folder, new_folder, dirs_exist_ok=True)
+    model_folder = new_folder
 
 local_config = du.load_config()
 local_device = local_config['model']['device']
@@ -21,7 +34,7 @@ _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=model.dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
 num_steps = int(1e6)
-alpha = 0.01
+alpha = local_config['training']['alpha'] if new_session else None
 
 input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
 output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
@@ -40,6 +53,8 @@ else:
         param_group['lr'] = alpha
 
 # --- train the model ---
+loss_history = None if new_session else opt_state['loss']
+
 tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     model_save_folder=model_folder,
     num_steps=num_steps,
@@ -48,7 +63,7 @@ tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     clip_grad_norm=config['training']['clip_norm'],
     loss_fn=loss_fn,
     opt_state_dict=opt_state['optimizer_state_dict'],
-    loss_history=opt_state['loss'],
+    loss_history=loss_history,
     sigma_lambda=config['training']['sigma_lambda'],
     peak_lambda=config['training']['peak_lambda'],    
     reset_init_every=config['training']['reset_init_every'],
