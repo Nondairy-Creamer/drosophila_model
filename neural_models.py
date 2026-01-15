@@ -140,7 +140,8 @@ class NeuralRnn(torch.nn.Module):
 
         if set_max_sigma:
             # --- find the steady state of the model, use this as initial condition when making predictions ---
-            self.find_steady_state()
+            with torch.no_grad():
+                self.find_steady_state()
 
     def set_sigma_max(self):
         with torch.no_grad():
@@ -324,24 +325,23 @@ class NeuralRnn(torch.nn.Module):
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def find_steady_state(self, run_time=100, max_iter=100):
-        with torch.no_grad():
-            inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
-            # Start from current steady state buffer
-            initial_state = self.steady_state.unsqueeze(0)
+        inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
+        # Start from current steady state buffer
+        initial_state = self.steady_state.unsqueeze(0)
 
-            for i in range(max_iter):
-                final_state = self.predict(inputs, init_state=initial_state)[1]
-                
-                # Check if state converged (didn't change from input to output)
-                if torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
-                    print('steady state found after', i + 1, 'iterations')
-                    self.steady_state.copy_(final_state.detach().squeeze(0))
-                    return
-                
-                initial_state = final_state.detach().clone()
+        for i in range(max_iter):
+            final_state = self.predict(inputs, init_state=initial_state)[1]
             
-            print('steady state not found after', max_iter, 'iterations')
-            self.steady_state.copy_(final_state.detach().squeeze(0))
+            # Check if state converged (didn't change from input to output)
+            if torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
+                print('steady state found after', i + 1, 'iterations')
+                self.steady_state.copy_(final_state.detach().squeeze(0))
+                return
+            
+            initial_state = final_state.detach().clone()
+        
+        print('steady state not found after', max_iter, 'iterations')
+        self.steady_state.copy_(final_state.detach().squeeze(0))
 
         return
 

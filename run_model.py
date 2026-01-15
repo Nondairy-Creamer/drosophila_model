@@ -105,6 +105,13 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         elif d == 'down':
             target[n] = torch.relu(-optic_flow[:, :, :, 1])
 
+    # Add zero baseline: no stimulus should produce no output
+    zero_stimulus = torch.zeros(1, stimulus.shape[1], stimulus.shape[2], dtype=stimulus.dtype, device=stimulus.device)
+    stimulus = torch.cat([stimulus, zero_stimulus], dim=0)
+    for n in output_neurons:
+        zero_target = torch.zeros(1, target[n].shape[1], target[n].shape[2], dtype=target[n].dtype, device=target[n].device)
+        target[n] = torch.cat([target[n], zero_target], dim=0)
+
     # save the config file and inputs
     if timestamp is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
