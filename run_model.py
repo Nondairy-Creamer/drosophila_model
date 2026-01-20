@@ -38,14 +38,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     # Extract parameters from config
     device = torch.device(config['model']['device'])
-    dtype = getattr(torch, config['model']['dtype'])
     dt = config['model']['dt']
-    stim_time = config['stimulus']['stim_time']  # seconds the sine is moving
-    pre_stim_time = config['stimulus']['pre_stim_time']  # seconds sine is stationary before the sine wave starts moving
-    post_stim_time = config['stimulus']['post_stim_time']  # seconds sine is stationary after the sine wave finishes moving
-    time_points = torch.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    num_time = len(time_points)
-    temporal_frequencies = config['stimulus']['temporal_frequencies']
 
     # --- load in connectivity and cell info data ---
     connectome_folder = Path(config['data']['connectome_folder'])
@@ -67,28 +60,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
                          device=config['model']['device'], dtype=config['model']['dtype'],
                          use_layer_norm=config['model']['use_layer_norm'], dt=dt, seed=seed)
 
-    # --- get a sign wave stimulus ---
-    # generate a sine wave on a cylinder around the fly
-    # stimulus, optic_flow = su.create_balanced_sine_wave(column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
-    #     temporal_frequency=temporal_frequencies, dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
-    # stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-    # optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-
-    # --- generate a sine wave with random tf over time
-    stimulus, optic_flow = su.create_random_tf_sine_wave(
-        column_info_df.phi.to_numpy(), column_info_df.theta.to_numpy(),
-        tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'],
-        num_repeats=config['stimulus']['num_repeats'], dt=dt, stim_time=stim_time, seed=stimulus_seed)
-    stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-    optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-
-    # --- grab the natural movie stimulus ---
-    # stimulus, optic_flow = su.load_natural_movie()
-    # stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-    # optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-
-    # --- plot the stimuli ---
-    pu.xt_plot(stimulus.detach().cpu().numpy(), column_info_df['phi'].to_numpy(), optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
+    stimulus, optic_flow = du.get_dataset(config['data']['data_set_type'], config, model.column_phi_theta)
 
     # specify the target responses you expect for each cell type. this is what we will train on
     target = {}

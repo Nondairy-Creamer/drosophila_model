@@ -30,6 +30,7 @@ temporal_frequencies = [
 ]
 
 [data]
+data_set_type = 'sintel'
 connectome_folder = "../connectome_data"
 fly_eye = "right"
 use_intrinsic = false
