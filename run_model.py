@@ -58,7 +58,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     if model_path is not None:
         model_file = Path(model_path) / 'model.pt'
         print(f"Loading existing model from {model_file}")
-        model = nm.NeuralRnn.load(model_file, device=config['model']['device'])
+        model = nm.NeuralRnn.load(model_file, device=config['model']['device'], freeze_params=False)
     else:
         model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
                              column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(),
