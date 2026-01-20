@@ -10,7 +10,7 @@ import stimulus_utilities as su
 import argparse
 
 
-def run_single_model(seed=None, device_override=None, run_id=None, timestamp=None):
+def run_single_model(seed=None, device_override=None, run_id=None, timestamp=None, model_path=None):
     """
     Run a single model training with specified seed and device.
 
@@ -19,6 +19,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         device_override: Override device from config (e.g., 'cuda:0', 'cuda:1', 'cpu')
         run_id: Optional identifier for this run (appended to timestamp)
         timestamp: Optional timestamp string. If None, generates a new timestamp.
+        model_path: Optional path to existing model folder (e.g., 'models/best_model').
+                    If provided, loads model.pt from that folder instead of creating a new one.
     """
 
     # Load configuration from TOML file
@@ -52,13 +54,18 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
-    # create the model
-    model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
-                         column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(),
-                         column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
-                         nonlinearity=config['model']['nonlinearity'],
-                         device=config['model']['device'], dtype=config['model']['dtype'],
-                         use_layer_norm=config['model']['use_layer_norm'], dt=dt, seed=seed)
+    # create or load the model
+    if model_path is not None:
+        model_file = Path(model_path) / 'model.pt'
+        print(f"Loading existing model from {model_file}")
+        model = nm.NeuralRnn.load(model_file, device=config['model']['device'])
+    else:
+        model = nm.NeuralRnn(synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
+                             column_indices=cell_info_df['column_index'].to_numpy(), cell_types=cell_info_df['type'].to_numpy(),
+                             column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
+                             nonlinearity=config['model']['nonlinearity'],
+                             device=config['model']['device'], dtype=config['model']['dtype'],
+                             use_layer_norm=config['model']['use_layer_norm'], dt=dt, seed=seed)
 
     stimulus, optic_flow = du.get_dataset(config['data']['data_set_type'], config, model.column_phi_theta)
 
@@ -124,8 +131,9 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default=None, help='Device override (e.g., cuda:0, cuda:1, cpu)')
     parser.add_argument('--run-id', type=str, default=None, help='Optional identifier for this run')
     parser.add_argument('--timestamp', type=str, default=None, help='Timestamp string for model folder (format: YYYYMMDD_HHMMSS)')
+    parser.add_argument('--model-path', type=str, default=None, help='Path to existing model folder to load (e.g., models/best_model)')
 
     args = parser.parse_args()
 
-    run_single_model(seed=args.seed, device_override=args.device, run_id=args.run_id, timestamp=args.timestamp)
+    run_single_model(seed=args.seed, device_override=args.device, run_id=args.run_id, timestamp=args.timestamp, model_path=args.model_path)
 
