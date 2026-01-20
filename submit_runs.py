@@ -70,7 +70,7 @@ def get_available_gpus():
     return available_gpus if available_gpus else ['cpu']
 
 
-def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py', log_dir='logs'):
+def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py', log_dir='logs', model_path=None):
     """
     Run a single training job with specified parameters.
     
@@ -81,6 +81,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
         timestamp: Timestamp string to use for all runs in this batch
         script_path: Path to the run_model.py script
         log_dir: Directory to store log files
+        model_path: Optional path to existing model folder to load
     
     Returns:
         tuple of (subprocess.Popen object, log file handle)
@@ -95,6 +96,8 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     ]
     if timestamp is not None:
         cmd.extend(['--timestamp', timestamp])
+    if model_path is not None:
+        cmd.extend(['--model-path', model_path])
     
     print(f"Starting run: seed={seed}, device={device}, run_id={run_id}")
     print(f"Command: {' '.join(cmd)}")
@@ -122,7 +125,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     return process, log_file
 
 
-def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
+def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py', model_path=None):
     """
     Submit multiple training runs across available GPUs.
     
@@ -130,6 +133,7 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
         runs_per_gpu: Number of runs to execute per GPU
         base_seed: Base seed value (each run gets base_seed + run_index)
         script_path: Path to the run_model.py script
+        model_path: Optional path to existing model folder to load
     """
     # Generate a single timestamp for all runs in this batch
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -176,7 +180,8 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py'):
             device=run_config['device'],
             run_id=run_config['run_id'],
             timestamp=timestamp,
-            script_path=script_path
+            script_path=script_path,
+            model_path=model_path
         )
         _running_processes.append((process, run_config, log_file))
     
@@ -230,6 +235,13 @@ def main():
         help='Path to run_model.py script (default: run_model.py)'
     )
     
+    parser.add_argument(
+        '--model-path',
+        type=str,
+        default=None,
+        help='Path to existing model folder to load (e.g., models/best_model)'
+    )
+    
     args = parser.parse_args()
     
     # Validate script path
@@ -238,11 +250,22 @@ def main():
         print(f"Error: Script not found at {script_path}")
         sys.exit(1)
     
+    # Validate model path if provided
+    model_path = None
+    if args.model_path is not None:
+        model_path = Path(args.model_path)
+        model_file = model_path / 'model.pt'
+        if not model_file.exists():
+            print(f"Error: Model file not found at {model_file}")
+            sys.exit(1)
+        model_path = str(model_path)
+    
     # Submit runs
     submit_runs(
         runs_per_gpu=args.runs_per_gpu,
         base_seed=args.base_seed,
-        script_path=str(script_path)
+        script_path=str(script_path),
+        model_path=model_path
     )
 
 
