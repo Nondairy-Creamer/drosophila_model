@@ -210,6 +210,12 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
         stimulus = interpolate_to_model_dt(stimulus_out, stimulus_dt, model_dt)
         optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
 
+        # Add a blank stimulus (all zeros) with zero optic flow
+        blank_stim = np.zeros((1, stimulus.shape[1], stimulus.shape[2]))
+        blank_flow = np.zeros((1, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]))
+        stimulus = np.concatenate([blank_stim, stimulus], axis=0)
+        optic_flow = np.concatenate([blank_flow, optic_flow], axis=0)
+
     elif data_set_type == 'sintel':
         sintel_path = Path('../connectome_data/sintel_data.pkl')
         with open(sintel_path, 'rb') as f:
@@ -229,6 +235,12 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
         # Interpolate to model timestep
         stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
         optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
+
+        # Add a blank stimulus (all zeros) with zero optic flow
+        blank_stim = torch.zeros((1, stimulus.shape[1], stimulus.shape[2]), device=device, dtype=dtype)
+        blank_flow = torch.zeros((1, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
+        stimulus = torch.cat([blank_stim, stimulus], dim=0)
+        optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
 
     # --- plot the stimuli ---
     if column_phi_theta is not None:
