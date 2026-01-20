@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from neural_models import NeuralRnn
+from neural_models import CurrentModel
 
 def cross_matrix(a):
     """
@@ -238,7 +238,7 @@ def test_rotation_only():
     d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
+    omega_pred, T_pred, Z_pred = CurrentModel.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     
     # ||T_pred|| now represents translation magnitude (scaled by 1/Z)
     trans_mag = T_pred.norm().item()
@@ -283,7 +283,7 @@ def test_translation_only():
     d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
+    omega_pred, T_pred, Z_pred = CurrentModel.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction (T_pred is now scaled)
@@ -333,7 +333,7 @@ def test_combined_motion():
     d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
+    omega_pred, T_pred, Z_pred = CurrentModel.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction
@@ -388,7 +388,7 @@ def test_varying_depth():
     d_phi, d_theta = generate_optic_flow(phi, theta, omega_true, T_true, Z)
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
+    omega_pred, T_pred, Z_pred = CurrentModel.estimate_self_motion_from_flow(phi, theta, d_phi, d_theta)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction
@@ -452,7 +452,7 @@ def test_noisy_flow():
     print(f"Flow magnitude:      {torch.sqrt(d_theta**2 + d_phi**2).mean():.4f}")
     
     # Recover self-motion
-    omega_pred, T_pred, Z_pred = NeuralRnn.estimate_self_motion_from_flow(phi, theta, d_phi_noisy, d_theta_noisy)
+    omega_pred, T_pred, Z_pred = CurrentModel.estimate_self_motion_from_flow(phi, theta, d_phi_noisy, d_theta_noisy)
     trans_mag = T_pred.norm().item()
     
     # Normalize T_pred to compare direction

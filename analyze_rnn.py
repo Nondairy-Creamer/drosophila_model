@@ -80,7 +80,7 @@ model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
-model = nm.NeuralRnn.load(model_folder / 'model.pt', device=device)
+model = nm.CurrentModel.load(model_folder / 'model.pt', device=device)
 stimulus = torch.load(model_folder / 'cell_inputs.pt', weights_only=True).to(device=model.device)
 # target is now a dict of tensors; load and move entries to the right device/dtype
 _target_loaded = torch.load(model_folder / 'target.pt', weights_only=False)

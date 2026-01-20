@@ -15,7 +15,7 @@ model_folder = Path('models/best_model')
 local_config = du.load_config()
 
 # Load model, stimulus, and config
-model = nm.NeuralRnn.load(model_folder / 'model.pt', device=local_config['model']['device'])
+model = nm.CurrentModel.load(model_folder / 'model.pt', device=local_config['model']['device'])
 stimulus = torch.load(model_folder / 'cell_inputs.pt')
 target = torch.load(model_folder / 'target.pt')
 

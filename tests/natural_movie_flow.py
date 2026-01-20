@@ -23,7 +23,7 @@ import imageio as iio_v2
 
 import data_utilities as du
 import stimulus_utilities as su
-from neural_models import NeuralRnn
+from neural_models import CurrentModel
 import training_utilities as tu
 
 # --- Configuration ---
@@ -38,7 +38,7 @@ stim_index = 0   # which stimulus to visualize (first one)
 # --- Load the model ---
 print("Loading model...")
 model_path = 'models/best_model/model.pt'
-model = NeuralRnn.load(model_path, device='cpu')
+model = CurrentModel.load(model_path, device='cpu')
 device = model.device
 dtype = model.dtype
 frame_rate = int(1 / model.dt)  # fps for the output movie

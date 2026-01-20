@@ -5,9 +5,12 @@ from pathlib import Path
 from functools import reduce
 import tempfile
 import os
+from abc import ABC, abstractmethod
 
 
-class NeuralRnn(torch.nn.Module):
+class NeuralModel(torch.nn.Module, ABC):
+    """Base class for neural models. Contains shared functionality for both current and conductance models."""
+    
     def __init__(self, synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
                  use_layer_norm=False, set_max_sigma=True, dt=0.01, seed=None, init_std=0.1):
         # capture constructor inputs early (before we mutate or derive types)
@@ -143,6 +146,11 @@ class NeuralRnn(torch.nn.Module):
             with torch.no_grad():
                 self.find_steady_state()
 
+    @abstractmethod
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        """Forward pass for the neural model. Must be implemented by subclasses."""
+        pass
+
     def set_sigma_max(self):
         with torch.no_grad():
             # Iteratively scale output_strength to achieve target max sigma (spectral norm, largest singular value)
@@ -160,49 +168,6 @@ class NeuralRnn(torch.nn.Module):
                 # Scale output_strength to move toward target
                 scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
                 self.output_strength_log.add_(torch.log(scale_factor))
-
-    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
-        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
-        input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
-        output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
-        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
-        offset_all_neurons = self.offset[self.neuron_to_type_index]
-
-        # model is
-        # z = D_in @ synapse_counts @ D_out @ nonlinearity(v_prev) + stimulus * stimulus_strength
-        # where D_in scales post-synaptic (rows) and D_out scales pre-synaptic (columns)
-        # v_next = persistence * v_prev + (1 - persistence) * (z + offset)
-        # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
-        # issues with passing gradients due to pytorch's limited sparse support.
-        # we can't precompute the dynamics matrix because the broadcast operation of the input/output vectors doesn't
-        # allow for passing the gradient when synapse_counts is sparse
-        # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
-
-        v_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
-        z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
-        z = z * input_strength[None, :]
-
-        # Optionally normalize recurrent term before adding inputs/offset
-        if self.use_layer_norm:
-            z = self.layer_norm(z)
-
-        if stim_to_cell_mapping is None:
-            z = z + u_t * stimulus_strength[None, :]
-        else:
-            # because stimulus can be very sparse (only stimulate 3 cell types)
-            # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
-            cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
-            stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
-            # Guard against any negative indices
-            valid = (cell_idx >= 0) & (stim_idx >= 0)
-            if torch.any(valid):
-                ci = cell_idx[valid]
-                si = stim_idx[valid]
-                z.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
-
-        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
-
-        return v_next
 
     def calc_sigma_max(self, max_iter=100, eps=1e-12):
         A = self.synapse_counts.coalesce()
@@ -419,6 +384,7 @@ class NeuralRnn(torch.nn.Module):
 
         payload = {
             'inputs': self.init_inputs,
+            'class_name': self.__class__.__name__,
             # store weights on CPU for portability (includes buffers like optic_flow_*_readout)
             'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
         }
@@ -705,4 +671,107 @@ class NeuralRnn(torch.nn.Module):
 
         return omega_star, T_star, Z_star
 
+
+class CurrentModel(NeuralModel):
+    """Current-based neural model where synaptic input is modeled as current injection."""
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
+        output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
+        offset_all_neurons = self.offset[self.neuron_to_type_index]
+
+        # model is
+        # z = D_in @ synapse_counts @ D_out @ nonlinearity(v_prev) + stimulus * stimulus_strength
+        # where D_in scales post-synaptic (rows) and D_out scales pre-synaptic (columns)
+        # v_next = persistence * v_prev + (1 - persistence) * (z + offset)
+        # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
+        # issues with passing gradients due to pytorch's limited sparse support.
+        # we can't precompute the dynamics matrix because the broadcast operation of the input/output vectors doesn't
+        # allow for passing the gradient when synapse_counts is sparse
+        # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
+
+        v_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
+        z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
+        z = z * input_strength[None, :]
+
+        # Optionally normalize recurrent term before adding inputs/offset
+        if self.use_layer_norm:
+            z = self.layer_norm(z)
+
+        if stim_to_cell_mapping is None:
+            z = z + u_t * stimulus_strength[None, :]
+        else:
+            # because stimulus can be very sparse (only stimulate 3 cell types)
+            # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
+            cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
+            stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
+            # Guard against any negative indices
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                z.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
+
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
+
+        return v_next
+
+
+class ConductanceModel(NeuralModel):
+    """Conductance-based neural model where synaptic input is modeled as conductance changes."""
     
+    def __init__(self, synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
+                 use_layer_norm=False, set_max_sigma=True, dt=0.01, seed=None, init_std=0.1):
+        super().__init__(synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity, device, dtype,
+                 use_layer_norm, set_max_sigma, dt, seed, init_std)
+        
+        # TODO: Initialize conductance-specific parameters here
+        # self.neurotransmitters = ['acetylcholine', 'glutamate', 'gaba']
+        # self.reversal_potential = ...  # (num_transmitters, num_cell_types)
+        # Need to restructure synapse_counts per neurotransmitter
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        # v_prev is tensor with shape (stimuli, neurons)
+        # u_t is tensor with shape (stimuli, neurons)
+        # stim to cell mapping is a sparse mapping from stimulus to individual neurons
+        
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        input_strength = self.input_strength_log.exp()[:, self.neuron_to_type_index]
+        output_strength = self.output_strength_log.exp()[:, self.neuron_to_type_index]
+        reversal_potential_all_neurons = self.reversal_potential[:, self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
+        offset_all_neurons = self.offset[self.neuron_to_type_index]
+
+        # model is
+        # neurotransmitters = ['acetylcholine', 'glutamate', 'gaba']
+        # -C_m * v_{t+1} = sum_over_transmitters_r (v_t - rp(i)) @ g_r(t) + (v_t - rp_leak) @ g_leak
+        # g_r(t) = D_in,r @ S_r @ D_out,r @ f(v_t - offset)
+        # f is self.nonlinearity and probably relu / softplus
+
+        z = torch.zeros_like(v_prev)
+        # get the contribution of each neurotransmitter
+        for ri, r in enumerate(self.neurotransmitters):
+            r_firing_rate = output_strength[None, ri, :] * self.nonlinearity(v_prev - offset_all_neurons)
+            r_conductance = torch.sparse.mm(self.synapse_counts[ri], r_firing_rate.transpose(0, 1)).transpose(0, 1)
+            r_conductance = r_conductance * input_strength[None, ri, :]
+            z = z + (v_prev - reversal_potential_all_neurons[None, ri, :]) * r_conductance
+
+        if stim_to_cell_mapping is None:
+            z = z + u_t * stimulus_strength[None, :]
+        else:
+            # because stimulus can be very sparse (only stimulate 3 cell types)
+            # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
+            cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
+            stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
+            # Guard against any negative indices
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                z.index_add_(1, ci, stimulus_strength[None, ci] * u_t[:, si])
+
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
+
+        return v_next

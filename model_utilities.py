@@ -41,7 +41,7 @@ def path_from_a_to_b(model, start_names, end_names, top_n=20, max_iterations=20,
     following the top N outgoing connections.
     
     Args:
-        model: NeuralRnn model
+        model: CurrentModel model
         start_names: list of starting cell type names
         end_names: list of ending cell type names
         top_n: number of top connections to follow from each neuron

@@ -27,7 +27,7 @@ local_config = du.load_config()
 local_device = local_config['model']['device']
 
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralRnn.load(model_folder / 'model.pt', freeze_params=False, device=local_device)
+model = nm.CurrentModel.load(model_folder / 'model.pt', freeze_params=False, device=local_device)
 stimulus = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
 # target is now a dict of tensors; load and move entries to the right device/dtype
 _target_loaded = torch.load(model_folder / 'target.pt')
