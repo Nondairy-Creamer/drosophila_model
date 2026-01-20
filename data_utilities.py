@@ -243,8 +243,8 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
         optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
 
     # --- plot the stimuli ---
-    if column_phi_theta is not None:
-        pu.xt_plot(column_phi_theta[:, 0], column_phi_theta[:, 1], optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
+    # if column_phi_theta is not None:
+    #     pu.xt_plot(column_phi_theta[:, 0], column_phi_theta[:, 1], optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
 
     stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
     optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
