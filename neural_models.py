@@ -110,10 +110,14 @@ class NeuralModel(torch.nn.Module, ABC):
                 )
                 param.add_(noise)
 
-    def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'], 
-                output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], init_state=None):
+    def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'],  output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], 
+                init_state=None, invert_input=True):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
+        if invert_input:
+            # inputs are usually given to L1 L2 and L3 mimicking input from the photo receptors
+            # however in Drosophila photo receptors inhibit these cells, so we invert the input here
+            inputs = -inputs
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):
@@ -163,6 +167,8 @@ class NeuralModel(torch.nn.Module, ABC):
 
         for t in range(num_time):
             v = self(v, inputs[:, t, :], stim_to_cell_mapping)
+            # Compute firing_rate on full v (has neuron dimension for proper threshold broadcasting)
+            fr = self.firing_rate(v)
 
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
@@ -171,22 +177,18 @@ class NeuralModel(torch.nn.Module, ABC):
                 valid = ci >= 0
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
-
-        # Compute firing_rate from the complete voltage tensor (more memory efficient)
-        # This creates one computation graph node instead of one per timestep
-        for i in readout_keys:
-            outputs['firing_rate'][i] = self.firing_rate(outputs['voltage'][i])
+                    outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
-    def find_steady_state(self, run_time=100, max_iter=100):
+    def find_steady_state(self, run_time=100, max_iter=50):
         inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
         # Start from current steady state buffer
         initial_state = self.steady_state.unsqueeze(0)
 
         for i in range(max_iter):
             final_state = self.predict(inputs, init_state=initial_state)[1]
-            
+
             # Check if state converged (didn't change from input to output)
             if torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
                 print('steady state found after', i + 1, 'iterations')
@@ -564,12 +566,7 @@ class NeuralModel(torch.nn.Module, ABC):
 
 class CurrentModel(NeuralModel):
     """Current-based neural model where synaptic input is modeled as current injection."""
-    
-    # Neurotransmitter sign mapping: excitatory = +1, inhibitory = -1
-    excitatory_nt = {'acetylcholine', 'ach'}
-    inhibitory_nt = {'glutamate', 'glut', 'gaba'}
-
-    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
+    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
                  set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
         
         # Sign the synapse counts based on neurotransmitter type before calling parent init
@@ -580,6 +577,10 @@ class CurrentModel(NeuralModel):
         super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
                          set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
         
+            
+        # Neurotransmitter sign mapping: excitatory = +1, inhibitory = -1
+        self.excitatory_nt = ['ACH']
+        self.inhibitory_nt = ['GLUT', 'GABA']
         self.max_allowed_sigma = 0.95
         
         # Initialize power vector for spectral norm calculation
@@ -636,8 +637,7 @@ class CurrentModel(NeuralModel):
             with torch.no_grad():
                 self.find_steady_state()
 
-    @staticmethod
-    def _sign_synapses(synapse_counts_coo, cell_types, cell_type_transmitters):
+    def _sign_synapses(self, synapse_counts_coo, cell_types, cell_type_transmitters):
         """
         Sign synapse counts based on neurotransmitter type.
         
@@ -667,9 +667,9 @@ class CurrentModel(NeuralModel):
         
         # Compute sign based on transmitter type
         synapse_sign = np.zeros(len(pre_transmitters), dtype=synapse_counts_coo.dtype)
-        for nt in CurrentModel.excitatory_nt:
+        for nt in self.excitatory_nt:
             synapse_sign[np.char.lower(pre_transmitters.astype(str)) == nt] = 1
-        for nt in CurrentModel.inhibitory_nt:
+        for nt in self.inhibitory_nt:
             synapse_sign[np.char.lower(pre_transmitters.astype(str)) == nt] = -1
         
         # Warn about any synapses with unknown neurotransmitter (sign = 0)
@@ -844,7 +844,7 @@ class ConductanceModel(NeuralModel):
         
         # --- Conductance-specific parameters ---
         # Reversal potentials in mV: acetylcholine is excitatory, glutamate/GABA are inhibitory
-        rp_default = {'acetylcholine': 10.0, 'glutamate': -70.0, 'gaba': -70.0}
+        rp_default = {'ACH': 10.0, 'GLUT': -70.0, 'GABA': -70.0}
         rp_leak_default = -50.0
         g_leak_log_default = np.log(1.0)
         capacitance_inv_log_default = np.log(1.0 / 40.0)
@@ -906,6 +906,11 @@ class ConductanceModel(NeuralModel):
         # Add noise to all parameters
         self.add_noise_to_parameters()
         
+        # Initialize steady_state to rp_leak (better starting point than zeros)
+        with torch.no_grad():
+            rp_leak_all = self.rp_leak[self.neuron_to_type_index]
+            self.steady_state.copy_(rp_leak_all)
+        
         # Find steady state
         with torch.no_grad():
             self.find_steady_state()
@@ -913,6 +918,11 @@ class ConductanceModel(NeuralModel):
     def firing_rate(self, v):
         """Convert voltage to firing rate with threshold subtraction."""
         threshold_all = self.threshold[self.neuron_to_type_index]
+        # Reshape threshold to broadcast with v: find the neuron dimension and expand others to 1
+        neuron_dim = v.shape.index(self.num_neurons)
+        shape = [1] * v.ndim
+        shape[neuron_dim] = self.num_neurons
+        threshold_all = threshold_all.view(*shape)
         return self.nonlinearity(v - threshold_all)
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):

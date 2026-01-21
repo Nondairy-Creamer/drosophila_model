@@ -52,6 +52,22 @@ synaptic_connections_df = synaptic_connections_df[pre_and_post_are_visual]
 presynaptic_ids = synaptic_connections_df.pre_root_id.values
 postsynaptic_ids = synaptic_connections_df.post_root_id.values
 synapse_counts = synaptic_connections_df.syn_count.values
+neurotransmitters = synaptic_connections_df.nt_type.values
+
+# --- Derive neurotransmitter per cell type ---
+# For each presynaptic neuron, count the neurotransmitter usage across all its synapses
+# Then aggregate by cell type to get the dominant neurotransmitter for each type
+# Add presynaptic cell type to the connections
+pre_root_to_type = visual_neurons_df.set_index('root_id')['type'].to_dict()
+pre_types = np.array([pre_root_to_type.get(rid, None) for rid in presynaptic_ids])
+
+# Create a dataframe to aggregate neurotransmitter by cell type
+nt_df = pd.DataFrame({'cell_type': pre_types, 'nt_type': neurotransmitters, 'syn_count': synapse_counts})
+# Weight by synapse count and get the most common neurotransmitter per cell type
+nt_per_type = nt_df.groupby(['cell_type', 'nt_type'])['syn_count'].sum().reset_index()
+idx = nt_per_type.groupby('cell_type')['syn_count'].idxmax()
+cell_type_nt_df = nt_per_type.loc[idx, ['cell_type', 'nt_type']].reset_index(drop=True)
+cell_type_nt_df.columns = ['cell_type', 'neurotransmitter']
 
 # exclude photoreceptors and other neurons that interfere with learning
 # Note: neurons_to_exclude uses cell TYPE names, not root IDs
@@ -166,6 +182,10 @@ col_idx = visual_neurons_df.columns.get_loc('column_id')
 visual_neurons_df.iloc[row_pos, col_idx] = column_info_df['column_id'].to_numpy().astype(int)
 visual_neurons_df['column_index'] = visual_neurons_df['column_id'] - 1
 
+# Add neurotransmitter to each neuron based on its cell type
+type_to_nt = cell_type_nt_df.set_index('cell_type')['neurotransmitter'].to_dict()
+visual_neurons_df['neurotransmitter'] = visual_neurons_df['type'].map(type_to_nt)
+
 # get a df that just has all the unique columns and where they are in space. can map to the visual_neurons_df via column_id
 cols = ['column_id', 'theta', 'phi', 'x', 'y', 'z', 'x_flat', 'y_flat', 'p', 'q']
 unique_columns_df = (
@@ -176,7 +196,7 @@ unique_columns_df = (
 )
 unique_columns_df['column_index'] = unique_columns_df['column_id'] - 1
 
-# save the cell info
+# save the cell info (includes neurotransmitter per neuron) and column info
 visual_neurons_df.to_parquet(connectome_folder / 'optic_lobes_cell_info.parquet', index=False)
 unique_columns_df.to_parquet(connectome_folder / 'optic_lobes_column_info.parquet', index=False)
 
