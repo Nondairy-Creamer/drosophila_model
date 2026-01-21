@@ -102,59 +102,92 @@ Conductance model
 \end_layout
 
 \begin_layout Standard
-\begin_inset Formula $-C_{m}\frac{d}{dt}V(t)=\sum_{r}^{glu,acytl,gaba}(V(t)-E_{r})g_{r}(t)+(V(t)-E_{leak})g_{leak}+u_{in}\odot\mathbf{u}_{t}$
+\begin_inset Formula $V\equiv V_{inside}-V_{outside}$
 \end_inset
 
 
 \end_layout
 
 \begin_layout Standard
-Conductance model says that all the current flow is the sum of
+inward flow of positive charge as defined as positive current
 \end_layout
 
 \begin_layout Standard
-capacitive current 
-\begin_inset Formula $C_{m}\frac{d}{dt}V(t)$
+Capacitance current 
+\begin_inset Formula $I_{C}=C_{m}\frac{dV}{dt}$
 \end_inset
 
 
 \end_layout
 
 \begin_layout Standard
-Synaptic input 
-\begin_inset Formula $\sum_{r}^{glu,acytl,gaba}(V(t)-E_{r})g_{r}(t)$
+Cation channel current 
+\begin_inset Formula $I_{exc}=g(V-E)$
 \end_inset
 
 
 \end_layout
 
 \begin_layout Standard
-Where the driving force of that current (i forget this terminology) is 
-\begin_inset Formula $V(t)-E_{r}$
-\end_inset
-
- and 
-\begin_inset Formula $E_{r}$
+Where 
+\begin_inset Formula $E$
 \end_inset
 
  is the reversal potential and 
-\begin_inset Formula $g_{r}(t)$
+\begin_inset Formula $g$
 \end_inset
 
  is the conductance
 \end_layout
 
 \begin_layout Standard
-The leak current 
-\begin_inset Formula $(V(t)-E_{leak})g_{leak}$
+Kirchhoff's law (conservation of charge) where 
+\begin_inset Formula $r$
+\end_inset
+
+ is a neurotransmitter
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $I_{C}+\sum_{r}I_{r}+I_{leak}+I_{inj}=0$
 \end_inset
 
 
 \end_layout
 
 \begin_layout Standard
-And direct current injection 
-\begin_inset Formula $\mathbf{c}\odot\mathbf{u}_{t}$
+\begin_inset Formula $C_{m}\frac{dV}{dt}+\sum_{r}g_{r}(V-E_{r})+g_{leak}(V-E_{leak})+I_{inj}=0$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V(t)=-C_{m}^{-1}\left[\sum_{r\in\{glu,ach,gaba\}}(V(t)-E_{r})\odot g_{r}(t)+(V(t)-E_{leak})\odot g_{leak}+I_{inj}\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Discrete Conductance.
+ Define 
+\begin_inset Formula $I_{inj}\equiv-b\odot u_{t}$
+\end_inset
+
+ i.e.
+ positive inputs cause depolarization
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{t+1}=v_{t}-\Delta tC_{m}^{-1}\left[\sum_{r\in\{glu,ach,gaba\}}(v_{t}-E_{r})\odot g_{r}(v_{t})+(v_{t}-E_{leak})\odot g_{leak}-b\odot\mathbf{u}_{t}\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $g_{r}(t)=D_{in,r}S_{r}D_{out,r}f(V(t)-\theta)$
 \end_inset
 
 
@@ -174,32 +207,14 @@ The conductance for a given neurotransmitter is governed by the strength of the 
 \end_inset
 
  and the firing rate of the presynaptic neuron 
-\begin_inset Formula $f(V(t)-b)$
+\begin_inset Formula $f(V(t)-\theta)$
 \end_inset
 
  where 
 \begin_inset Formula $f$
 \end_inset
 
- is a ReLU
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $g_{r}(t)=D_{in,r}S_{r}D_{out,r}f(V(t)-b)$
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Relationship between the two models
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $(V(t)-E_{r})g_{r}(t)=V(t)D_{in,r}S_{r}D_{out,r}f(V(t)-b)-E_{r}D_{in,r}S_{r}D_{out,r}f(V(t)-b)$
-\end_inset
-
-
+ is a softplus
 \end_layout
 
 \begin_layout Standard
@@ -207,15 +222,11 @@ Trainable parameters and init
 \end_layout
 
 \begin_layout Standard
-persistence = 0.7
-\end_layout
-
-\begin_layout Standard
 reversal potentials:
  acetyl choline = 10 mV,
  gaba,
  glu = -70 mV,
- leak = -20 mV
+ leak = -50 mV
 \end_layout
 
 \begin_layout Standard
@@ -224,7 +235,10 @@ D_in,
 \end_layout
 
 \begin_layout Standard
-b / threshold = -50 mV
+\begin_inset Formula $\theta$
+\end_inset
+
+ = -50 mV
 \end_layout
 
 \begin_layout Standard

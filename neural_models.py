@@ -11,8 +11,8 @@ from abc import ABC, abstractmethod
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
-    def __init__(self, synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_layer_norm=False, set_max_sigma=True, dt=0.01, seed=None, init_std=0.1):
+    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
+                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
         # capture constructor inputs early (before we mutate or derive types)
         # we'll save these to so that we can load the class easily
         params = locals().copy()
@@ -21,11 +21,8 @@ class NeuralModel(torch.nn.Module, ABC):
         self.init_inputs = params
         super().__init__()
 
-        persistence_init = 0.5
-        stimulus_strength_init = 10.0
-        offset_init = 0.0
-        self.max_allowed_sigma = 0.95
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
+        self.init_std = init_std
 
         # Create RNG from seed for random initialization
         if seed is not None:
@@ -42,20 +39,18 @@ class NeuralModel(torch.nn.Module, ABC):
         self.cell_types = cell_types
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype)
-        self.use_layer_norm = use_layer_norm
         self.num_neurons = cell_types.shape[0]
         self.unique_cell_types = np.unique(cell_types)
         self.num_cell_types = self.unique_cell_types.shape[0]
+        
+        # Neurotransmitter information (indexed by cell type)
+        self.cell_type_transmitters = np.array(cell_type_transmitters)
+        self.neurotransmitters = np.unique(cell_type_transmitters)
+        self.num_transmitters = len(self.neurotransmitters)
         self.column_indices = column_indices
         self.column_phi_theta = column_phi_theta
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
-        self.dt = dt  # not currently used in the model, but the model implicitly expects a time step
-        # Initialize persistent power-iteration vector for warm starts using RNG
-        # Register as buffer so it's saved/restored with state_dict
-        power_vec_np = self.rng.standard_normal(self.num_neurons)
-        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
-        power_vec = power_vec / (power_vec.norm() + 1e-12)
-        self.register_buffer('_power_vec', power_vec)
+        self.dt = dt
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
 
         # readout from the neurons to optic flow in units of degrees per second
@@ -67,26 +62,18 @@ class NeuralModel(torch.nn.Module, ABC):
         self.register_buffer('optic_flow_vertical_readout',
                              torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
 
-        def logit(p, eps=1e-6):
-            p = np.clip(p, eps, 1 - eps)
-            return np.log(p / (1 - p))
-
-        # --- model parameters with random initialization
-        # Initialize as numpy arrays with Gaussian noise, then convert to torch tensors
-        persistence_logit_init = logit(persistence_init)
-        persistence_logit_np = persistence_logit_init + self.rng.normal(0, init_std, self.num_cell_types)
-        self.persistence_logit = torch.tensor(persistence_logit_np, dtype=self.dtype, device=self.device)
-
-        stimulus_strength_log_init = np.log(stimulus_strength_init)
-        stimulus_strength_log_np = stimulus_strength_log_init + self.rng.normal(0, init_std, self.num_cell_types)
-        self.stimulus_strength_log = torch.tensor(stimulus_strength_log_np, dtype=self.dtype, device=self.device)
-
-        offset_np = offset_init + self.rng.normal(0, init_std, self.num_cell_types)
-        self.offset = torch.tensor(offset_np, dtype=self.dtype, device=self.device)
-
         # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
         # synapse counts sparse must be in the form N x 3 with [indices, (pre_synaptic, post_synaptic, count)]
+        # Filter out connections below the count threshold
+        self.count_threshold = count_threshold
+        if count_threshold > 0:
+            mask = synapse_counts_coo[:, 2] >= count_threshold
+            synapse_counts_coo = synapse_counts_coo[mask]
+        
+        # Store filtered COO for subclasses that may need it (e.g., ConductanceModel)
+        self.synapse_counts_coo = synapse_counts_coo
+        
         rows = torch.tensor(synapse_counts_coo[:, 1], device=device, dtype=torch.int64)
         cols = torch.tensor(synapse_counts_coo[:, 0], device=device, dtype=torch.int64)
         values = torch.tensor(synapse_counts_coo[:, 2], device=device, dtype=self.dtype)
@@ -102,123 +89,26 @@ class NeuralModel(torch.nn.Module, ABC):
             self.neuron_to_type_index[ct_mask] = cti
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
 
-        # Optional layer normalization for better signal propagation
-        if self.use_layer_norm:
-            self.layer_norm = torch.nn.LayerNorm(self.num_neurons, elementwise_affine=False, device=self.device, dtype=self.dtype)
-
-        # Target: keep variance roughly constant across layers
-        # Compute fan-in per neuron
-        synapses_in_per_neuron = self.synapse_counts.pow(2).sum(dim=1).to_dense()  # (num_neurons,)
-        synapses_out_per_neuron = self.synapse_counts.pow(2).sum(dim=0).to_dense()  # (num_neurons,)
-
-        # Average fan-in for each cell type
-        synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        for cti, ct in enumerate(self.unique_cell_types):
-            ct_mask_np = (self.cell_types == ct)
-            ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
-            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
-            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
-
-        # Initialize strength per cell type based on the inverse of its fan in / out
-        input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
-        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        input_strength_log_init = torch.log(input_strength_init)
-        output_strength_log_init = torch.log(output_strength_init)
-
-        # Add Gaussian noise to strength parameters
-        input_strength_log_np = input_strength_log_init.detach().cpu().numpy() + self.rng.normal(0, init_std, self.num_cell_types)
-        output_strength_log_np = output_strength_log_init.detach().cpu().numpy() + self.rng.normal(0, init_std, self.num_cell_types)
-        self.input_strength_log = torch.tensor(input_strength_log_np, dtype=self.dtype, device=self.device)
-        self.output_strength_log = torch.tensor(output_strength_log_np, dtype=self.dtype, device=self.device)
-
-        if set_max_sigma:
-            self.set_sigma_max()
-
-        self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
-        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
-        self.offset = torch.nn.Parameter(self.offset)
-        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
-        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
-
-        if set_max_sigma:
-            # --- find the steady state of the model, use this as initial condition when making predictions ---
-            with torch.no_grad():
-                self.find_steady_state()
-
     @abstractmethod
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
         """Forward pass for the neural model. Must be implemented by subclasses."""
         pass
 
-    def set_sigma_max(self):
+    @abstractmethod
+    def firing_rate(self, v):
+        """Convert voltage to firing rate. Must be implemented by subclasses."""
+        pass
+
+    def add_noise_to_parameters(self):
+        """Add Gaussian noise to all trainable parameters."""
         with torch.no_grad():
-            # Iteratively scale output_strength to achieve target max sigma (spectral norm, largest singular value)
-            max_scaling_iters = 100
-            rho_tolerance = 0.01
-            damping_factor = 0.3
-
-            for iter_idx in range(max_scaling_iters):
-                sigma_max = self.calc_sigma_max()
-
-                print(iter_idx, ':', sigma_max)
-                if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
-                    break
-
-                # Scale output_strength to move toward target
-                scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
-                self.output_strength_log.add_(torch.log(scale_factor))
-
-    def calc_sigma_max(self, max_iter=100, eps=1e-12):
-        A = self.synapse_counts.coalesce()
-        n = self.num_neurons
-        device = self.device
-        dtype = self.dtype
-        # Per-neuron scalings
-        D_in  = self.input_strength_log.exp()[self.neuron_to_type_index]  # (n,)
-        D_out = self.output_strength_log.exp()[self.neuron_to_type_index]  # (n,)
-        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]       # (n,)
-        one_minus_d = 1.0 - d
-
-        # M v = D_in * (A @ (D_out * v))
-        def apply_M(v):
-            v_scaled = v * D_out
-            y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
-            return y * D_in
-
-        # M^T v = D_out * (A^T @ (D_in * v))
-        def apply_M_T(v):
-            v_scaled = v * D_in
-            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
-            return y * D_out
-
-        # S v = diag(d) v + diag(1-d) (M v)
-        def apply_S(v):
-            return d * v + one_minus_d * apply_M(v)
-
-        # S^T v = diag(d) v + M^T (diag(1-d) v)
-        def apply_S_T(v):
-            return d * v + apply_M_T(one_minus_d * v)
-
-        # Warm start from registered buffer (saved/restored with state_dict)
-        x = self._power_vec.clone()
-
-        x = x / (x.norm() + eps)  # normalize, but no gradient needed w.r.t x
-        # x is treated as a constant initial direction for autograd
-
-        for _ in range(max_iter):
-            y = apply_S(x)     # y ≈ σ u
-            x = apply_S_T(y)   # x ≈ σ^2 v
-            x = x / (x.norm() + eps)
-
-        # At convergence, ||S v||_2 ≈ σ_max
-        y = apply_S(x)
-        sigma = y.norm()  # differentiable w.r.t. parameters in S
-
-        # Update warm-start vector in-place (registered buffer), but cut history
-        self._power_vec.copy_(x.detach())
-
-        return sigma
+            for param in self.parameters():
+                noise = torch.tensor(
+                    self.rng.normal(0, self.init_std, param.shape),
+                    dtype=param.dtype,
+                    device=param.device
+                )
+                param.add_(noise)
 
     def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'], 
                 output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], init_state=None):
@@ -285,7 +175,7 @@ class NeuralModel(torch.nn.Module, ABC):
         # Compute firing_rate from the complete voltage tensor (more memory efficient)
         # This creates one computation graph node instead of one per timestep
         for i in readout_keys:
-            outputs['firing_rate'][i] = self.nonlinearity(outputs['voltage'][i])
+            outputs['firing_rate'][i] = self.firing_rate(outputs['voltage'][i])
 
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
@@ -674,6 +564,184 @@ class NeuralModel(torch.nn.Module, ABC):
 
 class CurrentModel(NeuralModel):
     """Current-based neural model where synaptic input is modeled as current injection."""
+    
+    # Neurotransmitter sign mapping: excitatory = +1, inhibitory = -1
+    excitatory_nt = {'acetylcholine', 'ach'}
+    inhibitory_nt = {'glutamate', 'glut', 'gaba'}
+
+    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
+                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
+        
+        # Sign the synapse counts based on neurotransmitter type before calling parent init
+        # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
+        synapse_counts_coo = self._sign_synapses(synapse_counts_coo, cell_types, cell_type_transmitters)
+        
+        # Call parent init
+        super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
+                         set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
+        
+        self.max_allowed_sigma = 0.95
+        
+        # Initialize power vector for spectral norm calculation
+        power_vec_np = self.rng.standard_normal(self.num_neurons)
+        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
+        power_vec = power_vec / (power_vec.norm() + 1e-12)
+        self.register_buffer('_power_vec', power_vec)
+        
+        def logit(p, eps=1e-6):
+            p = np.clip(p, eps, 1 - eps)
+            return np.log(p / (1 - p))
+        
+        # --- CurrentModel-specific parameters ---
+        persistence_init = 0.5
+        stimulus_strength_init = 10.0
+        offset_init = 0.0
+        
+        persistence_logit_init = logit(persistence_init)
+        self.persistence_logit = torch.full((self.num_cell_types,), persistence_logit_init, dtype=self.dtype, device=self.device)
+        
+        stimulus_strength_log_init = np.log(stimulus_strength_init)
+        self.stimulus_strength_log = torch.full((self.num_cell_types,), stimulus_strength_log_init, dtype=self.dtype, device=self.device)
+        
+        self.offset = torch.full((self.num_cell_types,), offset_init, dtype=self.dtype, device=self.device)
+        
+        # Initialize strength per cell type based on the inverse of fan in / out
+        synapses_in_per_neuron = self.synapse_counts.pow(2).sum(dim=1).to_dense()
+        synapses_out_per_neuron = self.synapse_counts.pow(2).sum(dim=0).to_dense()
+        
+        synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+        
+        input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
+        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
+        self.input_strength_log = torch.log(input_strength_init)
+        self.output_strength_log = torch.log(output_strength_init)
+        
+        # Convert to Parameters
+        self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
+        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
+        self.offset = torch.nn.Parameter(self.offset)
+        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+        
+        # Add noise to all parameters
+        self.add_noise_to_parameters()
+        
+        if set_max_sigma:
+            self.set_sigma_max()
+            with torch.no_grad():
+                self.find_steady_state()
+
+    @staticmethod
+    def _sign_synapses(synapse_counts_coo, cell_types, cell_type_transmitters):
+        """
+        Sign synapse counts based on neurotransmitter type.
+        
+        Args:
+            synapse_counts_coo: COO matrix (N x 3 array with [pre, post, count]) with unsigned counts
+            cell_types: Array of cell type labels for each neuron
+            cell_type_transmitters: Array specifying neurotransmitter for each cell type 
+                                   (indexed by cell type, same order as np.unique(cell_types))
+        
+        Returns:
+            Signed COO matrix where excitatory synapses are positive and inhibitory are negative
+        """
+        synapse_counts_coo = synapse_counts_coo.copy()  # Don't modify input
+        
+        # Get unique cell types in sorted order (same as np.unique returns)
+        unique_cell_types = np.unique(cell_types)
+        
+        # Create mapping from neuron index to cell type index
+        neuron_to_type_idx = np.zeros(len(cell_types), dtype=np.int64)
+        for cti, ct in enumerate(unique_cell_types):
+            neuron_to_type_idx[cell_types == ct] = cti
+        
+        # Get transmitter for each presynaptic neuron in the COO matrix
+        pre_neuron_indices = synapse_counts_coo[:, 0].astype(np.int64)
+        pre_type_indices = neuron_to_type_idx[pre_neuron_indices]
+        pre_transmitters = np.array(cell_type_transmitters)[pre_type_indices]
+        
+        # Compute sign based on transmitter type
+        synapse_sign = np.zeros(len(pre_transmitters), dtype=synapse_counts_coo.dtype)
+        for nt in CurrentModel.excitatory_nt:
+            synapse_sign[np.char.lower(pre_transmitters.astype(str)) == nt] = 1
+        for nt in CurrentModel.inhibitory_nt:
+            synapse_sign[np.char.lower(pre_transmitters.astype(str)) == nt] = -1
+        
+        # Warn about any synapses with unknown neurotransmitter (sign = 0)
+        unknown_mask = synapse_sign == 0
+        if np.any(unknown_mask):
+            unknown_nts = np.unique(pre_transmitters[unknown_mask])
+            warning(f"Unknown neurotransmitters {unknown_nts} - these synapses will be set to 0")
+        
+        # Apply sign to counts
+        synapse_counts_coo[:, 2] = synapse_counts_coo[:, 2] * synapse_sign
+        
+        return synapse_counts_coo
+
+    def set_sigma_max(self):
+        """Iteratively scale output_strength to achieve target max sigma (spectral norm)."""
+        with torch.no_grad():
+            max_scaling_iters = 100
+            rho_tolerance = 0.01
+            damping_factor = 0.3
+
+            for iter_idx in range(max_scaling_iters):
+                sigma_max = self.calc_sigma_max()
+
+                print(iter_idx, ':', sigma_max)
+                if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
+                    break
+
+                scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
+                self.output_strength_log.add_(torch.log(scale_factor))
+
+    def calc_sigma_max(self, max_iter=100, eps=1e-12):
+        """Calculate the maximum singular value (spectral norm) of the dynamics matrix."""
+        A = self.synapse_counts.coalesce()
+        D_in = self.input_strength_log.exp()[self.neuron_to_type_index]
+        D_out = self.output_strength_log.exp()[self.neuron_to_type_index]
+        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        one_minus_d = 1.0 - d
+
+        def apply_M(v):
+            v_scaled = v * D_out
+            y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
+            return y * D_in
+
+        def apply_M_T(v):
+            v_scaled = v * D_in
+            y = torch.sparse.mm(A.transpose(0, 1), v_scaled.unsqueeze(1)).squeeze(1)
+            return y * D_out
+
+        def apply_S(v):
+            return d * v + one_minus_d * apply_M(v)
+
+        def apply_S_T(v):
+            return d * v + apply_M_T(one_minus_d * v)
+
+        x = self._power_vec.clone()
+        x = x / (x.norm() + eps)
+
+        for _ in range(max_iter):
+            y = apply_S(x)
+            x = apply_S_T(y)
+            x = x / (x.norm() + eps)
+
+        y = apply_S(x)
+        sigma = y.norm()
+
+        self._power_vec.copy_(x.detach())
+
+        return sigma
+
+    def firing_rate(self, v):
+        """Convert voltage to firing rate."""
+        return self.nonlinearity(v)
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
         persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
@@ -695,10 +763,6 @@ class CurrentModel(NeuralModel):
         v_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
         z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
         z = z * input_strength[None, :]
-
-        # Optionally normalize recurrent term before adding inputs/offset
-        if self.use_layer_norm:
-            z = self.layer_norm(z)
 
         if stim_to_cell_mapping is None:
             z = z + u_t * stimulus_strength[None, :]
@@ -722,44 +786,191 @@ class CurrentModel(NeuralModel):
 class ConductanceModel(NeuralModel):
     """Conductance-based neural model where synaptic input is modeled as conductance changes."""
     
-    def __init__(self, synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity='relu', device='cpu', dtype='float32',
-                 use_layer_norm=False, set_max_sigma=True, dt=0.01, seed=None, init_std=0.1):
-        super().__init__(synapse_counts_coo, cell_types, column_indices, column_phi_theta, nonlinearity, device, dtype,
-                 use_layer_norm, set_max_sigma, dt, seed, init_std)
+    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, 
+                 nonlinearity='softplus', device='cpu', dtype='float32', set_max_sigma=False,
+                 dt=0.01, seed=None, init_std=0.1, count_threshold=2):
+        """
+        Initialize a conductance-based neural model.
         
-        # TODO: Initialize conductance-specific parameters here
-        # self.neurotransmitters = ['acetylcholine', 'glutamate', 'gaba']
-        # self.reversal_potential = ...  # (num_transmitters, num_cell_types)
-        # Need to restructure synapse_counts per neurotransmitter
+        Args:
+            synapse_counts_coo: COO matrix (N x 3 array with [pre, post, count])
+            cell_types: Array of cell type labels for each neuron
+            cell_type_transmitters: Array specifying which neurotransmitter each cell type expresses,
+                                   indexed by cell type (same order as np.unique(cell_types))
+            column_indices: Array of column indices for each neuron
+            column_phi_theta: Array of (phi, theta) coordinates for each column
+            nonlinearity: Activation function name (default: 'softplus')
+            device: Torch device (default: 'cpu')
+            dtype: Torch dtype as string (default: 'float32')
+            set_max_sigma: Unused, kept for API compatibility (default: False)
+            dt: Time step in seconds (default: 0.01)
+            seed: Random seed for initialization (default: None)
+            init_std: Standard deviation for parameter initialization noise (default: 0.1)
+            count_threshold: Minimum synapse count to include a connection (default: 2)
+        """
+        # Call parent init (handles count_threshold filtering and neurotransmitter setup)
+        super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
+                         set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
+        
+        # --- Split synapse_counts_coo into per-neurotransmitter sparse matrices ---
+        # Use the filtered COO from parent class
+        synapse_counts_coo_filtered = self.synapse_counts_coo
+        dtype_torch = getattr(torch, dtype)
+        
+        # Map from neuron index to its cell type index (reuse parent's mapping)
+        neuron_to_type_idx = self.neuron_to_type_index.cpu().numpy()
+        
+        # Get the neurotransmitter for each presynaptic neuron in the COO matrix
+        pre_neuron_indices = synapse_counts_coo_filtered[:, 0].astype(np.int64)
+        pre_type_indices = neuron_to_type_idx[pre_neuron_indices]
+        pre_transmitters = self.cell_type_transmitters[pre_type_indices]
+        
+        # Build a sparse matrix for each neurotransmitter
+        self.synapse_counts = []
+        for r in self.neurotransmitters:
+            # Filter to synapses where presynaptic neuron expresses this transmitter
+            mask = (pre_transmitters == r)
+            coo_r = synapse_counts_coo_filtered[mask]
+            
+            rows = torch.tensor(coo_r[:, 1], device=device, dtype=torch.int64)
+            cols = torch.tensor(coo_r[:, 0], device=device, dtype=torch.int64)
+            values = torch.tensor(coo_r[:, 2], device=device, dtype=dtype_torch)
+            
+            indices = torch.stack([rows, cols], dim=0)
+            sparse_mat = torch.sparse_coo_tensor(indices, values, 
+                                                  size=(self.num_neurons, self.num_neurons), 
+                                                  dtype=dtype_torch, device=device).coalesce()
+            self.synapse_counts.append(sparse_mat)
+        
+        # --- Conductance-specific parameters ---
+        # Reversal potentials in mV: acetylcholine is excitatory, glutamate/GABA are inhibitory
+        rp_default = {'acetylcholine': 10.0, 'glutamate': -70.0, 'gaba': -70.0}
+        rp_leak_default = -50.0
+        g_leak_log_default = np.log(1.0)
+        capacitance_inv_log_default = np.log(1.0 / 40.0)
+        threshold_default = -50
+        
+        # Check that all neurotransmitters have defined reversal potentials
+        unknown_transmitters = set(self.neurotransmitters) - set(rp_default.keys())
+        if unknown_transmitters:
+            raise ValueError(f"Unknown neurotransmitters: {unknown_transmitters}. "
+                           f"Please add reversal potentials to default_rp for these transmitters.")
+        
+        # Reversal potential per transmitter per cell type: (num_transmitters, num_cell_types)
+        self.rp_transmitter = torch.zeros((self.num_transmitters, self.num_cell_types), dtype=self.dtype, device=self.device)
+        for ri, r in enumerate(self.neurotransmitters):
+            self.rp_transmitter[ri, :] = rp_default[r]
+        
+        # Leak reversal potential per cell type: (num_cell_types,)
+        self.rp_leak = torch.full((self.num_cell_types,), rp_leak_default, dtype=self.dtype, device=self.device)
+        
+        # Leak conductance (log scale) per cell type: (num_cell_types,)
+        self.g_leak_log = torch.full((self.num_cell_types,), g_leak_log_default, dtype=self.dtype, device=self.device)
+        
+        # Inverse capacitance (log scale) per cell type: (num_cell_types,)
+        self.capacitance_inv_log = torch.full((self.num_cell_types,), capacitance_inv_log_default, dtype=self.dtype, device=self.device)
+        
+        # Threshold (firing threshold) - initialized to match leak reversal potential
+        self.threshold = torch.full((self.num_cell_types,), threshold_default, dtype=self.dtype, device=self.device)
+        
+        # Stimulus strength (log scale) per cell type
+        stimulus_strength_init = 10.0
+        stimulus_strength_log_init = np.log(stimulus_strength_init)
+        self.stimulus_strength_log = torch.full((self.num_cell_types,), stimulus_strength_log_init, dtype=self.dtype, device=self.device)
+        
+        # --- Input/output strength per-transmitter ---
+        # Shape: (num_transmitters, num_cell_types)
+        # Input strength initialized to 1 (log = 0)
+        self.input_strength_log = torch.zeros((self.num_transmitters, self.num_cell_types), dtype=self.dtype, device=self.device)
+        
+        # Output strength initialized based on fan-out for variance normalization
+        output_strength_log_init = torch.zeros((self.num_transmitters, self.num_cell_types), dtype=self.dtype, device=self.device)
+        for ri, syn_counts in enumerate(self.synapse_counts):
+            synapses_out = syn_counts.pow(2).sum(dim=0).to_dense()
+            for cti, ct in enumerate(self.unique_cell_types):
+                ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+                fan_out = synapses_out[ct_mask].mean().clamp_min(1.0)
+                output_strength_log_init[ri, cti] = -0.5 * torch.log(fan_out)
+        self.output_strength_log = output_strength_log_init
+        
+        # --- Convert to Parameters ---
+        self.rp_transmitter = torch.nn.Parameter(self.rp_transmitter)
+        self.rp_leak = torch.nn.Parameter(self.rp_leak)
+        self.g_leak_log = torch.nn.Parameter(self.g_leak_log)
+        self.capacitance_inv_log = torch.nn.Parameter(self.capacitance_inv_log)
+        self.threshold = torch.nn.Parameter(self.threshold)
+        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
+        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+        
+        # Add noise to all parameters
+        self.add_noise_to_parameters()
+        
+        # Find steady state
+        with torch.no_grad():
+            self.find_steady_state()
+
+    def firing_rate(self, v):
+        """Convert voltage to firing rate with threshold subtraction."""
+        threshold_all = self.threshold[self.neuron_to_type_index]
+        return self.nonlinearity(v - threshold_all)
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
-        # v_prev is tensor with shape (stimuli, neurons)
-        # u_t is tensor with shape (stimuli, neurons)
-        # stim to cell mapping is a sparse mapping from stimulus to individual neurons
+        """
+        Conductance-based forward pass.
         
-        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        We're implementing this model:
+        
+        v_{t+1} = v_t - Δt * C_m^{-1} @ [Σ_{r∈{glu,ach,gaba}} (v_t - E_r) ⊙ g_r(v_t) + (v_t - E_leak) ⊙ g_leak - b ⊙ u_t]
+        
+        g_r(t) = D_{in,r} @ S_r @ D_{out,r} @ f(v(t) - θ)
+        
+        Where:
+            - V_t: membrane voltage at time t
+            - C_m: membrane capacitance
+            - E_r: reversal potential for neurotransmitter r (glu, ach, gaba)
+            - E_leak: leak reversal potential
+            - g_r(t): conductance for neurotransmitter r
+            - g_leak: leak conductance
+            - b: stimulus strength
+            - u_t: external stimulus
+            - D_{in,r}, D_{out,r}: input/output scaling matrices for neurotransmitter r
+            - S_r: synapse count matrix for neurotransmitter r
+            - f: nonlinearity (e.g., relu/softplus)
+            - θ: firing threshold offset
+        
+        Args:
+            v_prev: tensor with shape (stimuli, neurons)
+            u_t: tensor with shape (stimuli, neurons)
+            stim_to_cell_mapping: sparse mapping from stimulus to individual neurons
+        """
+        
+        # expand the parameters from cell types to all neurons
+        capacitance_inv = self.capacitance_inv_log.exp()[self.neuron_to_type_index]
         input_strength = self.input_strength_log.exp()[:, self.neuron_to_type_index]
         output_strength = self.output_strength_log.exp()[:, self.neuron_to_type_index]
-        reversal_potential_all_neurons = self.reversal_potential[:, self.neuron_to_type_index]
+        rp_transmitter_all = self.rp_transmitter[:, self.neuron_to_type_index]
+        rp_leak_all = self.rp_leak[self.neuron_to_type_index]
+        g_leak = self.g_leak_log.exp()[self.neuron_to_type_index]
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
-        offset_all_neurons = self.offset[self.neuron_to_type_index]
-
-        # model is
-        # neurotransmitters = ['acetylcholine', 'glutamate', 'gaba']
-        # -C_m * v_{t+1} = sum_over_transmitters_r (v_t - rp(i)) @ g_r(t) + (v_t - rp_leak) @ g_leak
-        # g_r(t) = D_in,r @ S_r @ D_out,r @ f(v_t - offset)
-        # f is self.nonlinearity and probably relu / softplus
 
         z = torch.zeros_like(v_prev)
         # get the contribution of each neurotransmitter
+        # Σ_{r∈{glu,ach,gaba}} (v_t - E_r) ⊙ g_r(v_t)
+        firing_rate = self.firing_rate(v_prev)
         for ri, r in enumerate(self.neurotransmitters):
-            r_firing_rate = output_strength[None, ri, :] * self.nonlinearity(v_prev - offset_all_neurons)
+            r_firing_rate = output_strength[None, ri, :] * firing_rate
             r_conductance = torch.sparse.mm(self.synapse_counts[ri], r_firing_rate.transpose(0, 1)).transpose(0, 1)
-            r_conductance = r_conductance * input_strength[None, ri, :]
-            z = z + (v_prev - reversal_potential_all_neurons[None, ri, :]) * r_conductance
+            r_conductance = input_strength[None, ri, :] * r_conductance
+            z = z + (v_prev - rp_transmitter_all[None, ri, :]) * r_conductance
 
+        # add in the leak current
+        # (v_t - E_leak) ⊙ g_leak
+        z = z + (v_prev - rp_leak_all[None, :]) * g_leak
+
+        # add in the inputs
         if stim_to_cell_mapping is None:
-            z = z + u_t * stimulus_strength[None, :]
+            z = z - u_t * stimulus_strength[None, :]
         else:
             # because stimulus can be very sparse (only stimulate 3 cell types)
             # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
@@ -770,8 +981,8 @@ class ConductanceModel(NeuralModel):
             if torch.any(valid):
                 ci = cell_idx[valid]
                 si = stim_idx[valid]
-                z.index_add_(1, ci, stimulus_strength[None, ci] * u_t[:, si])
+                z.index_add_(1, ci, -stimulus_strength[None, ci] * u_t[:, si])
 
-        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
+        v_next = v_prev - self.dt * capacitance_inv * z
 
         return v_next

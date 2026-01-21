@@ -12,12 +12,9 @@ config = load_config()
 connectome_folder = Path(config["data"]["connectome_folder"])
 synapse_count_dtype = getattr(np, config["data"]["synapse_count_dtype"])
 root_id_dtype = getattr(np, config["data"]["root_id_dtype"])
-excitatory_nt = config["data"]["excitatory_nt"]
-inhibitory_nt = config["data"]["inhibitory_nt"]
 fly_eye = config["data"]["fly_eye"]
 use_intrinsic = config["data"]["use_intrinsic"]
 hemisphere_coverage = config["data"]["hemisphere_coverage"]
-synapse_count_threshold = config['data']['synapse_count_threshold']
 neurons_to_exclude = config['data']['neurons_to_exclude']
 
 # --- data sets ---
@@ -55,24 +52,6 @@ synaptic_connections_df = synaptic_connections_df[pre_and_post_are_visual]
 presynaptic_ids = synaptic_connections_df.pre_root_id.values
 postsynaptic_ids = synaptic_connections_df.post_root_id.values
 synapse_counts = synaptic_connections_df.syn_count.values
-neurotransmitters = synaptic_connections_df.nt_type.values
-
-# change synapse sign to reflect the neurotransmitter being used. If the neurotransmitter is not in our list, set
-# the connection to 0
-synapse_sign = np.zeros_like(synapse_counts)
-excitatory_connections = synaptic_connections_df.nt_type.isin(excitatory_nt)
-inhibitory = synaptic_connections_df.nt_type.isin(inhibitory_nt)
-synapse_sign[excitatory_connections] = 1
-synapse_sign[inhibitory] = -1
-
-# corrections: there are some synapses that don't follow convention.
-# C2 and C3 make excitatory connections onto L1 and L2, but inhibitory elsewhere
-# Need to look up root IDs for these cell types
-c2c3_root_ids = visual_neurons_df[visual_neurons_df['type'].isin(['C2', 'C3'])]['root_id'].values
-l1l2_root_ids = visual_neurons_df[visual_neurons_df['type'].isin(['L1', 'L2'])]['root_id'].values
-c2c3_bool = np.isin(presynaptic_ids, c2c3_root_ids)
-l1l2_bool = np.isin(postsynaptic_ids, l1l2_root_ids)
-synapse_sign[c2c3_bool & l1l2_bool] = 1
 
 # exclude photoreceptors and other neurons that interfere with learning
 # Note: neurons_to_exclude uses cell TYPE names, not root IDs
@@ -83,17 +62,6 @@ exclude_bool = np.isin(presynaptic_ids, excluded_root_ids) | np.isin(postsynapti
 presynaptic_ids = presynaptic_ids[~exclude_bool]
 postsynaptic_ids = postsynaptic_ids[~exclude_bool]
 synapse_counts = synapse_counts[~exclude_bool]
-synapse_sign = synapse_sign[~exclude_bool]
-
-# remove connections with fewer than synapse_count_threshold synapses
-keep_connections = synapse_counts >= synapse_count_threshold
-presynaptic_ids = presynaptic_ids[keep_connections]
-postsynaptic_ids = postsynaptic_ids[keep_connections]
-synapse_counts = synapse_counts[keep_connections]
-synapse_sign = synapse_sign[keep_connections]
-
-# make synapse counts signed
-synapse_counts *= synapse_sign
 
 # -- make vector with (matrix row, matrix col, value). Can be used to construct a sparse or dense matrix --
 # Get the list of all root IDs we actually use

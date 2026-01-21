@@ -169,7 +169,7 @@ for ns in cells_to_plot:
     chosen_persistence = model.persistence_logit[cell_index].sigmoid().detach().cpu().numpy()
     chosen_strength_in = model.input_strength_log[cell_index].exp().detach().cpu().numpy()
     chosen_strength_out = model.output_strength_log[cell_index].exp().detach().cpu().numpy()
-    chosen_offset = model.offset[cell_index].detach().cpu().numpy()
+    chosen_offset = model.threshold[cell_index].detach().cpu().numpy()
     chosen_stimulus_strength = model.stimulus_strength_log[cell_index].exp().detach().cpu().numpy()
 
     chosen_connections_in = ave_con[:, cell_index]
