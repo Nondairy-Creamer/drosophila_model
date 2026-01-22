@@ -48,7 +48,7 @@ frame_rate = int(1 / model.dt)  # fps for the output movie
 # --- Load the movie stimulus and optic flow ---
 if (stimulus_type == 'flow_360') or (stimulus_type == 'sintel'):
     print("Loading movie data...")
-    stimulus, optic_flow = du.get_stimulus(stimulus_type, config)
+    stimulus, optic_flow = su.get_stimulus(stimulus_type, config)
     stimulus = stimulus.numpy()
     optic_flow = optic_flow.numpy()
 

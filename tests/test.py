@@ -24,7 +24,7 @@ device = model.device
 dtype = model.dtype
 
 # --- grab the natural movie stimulus ---
-stimulus, optic_flow = du.get_stimulus('flow_360', config)
+stimulus, optic_flow = su.get_stimulus('flow_360', config)
 
 # --- run the model on the data ---
 estimated_optic_flow, initial_state = model.calculate_optic_flow(stimulus)
