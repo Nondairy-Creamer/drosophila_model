@@ -151,7 +151,7 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     return data_interp
 
 
-def get_dataset(data_set_type: str, config, column_phi_theta=None):
+def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])
     
@@ -162,7 +162,7 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
     temporal_frequencies = config['stimulus']['temporal_frequencies']
     stimulus_seed = config['stimulus']['seed']
 
-    if data_set_type == 'static_sine':
+    if stimulus_type == 'static_sine':
         if column_phi_theta is None:
             raise Exception('sine waves require column_phi_theta input')
         # --- get a sign wave stimulus ---
@@ -172,7 +172,7 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
             temporal_frequency=temporal_frequencies, dt=model_dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
         )
 
-    elif data_set_type == 'random_sine':
+    elif stimulus_type == 'random_sine':
         if column_phi_theta is None:
             raise Exception('sine waves require column_phi_theta input')
 
@@ -183,7 +183,7 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
             num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
         )
 
-    elif data_set_type == 'flow_360':
+    elif stimulus_type == 'flow_360':
         # --- grab the natural movie stimulus ---
         stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
         with open(stimulus_path, 'rb') as f:
@@ -217,7 +217,7 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
         stimulus = np.concatenate([blank_stim, stimulus], axis=0)
         optic_flow = np.concatenate([blank_flow, optic_flow], axis=0)
 
-    elif data_set_type == 'sintel':
+    elif stimulus_type == 'sintel':
         sintel_path = Path('../connectome_data/sintel_data.pkl')
         with open(sintel_path, 'rb') as f:
             stimulus_in = pickle.load(f)

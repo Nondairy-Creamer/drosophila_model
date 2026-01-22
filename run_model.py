@@ -86,7 +86,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             commit_hash=commit_hash,
         )
 
-    stimulus, optic_flow = du.get_dataset(config['data']['data_set_type'], config, model.column_phi_theta)
+    stimulus, optic_flow = du.get_stimulus(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
 
     # specify the target responses you expect for each cell type. this is what we will train on
     target = {}

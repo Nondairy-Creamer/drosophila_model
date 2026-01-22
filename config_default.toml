@@ -19,6 +19,7 @@ peak_lambda = 0.0
 l1_lambda = 0.0
 
 [stimulus]
+stimulus_type = 'random_sine'
 stim_time = 1.0
 pre_stim_time = 0.0
 post_stim_time = 0.0
@@ -33,7 +34,6 @@ temporal_frequencies = [
 ]
 
 [data]
-data_set_type = 'sintel'
 connectome_folder = "../connectome_data"
 fly_eye = "right"
 use_intrinsic = false
