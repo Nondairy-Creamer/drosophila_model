@@ -25,10 +25,11 @@ class NeuralModel(torch.nn.Module, ABC):
         self.init_inputs = params
     
     def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
-                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
+                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
+        self.commit_hash = commit_hash
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
         self.init_std = init_std
 
@@ -580,14 +581,14 @@ class CurrentModel(NeuralModel):
     inhibitory_nt = ['glut', 'gaba']
     
     def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
-                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
+                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         # Sign the synapse counts based on neurotransmitter type before calling parent init
         # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
         synapse_counts_coo = self._sign_synapses(synapse_counts_coo, cell_types, cell_type_transmitters)
         
         # Call parent init
         super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
-                         set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
+                         set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, commit_hash=commit_hash)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()
@@ -799,7 +800,7 @@ class ConductanceModel(NeuralModel):
     
     def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, 
                  nonlinearity='softplus', device='cpu', dtype='float32', set_max_sigma=False,
-                 dt=0.01, seed=None, init_std=0.1, count_threshold=2):
+                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         """
         Initialize a conductance-based neural model.
         
@@ -818,10 +819,11 @@ class ConductanceModel(NeuralModel):
             seed: Random seed for initialization (default: None)
             init_std: Standard deviation for parameter initialization noise (default: 0.1)
             count_threshold: Minimum synapse count to include a connection (default: 2)
+            commit_hash: Git commit hash the model was created with (default: None)
         """
         # Call parent init (handles count_threshold filtering and neurotransmitter setup)
         super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
-                         set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
+                         set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, commit_hash=commit_hash)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()

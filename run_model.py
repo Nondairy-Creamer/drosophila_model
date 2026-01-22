@@ -8,6 +8,7 @@ import data_utilities as du
 from datetime import datetime
 import training_utilities as tu
 import stimulus_utilities as su
+import model_utilities as mu
 import argparse
 
 
@@ -90,6 +91,11 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     model_type = config['model'].get('model_type')
     ModelClass = getattr(nm, model_type)
     
+    # Get current git commit hash for provenance tracking
+    commit_hash = mu.get_git_commit_hash()
+    if commit_hash:
+        print(f"Git commit: {commit_hash[:8]}")
+
     # create or load the model
     if model_path is not None:
         model_file = Path(model_path) / 'model.pt'
@@ -106,7 +112,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             device=config['model']['device'],
             dtype=config['model']['dtype'],
             dt=dt,
-            seed=seed
+            seed=seed,
+            commit_hash=commit_hash
         )
 
     stimulus, optic_flow = du.get_dataset(config['data']['data_set_type'], config, model.column_phi_theta)

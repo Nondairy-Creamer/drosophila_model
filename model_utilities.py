@@ -1,6 +1,23 @@
 import numpy as np
 import pandas as pd
+import subprocess
 import torch
+
+
+def get_git_commit_hash():
+    """Get the current git commit hash, or None if not in a git repo or git unavailable."""
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return None
 
 
 def compute_average_connections(model):
