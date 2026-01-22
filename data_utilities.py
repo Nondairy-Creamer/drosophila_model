@@ -160,6 +160,7 @@ def get_dataset(data_set_type: str, config, column_phi_theta=None):
     pre_stim_time = config['stimulus']['pre_stim_time']  # seconds sine is stationary before the sine wave starts moving
     post_stim_time = config['stimulus']['post_stim_time']  # seconds sine is stationary after the sine wave finishes moving
     temporal_frequencies = config['stimulus']['temporal_frequencies']
+    stimulus_seed = config['stimulus']['seed']
 
     if data_set_type == 'static_sine':
         if column_phi_theta is None:
