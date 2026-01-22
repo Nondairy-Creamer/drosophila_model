@@ -364,23 +364,30 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
             raise Exception('sine waves require column_phi_theta input')
         # --- get a sign wave stimulus ---
         # generate a sine wave on a cylinder around the fly
-        stimulus, optic_flow = su.create_balanced_sine_wave(
+        stimulus, optic_flow = create_balanced_sine_wave(
             column_phi_theta[:, 0], column_phi_theta[:, 1],
             temporal_frequency=temporal_frequencies, dt=model_dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
         )
+
+        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
     elif stimulus_type == 'random_sine':
         if column_phi_theta is None:
             raise Exception('sine waves require column_phi_theta input')
 
         # --- generate a sine wave with random tf over time
-        stimulus, optic_flow = su.create_random_tf_sine_wave(
+        stimulus, optic_flow = create_random_tf_sine_wave(
             column_phi_theta[:, 0], column_phi_theta[:, 1],
             tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'],
             num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
         )
 
+        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+
     elif stimulus_type == 'flow_360':
+        final_length = 98
         # --- grab the natural movie stimulus ---
         stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
         with open(stimulus_path, 'rb') as f:
@@ -399,22 +406,29 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
                 stimulus_in['forward_flows'].append(long_run_vect[:expected_length])
                 stimulus_in['forward_flows'].append(long_run_vect[expected_length:2*expected_length])
 
-        stimulus_out = np.stack(stimulus_in['responses'])
+        stimulus = np.stack(stimulus_in['responses'])
         optic_flow = np.stack(stimulus_in['forward_flows'])
-        stimulus_out /= 127.5
-        stimulus_out -= 1.0
+        stimulus /= 127.5
+        stimulus -= 1.0
 
+        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+        
         # Interpolate to model timestep
-        stimulus = interpolate_to_model_dt(stimulus_out, stimulus_dt, model_dt)
+        stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
         optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
-
-        # Add a blank stimulus (all zeros) with zero optic flow
-        blank_stim = np.zeros((1, stimulus.shape[1], stimulus.shape[2]))
-        blank_flow = np.zeros((1, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]))
-        stimulus = np.concatenate([blank_stim, stimulus], axis=0)
-        optic_flow = np.concatenate([blank_flow, optic_flow], axis=0)
+        
+        # Split into non-overlapping segments of final_length
+        num_stimuli, time_length, num_neurons = stimulus.shape
+        num_segments = time_length // final_length
+        if num_segments > 0:
+            # Reshape to split time dimension: (stimuli, segments*final_length, neurons) -> (stimuli*segments, final_length, neurons)
+            stimulus = stimulus[:, :num_segments*final_length, :].reshape(num_stimuli * num_segments, final_length, num_neurons)
+            # Same for optic_flow: (stimuli, segments*final_length, neurons, 2) -> (stimuli*segments, final_length, neurons, 2)
+            optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
 
     elif stimulus_type == 'sintel':
+        final_length = 100
         sintel_path = Path('../connectome_data/sintel_data.pkl')
         with open(sintel_path, 'rb') as f:
             stimulus_in = pickle.load(f)
@@ -433,19 +447,25 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
         # Interpolate to model timestep
         stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
         optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
-
-        # Add a blank stimulus (all zeros) with zero optic flow
-        blank_stim = torch.zeros((1, stimulus.shape[1], stimulus.shape[2]), device=device, dtype=dtype)
-        blank_flow = torch.zeros((1, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
-        stimulus = torch.cat([blank_stim, stimulus], dim=0)
-        optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
+        
+        # Split into non-overlapping segments of final_length
+        num_stimuli, time_length, num_neurons = stimulus.shape
+        num_segments = time_length // final_length
+        if num_segments > 0:
+            # Reshape to split time dimension: (stimuli, segments*final_length, neurons) -> (stimuli*segments, final_length, neurons)
+            stimulus = stimulus[:, :num_segments*final_length, :].reshape(num_stimuli * num_segments, final_length, num_neurons)
+            # Same for optic_flow: (stimuli, segments*final_length, neurons, 2) -> (stimuli*segments, final_length, neurons, 2)
+            optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
 
     # --- plot the stimuli ---
     # if column_phi_theta is not None:
     #     pu.xt_plot(column_phi_theta[:, 0], column_phi_theta[:, 1], optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
 
-    stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-    optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+    # Add a blank stimulus (all zeros) with zero optic flow
+    blank_stim = torch.zeros((1, stimulus.shape[1], stimulus.shape[2]), device=device, dtype=dtype)
+    blank_flow = torch.zeros((1, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
+    stimulus = torch.cat([blank_stim, stimulus], dim=0)
+    optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
 
     return stimulus, optic_flow
 
@@ -475,6 +495,9 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     if was_numpy:
         data = torch.from_numpy(data)
     
+    # Store original dtype to preserve it
+    original_dtype = data.dtype
+    
     original_shape = data.shape
     batch_size, original_time = original_shape[0], original_shape[1]
     remaining_dims = original_shape[2:]
@@ -488,13 +511,16 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     data_flat = data.reshape(batch_size, original_time, -1)  # (batch, time, features)
     data_flat = data_flat.permute(0, 2, 1)  # (batch, features, time)
     
-    # Interpolate along time dimension
+    # Interpolate along time dimension (F.interpolate requires float)
     data_interp = torch.nn.functional.interpolate(
         data_flat.float(), 
         size=new_time, 
         mode='linear', 
         align_corners=True
     )
+    
+    # Convert back to original dtype
+    data_interp = data_interp.to(dtype=original_dtype)
     
     # Reshape back: (batch, features, new_time) -> (batch, new_time, *remaining)
     data_interp = data_interp.permute(0, 2, 1)  # (batch, new_time, features)
@@ -506,3 +532,4 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
         data_interp = data_interp.numpy()
     
     return data_interp
+    
