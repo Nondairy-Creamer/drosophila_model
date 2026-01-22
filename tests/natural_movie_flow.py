@@ -23,22 +23,24 @@ import imageio as iio_v2
 
 import data_utilities as du
 import stimulus_utilities as su
-from neural_models import CurrentModel
+import neural_models as nm
 import training_utilities as tu
 
 # --- Configuration ---
-config = du.load_config()
+model_folder = Path('models/best_model_resaved')
+config = du.load_config(model_folder / 'config.toml')
 connectome_folder = Path(config['data']['connectome_folder'])
 output_folder = Path('figures/natural_movie')
 output_folder.mkdir(parents=True, exist_ok=True)
-stimulus_type = 'sintel'
+stimulus_type = 'sine'
 
 stim_index = 0   # which stimulus to visualize (first one)
 
 # --- Load the model ---
 print("Loading model...")
-model_path = 'models/best_model/model.pt'
-model = CurrentModel.load(model_path, device='cpu')
+model_type = config['model'].get('model_type')
+ModelClass = getattr(nm, model_type)
+model = ModelClass.load(model_folder / 'model.pt', device='cpu')
 device = model.device
 dtype = model.dtype
 frame_rate = int(1 / model.dt)  # fps for the output movie

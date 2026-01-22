@@ -5,22 +5,30 @@ from pathlib import Path
 from functools import reduce
 import tempfile
 import os
+import inspect
 from abc import ABC, abstractmethod
 
 
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
-    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
-                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
-        # capture constructor inputs early (before we mutate or derive types)
-        # we'll save these to so that we can load the class easily
-        params = locals().copy()
+    def _save_init_inputs(self):
+        """Save the __init__ inputs from the calling frame to self.init_inputs.
+        
+        Call this at the end of __init__ to capture the constructor arguments for serialization.
+        Child classes should call this after super().__init__() to overwrite with their own inputs.
+        """
+        frame = inspect.currentframe().f_back
+        params = frame.f_locals.copy()
         params.pop('self', None)
         params.pop('__class__', None)
         self.init_inputs = params
+    
+    def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
+                 set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
         super().__init__()
-
+        # Save constructor inputs for serialization (child classes will overwrite with their own)
+        self._save_init_inputs()
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
         self.init_std = init_std
 
@@ -65,10 +73,10 @@ class NeuralModel(torch.nn.Module, ABC):
         # --- create the matrix of synapse counts ---
         # create synapse counts matrix with either sparse or dense format
         # synapse counts sparse must be in the form N x 3 with [indices, (pre_synaptic, post_synaptic, count)]
-        # Filter out connections below the count threshold
+        # Filter out connections below the count threshold (use abs for signed synapses)
         self.count_threshold = count_threshold
         if count_threshold > 0:
-            mask = synapse_counts_coo[:, 2] >= count_threshold
+            mask = np.abs(synapse_counts_coo[:, 2]) >= count_threshold
             synapse_counts_coo = synapse_counts_coo[mask]
         
         # Store filtered COO for subclasses that may need it (e.g., ConductanceModel)
@@ -566,9 +574,13 @@ class NeuralModel(torch.nn.Module, ABC):
 
 class CurrentModel(NeuralModel):
     """Current-based neural model where synaptic input is modeled as current injection."""
+    
+    # Neurotransmitter sign mapping: excitatory = +1, inhibitory = -1
+    excitatory_nt = ['ach']
+    inhibitory_nt = ['glut', 'gaba']
+    
     def __init__(self, synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity='softplus', device='cpu', dtype='float32',
                  set_max_sigma=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2):
-        
         # Sign the synapse counts based on neurotransmitter type before calling parent init
         # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
         synapse_counts_coo = self._sign_synapses(synapse_counts_coo, cell_types, cell_type_transmitters)
@@ -577,10 +589,9 @@ class CurrentModel(NeuralModel):
         super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
                          set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
         
-            
-        # Neurotransmitter sign mapping: excitatory = +1, inhibitory = -1
-        self.excitatory_nt = ['ACH']
-        self.inhibitory_nt = ['GLUT', 'GABA']
+        # Save init inputs after super().__init__() to overwrite with this class's inputs
+        self._save_init_inputs()
+        
         self.max_allowed_sigma = 0.95
         
         # Initialize power vector for spectral norm calculation
@@ -811,6 +822,9 @@ class ConductanceModel(NeuralModel):
         # Call parent init (handles count_threshold filtering and neurotransmitter setup)
         super().__init__(synapse_counts_coo, cell_types, cell_type_transmitters, column_indices, column_phi_theta, nonlinearity, device, dtype,
                          set_max_sigma=False, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold)
+        
+        # Save init inputs after super().__init__() to overwrite with this class's inputs
+        self._save_init_inputs()
         
         # --- Split synapse_counts_coo into per-neurotransmitter sparse matrices ---
         # Use the filtered COO from parent class

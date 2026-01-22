@@ -11,11 +11,15 @@ import plotting_utilities as pu
 import data_utilities as du
 
 fit_model_readout = True
-model_folder = Path('models/best_model')
+model_folder = Path('models/best_on_sintel/20260120_181237_gpu0_run0')
 local_config = du.load_config()
 
 # Load model, stimulus, and config
-model = nm.CurrentModel.load(model_folder / 'model.pt', device=local_config['model']['device'])
+print("Loading model...")
+model_config = du.load_config(model_folder / 'config.toml')
+model_type = model_config['model'].get('model_type')
+ModelClass = getattr(nm, model_type)
+model = ModelClass.load(model_folder / 'model.pt', device='cpu')
 stimulus = torch.load(model_folder / 'cell_inputs.pt')
 target = torch.load(model_folder / 'target.pt')
 
