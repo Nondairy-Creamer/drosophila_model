@@ -168,7 +168,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
             output_l1 = model.output_strength_log.exp().mean()
             loss = loss + l1_lambda * (input_l1 + output_l1) / 2
 
+        # Record GPU-side loss scalar without sync (must happen before best-loss check
+        # so the current loss is included when syncing to loss_plot for checkpoints)
+        loss_is_nan = torch.isnan(loss)
+        loss_list.append(loss.detach())
+
         # Detect if you've found the best loss so far BEFORE updating weights (no sync)
+        # NaN < anything is False, so NaN losses won't overwrite best_loss
         if loss < best_loss:
             best_loss = loss.detach()
             time_since_best = 0
@@ -211,21 +217,23 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         else:
             time_since_best += 1
 
-        # Update weights AFTER checking/saving best model
-        loss.backward()
+        # Skip gradient update if loss is NaN to avoid corrupting weights
+        # The patience mechanism will still trigger a reload of the best model
+        if loss_is_nan:
+            print(f'Warning: NaN loss detected at step {step + 1}, skipping gradient update')
+        else:
+            # Update weights AFTER checking/saving best model
+            loss.backward()
 
-        # Optional gradient clipping (prefer norm if both provided)
-        if clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
-        elif clip_grad_value is not None:
-            torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
-        opt.step()
-
-        # Record GPU-side loss scalar without sync
-        loss_list.append(loss.detach())
+            # Optional gradient clipping (prefer norm if both provided)
+            if clip_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+            elif clip_grad_value is not None:
+                torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
+            opt.step()
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
-            if time_since_best > patience:
+            if (time_since_best > patience) or (loss_is_nan):
                 # Load the best model state into the existing model
                 checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
                 model.load_state_dict(checkpoint['state_dict'])
