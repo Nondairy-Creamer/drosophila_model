@@ -87,7 +87,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
     # Get model class from config
-    model_type = config['model'].get('model_type', 'ConductanceModel')
+    model_type = config['model'].get('model_type')
     ModelClass = getattr(nm, model_type)
     
     # create or load the model

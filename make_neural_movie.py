@@ -35,7 +35,9 @@ fig_folder = Path(model_folder / 'movie')
 device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
 connectome_folder = Path(model_config['data']['connectome_folder'])
-model = nm.CurrentModel.load(model_folder / 'model.pt', device=device)
+model_type = model_config['model'].get('model_type')
+ModelClass = getattr(nm, model_type)
+model = ModelClass.load(model_folder / 'model.pt', device=device)
 _target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
 target = {k: (v.to(device=model.device, dtype=dtype) if torch.is_tensor(v) else v)
             for k, v in _target_loaded.items()}
