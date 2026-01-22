@@ -3,3 +3,4 @@ figures/*
 !figures/.gitkeep
 models/*
 !models/.gitkeep
+__pycache__/

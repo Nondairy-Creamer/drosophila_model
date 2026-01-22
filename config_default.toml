@@ -1,10 +1,11 @@
 [model]
-model_type = 'ConductanceModel'
+model_type = 'CurrentModel'
 device = "cuda"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "Softplus"
 dt = 0.01
+synapse_count_threshold = 2
 
 [training]
 num_steps = 100000

@@ -50,37 +50,6 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
     synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
     
-    # Filter to only include cells with known neurotransmitters (ACH, GABA, GLUT)
-    valid_neurotransmitters = ['ACH', 'GABA', 'GLUT']
-    valid_cell_mask = cell_info_df['neurotransmitter'].isin(valid_neurotransmitters)
-    num_cells_before = len(cell_info_df)
-    
-    # Get old indices of valid cells and create mapping to new indices
-    valid_old_indices = np.where(valid_cell_mask)[0]
-    old_to_new_idx = {old_idx: new_idx for new_idx, old_idx in enumerate(valid_old_indices)}
-    
-    # Filter cell_info_df
-    cell_info_df = cell_info_df[valid_cell_mask].reset_index(drop=True)
-    num_cells_after = len(cell_info_df)
-
-    # Filter synapse_counts_df to only keep connections where both neurons are valid
-    valid_old_indices_set = set(old_to_new_idx.keys())
-    valid_connections = (
-        synapse_counts_df['pre_matrix_ind'].isin(valid_old_indices_set) & 
-        synapse_counts_df['post_matrix_ind'].isin(valid_old_indices_set)
-    )
-    synapse_counts_df = synapse_counts_df[valid_connections].copy()
-    
-    # Remap indices to new values
-    synapse_counts_df['pre_matrix_ind'] = synapse_counts_df['pre_matrix_ind'].map(old_to_new_idx)
-    synapse_counts_df['post_matrix_ind'] = synapse_counts_df['post_matrix_ind'].map(old_to_new_idx)
-
-    # Get cell_type_transmitters array indexed by cell type (same order as np.unique(cell_types))
-    # Each cell type has one neurotransmitter - get the first one for each type
-    unique_cell_types = np.unique(cell_info_df['type'].to_numpy())
-    type_to_nt = cell_info_df.drop_duplicates('type').set_index('type')['neurotransmitter']
-    cell_type_transmitters = type_to_nt.loc[unique_cell_types].values
-
     # first generate the information about the columns - their location and ID
     # we'll use the columns that have all our input and output neurons
     input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
@@ -105,15 +74,16 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         model = ModelClass(
             synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
             cell_types=cell_info_df['type'].to_numpy(),
-            cell_type_transmitters=cell_type_transmitters,
+            neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
             column_indices=cell_info_df['column_index'].to_numpy(),
             column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
             nonlinearity=config['model']['nonlinearity'],
+            count_threshold=config['model']['synapse_count_threshold'],
             device=config['model']['device'],
             dtype=config['model']['dtype'],
             dt=dt,
             seed=seed,
-            commit_hash=commit_hash
+            commit_hash=commit_hash,
         )
 
     stimulus, optic_flow = du.get_dataset(config['data']['data_set_type'], config, model.column_phi_theta)
