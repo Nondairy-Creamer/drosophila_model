@@ -84,7 +84,6 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             dt=dt,
             seed=seed,
             commit_hash=commit_hash,
-            init_new_model=False,
         )
 
     stimulus, optic_flow = su.get_stimulus(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
