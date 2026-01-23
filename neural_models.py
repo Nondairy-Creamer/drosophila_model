@@ -700,7 +700,7 @@ class CurrentModel(NeuralModel):
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()
         
-        self.max_allowed_sigma = 0.95
+        self.max_allowed_sigma = 0.90
         
         # Initialize power vector for spectral norm calculation
         power_vec_np = self.rng.standard_normal(self.num_neurons)
