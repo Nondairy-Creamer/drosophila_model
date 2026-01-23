@@ -121,6 +121,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
+        # Move optimizer state tensors to model device (state dict may have been loaded to CPU)
+        for state in opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(model.device)
 
     if loss_history is None:
         loss_plot = []
@@ -241,6 +246,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
                 # Load the best optimizer state and reduce learning rate
                 opt_state = torch.load(model_save_folder / 'model_opt.pt', map_location='cpu', weights_only=False)
                 opt.load_state_dict(opt_state['optimizer_state_dict'])
+
+                # Move optimizer state tensors to model device (load_state_dict keeps them on CPU)
+                for state in opt.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(model.device)
 
                 alpha = alpha * alpha_factor
                 for param_group in opt.param_groups:
