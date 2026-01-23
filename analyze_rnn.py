@@ -38,7 +38,8 @@ for folder in matching_folders:
     if opt_path.exists():
         opt_data = torch.load(opt_path, weights_only=False)
         min_loss = min(opt_data['loss'])
-        model_losses.append((folder, min_loss))
+        if ~np.isnan(min_loss) and ~np.isinf(min_loss):
+            model_losses.append((folder, min_loss))
         print(f"  {folder.name}: min loss = {min_loss:.6f}")
     else:
         print(f"  {folder.name}: model_opt.pt not found, skipping")
