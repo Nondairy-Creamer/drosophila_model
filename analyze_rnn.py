@@ -80,7 +80,9 @@ model_config = du.load_config(model_folder / 'config.toml')
 computer_config = du.load_config()
 device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
-model = nm.CurrentModel.load(model_folder / 'model.pt', device=device)
+model_type = model_config['model'].get('model_type')
+ModelClass = getattr(nm, model_type)
+model = ModelClass.load(model_folder / 'model.pt', device=device)
 stimulus = torch.load(model_folder / 'cell_inputs.pt', weights_only=True).to(device=model.device)
 # target is now a dict of tensors; load and move entries to the right device/dtype
 _target_loaded = torch.load(model_folder / 'target.pt', weights_only=False)
@@ -169,7 +171,7 @@ for ns in cells_to_plot:
     chosen_persistence = model.persistence_logit[cell_index].sigmoid().detach().cpu().numpy()
     chosen_strength_in = model.input_strength_log[cell_index].exp().detach().cpu().numpy()
     chosen_strength_out = model.output_strength_log[cell_index].exp().detach().cpu().numpy()
-    chosen_offset = model.threshold[cell_index].detach().cpu().numpy()
+    chosen_offset = model.offset[cell_index].detach().cpu().numpy()
     chosen_stimulus_strength = model.stimulus_strength_log[cell_index].exp().detach().cpu().numpy()
 
     chosen_connections_in = ave_con[:, cell_index]

@@ -279,12 +279,24 @@ class NeuralModel(torch.nn.Module, ABC):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
                     outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
 
+        # Check for NaN predictions indicating unstable dynamics
+        total_elements = 0
+        nan_elements = 0
+        for key in readout_keys:
+            fr_tensor = outputs['firing_rate'][key]
+            total_elements += fr_tensor.numel()
+            nan_elements += torch.isnan(fr_tensor).sum().item()
+        if total_elements > 0 and nan_elements / total_elements > 0.5:
+            print(f'Warning: >50% of predictions are NaN ({nan_elements}/{total_elements}), potentially unstable dynamics')
+
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def find_steady_state(self, run_time=100, max_iter=25):
         inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
         # Start from current steady state buffer
+        original_state = self.steady_state.clone()
         initial_state = self.steady_state.unsqueeze(0)
+        initial_ave = initial_state.abs().mean()
 
         for i in range(max_iter):
             final_state = self.predict(inputs, init_state=initial_state)[1]
@@ -296,7 +308,13 @@ class NeuralModel(torch.nn.Module, ABC):
                 return
             
             initial_state = final_state.detach().clone()
-        
+
+        # Check for exploding dynamics: if new state is much larger than previous
+        final_ave = final_state.abs().mean()
+        if final_ave / (initial_ave + 1) > 1e6:
+            print('Warning: cannot find steady state, dynamics may be unstable')
+            return
+            
         print('steady state not found after', max_iter, 'iterations')
         self.steady_state.copy_(final_state.detach().squeeze(0))
 
