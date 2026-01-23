@@ -3,71 +3,105 @@ import pandas as pd
 from pathlib import Path
 import data_utilities as du
 from matplotlib import pyplot as plt
+import neural_models as nm
 
 
 # Load configuration from TOML file
 config = du.load_config()
 
-# --- load in connectivity and cell info data ---
+# --- Initialize a CurrentModel from parquet data ---
 connectome_folder = Path(config['data']['connectome_folder'])
 cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
 column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-num_neurons = len(cell_info_df)
-num_columns = len(column_info_df)
+
+model = nm.CurrentModel(
+    synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
+    cell_types=cell_info_df['type'].to_numpy(),
+    neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
+    column_indices=cell_info_df['column_index'].to_numpy(),
+    column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
+    device='cpu',
+    init_new_model=False,  # Skip steady state finding for analysis
+)
+
+# Extract data from the model (uses filtered neurons/synapses)
+cell_types = model.cell_types
+column_indices = model.column_indices
+column_phi_theta = model.column_phi_theta  # (num_columns, 2) with (phi, theta)
+num_neurons = model.num_neurons
+num_columns = model.num_columns
+
+# Extract COO data from model.synapse_counts sparse tensor (post all model manipulation)
+synapse_counts_sparse = model.synapse_counts.coalesce()
+coo_indices = synapse_counts_sparse.indices().cpu().numpy()  # shape (2, num_synapses): [row=post, col=pre]
+coo_values = synapse_counts_sparse.values().cpu().numpy()
+coo_post = coo_indices[0]  # postsynaptic neuron indices
+coo_pre = coo_indices[1]   # presynaptic neuron indices
 
 
-# get all neurons that synpase onto a specific cell and where they are spatially
+# get all neurons that synapse onto a specific cell and where they are spatially
 
 chosen_type = 'T4a'
-chosen_type_indexes = np.where(cell_info_df['type'] == chosen_type)[0]
+chosen_type_indexes = np.where(cell_types == chosen_type)[0]
 chosen_presyn = ['Mi9', 'Mi1', 'Mi4']
-chosen_presyn_index = [np.where(cell_info_df.type == i)[0] for i in chosen_presyn]
+chosen_presyn_index = [np.where(cell_types == i)[0] for i in chosen_presyn]
 all_chosen = np.unique(np.concatenate(chosen_presyn_index))
 
 
 pre_syn = {i: [] for i in chosen_presyn}
 # loop through each T4a cell and plot the location of its connections
 for cti in chosen_type_indexes:
-    # get the neurons presynaptic to this neuron
-    this_column_id = cell_info_df.iloc[cti].column_id
+    # get the column for this neuron
+    this_column_idx = column_indices[cti]
 
-    if np.isnan(this_column_id):
+    if np.isnan(this_column_idx):
         continue
 
-    this_column_id = int(this_column_id)
+    this_column_idx = int(this_column_idx)
 
-    column_x = column_info_df[column_info_df.column_id == this_column_id].x_flat.to_numpy()
-    column_y = column_info_df[column_info_df.column_id == this_column_id].y_flat.to_numpy()
-    chosen_type_xy = np.array([column_x, column_y]).T
+    # Get the phi, theta position of this column
+    column_phi = column_phi_theta[this_column_idx, 0]
+    column_theta = column_phi_theta[this_column_idx, 1]
+    chosen_type_xy = np.array([[column_phi, column_theta]])
 
-    these_connections = synapse_counts_df[synapse_counts_df.post_matrix_ind == cti]
-    these_connections = these_connections[these_connections.pre_matrix_ind.isin(all_chosen)]
-    these_connections_indexes = these_connections.pre_matrix_ind.to_numpy()
+    # Find presynaptic connections to this neuron from the COO arrays
+    # coo_post has postsynaptic indices, coo_pre has presynaptic indices
+    post_mask = coo_post == cti
+    pre_indices = coo_pre[post_mask]
+    
+    # Filter to only chosen presynaptic types
+    in_chosen = np.isin(pre_indices, all_chosen)
+    these_connections_indexes = pre_indices[in_chosen]
 
     for tc in these_connections_indexes:
         xy = np.zeros(2)
-        tc_column_id = cell_info_df.iloc[tc].column_id
+        tc_column_idx = column_indices[tc]
 
-        if np.isnan(tc_column_id):
+        if np.isnan(tc_column_idx):
             continue
 
-        tc_column_id = int(tc_column_id)
+        tc_column_idx = int(tc_column_idx)
 
-        xy[0] = column_info_df.loc[column_info_df.column_id == tc_column_id, 'x_flat'].iloc[0]
-        xy[1] = column_info_df.loc[column_info_df.column_id == tc_column_id, 'y_flat'].iloc[0]
-        tc_type = cell_info_df.iloc[tc].type
+        xy[0] = column_phi_theta[tc_column_idx, 0]
+        xy[1] = column_phi_theta[tc_column_idx, 1]
+        tc_type = cell_types[tc]
         pre_syn[tc_type].append(xy[None, :] - chosen_type_xy)
 
 pre_syn = {i: np.concatenate(pre_syn[i], axis=0) for i in chosen_presyn}
 
+# Create output directory
+output_dir = Path('figures/connectome_analysis')
+output_dir.mkdir(parents=True, exist_ok=True)
+
 plt.figure()
 colors = ['orange', 'blue', 'red']
 for pi, p in enumerate(pre_syn):
-    rand_scatter = np.random.randn(pre_syn[p].shape[0], pre_syn[p].shape[1]) / 10
+    rand_scatter = 0*np.random.randn(pre_syn[p].shape[0], pre_syn[p].shape[1]) / 10
     plt.scatter(pre_syn[p][:, 0] + rand_scatter[:, 0], pre_syn[p][:, 1]+ rand_scatter[:, 1], color=colors[pi])
 plt.legend(pre_syn.keys())
-plt.xlabel('<- anterior, posterior ->')
-plt.ylabel('<- down, up ->')
-plt.show()
-a=1
+plt.xlabel('delta phi (azimuth)')
+plt.ylabel('delta theta (elevation)')
+plt.title(f'Presynaptic inputs to {chosen_type}')
+plt.savefig(output_dir / f'presynaptic_inputs_to_{chosen_type}.png', dpi=150, bbox_inches='tight')
+plt.close()

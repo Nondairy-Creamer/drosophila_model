@@ -13,7 +13,7 @@ class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
     def __init__(self, synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta, 
-                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='softplus', device='cpu', dtype='float32',
+                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
@@ -686,7 +686,7 @@ class CurrentModel(NeuralModel):
     """Current-based neural model where synaptic input is modeled as current injection."""
     
     def __init__(self, synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='softplus', device='cpu', dtype='float32',
+                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         # Call parent init (handles NT filtering and orphan removal)
         super().__init__(synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta,
@@ -907,7 +907,7 @@ class ConductanceModel(NeuralModel):
     """Conductance-based neural model where synaptic input is modeled as conductance changes."""
     
     def __init__(self, synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='softplus', device='cpu', dtype='float32', init_new_model=True,
+                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32', init_new_model=True,
                  dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         """
         Initialize a conductance-based neural model.
@@ -920,7 +920,7 @@ class ConductanceModel(NeuralModel):
             column_phi_theta: Array of (phi, theta) coordinates for each column
             excitatory_nt: List of excitatory neurotransmitter names (default: ['ACH'])
             inhibitory_nt: List of inhibitory neurotransmitter names (default: ['GLUT', 'GABA'])
-            nonlinearity: Activation function name (default: 'softplus')
+            nonlinearity: Activation function name (default: 'Softplus')
             device: Torch device (default: 'cpu')
             dtype: Torch dtype as string (default: 'float32')
             init_new_model: Do anything a new model needs like finding a baseline (default: True)
@@ -1116,7 +1116,7 @@ class ConductanceModel(NeuralModel):
             - u_t: external stimulus
             - D_{in,r}, D_{out,r}: input/output scaling matrices for neurotransmitter r
             - S_r: synapse count matrix for neurotransmitter r
-            - f: nonlinearity (e.g., relu/softplus)
+            - f: nonlinearity (e.g., ReLU/Softplus)
             - θ: firing threshold offset
         
         Args:
