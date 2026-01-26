@@ -1002,23 +1002,35 @@ class ConductanceModel(NeuralModel):
         
         # --- Input strength: per cell type per transmitter ---
         # Shape: (num_transmitters, num_cell_types)
+        # Initialize based on fan-in: how many synapses each cell type receives from each transmitter
         self.input_strength_log = torch.zeros(self.num_transmitters, self.num_cell_types, dtype=self.dtype, device=self.device)
         
-        # --- Output strength: per cell type (like CurrentModel) ---
-        # Shape: (num_cell_types,)
-        # Initialize based on average fan-out per cell type across all transmitters
-        synapses_out_per_neuron = torch.zeros(self.num_neurons, dtype=self.dtype, device=self.device)
         for ri in range(self.num_transmitters):
-            synapses_out_per_neuron += self.synapse_counts[ri].pow(2).sum(dim=0).to_dense()
+            # Fan-in per neuron for this transmitter (sum over presynaptic, i.e., columns)
+            # synapse_counts[ri] is (post, pre), so sum(dim=1) gives fan-in per post-synaptic neuron
+            synapses_in_per_neuron = self.synapse_counts[ri].pow(2).sum(dim=1).to_dense()
+            
+            for cti, ct in enumerate(self.unique_cell_types):
+                ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+                fan_in = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+                self.input_strength_log[ri, cti] = -0.5 * torch.log(fan_in)
         
-        # Average fan-out per cell type
-        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
+        # --- Output strength: per cell type ---
+        # Shape: (num_cell_types,)
+        # Initialize based on fan-out for the transmitter that each cell type expresses
+        self.output_strength_log = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
+        
         for cti, ct in enumerate(self.unique_cell_types):
             ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
-            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
-        
-        output_strength_log_init = -0.5 * torch.log(synapses_out_per_cell_type)
-        self.output_strength_log = output_strength_log_init
+            # Find which transmitter this cell type expresses
+            ct_transmitter = self.cell_type_transmitters[cti]
+            ri = np.where(self.unique_transmitters == ct_transmitter)[0][0]
+            
+            # Fan-out per neuron for this transmitter (sum over postsynaptic, i.e., rows)
+            # synapse_counts[ri] is (post, pre), so sum(dim=0) gives fan-out per pre-synaptic neuron
+            synapses_out_per_neuron = self.synapse_counts[ri].pow(2).sum(dim=0).to_dense()
+            fan_out = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+            self.output_strength_log[cti] = -0.5 * torch.log(fan_out)
         
         # --- Convert to Parameters ---
         self.rp_transmitter = torch.nn.Parameter(self.rp_transmitter)
