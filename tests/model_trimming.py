@@ -17,7 +17,7 @@ import training_utilities as tu
 import model_utilities as mu
 
 # --- Configuration ---
-model_path = 'models/best_model/model.pt'
+model_path = 'models/best_model_resaved/model.pt'
 loss_threshold = 1.10  # Stop when loss increases to 110% of starting value (10% worse)
 local_config = du.load_config()
 

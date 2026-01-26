@@ -179,6 +179,9 @@ class NeuralModel(torch.nn.Module, ABC):
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):
+            input_neurons = [i for i in input_neurons if i in self.unique_cell_types]
+            output_neurons = [i for i in output_neurons if i in self.unique_cell_types]
+
             # get a mapping from the stimulus (batch, time, columns) columns to neurons
             input_neuron_indices, input_column_indices = self.get_shared_columns(input_neurons)
             input_column_indices_np = input_column_indices
@@ -250,6 +253,10 @@ class NeuralModel(torch.nn.Module, ABC):
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def find_steady_state(self, run_time=100, max_iter=25):
+        # TODO remove this
+        print('Finding steady state currently broken. Skipping')
+        return
+        
         inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
         # Start from current steady state buffer
         original_state = self.steady_state.clone()

@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 import sys
 
 if len(sys.argv) == 1:
-    base_folder = Path('models/20251128_224751')
+    base_folder = Path('models/20260126_131210')
 else:
     base_folder = Path(sys.argv[1])
 
@@ -130,7 +130,8 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 
 
 # --- select some additional neurons for plotting ---
-cells_to_plot = ['L1', 'L2', 'Mi1', 'Tm3', 'Mi9', 'Mi4', 'C3', 'CT1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+# cells_to_plot = ['L1', 'L2', 'Mi1', 'Tm3', 'Mi9', 'Mi4', 'C3', 'CT1', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+cells_to_plot = ['L2', 'T5a', 'T5b', 'T5c', 'T5d', 'L4', 'Tm1', 'Tm2', 'Tm4', 'Tm9']
 
 # --- silence certain neurons ---
 neurons_to_silence = []

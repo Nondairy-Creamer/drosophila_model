@@ -467,6 +467,14 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
     stimulus = torch.cat([blank_stim, stimulus], dim=0)
     optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
 
+    # Add pre-stimulus interval (zero stimulus with zero optic flow) to the beginning of each stimulus
+    pre_stim_points = int(pre_stim_time / model_dt)
+    if pre_stim_points > 0:
+        pre_stim = torch.zeros((stimulus.shape[0], pre_stim_points, stimulus.shape[2]), device=device, dtype=dtype)
+        pre_flow = torch.zeros((optic_flow.shape[0], pre_stim_points, optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
+        stimulus = torch.cat([pre_stim, stimulus], dim=1)
+        optic_flow = torch.cat([pre_flow, optic_flow], dim=1)
+
     return stimulus, optic_flow
 
 def interpolate_to_model_dt(data, stimulus_dt, model_dt):
@@ -532,4 +540,47 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
         data_interp = data_interp.numpy()
     
     return data_interp
+
+
+def get_synthetic_data(model, stimulus, input_neurons, output_neurons):
+    """
+    Generate synthetic target data by running a noise-perturbed model.
     
+    Creates a copy of the model, adds noise to its parameters, runs the stimulus
+    through it, and returns the firing rates as target data.
+    
+    Args:
+        model: Neural model instance with add_noise_to_parameters and predict methods
+        stimulus: Input stimulus tensor [batches, time, columns]
+        input_neurons: List of input neuron types (e.g., ['L1', 'L2', 'L3'])
+        output_neurons: List of output neuron types (e.g., ['T4a', 'T4b', ...])
+        
+    Returns:
+        target: Dictionary mapping output neuron types to their firing rate tensors
+    """
+    import copy
+    
+    # Create a deep copy of the model to avoid modifying the original
+    perturbed_model = copy.deepcopy(model)
+    
+    # Add noise to the copied model's parameters
+    perturbed_model.add_noise_to_parameters()
+    perturbed_model.add_noise_to_parameters()
+    perturbed_model.add_noise_to_parameters()
+    perturbed_model.add_noise_to_parameters()
+    perturbed_model.add_noise_to_parameters()
+    
+    # Run the stimulus through the perturbed model
+    with torch.no_grad():
+        pred, _, _ = perturbed_model.predict(
+            stimulus,
+            input_neurons=input_neurons,
+            output_neurons=output_neurons,
+            init_state=None
+        )
+    
+    # Extract the firing rates as target dictionary
+    target = {neuron: pred['firing_rate'][neuron].clone() for neuron in output_neurons}
+    
+    return target, perturbed_model
+

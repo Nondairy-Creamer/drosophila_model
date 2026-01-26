@@ -44,17 +44,32 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     device = torch.device(config['model']['device'])
     dt = config['model']['dt']
 
+    # save the config file and inputs
+    if timestamp is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    if run_id is not None:
+        model_save_folder = Path(f'models/{timestamp}_{run_id}')
+    else:
+        model_save_folder = Path('models/' + timestamp)
+    model_save_folder.mkdir(parents=True, exist_ok=True)
+
     # --- load in connectivity and cell info data ---
     connectome_folder = Path(config['data']['connectome_folder'])
     cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
     synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-    
+    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+
     # first generate the information about the columns - their location and ID
     # we'll use the columns that have all our input and output neurons
     input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
+
+    if len(config['model']['use_connectome_subset']) > 0:
+        cell_info_df, synapse_counts_df = du.get_connectome_subset(cell_info_df, synapse_counts_df, config['model']['use_connectome_subset'])
+        input_neurons = [i for i in input_neurons if i in config['model']['use_connectome_subset']]
+        output_neurons_direction = [output_neurons_direction[i] for i in range(len(output_neurons)) if output_neurons[i] in config['model']['use_connectome_subset']]
+        output_neurons = [i for i in output_neurons if i in config['model']['use_connectome_subset']]
 
     # Get model class from config
     model_type = config['model'].get('model_type')
@@ -89,36 +104,25 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     stimulus, optic_flow = su.get_stimulus(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
 
-    # specify the target responses you expect for each cell type. this is what we will train on
-    target = {}
+    if config['training']['use_synthetic_data']:
+        target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
+        target_model.save(model_save_folder / 'target_model.pt')
 
-    # --- make stimulus for random velocity sine wave ---
-    # Use torch.relu to create independent copies and avoid in-place modification bugs
-    for n, d in zip(output_neurons, output_neurons_direction):
-        if d == 'right':
-            target[n] = torch.relu(optic_flow[:, :, :, 0])
-        elif d == 'left':
-            target[n] = torch.relu(-optic_flow[:, :, :, 0])
-        elif d == 'up':
-            target[n] = torch.relu(optic_flow[:, :, :, 1])
-        elif d == 'down':
-            target[n] = torch.relu(-optic_flow[:, :, :, 1])
-
-    # Add zero baseline: no stimulus should produce no output
-    zero_stimulus = torch.zeros(1, stimulus.shape[1], stimulus.shape[2], dtype=stimulus.dtype, device=stimulus.device)
-    stimulus = torch.cat([stimulus, zero_stimulus], dim=0)
-    for n in output_neurons:
-        zero_target = torch.zeros(1, target[n].shape[1], target[n].shape[2], dtype=target[n].dtype, device=target[n].device)
-        target[n] = torch.cat([target[n], zero_target], dim=0)
-
-    # save the config file and inputs
-    if timestamp is None:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    if run_id is not None:
-        model_save_folder = Path(f'models/{timestamp}_{run_id}')
     else:
-        model_save_folder = Path('models/' + timestamp)
-    model_save_folder.mkdir(parents=True, exist_ok=True)
+        # specify the target responses you expect for each cell type. this is what we will train on
+        target = {}
+
+        # --- make stimulus for random velocity sine wave ---
+        # Use torch.relu to create independent copies and avoid in-place modification bugs
+        for n, d in zip(output_neurons, output_neurons_direction):
+            if d == 'right':
+                target[n] = torch.relu(optic_flow[:, :, :, 0])
+            elif d == 'left':
+                target[n] = torch.relu(-optic_flow[:, :, :, 0])
+            elif d == 'up':
+                target[n] = torch.relu(optic_flow[:, :, :, 1])
+            elif d == 'down':
+                target[n] = torch.relu(-optic_flow[:, :, :, 1])
 
     # Save seed info to config (filter out None values since TOML doesn't support them)
     run_info = {'seed': seed, 'device': str(device), 'run_id': run_id}

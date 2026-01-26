@@ -33,8 +33,9 @@ def compute_average_connections(model):
     values = model.synapse_counts.values().cpu().numpy()    # shape (nnz,)
 
     # Get cell type index for each pre and post neuron in the synapse list
-    pre_types = model.neuron_to_type_index[indices[0]].cpu().numpy()
-    post_types = model.neuron_to_type_index[indices[1]].cpu().numpy()
+    # indices[0] = rows = postsynaptic, indices[1] = cols = presynaptic
+    post_types = model.neuron_to_type_index[indices[0]].cpu().numpy()
+    pre_types = model.neuron_to_type_index[indices[1]].cpu().numpy()
 
     # Use pandas groupby to compute mean for each (pre_type, post_type) pair
     synapse_df = pd.DataFrame({

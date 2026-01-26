@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 import tempfile
 from typing import Any, Dict
-import torch
+import pandas as pd
 import numpy as np
 import pickle
 import plotting_utilities as pu
@@ -129,3 +129,35 @@ def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
             os.close(dir_fd)
         except Exception:
             pass
+
+
+def get_connectome_subset(
+    cell_info_df: pd.DataFrame,
+    synapse_counts_df: pd.DataFrame,
+    cell_types: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Filter connectome data to include only specified cell types.
+    
+    Args:
+        cell_info_df: DataFrame with cell information (must have 'type' and 'root_id' columns)
+        synapse_counts_df: DataFrame with synapse counts (must have 'pre_root_id' and 'post_root_id' columns)
+        column_info_df: DataFrame with column information (currently unused but included for API consistency)
+        cell_types: List of cell type names to keep
+        
+    Returns:
+        Tuple of (filtered_cell_info_df, filtered_synapse_counts_df)
+    """
+    # Filter cell_info_df to only include specified cell types
+    filtered_cell_info_df = cell_info_df[cell_info_df['type'].isin(cell_types)].copy().reset_index(drop=True)
+    
+    # Get the set of root_ids that remain after filtering
+    valid_root_ids = set(filtered_cell_info_df['root_id'])
+    
+    # Filter synapse_counts_df to only include synapses where both pre and post neurons are in the subset
+    filtered_synapse_counts_df = synapse_counts_df[
+        synapse_counts_df['pre_root_id'].isin(valid_root_ids) &
+        synapse_counts_df['post_root_id'].isin(valid_root_ids)
+    ].copy().reset_index(drop=True)
+    
+    return filtered_cell_info_df, filtered_synapse_counts_df
