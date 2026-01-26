@@ -4,3 +4,5 @@ figures/*
 models/*
 !models/.gitkeep
 __pycache__/
+
+.DS_Store

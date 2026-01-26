@@ -16,7 +16,7 @@ column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.pa
 synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
 
 model = nm.CurrentModel(
-    synapse_counts_coo=synapse_counts_df[['pre_matrix_ind', 'post_matrix_ind', 'synapse_counts']].to_numpy(),
+    synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),
     cell_types=cell_info_df['type'].to_numpy(),
     neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
     column_indices=cell_info_df['column_index'].to_numpy(),

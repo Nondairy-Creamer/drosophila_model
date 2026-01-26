@@ -1,6 +1,7 @@
 from logging import warning
 import torch
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from functools import reduce
 import tempfile
@@ -12,7 +13,7 @@ from abc import ABC, abstractmethod
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
-    def __init__(self, synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta, 
+    def __init__(self, synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         super().__init__()
@@ -45,36 +46,45 @@ class NeuralModel(torch.nn.Module, ABC):
         # Ensure neurotransmitters is a numpy array
         neurotransmitters = np.array(neurotransmitters)
         
-        # --- Filter neurons by valid neurotransmitters ---
-        synapse_counts_coo, cell_types, neurotransmitters, column_indices = self._filter_neurons_by_neurotransmitter(
-            synapse_counts_coo, cell_types, neurotransmitters, column_indices, valid_neurotransmitters
-        )
+        # synapse_counts_coo has [pre_root_id, post_root_id, count]
+        # Get the root_ids that define neuron ordering (from cell_info which was ordered by unique synapse root IDs)
+        root_ids = np.unique(synapse_counts_coo[:, 0:2])
         
-        # --- Apply synapse count threshold ---
+        # --- Filter neurons by valid neurotransmitters (while still using root IDs) ---
+        valid_nt_mask = np.isin(neurotransmitters, valid_neurotransmitters)
+        valid_root_ids = set(root_ids[valid_nt_mask])
+        num_filtered_nt = np.sum(~valid_nt_mask)
+        if num_filtered_nt > 0:
+            # Filter synapses where both pre and post have valid neurotransmitters
+            pre_valid = np.isin(synapse_counts_coo[:, 0], list(valid_root_ids))
+            post_valid = np.isin(synapse_counts_coo[:, 1], list(valid_root_ids))
+            synapse_counts_coo = synapse_counts_coo[pre_valid & post_valid]
+            print(f"Filtered {num_filtered_nt} neurons with invalid neurotransmitters")
+        
+        # --- Apply synapse count threshold (still using root IDs) ---
         if count_threshold > 0:
             mask = np.abs(synapse_counts_coo[:, 2]) >= count_threshold
             synapse_counts_coo = synapse_counts_coo[mask]
         
-        # --- Remove orphaned neurons (no connections in or out) ---
-        num_neurons_current = len(cell_types)
-        pre_indices = synapse_counts_coo[:, 0].astype(int)
-        post_indices = synapse_counts_coo[:, 1].astype(int)
-        connected_neurons = np.unique(np.concatenate([pre_indices, post_indices]))
+        # --- Remove orphaned neurons: keep only neurons that appear in remaining synapses ---
+        connected_root_ids = np.unique(synapse_counts_coo[:, 0:2])
+        num_orphaned = len(root_ids) - len(connected_root_ids)
+        if num_orphaned > 0:
+            print(f"Removed {num_orphaned} orphaned neurons (no connections after thresholding)")
         
-        if len(connected_neurons) < num_neurons_current:
-            # Create mapping from old indices to new indices
-            orphan_old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(connected_neurons)}
-            
-            # Filter cell_types, neurotransmitters, column_indices
-            cell_types = cell_types[connected_neurons]
-            neurotransmitters = neurotransmitters[connected_neurons]
-            column_indices = column_indices[connected_neurons]
-            
-            # Remap synapse indices
-            synapse_counts_coo[:, 0] = np.array([orphan_old_to_new[int(idx)] for idx in synapse_counts_coo[:, 0]])
-            synapse_counts_coo[:, 1] = np.array([orphan_old_to_new[int(idx)] for idx in synapse_counts_coo[:, 1]])
-            
-            print(f"Removed {num_neurons_current - len(connected_neurons)} orphaned neurons (no connections after thresholding)")
+        # Filter cell arrays to only include connected neurons (use root_ids to find which to keep)
+        keep_mask = np.isin(root_ids, connected_root_ids)
+        root_ids = root_ids[keep_mask]
+        cell_types = cell_types[keep_mask]
+        neurotransmitters = neurotransmitters[keep_mask]
+        column_indices = column_indices[keep_mask]
+        
+        # --- Convert root IDs to matrix indices (done once after all filtering) ---
+        self.root_ids = root_ids
+        root_id_index = pd.Index(root_ids)
+        pre_matrix_indices = root_id_index.get_indexer(synapse_counts_coo[:, 0])
+        post_matrix_indices = root_id_index.get_indexer(synapse_counts_coo[:, 1])
+        synapse_counts_coo = np.column_stack([pre_matrix_indices, post_matrix_indices, synapse_counts_coo[:, 2]])
         
         # --- Now set up the model with filtered data ---
         self.cell_types = cell_types
@@ -147,57 +157,6 @@ class NeuralModel(torch.nn.Module, ABC):
         params.pop('self', None)
         params.pop('__class__', None)
         self.init_inputs = params
-    
-    @staticmethod
-    def _filter_neurons_by_neurotransmitter(synapse_counts_coo, cell_types, neurotransmitters, column_indices, valid_neurotransmitters):
-        """
-        Filter neurons to only include those with valid neurotransmitters.
-        
-        Args:
-            synapse_counts_coo: COO matrix (N x 3 array with [pre, post, count])
-            cell_types: Array of cell type labels for each neuron
-            neurotransmitters: Array of neurotransmitters for each neuron (same size as cell_types)
-            column_indices: Array of column indices for each neuron
-            valid_neurotransmitters: List of valid neurotransmitter names to keep
-        
-        Returns:
-            Tuple of (filtered_synapse_counts_coo, filtered_cell_types, filtered_neurotransmitters, filtered_column_indices)
-            with indices remapped to be contiguous starting from 0
-        """
-        neurotransmitters = np.array(neurotransmitters)
-        
-        # Find neurons with valid neurotransmitters
-        valid_neuron_mask = np.isin(neurotransmitters, valid_neurotransmitters)
-        
-        num_neurons_before = len(cell_types)
-        valid_old_indices = np.where(valid_neuron_mask)[0]
-        
-        if len(valid_old_indices) == num_neurons_before:
-            # No filtering needed
-            return synapse_counts_coo, cell_types, neurotransmitters, column_indices
-        
-        # Create old->new index mapping
-        old_to_new_idx = {old_idx: new_idx for new_idx, old_idx in enumerate(valid_old_indices)}
-        
-        # Filter cell_types, neurotransmitters, and column_indices
-        cell_types = cell_types[valid_neuron_mask]
-        neurotransmitters = neurotransmitters[valid_neuron_mask]
-        column_indices = column_indices[valid_neuron_mask]
-        
-        # Filter synapse_counts_coo to only keep connections where BOTH pre and post neurons are valid
-        pre_indices = synapse_counts_coo[:, 0].astype(int)
-        post_indices = synapse_counts_coo[:, 1].astype(int)
-        valid_connections = valid_neuron_mask[pre_indices] & valid_neuron_mask[post_indices]
-        synapse_counts_coo = synapse_counts_coo[valid_connections].copy()
-        
-        # Remap indices to new contiguous values
-        synapse_counts_coo[:, 0] = np.array([old_to_new_idx[int(idx)] for idx in synapse_counts_coo[:, 0]])
-        synapse_counts_coo[:, 1] = np.array([old_to_new_idx[int(idx)] for idx in synapse_counts_coo[:, 1]])
-        
-        num_neurons_after = len(cell_types)
-        print(f"Filtered {num_neurons_before - num_neurons_after} neurons with invalid neurotransmitters")
-        
-        return synapse_counts_coo, cell_types, neurotransmitters, column_indices
     
     def add_noise_to_parameters(self):
         """Add Gaussian noise to all trainable parameters."""
@@ -690,7 +649,8 @@ class CurrentModel(NeuralModel):
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
         # Call parent init (handles NT filtering and orphan removal)
         super().__init__(synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                         excitatory_nt, inhibitory_nt, nonlinearity, device, dtype,
+                         excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
+                         nonlinearity=nonlinearity, device=device, dtype=dtype,
                          init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, commit_hash=commit_hash)
         
         # Sign the synapse counts based on neurotransmitter type
@@ -913,7 +873,7 @@ class ConductanceModel(NeuralModel):
         Initialize a conductance-based neural model.
         
         Args:
-            synapse_counts_coo: COO matrix (N x 3 array with [pre, post, count])
+            synapse_counts_coo: COO matrix (N x 3 array with [pre_root_id, post_root_id, count])
             cell_types: Array of cell type labels for each neuron
             neurotransmitters: Array of neurotransmitters for each neuron (same size as cell_types)
             column_indices: Array of column indices for each neuron
@@ -932,7 +892,8 @@ class ConductanceModel(NeuralModel):
         """
         # Call parent init (handles NT filtering, count_threshold filtering, and orphan removal)
         super().__init__(synapse_counts_coo, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                         excitatory_nt, inhibitory_nt, nonlinearity, device, dtype,
+                         excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
+                         nonlinearity=nonlinearity, device=device, dtype=dtype,
                          init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, commit_hash=commit_hash)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs

@@ -79,8 +79,7 @@ presynaptic_ids = presynaptic_ids[~exclude_bool]
 postsynaptic_ids = postsynaptic_ids[~exclude_bool]
 synapse_counts = synapse_counts[~exclude_bool]
 
-# -- make vector with (matrix row, matrix col, value). Can be used to construct a sparse or dense matrix --
-# Get the list of all root IDs we actually use
+# -- Get the list of all root IDs we actually use --
 model_root_ids = np.unique((presynaptic_ids, postsynaptic_ids))
 num_neurons = len(model_root_ids)
 
@@ -90,15 +89,9 @@ visual_neurons_indices = pd.Index(visual_neurons_df.root_id).get_indexer(model_r
 assert np.all(visual_neurons_indices >= 0), "Some model_root_ids not found in visual_neurons_df - data inconsistency"
 visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indices]
 
-# make a mapping from root id to matrix index for presyanptic and postsynaptic connections
-pre_matrix_indices = pd.Index(model_root_ids).get_indexer(presynaptic_ids)
-post_matrix_indices = pd.Index(model_root_ids).get_indexer(postsynaptic_ids)
-# Verify all IDs were found - these should always pass since model_root_ids was built from these IDs
-assert np.all(pre_matrix_indices >= 0), "Some presynaptic IDs not found in model_root_ids - data inconsistency"
-assert np.all(post_matrix_indices >= 0), "Some postsynaptic IDs not found in model_root_ids - data inconsistency"
-
-# save the matrix indices and values to a data frame
-synapse_counts_df = pd.DataFrame({'pre_matrix_ind': pre_matrix_indices, 'post_matrix_ind': post_matrix_indices, 'synapse_counts': synapse_counts})
+# save the root IDs and synapse counts to a data frame
+# the conversion from root IDs to matrix indices is done in NeuralModel.__init__
+synapse_counts_df = pd.DataFrame({'pre_root_id': presynaptic_ids, 'post_root_id': postsynaptic_ids, 'synapse_counts': synapse_counts})
 # Save the synapse counts and cell types to a dict to use in modeling
 synapse_counts_df.to_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet', index=False)
 
