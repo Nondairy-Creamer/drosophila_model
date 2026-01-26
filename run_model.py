@@ -73,6 +73,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     else:
         model = ModelClass(
             synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),
+            root_ids=cell_info_df['root_id'].to_numpy(),
             cell_types=cell_info_df['type'].to_numpy(),
             neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
             column_indices=cell_info_df['column_index'].to_numpy(),

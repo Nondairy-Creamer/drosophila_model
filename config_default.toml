@@ -48,5 +48,4 @@ inhibitory_nt = [
     "GABA",
     "GLUT",
 ]
-synapse_count_dtype = "float64"
 root_id_dtype = "int64"

@@ -10,7 +10,6 @@ config = load_config()
 
 # Extract parameters from config
 connectome_folder = Path(config["data"]["connectome_folder"])
-synapse_count_dtype = getattr(np, config["data"]["synapse_count_dtype"])
 root_id_dtype = getattr(np, config["data"]["root_id_dtype"])
 fly_eye = config["data"]["fly_eye"]
 use_intrinsic = config["data"]["use_intrinsic"]
@@ -28,7 +27,7 @@ visual_neurons_df = pd.read_csv(connectome_folder / 'visual_neuron_types_no_thre
 synaptic_connections_df = pd.read_csv(connectome_folder / 'connections_no_threshold.csv',
                                       dtype={"pre_root_id": root_id_dtype,
                                              "post_root_id": root_id_dtype,
-                                             "syn_count": synapse_count_dtype}
+                                             "syn_count": root_id_dtype}
                                       )
 
 # The optic lobes are organized into retinotopic visual columns and this data set specifies the column id and location
@@ -91,7 +90,12 @@ visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indices]
 
 # save the root IDs and synapse counts to a data frame
 # the conversion from root IDs to matrix indices is done in NeuralModel.__init__
-synapse_counts_df = pd.DataFrame({'pre_root_id': presynaptic_ids, 'post_root_id': postsynaptic_ids, 'synapse_counts': synapse_counts})
+# root IDs are already int64, synapse_counts needs conversion from float64 to int64
+synapse_counts_df = pd.DataFrame({
+    'pre_root_id': presynaptic_ids,
+    'post_root_id': postsynaptic_ids,
+    'synapse_counts': synapse_counts
+})
 # Save the synapse counts and cell types to a dict to use in modeling
 synapse_counts_df.to_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet', index=False)
 
