@@ -905,7 +905,7 @@ class ConductanceModel(NeuralModel):
         dtype_torch = getattr(torch, dtype)
         
         # Get the neurotransmitter for each presynaptic neuron in the COO matrix (directly from per-neuron array)
-        pre_neuron_indices = synapse_counts_coo_filtered[:, 0].astype(np.int64)
+        pre_neuron_indices = synapse_counts_coo_filtered[:, 0]
         pre_transmitters = self.transmitters[pre_neuron_indices]
         
         # Map from neuron index to cell type index (needed for tracking which cell types receive each transmitter)
@@ -957,10 +957,9 @@ class ConductanceModel(NeuralModel):
         self.register_buffer('active_input_cell_type_idx', active_indices[:, 1])    # cell type indices
         self.num_active_input_pairs = active_indices.shape[0]
         
-        print(f"ConductanceModel: {self.num_transmitters} transmitters, {self.num_cell_types} cell types")
+        print(f"ConductanceModel: {self.num_transmitters} transmitters, {self.num_cell_types} cell types, {self.num_neurons} neurons")
         print(f"  Output params: {self.num_cell_types} (one per cell type)")
-        print(f"  Input/RP params: {self.num_active_input_pairs} active pairs "
-              f"(vs {self.num_transmitters * self.num_cell_types} if dense)")
+        print(f"  Input/RP params: {self.num_transmitters} x {self.num_cell_types} (per transmitter per cell type)")
         
         # --- Conductance-specific parameters ---
         # Reversal potentials in mV: acetylcholine is excitatory, glutamate/GABA are inhibitory
@@ -976,17 +975,13 @@ class ConductanceModel(NeuralModel):
             raise ValueError(f"Unknown neurotransmitters: {unknown_transmitters}. "
                            f"Please add reversal potentials to default_rp for these transmitters.")
         
-        # --- Compact parameter storage ---
-        # Only store parameters for biologically-relevant (transmitter, cell_type) pairs
-        
-        # Reversal potential: only for (transmitter, cell_type) pairs that RECEIVE that transmitter
-        # Shape: (num_active_input_pairs,)
-        rp_transmitter_compact = torch.zeros(self.num_active_input_pairs, dtype=self.dtype, device=self.device)
+        # --- Reversal potential: per cell type per transmitter ---
+        # Shape: (num_transmitters, num_cell_types)
+        # Initialize based on transmitter type defaults
+        rp_transmitter_init = torch.zeros(self.num_transmitters, self.num_cell_types, dtype=self.dtype, device=self.device)
         for ri, r in enumerate(self.unique_transmitters):
-            # Find which entries in the compact array correspond to this transmitter
-            mask = (self.active_input_transmitter_idx == ri)
-            rp_transmitter_compact[mask] = rp_default[r]
-        self.rp_transmitter = rp_transmitter_compact
+            rp_transmitter_init[ri, :] = rp_default[r]
+        self.rp_transmitter = rp_transmitter_init
         
         # Leak reversal potential per cell type: (num_cell_types,)
         self.rp_leak = torch.full((self.num_cell_types,), rp_leak_default, dtype=self.dtype, device=self.device)
@@ -1005,22 +1000,24 @@ class ConductanceModel(NeuralModel):
         stimulus_strength_log_init = np.log(stimulus_strength_init)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), stimulus_strength_log_init, dtype=self.dtype, device=self.device)
         
-        # --- Input strength: compact storage for receiving pairs only ---
-        # Shape: (num_active_input_pairs,) - only pairs where cell type receives that transmitter
-        self.input_strength_log = torch.zeros(self.num_active_input_pairs, dtype=self.dtype, device=self.device)
+        # --- Input strength: per cell type per transmitter ---
+        # Shape: (num_transmitters, num_cell_types)
+        self.input_strength_log = torch.zeros(self.num_transmitters, self.num_cell_types, dtype=self.dtype, device=self.device)
         
-        # --- Output strength: one per cell type (each expresses exactly one transmitter) ---
+        # --- Output strength: per cell type (like CurrentModel) ---
         # Shape: (num_cell_types,)
-        # Initialize based on fan-out from the transmitter that cell type expresses
-        output_strength_log_init = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
+        # Initialize based on average fan-out per cell type across all transmitters
+        synapses_out_per_neuron = torch.zeros(self.num_neurons, dtype=self.dtype, device=self.device)
+        for ri in range(self.num_transmitters):
+            synapses_out_per_neuron += self.synapse_counts[ri].pow(2).sum(dim=0).to_dense()
+        
+        # Average fan-out per cell type
+        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
         for cti, ct in enumerate(self.unique_cell_types):
-            # Get which transmitter this cell type expresses
-            ri = self.cell_type_transmitter_idx[cti].item()
-            syn_counts = self.synapse_counts[ri]
-            synapses_out = syn_counts.pow(2).sum(dim=0).to_dense()
             ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
-            fan_out = synapses_out[ct_mask].mean().clamp_min(1.0)
-            output_strength_log_init[cti] = -0.5 * torch.log(fan_out)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+        
+        output_strength_log_init = -0.5 * torch.log(synapses_out_per_cell_type)
         self.output_strength_log = output_strength_log_init
         
         # --- Convert to Parameters ---
@@ -1086,49 +1083,24 @@ class ConductanceModel(NeuralModel):
             stim_to_cell_mapping: sparse mapping from stimulus to individual neurons
         """
         
-        # --- Expand compact parameters to full tensors ---
+        # --- Expand parameters to per-neuron tensors ---
         
-        # Simple per-cell-type params -> per-neuron
+        # Per-cell-type params -> per-neuron
         capacitance_inv = self.capacitance_inv_log.exp()[self.neuron_to_type_index]
         rp_leak_all = self.rp_leak[self.neuron_to_type_index]
         g_leak = self.g_leak_log.exp()[self.neuron_to_type_index]
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
-        
-        # Output strength: (num_cell_types,) -> (num_transmitters, num_neurons)
-        # Each cell type only contributes to the transmitter it expresses
-        output_strength_full = torch.zeros(self.num_transmitters, self.num_neurons, 
-                                           dtype=self.dtype, device=self.device)
-        output_strength_exp = self.output_strength_log.exp()  # (num_cell_types,)
-        for ri in range(self.num_transmitters):
-            # Get neurons whose cell type expresses this transmitter
-            expresses_ri = (self.cell_type_transmitter_idx[self.neuron_to_type_index] == ri)
-            # Scatter the output strength values for neurons expressing this transmitter
-            output_strength_full[ri, expresses_ri] = output_strength_exp[self.neuron_to_type_index[expresses_ri]]
-        
-        # Input strength: (num_active_input_pairs,) -> (num_transmitters, num_neurons)
-        input_strength_full = torch.zeros(self.num_transmitters, self.num_neurons,
-                                          dtype=self.dtype, device=self.device)
-        input_strength_exp = self.input_strength_log.exp()  # (num_active_input_pairs,)
-        # Scatter: active_input_transmitter_idx and active_input_cell_type_idx give (transmitter, cell_type) pairs
-        # We need to expand to neurons
-        input_strength_by_type = torch.zeros(self.num_transmitters, self.num_cell_types,
-                                             dtype=self.dtype, device=self.device)
-        input_strength_by_type[self.active_input_transmitter_idx, self.active_input_cell_type_idx] = input_strength_exp
-        input_strength_full = input_strength_by_type[:, self.neuron_to_type_index]
-        
-        # Reversal potential: (num_active_input_pairs,) -> (num_transmitters, num_neurons)
-        rp_transmitter_by_type = torch.zeros(self.num_transmitters, self.num_cell_types,
-                                             dtype=self.dtype, device=self.device)
-        rp_transmitter_by_type[self.active_input_transmitter_idx, self.active_input_cell_type_idx] = self.rp_transmitter
-        rp_transmitter_all = rp_transmitter_by_type[:, self.neuron_to_type_index]
+        output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]  # (num_neurons,)
+        input_strength_full = self.input_strength_log.exp()[:, self.neuron_to_type_index]
+        rp_transmitter_all = self.rp_transmitter[:, self.neuron_to_type_index]
 
         z = torch.zeros_like(v_prev)
         # get the contribution of each neurotransmitter
         # Σ_{r∈{glu,ach,gaba}} (v_t - E_r) ⊙ g_r(v_t)
-        firing_rate = self.firing_rate(v_prev)
+        firing_rate_scaled = output_strength[None, :] * self.firing_rate(v_prev)
         for ri, r in enumerate(self.unique_transmitters):
-            r_firing_rate = output_strength_full[None, ri, :] * firing_rate
-            r_conductance = torch.sparse.mm(self.synapse_counts[ri], r_firing_rate.transpose(0, 1)).transpose(0, 1)
+            # Output strength is per-neuron (shared across transmitters)
+            r_conductance = torch.sparse.mm(self.synapse_counts[ri], firing_rate_scaled.transpose(0, 1)).transpose(0, 1)
             r_conductance = input_strength_full[None, ri, :] * r_conductance
             z = z + (v_prev - rp_transmitter_all[None, ri, :]) * r_conductance
 
