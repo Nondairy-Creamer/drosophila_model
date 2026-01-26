@@ -116,7 +116,7 @@ model.silence_neurons(neurons_to_silence, invert_silencing=False)
 input_neurons = ['L1', 'L2', 'L3']
 output_neurons = ['L1', 'Mi1', 'Mi9', 'C3', 'L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
-print(model.calc_sigma_max())
+# print(model.calc_sigma_max())
 
 with torch.no_grad():
     pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]

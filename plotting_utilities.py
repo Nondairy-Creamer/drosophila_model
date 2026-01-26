@@ -107,7 +107,7 @@ def scatter_3d_with_origin_axes(xyz, save_folder=Path('figures')):
     plt.savefig(save_folder / '3d_column_position.png')
     plt.close()
 
-def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), run_tag=None, plot_every=4):
+def xt_plot(stim_time_space, x, optic_flow=None, stimulus=None, save_folder=Path('figures'), run_tag=None, plot_every=4):
     save_folder = convert_and_create_save_folder(save_folder)
     
     valid_cells = ~np.any(np.isnan(stim_time_space), axis=(0, 1))
@@ -121,16 +121,35 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
         valid_optic_flow = optic_flow[:, :, valid_cells, :]
         optic_flow_sorted = valid_optic_flow[:, :, sort_inds, :]
 
+    if stimulus is not None:
+        valid_stimulus = stimulus[:, :, valid_cells]
+        stimulus_sorted = valid_stimulus[:, :, sort_inds]
+
     # Only plot every plot_every stimuli
     plot_indices = np.arange(0, stim_sorted.shape[0], plot_every)
     extent = [x_sorted.min(), x_sorted.max(), 0, valid_stim.shape[1]]
 
     for pi in plot_indices:
-        if optic_flow is not None:
+        # Determine subplot layout based on what's provided
+        if optic_flow is not None and stimulus is not None:
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4), gridspec_kw={'width_ratios': [2, 2, 1, 1]})
+            ax_stim, ax_pred, ax_of_x, ax_of_y = axes
+        elif optic_flow is not None:
             fig, axes = plt.subplots(1, 3, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1, 1]})
             ax_pred, ax_of_x, ax_of_y = axes
+        elif stimulus is not None:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+            ax_stim, ax_pred = axes
         else:
             fig, ax_pred = plt.subplots()
+        
+        # Plot stimulus if provided
+        if stimulus is not None:
+            im_stim = ax_stim.imshow(stimulus_sorted[pi, :, :], interpolation='nearest', aspect='auto', extent=extent)
+            ax_stim.set_xlabel('phi')
+            ax_stim.set_ylabel('time')
+            ax_stim.set_title('stimulus')
+            fig.colorbar(im_stim, ax=ax_stim)
         
         # No transpose: rows=time (y-axis), cols=phi_sorted high-to-low (x-axis)
         im_pred = ax_pred.imshow(stim_sorted[pi, :, :], interpolation='nearest', aspect='auto', extent=extent)
@@ -138,7 +157,7 @@ def xt_plot(stim_time_space, x, optic_flow=None, save_folder=Path('figures'), ru
             im_pred.set_clim(vmin=0)
         ax_pred.set_xlabel('phi')
         ax_pred.set_ylabel('time')
-        ax_pred.set_title('stimulus')
+        ax_pred.set_title('voltage')
         fig.colorbar(im_pred, ax=ax_pred)
 
         if optic_flow is not None:
