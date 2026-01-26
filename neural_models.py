@@ -944,26 +944,6 @@ class ConductanceModel(NeuralModel):
             unique_receiving_types = np.unique(post_cell_type_indices)
             receives_transmitter[ri, unique_receiving_types] = True
         
-        # --- Precompute mappings for sparse parameter storage ---
-        
-        # 1. Which transmitter does each cell type EXPRESS (for output_strength)
-        #    Shape: (num_cell_types,) with values in [0, num_transmitters)
-        cell_type_transmitter_idx = torch.zeros(self.num_cell_types, dtype=torch.int64, device=device)
-        for ri, r in enumerate(self.unique_transmitters):
-            expressing_mask = (self.cell_type_transmitters == r)
-            cell_type_transmitter_idx[expressing_mask] = ri
-        self.register_buffer('cell_type_transmitter_idx', cell_type_transmitter_idx)
-        
-        # 2. Which (transmitter, cell_type) pairs RECEIVE input (for input_strength, rp_transmitter)
-        #    Store as boolean mask and as flat indices for scatter
-        self.register_buffer('receives_transmitter_mask', receives_transmitter)
-        
-        # Get indices of active (receiving) pairs for sparse -> dense expansion
-        active_indices = receives_transmitter.nonzero(as_tuple=False)  # (num_active, 2)
-        self.register_buffer('active_input_transmitter_idx', active_indices[:, 0])  # transmitter indices
-        self.register_buffer('active_input_cell_type_idx', active_indices[:, 1])    # cell type indices
-        self.num_active_input_pairs = active_indices.shape[0]
-        
         print(f"ConductanceModel: {self.num_transmitters} transmitters, {self.num_cell_types} cell types, {self.num_neurons} neurons")
         print(f"  Output params: {self.num_cell_types} (one per cell type)")
         print(f"  Input/RP params: {self.num_transmitters} x {self.num_cell_types} (per transmitter per cell type)")
@@ -1063,13 +1043,13 @@ class ConductanceModel(NeuralModel):
                 self.find_steady_state()
 
     def firing_rate(self, v):
-        """Convert voltage to firing rate with threshold subtraction."""
+        """Convert voltage to firing rate with threshold subtraction.
+        
+        Args:
+            v: Voltage tensor with shape (..., num_neurons) where neuron dimension is last.
+        """
         threshold_all = self.threshold[self.neuron_to_type_index]
-        # Reshape threshold to broadcast with v: find the neuron dimension and expand others to 1
-        neuron_dim = v.shape.index(self.num_neurons)
-        shape = [1] * v.ndim
-        shape[neuron_dim] = self.num_neurons
-        threshold_all = threshold_all.view(*shape)
+        # threshold_all has shape (num_neurons,), which broadcasts against the last dim of v
         return self.nonlinearity(v - threshold_all)
 
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
