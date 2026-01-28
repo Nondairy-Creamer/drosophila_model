@@ -106,10 +106,10 @@ def calc_loss(loss_fn, pred, target):
 
     return loss
 
-def train_model(model, inputs, target, output_neurons, input_neurons, model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
+def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
-                sigma_lambda=0, peak_lambda=0, l1_lambda=0):
+                sigma_lambda=0, peak_lambda=0, l1_lambda=0, input_noise_std=0.0, random_flip_input=False):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
@@ -148,9 +148,16 @@ def train_model(model, inputs, target, output_neurons, input_neurons, model_save
         if (step % reset_init_every) == 0:
             last_state = None
 
+        # --- do any data augmentation ---
+        inputs_augmented = inputs.clone()
+
+        if input_noise_std > 0:
+            noise = torch.tensor(rng.standard_normal(inputs.shape), device=inputs.device, dtype=inputs.dtype) * input_noise_std
+            inputs_augmented = inputs_augmented + noise
+            
         start = time.time()
         opt.zero_grad()
-        pred, last_state, cached_mappings = model.predict(inputs, init_state=last_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+        pred, last_state, cached_mappings = model.predict(inputs_augmented, init_state=last_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
 
         loss = calc_loss(loss_fn, pred['firing_rate'], target)
 
