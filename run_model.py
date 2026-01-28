@@ -148,7 +148,9 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         sigma_lambda=config['training'].get('sigma_lambda', 0),
         peak_lambda=config['training'].get('peak_lambda', 0),
         loss_fn=loss_fn, 
-        input_noise_std=config['training']['input_noise_std'])
+        input_noise_std=config['training']['input_noise_std'],
+        contrast_std=config['training']['contrast_std'],
+    )
 
 
 if __name__ == '__main__':

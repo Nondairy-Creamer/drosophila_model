@@ -109,7 +109,7 @@ def calc_loss(loss_fn, pred, target):
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
-                sigma_lambda=0, peak_lambda=0, l1_lambda=0, input_noise_std=0.0, random_flip_input=False):
+                sigma_lambda=0, peak_lambda=0, l1_lambda=0, input_noise_std=0.0, contrast_std=0.0, random_flip_input=False):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
@@ -151,8 +151,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         # --- do any data augmentation ---
         inputs_augmented = inputs.clone()
 
+        if contrast_std > 0:
+            contrast = torch.tensor(np.exp(rng.standard_normal(1) * contrast_std), device=inputs.device, dtype=inputs.dtype)
+            inputs_augmented = inputs_augmented * contrast
+
         if input_noise_std > 0:
-            noise = torch.tensor(rng.standard_normal(inputs.shape), device=inputs.device, dtype=inputs.dtype) * input_noise_std
+            noise = torch.tensor(rng.standard_normal(inputs.shape) * input_noise_std, device=inputs.device, dtype=inputs.dtype)
             inputs_augmented = inputs_augmented + noise
             
         start = time.time()

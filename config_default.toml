@@ -13,6 +13,7 @@ num_steps = 100000
 save_every = 10
 loss_fn = "cos_loss"
 input_noise_std = 0.0
+contrast_std = 0.0
 random_flip_input = false
 alpha = 0.01
 clip_norm = 1.0
