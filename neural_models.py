@@ -186,6 +186,9 @@ class NeuralModel(torch.nn.Module, ABC):
             torch.randn(self.channels_1, self.num_nearest_columns, num_decoder_neuron_types, 
                        device=self.device, dtype=self.dtype) * self.init_std
         )
+        self.decoder_conv_1_bias = torch.nn.Parameter(
+            torch.zeros(self.channels_1, device=self.device, dtype=self.dtype)
+        )
         
         # Pre-compute mapping from column to decoder neuron indices
         self._precompute_column_to_decoder_neurons(num_decoder_neuron_types)
@@ -196,9 +199,14 @@ class NeuralModel(torch.nn.Module, ABC):
             torch.randn(self.channels_2, self.num_nearest_columns, self.channels_1, 
                        device=self.device, dtype=self.dtype) * self.init_std
         )
+        self.decoder_conv_2_bias = torch.nn.Parameter(
+            torch.zeros(self.channels_2, device=self.device, dtype=self.dtype)
+        )
         
         # Pre-compute nearest column indices for each column
         self._precompute_nearest_columns(self.num_nearest_columns)
+        # Pre-compute decoder neuron indices for nearest columns (used in decode_motion)
+        self._precompute_nearest_decoder_neurons()
 
     def _precompute_column_to_decoder_neurons(self, num_decoder_neuron_types):
         """Pre-compute mapping from column index to decoder neuron indices in that column.
@@ -267,6 +275,17 @@ class NeuralModel(torch.nn.Module, ABC):
         self.register_buffer('nearest_column_indices', 
                            torch.tensor(nearest_indices, device=self.device, dtype=torch.int64))
 
+    def _precompute_nearest_decoder_neurons(self):
+        """Pre-compute decoder neuron indices for each column's nearest columns.
+        
+        Creates tensor (num_columns, num_nearest, num_decoder_neuron_types) with neuron indices.
+        Missing neurons are marked as -1.
+        """
+        # nearest_column_indices: (num_columns, num_nearest)
+        # column_to_decoder_neurons: (num_columns, num_decoder_neuron_types)
+        nearest_decoder_neuron_indices = self.column_to_decoder_neurons[self.nearest_column_indices]
+        self.register_buffer('nearest_decoder_neuron_indices', nearest_decoder_neuron_indices)
+
     def decode_motion(self, v):
         """
         Decode motion from firing rates using hand-implemented convolutions.
@@ -293,43 +312,19 @@ class NeuralModel(torch.nn.Module, ABC):
         num_nearest = self.nearest_column_indices.shape[1]
 
         # Apply conv_1: For each column, operate on individual decoder neurons in N nearest columns
-        # Collect firing rates from decoder neurons for each nearest column
+        # Collect firing rates from decoder neurons for each nearest column (precomputed mapping)
         # Shape: (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
-        num_decoder_neuron_types = len(self.neurons_to_decode)
-        nearest_decoder_voltages = torch.full(
-            (stimuli_size, num_columns, num_nearest, num_decoder_neuron_types),
-            float('nan'),
-            device=v.device,
-            dtype=v.dtype
-        )
-        
-        for col_idx in range(num_columns):
-            # Get N nearest column indices (including self)
-            nearest_cols = self.nearest_column_indices[col_idx]  # (num_nearest,)
-            
-            for n_idx, nearest_col in enumerate(nearest_cols):
-                nearest_col = nearest_col.item()
-                # Get decoder neuron indices for this nearest column
-                # Shape: (num_decoder_neuron_types,) with -1 for missing neurons
-                # Each position corresponds to a specific neuron type (by index in self.neurons_to_decode)
-                decoder_neuron_indices = self.column_to_decoder_neurons[nearest_col]  # (num_decoder_neuron_types,)
-                
-                # Find valid neurons (not -1) and set all at once using vectorized operations
-                valid_mask = decoder_neuron_indices >= 0
-                if torch.any(valid_mask):
-                    valid_type_indices = torch.where(valid_mask)[0]  # type indices that have valid neurons
-                    valid_neuron_indices = decoder_neuron_indices[valid_mask]  # actual neuron indices
-                    # Set all valid positions at once: ensures same neuron type always uses same filter weight
-                    nearest_decoder_voltages[:, col_idx, n_idx, valid_type_indices] = v[:, valid_neuron_indices]
-                    # Invalid positions (neuron_idx == -1) stay as NaN (already initialized)
+        decoder_indices = self.nearest_decoder_neuron_indices  # (num_columns, num_nearest, num_decoder_neuron_types)
+        valid_mask = decoder_indices >= 0
+        safe_indices = decoder_indices.clamp(min=0)
+        nearest_decoder_voltages = v[:, safe_indices]
+        nearest_decoder_voltages = nearest_decoder_voltages.masked_fill(~valid_mask.unsqueeze(0), float('nan'))
         
         # Apply conv_1 filter: (stimuli, num_columns, num_nearest, num_decoder_neuron_types) @ (channels_1, num_nearest, num_decoder_neuron_types)
         # decoder_conv_1: (channels_1, num_nearest, num_decoder_neuron_types)
         # nearest_decoder_voltages: (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
         # Broadcasts over stimuli dimension
         # Handle NaNs by setting them to 0 before multiplication, then mask out contributions
-        conv_1_output = torch.zeros(stimuli_size, num_columns, self.channels_1, device=v.device, dtype=v.dtype)
-        
         # Replace NaN with 0 for computation, but track which values were NaN
         valid_mask = ~torch.isnan(nearest_decoder_voltages)  # (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
         nearest_decoder_voltages_clean = torch.where(
@@ -338,13 +333,14 @@ class NeuralModel(torch.nn.Module, ABC):
             torch.zeros_like(nearest_decoder_voltages)
         )
         
-        for ch in range(self.channels_1):
-            # (stimuli, num_columns, num_nearest, num_decoder_neuron_types) * (num_nearest, num_decoder_neuron_types)
-            # Sum over num_nearest and num_decoder_neuron_types dimensions
-            conv_1_output[:, :, ch] = torch.sum(
-                nearest_decoder_voltages_clean * self.decoder_conv_1[ch, :, :].unsqueeze(0).unsqueeze(0),
-                dim=(2, 3)
-            )
+        # Single fused contraction: (stimuli, columns, nearest, types) x (channels_1, nearest, types)
+        # -> (stimuli, columns, channels_1)
+        conv_1_output = torch.einsum(
+            'scnt,knt->sck',
+            nearest_decoder_voltages_clean,
+            self.decoder_conv_1
+        )
+        conv_1_output = conv_1_output + self.decoder_conv_1_bias.view(1, 1, -1)
         
         # Apply softplus activation after conv_1
         conv_1_output = torch.nn.functional.softplus(conv_1_output)
@@ -359,14 +355,14 @@ class NeuralModel(torch.nn.Module, ABC):
         # decoder_conv_2: (channels_2, num_nearest, channels_1)
         # nearest_conv_1_output: (stimuli, num_columns, num_nearest, channels_1)
         # Broadcasts over stimuli dimension
-        conv_2_output = torch.zeros(stimuli_size, num_columns, self.channels_2, device=v.device, dtype=v.dtype)
-        for ch in range(self.channels_2):
-            # (stimuli, num_columns, num_nearest, channels_1) * (num_nearest, channels_1) -> (stimuli, num_columns)
-            # Sum over num_nearest and channels_1 dimensions
-            conv_2_output[:, :, ch] = torch.sum(
-                nearest_conv_1_output * self.decoder_conv_2[ch, :, :].unsqueeze(0).unsqueeze(0),
-                dim=(2, 3)
-            )
+        # Single fused contraction: (stimuli, columns, nearest, channels_1) x (channels_2, nearest, channels_1)
+        # -> (stimuli, columns, channels_2)
+        conv_2_output = torch.einsum(
+            'scnf,knf->sck',
+            nearest_conv_1_output,
+            self.decoder_conv_2
+        )
+        conv_2_output = conv_2_output + self.decoder_conv_2_bias.view(1, 1, -1)
         
         # Output: first 2 channels divided by 3rd channel
         # Avoid division by zero

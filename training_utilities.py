@@ -91,6 +91,19 @@ def cos_loss(y_hat, y, dim=None, eps=1e-6):
 
     return 1.0 - ave_cosine_sim
 
+def mse_loss(y_hat, y, dim=None, eps=1e-6):
+    # Create mask of positions valid in BOTH tensors
+    valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y)).float()
+
+    # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
+    y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
+    y = torch.where(torch.isnan(y), torch.zeros_like(y), y)
+
+    diff2 = (y_hat - y).pow(2) * valid_mask
+    valid_count = valid_mask.sum(dim=dim, keepdim=True).clamp_min(1)
+    mse = diff2.sum(dim=dim, keepdim=True) / valid_count
+    return torch.mean(mse)
+
 def combined_loss(y_hat, y, eps=1e-6):
     cos_loss_val = cos_loss(y_hat, y, eps=eps)
     corr_loss_val = corr_loss(y_hat, y, eps=eps)
