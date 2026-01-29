@@ -42,9 +42,9 @@ def plot_loss(loss, save_folder=Path('figures')):
 
     plt.figure()
     plt.plot(loss)
-    plt.ylabel('1 - cosine similarity')
+    plt.ylabel('loss')
     plt.xlabel('epochs')
-    # plt.ylim((0, 1))
+    plt.ylim((0, np.nanpercentile(loss, 95)))
     plt.savefig(save_folder / 'loss.png')
     plt.close()
 
