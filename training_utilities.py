@@ -163,7 +163,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         opt.zero_grad()
         pred, last_state, cached_mappings = model.predict(inputs_augmented, init_state=last_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
 
-        loss = calc_loss(loss_fn, pred['firing_rate'], target)
+        if model.use_decoder:
+            # When using decoder, pred['decoder'] and target are tensors, not dicts
+            # decoder output: (batches, time, num_columns, 2)
+            # target (optic_flow): (batches, time, num_columns, 2)
+            loss = loss_fn(pred['decoder'], target)
+        else:
+            loss = calc_loss(loss_fn, pred['firing_rate'], target)
 
         if sigma_lambda > 0:
             # add a regularizer based on the operator norm of the model

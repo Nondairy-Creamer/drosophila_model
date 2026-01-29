@@ -97,6 +97,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             count_threshold=config['model']['synapse_count_threshold'],
             device=config['model']['device'],
             dtype=config['model']['dtype'],
+            use_decoder=config['model']['use_decoder'],
             dt=dt,
             seed=seed,
             commit_hash=commit_hash,
@@ -108,6 +109,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
         target_model.save(model_save_folder / 'target_model.pt')
 
+    elif config['model']['use_decoder']:
+        target = optic_flow
     else:
         # specify the target responses you expect for each cell type. this is what we will train on
         target = {}
@@ -129,7 +132,10 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     config['run_info'] = {k: v for k, v in run_info.items() if v is not None}
     du.save_config(config, model_save_folder / 'config.toml')
     torch.save(stimulus.detach().cpu(), model_save_folder / "cell_inputs.pt")
-    torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
+    if type(target) is dict:
+        torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
+    else:
+        torch.save(target.detach().cpu(), model_save_folder / "target.pt")
 
     # get the loss function
     loss_fn = getattr(tu, config['training']['loss_fn'])

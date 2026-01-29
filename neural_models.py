@@ -15,7 +15,7 @@ class NeuralModel(torch.nn.Module, ABC):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
-                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
+                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None, use_decoder=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
@@ -25,6 +25,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.count_threshold = count_threshold
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
+        self.use_decoder = use_decoder
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
 
         # Create RNG from seed for random initialization
@@ -135,6 +136,249 @@ class NeuralModel(torch.nn.Module, ABC):
             self.neuron_to_type_index[ct_mask] = cti
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
 
+        if self.use_decoder:
+            # Initialize decoder
+            self._initialize_decoder()
+
+    def _initialize_decoder(self, num_nearest_columns=25):
+        """Initialize decoder parameters and precompute neuron indices."""
+        # conv_1: N=25 nearest columns, 8 channels, weights per neuron
+        # conv_2: N=25 inputs, 3 channels
+        self.num_nearest_columns = num_nearest_columns
+        self.channels_1 = 8
+        self.channels_2 = 3
+        
+        # Set list of neurons to use for decoding (from black box in figure panel g)
+        self.neurons_to_decode = [
+            # T-shaped cells
+            'T1', 'T2', 'T2a', 'T3',
+            'T4a', 'T4b', 'T4c', 'T4d',
+            'T5a', 'T5b', 'T5c', 'T5d',
+            # Transmedullary cells (Tm)
+            'Tm1', 'Tm2', 'Tm3', 'Tm4',
+            'Tm5Y', 'Tm5a', 'Tm5b', 'Tm5c',
+            'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+            # Transmedullary Y cells (TmY)
+            'TmY3', 'TmY4', 'TmY9', 'TmY10', 'TmY15', 'TmY18', 'TmY5a'
+        ]
+        
+        # Pre-compute neuron indices for decoder neurons
+        decoder_neuron_mask_np = np.zeros(self.num_neurons, dtype=bool)
+        for ct_name in self.neurons_to_decode:
+            decoder_neuron_mask_np |= (self.cell_types == ct_name)
+        decoder_neuron_indices_np = np.where(decoder_neuron_mask_np)[0]
+        # Store as buffer so it's saved with the model
+        self.register_buffer('decoder_neuron_indices', 
+                           torch.tensor(decoder_neuron_indices_np, device=self.device, dtype=torch.int64))
+        # Also store mask for efficient column lookups
+        self.register_buffer('decoder_neuron_mask',
+                           torch.tensor(decoder_neuron_mask_np, device=self.device, dtype=torch.bool))
+        
+        # Pre-compute column_indices as tensor (used in decode_motion)
+        self.register_buffer('column_indices_tensor',
+                           torch.from_numpy(self.column_indices).to(device=self.device))
+        
+        # Number of decoder neuron types (fixed size for the tensor)
+        num_decoder_neuron_types = len(self.neurons_to_decode)
+        
+        # Initialize conv_1 with weights per neuron: (channels_1, num_nearest_columns, num_decoder_neuron_types)
+        self.decoder_conv_1 = torch.nn.Parameter(
+            torch.randn(self.channels_1, self.num_nearest_columns, num_decoder_neuron_types, 
+                       device=self.device, dtype=self.dtype) * self.init_std
+        )
+        
+        # Pre-compute mapping from column to decoder neuron indices
+        self._precompute_column_to_decoder_neurons(num_decoder_neuron_types)
+        
+        # Initialize conv_2 (operates on conv_1_output channels from nearest columns)
+        # Shape: (channels_2, num_nearest_columns, channels_1)
+        self.decoder_conv_2 = torch.nn.Parameter(
+            torch.randn(self.channels_2, self.num_nearest_columns, self.channels_1, 
+                       device=self.device, dtype=self.dtype) * self.init_std
+        )
+        
+        # Pre-compute nearest column indices for each column
+        self._precompute_nearest_columns(self.num_nearest_columns)
+
+    def _precompute_column_to_decoder_neurons(self, num_decoder_neuron_types):
+        """Pre-compute mapping from column index to decoder neuron indices in that column.
+        
+        Creates a tensor (num_columns, num_decoder_neuron_types) with neuron indices.
+        Each position corresponds to a specific neuron type (by index in self.neurons_to_decode),
+        ensuring the same neuron type always maps to the same filter weight index.
+        Missing neurons are padded with -1 (will be converted to NaN when indexing firing rates).
+        
+        Args:
+            num_decoder_neuron_types: Number of decoder neuron types (from len(self.neurons_to_decode))
+        """
+        # Create mapping from cell type name to index in self.neurons_to_decode
+        # This ensures each neuron type always maps to the same filter weight index
+        cell_type_to_index = {ct_name: idx for idx, ct_name in enumerate(self.neurons_to_decode)}
+        
+        # Create tensor: (num_columns, num_decoder_neuron_types)
+        # Use -1 as sentinel value (will be converted to NaN when indexing)
+        column_to_decoder_neurons_tensor = torch.full(
+            (self.num_columns, num_decoder_neuron_types),
+            -1,
+            device=self.device,
+            dtype=torch.int64
+        )
+        
+        for col_idx in range(self.num_columns):
+            # Find neurons in this column
+            in_column_mask = (self.column_indices_tensor == col_idx) & ~torch.isnan(self.column_indices_tensor)
+            # Intersect with decoder neurons
+            decoder_in_column_mask = in_column_mask & self.decoder_neuron_mask
+            decoder_neuron_indices = torch.where(decoder_in_column_mask)[0]
+            
+            # Map each neuron to its type index
+            for neuron_idx in decoder_neuron_indices:
+                neuron_idx_np = neuron_idx.item()
+                cell_type = self.cell_types[neuron_idx_np]
+                # Find which type index this neuron corresponds to
+                if cell_type in cell_type_to_index:
+                    type_idx = cell_type_to_index[cell_type]
+                    # Store neuron index at the correct type-index position
+                    # If multiple neurons of same type exist in column, keep the first one
+                    if column_to_decoder_neurons_tensor[col_idx, type_idx] == -1:
+                        column_to_decoder_neurons_tensor[col_idx, type_idx] = neuron_idx
+        
+        # Store as buffer so it's saved with the model
+        self.register_buffer('column_to_decoder_neurons', column_to_decoder_neurons_tensor)
+
+    def _precompute_nearest_columns(self, num_nearest_columns):
+        """Pre-compute the N nearest columns for each column based on Euclidean distance in phi-theta space."""
+        column_phi_theta_np = self.column_phi_theta  # (num_columns, 2) with [phi, theta]
+        num_columns = column_phi_theta_np.shape[0]
+        
+        # Compute pairwise Euclidean distances between phi-theta vectors
+        # Expand for broadcasting: (num_columns, 1, 2) and (1, num_columns, 2)
+        phi_theta_i = column_phi_theta_np[:, None, :]  # (num_columns, 1, 2)
+        phi_theta_j = column_phi_theta_np[None, :, :]  # (1, num_columns, 2)
+        
+        # Euclidean distance: sqrt((phi_i - phi_j)^2 + (theta_i - theta_j)^2)
+        diff = phi_theta_i - phi_theta_j  # (num_columns, num_columns, 2)
+        distances = np.sqrt(np.sum(diff**2, axis=2))  # (num_columns, num_columns)
+        
+        # For each column, find N nearest (including itself)
+        nearest_indices = np.argsort(distances, axis=1)[:, :num_nearest_columns]  # (num_columns, actual_N)
+        
+        # Store as buffer (not a parameter, so it's saved but not trainable)
+        self.register_buffer('nearest_column_indices', 
+                           torch.tensor(nearest_indices, device=self.device, dtype=torch.int64))
+
+    def decode_motion(self, v):
+        """
+        Decode motion from firing rates using hand-implemented convolutions.
+        
+        Args:
+            v: Firing rate tensor with shape (stimuli, num_neurons) or (num_neurons,)
+                All operations broadcast over the first dimension (stimuli)
+        
+        Returns:
+            motion: Decoded motion with shape (stimuli, num_columns, 2) or (num_columns, 2)
+                First 2 channels divided by 3rd channel
+        """
+        # Handle both batched and unbatched inputs
+        if v.dim() == 1:
+            v = v.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+        
+        # v has shape (stimuli, num_neurons)
+        # All operations will broadcast over the first dimension (stimuli)
+        stimuli_size = v.shape[0]
+        num_columns = self.num_columns
+        num_nearest = self.nearest_column_indices.shape[1]
+
+        # Apply conv_1: For each column, operate on individual decoder neurons in N nearest columns
+        # Collect firing rates from decoder neurons for each nearest column
+        # Shape: (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
+        num_decoder_neuron_types = len(self.neurons_to_decode)
+        nearest_decoder_voltages = torch.full(
+            (stimuli_size, num_columns, num_nearest, num_decoder_neuron_types),
+            float('nan'),
+            device=v.device,
+            dtype=v.dtype
+        )
+        
+        for col_idx in range(num_columns):
+            # Get N nearest column indices (including self)
+            nearest_cols = self.nearest_column_indices[col_idx]  # (num_nearest,)
+            
+            for n_idx, nearest_col in enumerate(nearest_cols):
+                nearest_col = nearest_col.item()
+                # Get decoder neuron indices for this nearest column
+                # Shape: (num_decoder_neuron_types,) with -1 for missing neurons
+                # Each position corresponds to a specific neuron type (by index in self.neurons_to_decode)
+                decoder_neuron_indices = self.column_to_decoder_neurons[nearest_col]  # (num_decoder_neuron_types,)
+                
+                # Find valid neurons (not -1) and set all at once using vectorized operations
+                valid_mask = decoder_neuron_indices >= 0
+                if torch.any(valid_mask):
+                    valid_type_indices = torch.where(valid_mask)[0]  # type indices that have valid neurons
+                    valid_neuron_indices = decoder_neuron_indices[valid_mask]  # actual neuron indices
+                    # Set all valid positions at once: ensures same neuron type always uses same filter weight
+                    nearest_decoder_voltages[:, col_idx, n_idx, valid_type_indices] = v[:, valid_neuron_indices]
+                    # Invalid positions (neuron_idx == -1) stay as NaN (already initialized)
+        
+        # Apply conv_1 filter: (stimuli, num_columns, num_nearest, num_decoder_neuron_types) @ (channels_1, num_nearest, num_decoder_neuron_types)
+        # decoder_conv_1: (channels_1, num_nearest, num_decoder_neuron_types)
+        # nearest_decoder_voltages: (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
+        # Broadcasts over stimuli dimension
+        # Handle NaNs by setting them to 0 before multiplication, then mask out contributions
+        conv_1_output = torch.zeros(stimuli_size, num_columns, self.channels_1, device=v.device, dtype=v.dtype)
+        
+        # Replace NaN with 0 for computation, but track which values were NaN
+        valid_mask = ~torch.isnan(nearest_decoder_voltages)  # (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
+        nearest_decoder_voltages_clean = torch.where(
+            valid_mask,
+            nearest_decoder_voltages,
+            torch.zeros_like(nearest_decoder_voltages)
+        )
+        
+        for ch in range(self.channels_1):
+            # (stimuli, num_columns, num_nearest, num_decoder_neuron_types) * (num_nearest, num_decoder_neuron_types)
+            # Sum over num_nearest and num_decoder_neuron_types dimensions
+            conv_1_output[:, :, ch] = torch.sum(
+                nearest_decoder_voltages_clean * self.decoder_conv_1[ch, :, :].unsqueeze(0).unsqueeze(0),
+                dim=(2, 3)
+            )
+        
+        # Apply softplus activation after conv_1
+        conv_1_output = torch.nn.functional.softplus(conv_1_output)
+        
+        # Apply conv_2: (stimuli, num_columns, channels_1) -> (stimuli, num_columns, channels_2)
+        # conv_2 operates on conv_1_output from nearest columns, weighting the channels_1 channels
+        # Get conv_1_output from nearest columns: (stimuli, num_columns, num_nearest, channels_1)
+        # Advanced indexing: conv_1_output[:, nearest_indices] broadcasts over stimuli dimension
+        nearest_conv_1_output = conv_1_output[:, self.nearest_column_indices]  # (stimuli, num_columns, num_nearest, channels_1)
+        
+        # Apply conv_2 filter: (stimuli, num_columns, num_nearest, channels_1) @ (channels_2, num_nearest, channels_1)
+        # decoder_conv_2: (channels_2, num_nearest, channels_1)
+        # nearest_conv_1_output: (stimuli, num_columns, num_nearest, channels_1)
+        # Broadcasts over stimuli dimension
+        conv_2_output = torch.zeros(stimuli_size, num_columns, self.channels_2, device=v.device, dtype=v.dtype)
+        for ch in range(self.channels_2):
+            # (stimuli, num_columns, num_nearest, channels_1) * (num_nearest, channels_1) -> (stimuli, num_columns)
+            # Sum over num_nearest and channels_1 dimensions
+            conv_2_output[:, :, ch] = torch.sum(
+                nearest_conv_1_output * self.decoder_conv_2[ch, :, :].unsqueeze(0).unsqueeze(0),
+                dim=(2, 3)
+            )
+        
+        # Output: first 2 channels divided by 3rd channel
+        # Avoid division by zero
+        denominator = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
+        denominator = torch.sign(denominator) * torch.clamp(torch.abs(denominator), min=1e-8)
+        optic_flow = conv_2_output[:, :, :2] / denominator  # (stimuli, num_columns, 2)
+        
+        if squeeze_output:
+            optic_flow = optic_flow.squeeze(0)
+        
+        return optic_flow
+
     @abstractmethod
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
         """Forward pass for the neural model. Must be implemented by subclasses."""
@@ -226,10 +470,17 @@ class NeuralModel(torch.nn.Module, ABC):
             outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
             outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
+        # Initialize decoder output if decoder is enabled (only once, outside the loop)
+        if self.use_decoder:
+            outputs['decoder'] = torch.full((num_batches, num_time, self.num_columns, 2), float('nan'), device=self.device, dtype=self.dtype)
+
         for t in range(num_time):
             v = self(v, inputs[:, t, :], stim_to_cell_mapping)
             # Compute firing_rate on full v (has neuron dimension for proper threshold broadcasting)
             fr = self.firing_rate(v)
+
+            if self.use_decoder:
+                outputs['decoder'][:, t, :, :] = self.decode_motion(fr)
 
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
@@ -652,12 +903,13 @@ class CurrentModel(NeuralModel):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
-                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
+                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, commit_hash=None):
         # Call parent init (handles NT filtering and orphan removal)
         super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
                          nonlinearity=nonlinearity, device=device, dtype=dtype,
-                         init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, commit_hash=commit_hash)
+                         init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
+                         commit_hash=commit_hash, use_decoder=use_decoder)
         
         # Sign the synapse counts based on neurotransmitter type
         # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
@@ -874,7 +1126,7 @@ class ConductanceModel(NeuralModel):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32', init_new_model=True,
-                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None):
+                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, commit_hash=None):
         """
         Initialize a conductance-based neural model.
         
@@ -901,7 +1153,8 @@ class ConductanceModel(NeuralModel):
         super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
                          nonlinearity=nonlinearity, device=device, dtype=dtype,
-                         init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, commit_hash=commit_hash)
+                         init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
+                         commit_hash=commit_hash, use_decoder=use_decoder)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()
