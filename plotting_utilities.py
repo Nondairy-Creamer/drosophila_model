@@ -40,11 +40,16 @@ def plot_readout_target(readout, target, save_folder=Path('figures'), eps=1e-8):
 def plot_loss(loss, save_folder=Path('figures')):
     save_folder = convert_and_create_save_folder(save_folder)
 
+    # Ensure numpy array for consistent plotting/percentiles
+    loss_np = np.asarray(loss, dtype=float)
+
     plt.figure()
-    plt.plot(loss)
+    plt.plot(loss_np)
     plt.ylabel('loss')
     plt.xlabel('epochs')
-    plt.ylim((0, np.nanpercentile(loss, 95)))
+    finite_mask = np.isfinite(loss_np)
+    if finite_mask.any():
+        plt.ylim((0.9 * np.nanmin(loss_np[finite_mask]), 1.1 * np.nanpercentile(loss_np[finite_mask], 95)))
     plt.savefig(save_folder / 'loss.png')
     plt.close()
 
