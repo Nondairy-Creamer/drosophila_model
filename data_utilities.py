@@ -92,6 +92,25 @@ def _convert_none_strings(config: dict | list | Any) -> dict | list | Any:
     else:
         return config
 
+def _convert_none_to_strings(config: dict | list | Any) -> dict | list | Any:
+    '''
+    Recursively convert Python None values to "none" strings for TOML serialization.
+    
+    Args:
+        config: Configuration value (dict, list, or other type)
+        
+    Returns:
+        Configuration with None values converted to "none" strings
+    '''
+    if isinstance(config, dict):
+        return {key: _convert_none_to_strings(value) for key, value in config.items()}
+    elif isinstance(config, list):
+        return [_convert_none_to_strings(item) for item in config]
+    elif config is None:
+        return "none"
+    else:
+        return config
+
 def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
     '''
     Save a configuration dictionary to a TOML file.
@@ -113,12 +132,15 @@ def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
             "TOML writer not available. Please install 'tomli-w' for writing TOML files."
         )
 
+    # Convert None values to "none" strings for TOML serialization
+    config_serializable = _convert_none_to_strings(config)
+
     # Write atomically
     dir_fd = os.open(str(output_path.parent), os.O_RDONLY)
     try:
         with tempfile.NamedTemporaryFile('w', delete=False, dir=str(output_path.parent), suffix='.tmp') as tmp:
             tmp_path = Path(tmp.name)
-            tmp.write(toml_writer.dumps(config))
+            tmp.write(toml_writer.dumps(config_serializable))
             tmp.flush()
             os.fsync(tmp.fileno())
         # Replace target
