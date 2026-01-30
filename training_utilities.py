@@ -262,7 +262,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
             # Optional gradient clipping (prefer norm if both provided)
             if clip_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+                if total_norm > clip_grad_norm:
+                    print(f'Gradient clipped at step {step + 1}: norm {total_norm:.2f} > max_norm {clip_grad_norm}')
             elif clip_grad_value is not None:
                 torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
             opt.step()
