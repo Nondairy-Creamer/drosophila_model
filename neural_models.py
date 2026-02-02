@@ -2,6 +2,7 @@ from logging import warning
 import torch
 import numpy as np
 import pandas as pd
+from scipy.optimize import linear_sum_assignment
 from pathlib import Path
 from functools import reduce
 import tempfile
@@ -140,11 +141,12 @@ class NeuralModel(torch.nn.Module, ABC):
             # Initialize decoder
             self._initialize_decoder()
 
-    def _initialize_decoder(self, num_nearest_columns=25):
+    def _initialize_decoder(self, conv_size=5):
         """Initialize decoder parameters and precompute neuron indices."""
-        # conv_1: N=25 nearest columns, 8 channels, weights per neuron
-        # conv_2: N=25 inputs, 3 channels
-        self.num_nearest_columns = num_nearest_columns
+        # conv_1: N^2 nearest columns, 8 channels, weights per neuron
+        # conv_2: N^2 inputs, 3 channels
+        self.conv_size = conv_size
+        self.num_nearest_columns = conv_size ** 2
         self.channels_1 = 8
         self.channels_2 = 3
         
@@ -204,7 +206,7 @@ class NeuralModel(torch.nn.Module, ABC):
         )
         
         # Pre-compute nearest column indices for each column
-        self._precompute_nearest_columns(self.num_nearest_columns)
+        self._precompute_nearest_columns(self.conv_size)
         # Pre-compute decoder neuron indices for nearest columns (used in decode_motion)
         self._precompute_nearest_decoder_neurons()
 
@@ -254,26 +256,115 @@ class NeuralModel(torch.nn.Module, ABC):
         # Store as buffer so it's saved with the model
         self.register_buffer('column_to_decoder_neurons', column_to_decoder_neurons_tensor)
 
-    def _precompute_nearest_columns(self, num_nearest_columns):
-        """Pre-compute the N nearest columns for each column based on Euclidean distance in phi-theta space."""
-        column_phi_theta_np = self.column_phi_theta  # (num_columns, 2) with [phi, theta]
-        num_columns = column_phi_theta_np.shape[0]
+    def _precompute_nearest_columns(self, conv_size):
+        """Pre-compute nearest columns using a shift + stretch aligned N x N grid.
+        
+        For each central column, take the N^2 nearest columns, fit a best rigid transform
+        from a fixed N x N grid to those points (including the central column), then order
+        the nearest columns by the grid's row-major ordering to keep convolution weights
+        consistently aligned across columns.
+        """
+        # (num_columns, 2) with [phi, theta]
+        num_columns = self.column_phi_theta.shape[0]
+
+        num_nearest_columns = conv_size ** 2
         
         # Compute pairwise Euclidean distances between phi-theta vectors
-        # Expand for broadcasting: (num_columns, 1, 2) and (1, num_columns, 2)
-        phi_theta_i = column_phi_theta_np[:, None, :]  # (num_columns, 1, 2)
-        phi_theta_j = column_phi_theta_np[None, :, :]  # (1, num_columns, 2)
-        
-        # Euclidean distance: sqrt((phi_i - phi_j)^2 + (theta_i - theta_j)^2)
+        phi_theta_i = self.column_phi_theta[:, None, :]  # (num_columns, 1, 2)
+        phi_theta_j = self.column_phi_theta[None, :, :]  # (1, num_columns, 2)
         diff = phi_theta_i - phi_theta_j  # (num_columns, num_columns, 2)
         distances = np.sqrt(np.sum(diff**2, axis=2))  # (num_columns, num_columns)
         
-        # For each column, find N nearest (including itself)
-        nearest_indices = np.argsort(distances, axis=1)[:, :num_nearest_columns]  # (num_columns, actual_N)
+        # For each column, find N^2 nearest (including itself)
+        nearest_indices = np.argsort(distances, axis=1)[:, :num_nearest_columns]  # (num_columns, N^2)
+        
+        # Fixed N x N grid centered at (0,0), row-major order (y then x)
+        offsets = np.arange(-(conv_size // 2), conv_size // 2 + 1, dtype=np.float64)
+        grid_x, grid_y = np.meshgrid(offsets, offsets, indexing='xy')
+        base_grid = np.stack([grid_x.reshape(-1), grid_y.reshape(-1)], axis=1)
+        
+        # Use median nearest-neighbor distance as global spacing
+        nearest_neighbor_dist = np.partition(distances, 1, axis=1)[:, 1]
+        grid_spacing = np.nanmedian(nearest_neighbor_dist)
+        if not np.isfinite(grid_spacing) or grid_spacing <= 0:
+            grid_spacing = 1.0
+        grid_points = base_grid * grid_spacing
+        
+        center_grid_idx = np.where(
+            (grid_points[:, 0] == 0) & (grid_points[:, 1] == 0)
+        )[0][0]
+        
+        def _no_rotation_affine(src_points, dst_points):
+            """Return per-axis scale and translation (no rotation) best fit."""
+            # Solve independently per axis: dst = src * s + t
+            A = np.column_stack([src_points[:, 0], np.ones(src_points.shape[0])])
+            sx, tx = np.linalg.lstsq(A, dst_points[:, 0], rcond=None)[0]
+            A = np.column_stack([src_points[:, 1], np.ones(src_points.shape[0])])
+            sy, ty = np.linalg.lstsq(A, dst_points[:, 1], rcond=None)[0]
+            scale = np.array([sx, sy])
+            translation = np.array([tx, ty])
+            return scale, translation
+        
+        def _hungarian_assignment(distance_matrix, fixed_pairs):
+            """Optimal one-to-one assignment with optional fixed grid->actual pairs."""
+            n = distance_matrix.shape[0]
+            assignment = np.full(n, -1, dtype=np.int64)
+            grid_used = np.zeros(n, dtype=bool)
+            actual_used = np.zeros(n, dtype=bool)
+            for grid_idx, actual_idx in fixed_pairs:
+                assignment[grid_idx] = actual_idx
+                grid_used[grid_idx] = True
+                actual_used[actual_idx] = True
+            
+            remaining_grid = np.where(~grid_used)[0]
+            remaining_actual = np.where(~actual_used)[0]
+            if remaining_grid.size > 0:
+                reduced_cost = distance_matrix[np.ix_(remaining_grid, remaining_actual)]
+                row_ind, col_ind = linear_sum_assignment(reduced_cost)
+                assignment[remaining_grid[row_ind]] = remaining_actual[col_ind]
+            return assignment
+        
+        ordered_nearest_indices = np.zeros_like(nearest_indices)
+        max_icp_iters = 6
+        
+        for col_idx in range(num_columns):
+            actual_points = self.column_phi_theta[nearest_indices[col_idx]].astype(np.float64)
+            center_actual_pos = np.where(nearest_indices[col_idx] == col_idx)[0]
+            if center_actual_pos.size == 0:
+                center_actual_pos = 0
+            else:
+                center_actual_pos = int(center_actual_pos[0])
+            
+            scale = np.ones(2, dtype=np.float64)
+            translation = actual_points.mean(axis=0) - grid_points.mean(axis=0)
+            assignment = None
+            
+            for _ in range(max_icp_iters):
+                transformed_grid = (grid_points * scale[None, :]) + translation
+                dists = np.linalg.norm(
+                    transformed_grid[:, None, :] - actual_points[None, :, :],
+                    axis=2
+                )
+                assignment_new = _hungarian_assignment(
+                    dists,
+                    fixed_pairs=[(center_grid_idx, center_actual_pos)]
+                )
+                matched_actual = actual_points[assignment_new]
+                scale_new, translation_new = _no_rotation_affine(grid_points, matched_actual)
+                
+                if assignment is not None and np.array_equal(assignment_new, assignment):
+                    scale, translation = scale_new, translation_new
+                    break
+                assignment = assignment_new
+                scale, translation = scale_new, translation_new
+            
+            ordered_nearest_indices[col_idx] = nearest_indices[col_idx][assignment]
         
         # Store as buffer (not a parameter, so it's saved but not trainable)
-        self.register_buffer('nearest_column_indices', 
-                           torch.tensor(nearest_indices, device=self.device, dtype=torch.int64))
+        self.register_buffer(
+            'nearest_column_indices',
+            torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
+        )
 
     def _precompute_nearest_decoder_neurons(self):
         """Pre-compute decoder neuron indices for each column's nearest columns.

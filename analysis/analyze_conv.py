@@ -77,17 +77,27 @@ def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path
 
     nearest_indices = model.nearest_column_indices.detach().cpu().numpy()
     center_color = 'black'
-    conv_colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+    conv_cmap = plt.get_cmap('viridis')
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), dpi=150, sharex=True, sharey=True)
     axes = axes.ravel()
 
-    for ax, center_idx, conv_color in zip(axes, center_indices, conv_colors):
+    for ax, center_idx in zip(axes, center_indices):
         conv_indices = nearest_indices[center_idx]
+        conv_order = np.arange(conv_indices.size)
 
         ax.scatter(phi, theta, s=18, color='lightgray', alpha=0.7, edgecolors='none')
-        ax.scatter(phi[conv_indices], theta[conv_indices], s=28, color=conv_color, alpha=0.9, edgecolors='none')
+        conv_scatter = ax.scatter(
+            phi[conv_indices],
+            theta[conv_indices],
+            s=28,
+            c=conv_order,
+            cmap=conv_cmap,
+            alpha=0.9,
+            edgecolors='none'
+        )
         ax.scatter(phi[center_idx], theta[center_idx], s=60, color=center_color, edgecolors='none')
+        fig.colorbar(conv_scatter, ax=ax, shrink=0.8, pad=0.02, label='Convolution index')
 
         ax.set_title(f'Center column {center_idx}')
         ax.set_xlabel('phi')
