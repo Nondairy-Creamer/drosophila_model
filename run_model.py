@@ -85,6 +85,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         model_file = Path(model_path) / 'model.pt'
         print(f"Loading existing model from {model_file}")
         model = ModelClass.load(model_file, device=config['model']['device'], freeze_params=False)
+        model.add_noise_to_parameters()
     else:
         model = ModelClass(
             synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),

@@ -488,12 +488,12 @@ class NeuralModel(torch.nn.Module, ABC):
         params.pop('__class__', None)
         self.init_inputs = params
     
-    def add_noise_to_parameters(self):
+    def add_noise_to_parameters(self, noise_std):
         """Add Gaussian noise to all trainable parameters."""
         with torch.no_grad():
             for param in self.parameters():
                 noise = torch.tensor(
-                    self.rng.normal(0, self.init_std, param.shape),
+                    self.rng.normal(0, noise_std, param.shape),
                     dtype=param.dtype,
                     device=param.device
                 )
@@ -1054,7 +1054,7 @@ class CurrentModel(NeuralModel):
         self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
         
         # Add noise to all parameters
-        self.add_noise_to_parameters()
+        self.add_noise_to_parameters(self.init_std)
         
         if init_new_model:
             with torch.no_grad():
@@ -1370,7 +1370,7 @@ class ConductanceModel(NeuralModel):
         self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
         
         # Add noise to all parameters
-        self.add_noise_to_parameters()
+        self.add_noise_to_parameters(self.init_std)
         
         # Initialize steady_state to rp_leak (better starting point than zeros)
         with torch.no_grad():

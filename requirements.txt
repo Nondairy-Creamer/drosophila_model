@@ -15,3 +15,4 @@ imageio-ffmpeg
 av
 debugpy
 scipy
+pytest

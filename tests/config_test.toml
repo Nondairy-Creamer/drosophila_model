@@ -1,0 +1,54 @@
+[model]
+model_type = 'CurrentModel'
+device = "cpu"
+dtype = "float32"
+use_layer_norm = false
+nonlinearity = "Softplus"
+use_decoder = true
+dt = 0.01
+synapse_count_threshold = 2
+use_connectome_subset = [
+    'L2', 'L4', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'CT1', 'T5a', 'T5b', 'T5c', 'T5d',
+    'L1', 'L3', 'L5', 'Mi1', 'Tm3', 'Mi4', 'Mi9', 'C2', 'C3', 'T4a', 'T4b', 'T4c' ,'T4d'
+]
+
+[training]
+num_steps = 100
+save_every = 10
+input_noise_std = 0.16
+contrast_std = 0.2
+random_flip_input = true
+loss_fn = "cos_loss"
+alpha = 0.01
+clip_norm = 'none'
+use_synthetic_data = false
+
+[stimulus]
+stimulus_type = 'random_sine'
+stim_time = 1.0
+pre_stim_time = 0.5
+post_stim_time = 0.0
+tf_amp = 5.0
+tf_time_scale = 0.15
+num_repeats = 2
+temporal_frequencies = [
+    2,
+    4,
+    8,
+]
+
+[data]
+connectome_folder = "../connectome_data"
+fly_eye = "right"
+use_intrinsic = false
+hemisphere_coverage = 0.85
+normalize_rows = false
+neurons_to_exclude = ['R1-6', 'R7', 'R8']
+excitatory_nt = [
+    "ACH",
+]
+inhibitory_nt = [
+    "GABA",
+    "GLUT",
+]
+root_id_dtype = "int64"

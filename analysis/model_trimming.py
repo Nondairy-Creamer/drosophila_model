@@ -67,7 +67,7 @@ output_neurons = list(target.keys())
 
 with torch.no_grad():
     pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
-    initial_loss = tu.calc_loss(tu.cos_loss, pred['firing_rate'], target).item()
+    initial_loss = tu.calc_loss_dict(tu.cos_loss, pred['firing_rate'], target).item()
 
 print(f"Initial loss: {initial_loss:.6f}")
 print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
@@ -100,7 +100,7 @@ for cell_type_idx in sorted_indices:
     # Calculate loss with silenced cell types
     with torch.no_grad():
         pred = model_copy.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
-        current_loss = tu.calc_loss(tu.cos_loss, pred['firing_rate'], target).item()
+        current_loss = tu.calc_loss_dict(tu.cos_loss, pred['firing_rate'], target).item()
     
     loss_ratio = current_loss / initial_loss
     
