@@ -14,3 +14,4 @@ imageio
 imageio-ffmpeg
 av
 debugpy
+scipy
