@@ -16,7 +16,8 @@ class NeuralModel(torch.nn.Module, ABC):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
-                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None, use_decoder=True):
+                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
+                 use_decoder=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
@@ -27,6 +28,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
         self.use_decoder = use_decoder
+        self.decoder_denom_eps = 1e-2
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
 
         # Create RNG from seed for random initialization
@@ -191,6 +193,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.decoder_conv_1_bias = torch.nn.Parameter(
             torch.zeros(self.channels_1, device=self.device, dtype=self.dtype)
         )
+        self.decoder_conv_1_bn = torch.nn.BatchNorm1d(self.channels_1).to(device=self.device, dtype=self.dtype)
         
         # Pre-compute mapping from column to decoder neuron indices
         self._precompute_column_to_decoder_neurons(num_decoder_neuron_types)
@@ -432,6 +435,7 @@ class NeuralModel(torch.nn.Module, ABC):
             self.decoder_conv_1
         )
         conv_1_output = conv_1_output + self.decoder_conv_1_bias.view(1, 1, -1)
+        conv_1_output = self.decoder_conv_1_bn(conv_1_output.permute(0, 2, 1)).permute(0, 2, 1)
         
         # Apply softplus activation after conv_1
         conv_1_output = torch.nn.functional.softplus(conv_1_output)
@@ -456,9 +460,10 @@ class NeuralModel(torch.nn.Module, ABC):
         conv_2_output = conv_2_output + self.decoder_conv_2_bias.view(1, 1, -1)
         
         # Output: first 2 channels divided by 3rd channel
-        # Avoid division by zero
+        # Avoid near-zero division to stabilize early training
         denominator = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
-        denominator = torch.sign(denominator) * torch.clamp(torch.abs(denominator), min=1e-8)
+        denominator = torch.nn.functional.softplus(denominator)
+        denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
         optic_flow = conv_2_output[:, :, :2] / denominator  # (stimuli, num_columns, 2)
         
         if squeeze_output:
@@ -990,7 +995,8 @@ class CurrentModel(NeuralModel):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
-                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, commit_hash=None):
+                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True,
+                 commit_hash=None):
         # Call parent init (handles NT filtering and orphan removal)
         super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
