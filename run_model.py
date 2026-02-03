@@ -12,7 +12,7 @@ import model_utilities as mu
 import argparse
 
 
-def run_single_model(seed=None, device_override=None, run_id=None, timestamp=None, model_path=None):
+def run_single_model(seed=None, device_override=None, run_id=None, timestamp=None, model_path=None, config_path=None):
     """
     Run a single model training with specified seed and device.
 
@@ -26,7 +26,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     """
 
     # Load configuration from TOML file
-    config = du.load_config()
+    config = du.load_config(config_path or 'config.toml')
     stimulus_seed = 0
 
     # Override device if specified
@@ -168,8 +168,16 @@ if __name__ == '__main__':
     parser.add_argument('--run-id', type=str, default=None, help='Optional identifier for this run')
     parser.add_argument('--timestamp', type=str, default=None, help='Timestamp string for model folder (format: YYYYMMDD_HHMMSS)')
     parser.add_argument('--model-path', type=str, default=None, help='Path to existing model folder to load (e.g., models/best_model)')
+    parser.add_argument('--config-path', type=str, default=None, help='Path to config TOML (default: config.toml)')
 
     args = parser.parse_args()
 
-    run_single_model(seed=args.seed, device_override=args.device, run_id=args.run_id, timestamp=args.timestamp, model_path=args.model_path)
+    run_single_model(
+        seed=args.seed,
+        device_override=args.device,
+        run_id=args.run_id,
+        timestamp=args.timestamp,
+        model_path=args.model_path,
+        config_path=args.config_path,
+    )
 

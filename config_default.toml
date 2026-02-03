@@ -5,6 +5,7 @@ dtype = "float32"
 use_layer_norm = false
 nonlinearity = "Softplus"
 use_decoder = false
+use_input_conv = false
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = []

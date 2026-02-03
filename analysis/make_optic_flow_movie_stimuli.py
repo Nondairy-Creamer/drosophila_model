@@ -169,7 +169,7 @@ def main() -> None:
     parser.add_argument(
         "--stim-index",
         type=int,
-        default=0,
+        default=5,
         help="Stimulus index to visualize per stimulus type",
     )
     parser.add_argument(

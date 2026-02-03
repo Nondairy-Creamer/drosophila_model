@@ -4,8 +4,11 @@ import loss_functions as lf
 from tests.test_model_factory import build_model_from_test_config
 
 
-def test_decoder_gradients_defined():
-    model, _, input_neurons, _ = build_model_from_test_config(use_decoder=True)
+def test_model_gradients():
+    model, _, input_neurons, _ = build_model_from_test_config(
+        use_decoder=True,
+        use_input_conv=True,
+    )
     model.train()
 
     inputs = torch.ones((1, 20, model.num_columns), dtype=model.dtype, device=model.device)

@@ -7,6 +7,16 @@ import torch
 # Stimulus: [examples, time, points in space]
 # Optic Flow: [examples, time, points in space, LR/UD optic flow]
 
+import h5py
+import numpy as np
+
+def loadmat_v73(path):
+    out = {}
+    with h5py.File(path, "r") as f:
+        for k in f.keys():
+            out[k] = np.array(f[k])
+    return out
+
 def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=4,
                       phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
@@ -335,6 +345,60 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
 
     return stimulus, optic_flow
 
+
+def get_random_velocity_pano(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, velocity_amp=180, velocity_time_scale=0.25, seed=None,
+                             dt=0.01, stim_time=1.0, num_repeats=5):
+    # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
+    # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
+    # the velocity of this sine wave is a smoothed gaussian random walk 
+    # positive / negative temporal frequency is right / left and up / down sine waves
+    
+    # Create RNG from seed
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng()
+    
+    # --- load in the stimuli ---
+    pano = loadmat_v73('/Users/mcreamer/Documents/python/connectome_data/panoramic/0001-120515-142521.mat').T
+    pano_y_lim = -np.array([47, -58]) * np.pi / 180 + np.pi / 2
+    pano_x_lim = np.array([0, 2 * np.pi])
+
+    # --- generate the space time coordinates ---
+    # double the number of stim because we want to symmetrize the temporal frequnecies
+    num_repeats = num_repeats * 2
+    time_vect = np.arange(0, stim_time * num_repeats, step=dt)
+    t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
+    t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
+    num_time, num_cell = phi_mesh.shape
+    time_per_stim = num_time // num_repeats
+
+    # --- generate the shifting velocity and angle ---
+    #random velocity
+    velocity = rng.standard_normal(num_time // 2)
+    velocity = np.concatenate((velocity, -velocity), axis=0)
+    angle = rng.uniform(low=0.0, high=2*np.pi, size=num_time)
+
+    d_phi = velocity * np.cos(angle)
+    d_theta = velocity * np.sin(angle)
+
+    # make the filter of the velocity
+    velocity_filter = 1 / (np.sqrt(2 * np.pi * velocity_time_scale**2)) * np.exp(-(time_vect-time_vect.mean())**2 / (2 * velocity_time_scale**2)) * dt
+    velocity_filter /= velocity_filter.sum()
+    velocity_filter = np.fft.ifftshift(velocity_filter)  # shift for our circular convolution
+    expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / velocity_time_scale)
+
+    # filter the dx and dy
+    d_phi = np.fft.ifft(np.fft.fft(d_phi) * np.fft.fft(velocity_filter)).real
+    d_theta = np.fft.ifft(np.fft.fft(d_theta) * np.fft.fft(velocity_filter)).real
+    # rescale the tf after smoothing to get the correct amplitude
+    d_phi *= velocity_amp / expected_std
+    d_theta *= velocity_amp / expected_std
+
+
+
+    return stimulus, np.stack((d_phi, d_theta)).T
+
 def consolidate_stim(stim_dict, optic_flow_dict):
     time_per_stim, num_cell = next(iter(stim_dict.values()))[0].shape[1:]
     stimulus = np.zeros((0, time_per_stim, num_cell))
@@ -370,6 +434,22 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
         )
 
         stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+        stimulus = (stimulus + 1.0) / 2.0
+        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+
+    elif stimulus_type == 'random_pano':
+        if column_phi_theta is None:
+            raise Exception('panoramic require column_phi_theta input')
+
+        # get pano stimulus with random velocity
+        stimulus, optic_flow = get_random_velocity_pano(
+            column_phi_theta[:, 0], column_phi_theta[:, 1],
+            velocity_amp=config['stimulus']['tf_amp'], velocity_time_scale=config['stimulus']['tf_time_scale'],
+            num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
+        )
+
+        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+        stimulus = (stimulus + 1.0) / 2.0
         optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
     elif stimulus_type == 'random_sine':
@@ -408,8 +488,7 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
 
         stimulus = np.stack(stimulus_in['responses'])
         optic_flow = np.stack(stimulus_in['forward_flows'])
-        stimulus /= 127.5
-        stimulus -= 1.0
+        stimulus /= 255.0
 
         stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
         optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
@@ -441,8 +520,7 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
         stimulus = torch.stack(stimulus_list, axis=0)
         optic_flow = torch.stack(optic_flow_list, axis=0)
         optic_flow[:, :, :, 1] *= -1
-        stimulus /= 127.5
-        stimulus -= 1.0
+        stimulus /= 255.0
 
         # Interpolate to model timestep
         stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
@@ -542,7 +620,7 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     return data_interp
 
 
-def get_synthetic_data(model, stimulus, input_neurons, output_neurons):
+def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_noise_mult=5):
     """
     Generate synthetic target data by running a noise-perturbed model.
     
@@ -564,11 +642,7 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons):
     perturbed_model = copy.deepcopy(model)
     
     # Add noise to the copied model's parameters
-    perturbed_model.add_noise_to_parameters()
-    perturbed_model.add_noise_to_parameters()
-    perturbed_model.add_noise_to_parameters()
-    perturbed_model.add_noise_to_parameters()
-    perturbed_model.add_noise_to_parameters()
+    perturbed_model.add_noise_to_parameters(model.init_std * init_noise_mult)
     
     # Run the stimulus through the perturbed model
     with torch.no_grad():

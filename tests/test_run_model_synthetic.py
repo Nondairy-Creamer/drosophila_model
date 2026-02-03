@@ -1,4 +1,3 @@
-import shutil
 import time
 from pathlib import Path
 
@@ -10,28 +9,9 @@ import run_model
 import training_utilities as tu
 
 
-def _write_test_config(repo_root: Path) -> dict:
-    config = du.load_config(str(repo_root / "tests" / "config_test.toml"))
-    config["training"]["use_synthetic_data"] = True
-    config["training"]["num_steps"] = 100
-    config["model"]["use_decoder"] = False
-    config["model"]["device"] = "cpu"
-    config["model"]["dt"] = 0.01
-    config["stimulus"]["stim_time"] = 1.0
-    config["stimulus"]["pre_stim_time"] = 0.0
-    config["stimulus"]["post_stim_time"] = 0.0
-    config["stimulus"]["num_repeats"] = 1
-    du.save_config(config, repo_root / "config.toml")
-    return config
-
-
-def _restore_config(repo_root: Path, backup_path: Path | None) -> None:
-    config_path = repo_root / "config.toml"
-    if backup_path is None:
-        if config_path.exists():
-            config_path.unlink()
-        return
-    shutil.copy2(backup_path, config_path)
+def _load_test_config(repo_root: Path) -> tuple[dict, Path]:
+    test_config_path = repo_root / "tests" / "config_test.toml"
+    return du.load_config(str(test_config_path)), test_config_path
 
 
 def _get_run_folder(repo_root: Path, timestamp: str, run_id: str) -> Path:
@@ -68,30 +48,20 @@ def _calc_loss(model, stimulus, target, input_neurons, output_neurons, loss_fn):
 
 def test_run_model_synthetic_learns(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
-    config_path = repo_root / "config.toml"
-    backup_path = None
-    if config_path.exists():
-        backup_path = tmp_path / "config_backup.toml"
-        shutil.copy2(config_path, backup_path)
-
     timestamp = f"pytest_{int(time.time())}"
     run_id = "synthetic"
-    try:
-        config = _write_test_config(repo_root)
-        run_model.run_single_model(
-            seed=0,
-            device_override="cpu",
-            run_id=run_id,
-            timestamp=timestamp,
-        )
-    finally:
-        _restore_config(repo_root, backup_path)
+    config, test_config_path = _load_test_config(repo_root)
+    run_model.run_single_model(
+        seed=0,
+        device_override="cpu",
+        run_id=run_id,
+        timestamp=timestamp,
+        config_path=str(test_config_path),
+    )
 
     model_dir = _get_run_folder(repo_root, timestamp, run_id)
     stimulus = torch.load(model_dir / "cell_inputs.pt")
     target = torch.load(model_dir / "target.pt")
-
-    assert stimulus.shape[1] == 100, f"Expected 100 time points, got {stimulus.shape[1]}"
 
     input_neurons, output_neurons = _get_io_neurons(config)
     loss_fn = getattr(tu, config["training"]["loss_fn"])

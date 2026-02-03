@@ -19,10 +19,11 @@ def load_test_config() -> tuple[dict, Path]:
     return config, repo_root
 
 
-def build_model_from_test_config(use_decoder: bool):
+def build_model_from_test_config(use_decoder: bool = True, use_input_conv: bool = True):
     config, repo_root = load_test_config()
     config["model"]["device"] = "cpu"
     config["model"]["use_decoder"] = use_decoder
+    config["model"]["use_input_conv"] = use_input_conv
 
     connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
     cell_info_df = pd.read_parquet(connectome_folder / "optic_lobes_cell_info.parquet")
@@ -54,9 +55,12 @@ def build_model_from_test_config(use_decoder: bool):
         device=config["model"]["device"],
         dtype=config["model"]["dtype"],
         use_decoder=config["model"]["use_decoder"],
+        use_input_conv=config["model"]["use_input_conv"],
         dt=config["model"]["dt"],
         seed=0,
         commit_hash=None,
     )
 
     return model, config, input_neurons, output_neurons
+
+

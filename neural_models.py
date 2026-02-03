@@ -17,7 +17,7 @@ class NeuralModel(torch.nn.Module, ABC):
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 use_decoder=True):
+                 use_decoder=True, use_input_conv=True, input_conv_size_x=3, input_conv_size_t=4):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
@@ -28,6 +28,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
         self.use_decoder = use_decoder
+        self.use_input_conv = use_input_conv
         self.decoder_denom_eps = 1e-2
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
 
@@ -142,6 +143,9 @@ class NeuralModel(torch.nn.Module, ABC):
         if self.use_decoder:
             # Initialize decoder
             self._initialize_decoder()
+        if self.use_input_conv:
+            # Initialize input convolution layer
+            self._initialize_input_conv(conv_size_x=input_conv_size_x, conv_size_t=input_conv_size_t)
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
@@ -151,6 +155,40 @@ class NeuralModel(torch.nn.Module, ABC):
         y = radius * np.sin(theta) * np.sin(phi)
         z = radius * np.cos(theta)
         return np.stack((x, y, z), axis=1)
+
+    def _initialize_input_conv(self, conv_size_x=5, conv_size_t=5):
+        """Initialize input convolution parameters and precompute indices."""
+        if conv_size_x % 2 == 0:
+            raise ValueError("conv_size_x must be odd for centered spatial convolution.")
+        if conv_size_t < 1:
+            raise ValueError("conv_size_t must be >= 1 for temporal convolution.")
+
+        self.input_conv_size_x = conv_size_x
+        self.input_conv_size_t = conv_size_t
+        self.input_num_nearest_columns = conv_size_x ** 2
+
+        # Low-rank 3D convolution parameters: outer product of x, y, and t vectors
+        input_conv_x_np = self.rng.standard_normal(conv_size_x) * self.init_std
+        input_conv_y_np = self.rng.standard_normal(conv_size_x) * self.init_std
+        input_conv_t_np = self.rng.standard_normal(conv_size_t) * self.init_std
+        self.input_conv_x = torch.nn.Parameter(
+            torch.tensor(input_conv_x_np, device=self.device, dtype=self.dtype) 
+        )
+        self.input_conv_y = torch.nn.Parameter(
+            torch.tensor(input_conv_y_np, device=self.device, dtype=self.dtype)
+        )
+        self.input_conv_t = torch.nn.Parameter(
+            torch.tensor(input_conv_t_np, device=self.device, dtype=self.dtype)
+        )
+        self.input_conv_bias = torch.nn.Parameter(
+            torch.zeros((), device=self.device, dtype=self.dtype)
+        )
+
+        ordered_nearest_indices = self._compute_nearest_columns(conv_size_x)
+        self.register_buffer(
+            'input_nearest_column_indices',
+            torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
+        )
 
     def _initialize_decoder(self, conv_size=5):
         """Initialize decoder parameters and precompute neuron indices."""
@@ -195,9 +233,11 @@ class NeuralModel(torch.nn.Module, ABC):
         num_decoder_neuron_types = len(self.neurons_to_decode)
         
         # Initialize conv_1 with weights per neuron: (channels_1, num_nearest_columns, num_decoder_neuron_types)
+        decoder_conv_1_np = self.rng.standard_normal(
+            (self.channels_1, self.num_nearest_columns, num_decoder_neuron_types)
+        )
         self.decoder_conv_1 = torch.nn.Parameter(
-            torch.randn(self.channels_1, self.num_nearest_columns, num_decoder_neuron_types, 
-                       device=self.device, dtype=self.dtype) * self.init_std
+            torch.tensor(decoder_conv_1_np, device=self.device, dtype=self.dtype) * self.init_std
         )
         self.decoder_conv_1_bias = torch.nn.Parameter(
             torch.zeros(self.channels_1, device=self.device, dtype=self.dtype)
@@ -209,9 +249,11 @@ class NeuralModel(torch.nn.Module, ABC):
         
         # Initialize conv_2 (operates on conv_1_output channels from nearest columns)
         # Shape: (channels_2, num_nearest_columns, channels_1)
+        decoder_conv_2_np = self.rng.standard_normal(
+            (self.channels_2, self.num_nearest_columns, self.channels_1)
+        )
         self.decoder_conv_2 = torch.nn.Parameter(
-            torch.randn(self.channels_2, self.num_nearest_columns, self.channels_1, 
-                       device=self.device, dtype=self.dtype) * self.init_std
+            torch.tensor(decoder_conv_2_np, device=self.device, dtype=self.dtype) * self.init_std
         )
         self.decoder_conv_2_bias = torch.nn.Parameter(
             torch.zeros(self.channels_2, device=self.device, dtype=self.dtype)
@@ -276,6 +318,16 @@ class NeuralModel(torch.nn.Module, ABC):
         the nearest columns by the grid's row-major ordering to keep convolution weights
         consistently aligned across columns.
         """
+        ordered_nearest_indices = self._compute_nearest_columns(conv_size)
+        self.register_buffer(
+            'nearest_column_indices',
+            torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
+        )
+
+    def _compute_nearest_columns(self, conv_size):
+        if conv_size % 2 == 0:
+            raise ValueError("conv_size must be odd for centered convolution.")
+
         # (num_columns, 2) with [phi, theta]
         num_columns = self.column_phi_theta.shape[0]
 
@@ -371,12 +423,43 @@ class NeuralModel(torch.nn.Module, ABC):
                 scale, translation = scale_new, translation_new
             
             ordered_nearest_indices[col_idx] = nearest_indices[col_idx][assignment]
-        
-        # Store as buffer (not a parameter, so it's saved but not trainable)
-        self.register_buffer(
-            'nearest_column_indices',
-            torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
-        )
+
+        return ordered_nearest_indices
+
+    def apply_input_conv(self, inputs):
+        """Apply the low-rank input convolution over time and columns."""
+        if not self.use_input_conv:
+            return inputs
+
+        if inputs.dim() == 2:
+            inputs = inputs.unsqueeze(0)
+            squeeze_output = True
+        elif inputs.dim() == 3:
+            squeeze_output = False
+        else:
+            raise ValueError("inputs must have shape (time, columns) or (stimuli, time, columns).")
+
+        num_columns = self.input_nearest_column_indices.shape[0]
+        if inputs.shape[2] != num_columns:
+            raise ValueError(
+                f"inputs has {inputs.shape[2]} columns, expected {num_columns}."
+            )
+
+        pad = self.input_conv_size_t - 1
+        inputs_padded = torch.nn.functional.pad(inputs, (0, 0, pad, 0))
+        time_windows = inputs_padded.unfold(1, self.input_conv_size_t, 1)
+        spatial_windows = time_windows[:, :, self.input_nearest_column_indices, :]
+        spatial_windows = spatial_windows.permute(0, 1, 4, 2, 3)
+
+        spatial_kernel = (self.input_conv_y[:, None] * self.input_conv_x[None, :]).reshape(-1)
+        spatial_applied = torch.einsum('stqcn,n->stqc', spatial_windows, spatial_kernel)
+        convolved = torch.einsum('stqc,q->stc', spatial_applied, self.input_conv_t)
+        convolved = convolved + self.input_conv_bias
+
+        if squeeze_output:
+            convolved = convolved.squeeze(0)
+
+        return convolved
 
     def _precompute_nearest_decoder_neurons(self):
         """Pre-compute decoder neuron indices for each column's nearest columns.
@@ -521,6 +604,8 @@ class NeuralModel(torch.nn.Module, ABC):
             # inputs are usually given to L1 L2 and L3 mimicking input from the photo receptors
             # however in Drosophila photo receptors inhibit these cells, so we invert the input here
             inputs = -inputs + 2 * torch.mean(inputs)
+        if self.use_input_conv:
+            inputs = self.apply_input_conv(inputs)
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):
@@ -1005,13 +1090,14 @@ class CurrentModel(NeuralModel):
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True,
-                 commit_hash=None):
+                 use_input_conv=False, input_conv_size_x=3, input_conv_size_t=3, commit_hash=None):
         # Call parent init (handles NT filtering and orphan removal)
         super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
                          nonlinearity=nonlinearity, device=device, dtype=dtype,
                          init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
-                         commit_hash=commit_hash, use_decoder=use_decoder)
+                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv,
+                         input_conv_size_x=input_conv_size_x, input_conv_size_t=input_conv_size_t)
         
         # Sign the synapse counts based on neurotransmitter type
         # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
@@ -1228,7 +1314,8 @@ class ConductanceModel(NeuralModel):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32', init_new_model=True,
-                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, commit_hash=None):
+                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, use_input_conv=False,
+                 input_conv_size_x=3, input_conv_size_t=3, commit_hash=None):
         """
         Initialize a conductance-based neural model.
         
@@ -1256,7 +1343,8 @@ class ConductanceModel(NeuralModel):
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
                          nonlinearity=nonlinearity, device=device, dtype=dtype,
                          init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
-                         commit_hash=commit_hash, use_decoder=use_decoder)
+                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv,
+                         input_conv_size_x=input_conv_size_x, input_conv_size_t=input_conv_size_t)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()

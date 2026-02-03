@@ -4,7 +4,8 @@ device = "cpu"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "Softplus"
-use_decoder = true
+use_decoder = false
+use_input_conv = true
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = [
@@ -13,7 +14,7 @@ use_connectome_subset = [
 ]
 
 [training]
-num_steps = 10
+num_steps = 100
 save_every = 10
 input_noise_std = 0.16
 contrast_std = 0.2
@@ -21,16 +22,16 @@ random_flip_input = true
 loss_fn = "cos_loss"
 alpha = 0.01
 clip_norm = 'none'
-use_synthetic_data = false
+use_synthetic_data = true
 
 [stimulus]
 stimulus_type = 'random_sine'
 stim_time = 1.0
-pre_stim_time = 0.5
+pre_stim_time = 0.0
 post_stim_time = 0.0
 tf_amp = 5.0
 tf_time_scale = 0.15
-num_repeats = 2
+num_repeats = 1
 temporal_frequencies = [
     2,
     4,
