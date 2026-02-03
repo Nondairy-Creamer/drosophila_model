@@ -129,9 +129,9 @@ def main() -> None:
 
     # Extract stimulus and flow for a single stimulus
     stim_index = args.stim_index
-    stim_single = stimulus[0, :, :]
-    true_flow_single = true_flow[0, :, :, :]
-    pred_flow_single = pred_flow[0, :, :, :]
+    stim_single = stimulus[stim_index, :, :]
+    true_flow_single = true_flow[stim_index, :, :, :]
+    pred_flow_single = pred_flow[stim_index, :, :, :]
     num_time, _ = stim_single.shape
 
     print(f"Creating movie for stimulus {stim_index} with {num_time} frames...")
