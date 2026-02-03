@@ -99,6 +99,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             device=config['model']['device'],
             dtype=config['model']['dtype'],
             use_decoder=config['model']['use_decoder'],
+            use_input_conv=config['model']['use_input_conv'],
             dt=dt,
             seed=seed,
             commit_hash=commit_hash,

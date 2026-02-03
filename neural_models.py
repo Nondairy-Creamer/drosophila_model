@@ -168,9 +168,24 @@ class NeuralModel(torch.nn.Module, ABC):
         self.input_num_nearest_columns = conv_size_x ** 2
 
         # Low-rank 3D convolution parameters: outer product of x, y, and t vectors
-        input_conv_x_np = self.rng.standard_normal(conv_size_x) * self.init_std
-        input_conv_y_np = self.rng.standard_normal(conv_size_x) * self.init_std
-        input_conv_t_np = self.rng.standard_normal(conv_size_t) * self.init_std
+        center = (conv_size_x - 1) / 2.0
+        sigma = conv_size_x / 4.0
+        x_idx = np.arange(conv_size_x, dtype=np.float64)
+        gaussian = np.exp(-0.5 * ((x_idx - center) / sigma) ** 2)
+        gaussian = gaussian / gaussian.sum()
+
+        tau = conv_size_t / 2.0
+        t_idx = np.arange(conv_size_t, dtype=np.float64)
+        exponential = np.exp(-t_idx / tau)
+        exponential = exponential / exponential.sum()
+
+        noise_x = self.rng.standard_normal(conv_size_x) * self.init_std
+        noise_y = self.rng.standard_normal(conv_size_x) * self.init_std
+        noise_t = self.rng.standard_normal(conv_size_t) * self.init_std
+
+        input_conv_x_np = gaussian + noise_x
+        input_conv_y_np = gaussian + noise_y
+        input_conv_t_np = exponential + noise_t
         self.input_conv_x = torch.nn.Parameter(
             torch.tensor(input_conv_x_np, device=self.device, dtype=self.dtype) 
         )
