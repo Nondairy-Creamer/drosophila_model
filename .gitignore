@@ -4,5 +4,5 @@ figures/*
 models/*
 !models/.gitkeep
 __pycache__/
-
+.venv
 .DS_Store
