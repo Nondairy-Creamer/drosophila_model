@@ -143,6 +143,15 @@ class NeuralModel(torch.nn.Module, ABC):
             # Initialize decoder
             self._initialize_decoder()
 
+    def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
+        """Return column locations projected to 3D Cartesian coordinates."""
+        phi = self.column_phi_theta[:, 0]
+        theta = self.column_phi_theta[:, 1]
+        x = radius * np.sin(theta) * np.cos(phi)
+        y = radius * np.sin(theta) * np.sin(phi)
+        z = radius * np.cos(theta)
+        return np.stack((x, y, z), axis=1)
+
     def _initialize_decoder(self, conv_size=5):
         """Initialize decoder parameters and precompute neuron indices."""
         # conv_1: N^2 nearest columns, 8 channels, weights per neuron
@@ -511,7 +520,7 @@ class NeuralModel(torch.nn.Module, ABC):
         if invert_input:
             # inputs are usually given to L1 L2 and L3 mimicking input from the photo receptors
             # however in Drosophila photo receptors inhibit these cells, so we invert the input here
-            inputs = -inputs
+            inputs = -inputs + 2 * torch.mean(inputs)
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):

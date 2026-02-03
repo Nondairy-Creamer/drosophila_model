@@ -3,8 +3,8 @@ Create a movie comparing true vs predicted optic flow.
 2x2 layout:
   - Top left: Stimulus intensity (scatter plot)
   - Top right: True optic flow (quiver plot)
-  - Bottom left: Predicted optic flow (quiver plot)
-  - Bottom right: Blank (reserved)
+  - Bottom left: Blank (reserved)
+  - Bottom right: Predicted optic flow (quiver plot)
 """
 import argparse
 import sys
@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import numpy as np
-import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
@@ -89,8 +88,6 @@ def main() -> None:
 
     model_folder, model_file = _resolve_model_paths(Path(args.model_path))
     config = du.load_config(model_folder / 'config.toml')
-    connectome_folder = Path(config['data']['connectome_folder'])
-
     print("Loading model...")
     model_type = config['model'].get('model_type')
     ModelClass = getattr(nm, model_type)
@@ -98,7 +95,7 @@ def main() -> None:
     model.use_decoder = True
     device = model.device
     dtype = model.dtype
-    frame_rate = int(1 / model.dt)
+    frame_rate = max(1, int((1 / model.dt) / 2))
 
     print("Loading inputs and targets...")
     cell_inputs = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
@@ -122,10 +119,10 @@ def main() -> None:
     print(f"True flow shape: {true_flow.shape}")
     print(f"Pred flow shape: {pred_flow.shape}")
 
-    # Load column positions
-    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-    cell_x = column_info_df.x.to_numpy()
-    cell_z = column_info_df.z.to_numpy()
+    # Use model column locations in spherical coordinates and project to 3D (radius=1)
+    column_xyz = model.get_column_xyz()
+    cell_x = column_xyz[:, 0]
+    cell_z = column_xyz[:, 2]
 
     # Extract stimulus and flow for a single stimulus
     stim_index = args.stim_index
@@ -153,8 +150,8 @@ def main() -> None:
     fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
     ax_stim = axes[0, 0]
     ax_true = axes[0, 1]
-    ax_pred = axes[1, 0]
-    ax_blank = axes[1, 1]
+    ax_blank = axes[1, 0]
+    ax_pred = axes[1, 1]
 
     # Set up axes limits with some padding (invert x-axis: +X on left)
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
