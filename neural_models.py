@@ -554,7 +554,7 @@ class NeuralModel(torch.nn.Module, ABC):
         # Output: first 2 channels divided by 3rd channel
         # Avoid near-zero division to stabilize early training
         denominator = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
-        denominator = torch.nn.functional.softplus(denominator)
+        denominator = torch.nn.functional.relu(denominator)
         denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
         optic_flow = conv_2_output[:, :, :2] / denominator  # (stimuli, num_columns, 2)
         
