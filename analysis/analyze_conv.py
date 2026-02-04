@@ -1,9 +1,9 @@
 """
-Visualize decoder convolution columns in phi/theta space.
+Visualize decoder and input convolution columns in phi/theta space.
 
 Creates a 2x2 plot where each panel shows:
   - All columns (gray)
-  - Columns included in the decoder convolution for a chosen center column
+  - Columns included in the convolution for a chosen center column
   - The center column location
 """
 import argparse
@@ -51,6 +51,7 @@ def _load_model(config: dict, device: str) -> nm.CurrentModel:
         device=device,
         dtype=config['model']['dtype'],
         use_decoder=True,
+        use_input_conv=config['model']['use_input_conv'],
         dt=config['model']['dt'],
         seed=None,
         commit_hash=commit_hash,
@@ -111,6 +112,47 @@ def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path
     plt.close(fig)
 
 
+def _plot_input_conv_columns(model: nm.CurrentModel, center_indices: list[int], output_path: Path) -> None:
+    column_theta_phi = model.column_phi_theta
+    phi = column_theta_phi[:, 0]
+    theta = column_theta_phi[:, 1]
+
+    nearest_indices = model.input_nearest_column_indices.detach().cpu().numpy()
+    center_color = 'black'
+    conv_cmap = plt.get_cmap('viridis')
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), dpi=150, sharex=True, sharey=True)
+    axes = axes.ravel()
+
+    for ax, center_idx in zip(axes, center_indices):
+        conv_indices = nearest_indices[center_idx]
+        conv_order = np.arange(conv_indices.size)
+
+        ax.scatter(phi, theta, s=18, color='lightgray', alpha=0.7, edgecolors='none')
+        conv_scatter = ax.scatter(
+            phi[conv_indices],
+            theta[conv_indices],
+            s=28,
+            c=conv_order,
+            cmap=conv_cmap,
+            alpha=0.9,
+            edgecolors='none'
+        )
+        ax.scatter(phi[center_idx], theta[center_idx], s=60, color=center_color, edgecolors='none')
+        fig.colorbar(conv_scatter, ax=ax, shrink=0.8, pad=0.02, label='Input convolution index')
+
+        ax.set_title(f'Center column {center_idx}')
+        ax.set_xlabel('phi')
+        ax.set_ylabel('theta')
+        ax.set_aspect('equal', adjustable='box')
+
+    fig.suptitle('Input convolution columns in phi/theta space')
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze decoder convolution columns.")
     parser.add_argument(
@@ -132,6 +174,12 @@ def main() -> None:
         help="Output image path",
     )
     parser.add_argument(
+        "--input-output",
+        type=str,
+        default="figures/input_convolution_columns.png",
+        help="Output image path for input convolution columns",
+    )
+    parser.add_argument(
         "--center-indices",
         type=int,
         nargs=4,
@@ -150,6 +198,12 @@ def main() -> None:
 
     _plot_columns(model, center_indices, Path(args.output))
     print(f"Saved plot to {args.output}")
+
+    if model.use_input_conv:
+        _plot_input_conv_columns(model, center_indices, Path(args.input_output))
+        print(f"Saved plot to {args.input_output}")
+    else:
+        print("Skipping input convolution plot because use_input_conv is disabled.")
 
 
 if __name__ == "__main__":

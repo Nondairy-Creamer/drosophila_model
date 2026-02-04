@@ -2,6 +2,12 @@ from pathlib import Path
 
 import pandas as pd
 
+import sys
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
 import data_utilities as du
 import neural_models as nm
 

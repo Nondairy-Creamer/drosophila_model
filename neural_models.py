@@ -26,7 +26,7 @@ class NeuralModel(torch.nn.Module, ABC):
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 use_decoder=True, use_input_conv=True, input_conv_size_x=3, input_conv_size_t=4):
+                 use_decoder=True, use_input_conv=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
@@ -154,7 +154,7 @@ class NeuralModel(torch.nn.Module, ABC):
             self._initialize_decoder()
         if self.use_input_conv:
             # Initialize input convolution layer
-            self._initialize_input_conv(conv_size_x=input_conv_size_x, conv_size_t=input_conv_size_t)
+            self._initialize_input_conv()
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
@@ -165,7 +165,7 @@ class NeuralModel(torch.nn.Module, ABC):
         z = radius * np.cos(theta)
         return np.stack((x, y, z), axis=1)
 
-    def _initialize_input_conv(self, conv_size_x=5, conv_size_t=5):
+    def _initialize_input_conv(self, conv_size_x=3, conv_size_t=4):
         """Initialize input convolution parameters and precompute indices."""
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
@@ -468,7 +468,9 @@ class NeuralModel(torch.nn.Module, ABC):
 
         spatial_kernel = (self.input_conv_y[:, None] * self.input_conv_x[None, :]).reshape(-1)
         spatial_applied = torch.einsum('stqcn,n->stqc', spatial_windows, spatial_kernel)
-        convolved = torch.einsum('stqc,q->stc', spatial_applied, self.input_conv_t)
+        # Flip temporal kernel so index 0 corresponds to current time.
+        temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
+        convolved = torch.einsum('stqc,q->stc', spatial_applied, temporal_kernel)
         convolved = convolved + self.input_conv_bias
 
         if squeeze_output:
@@ -1118,14 +1120,13 @@ class CurrentModel(NeuralModel):
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True,
-                 use_input_conv=False, input_conv_size_x=3, input_conv_size_t=3, commit_hash=None):
+                 use_input_conv=False, commit_hash=None):
         # Call parent init (handles NT filtering and orphan removal)
         super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
                          nonlinearity=nonlinearity, device=device, dtype=dtype,
                          init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
-                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv,
-                         input_conv_size_x=input_conv_size_x, input_conv_size_t=input_conv_size_t)
+                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv)
         
         # Sign the synapse counts based on neurotransmitter type
         # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
@@ -1343,8 +1344,7 @@ class ConductanceModel(NeuralModel):
     
     def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32', init_new_model=True,
-                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, use_input_conv=False,
-                 input_conv_size_x=3, input_conv_size_t=3, commit_hash=None):
+                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, use_input_conv=False, commit_hash=None):
         """
         Initialize a conductance-based neural model.
         
@@ -1372,8 +1372,7 @@ class ConductanceModel(NeuralModel):
                          excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
                          nonlinearity=nonlinearity, device=device, dtype=dtype,
                          init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
-                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv,
-                         input_conv_size_x=input_conv_size_x, input_conv_size_t=input_conv_size_t)
+                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()
