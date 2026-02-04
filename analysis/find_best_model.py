@@ -38,7 +38,7 @@ def find_best_model(base_folder):
     for folder in matching_folders:
         opt_path = folder / 'model_opt.pt'
         if opt_path.exists():
-            opt_data = torch.load(opt_path, weights_only=False)
+            opt_data = torch.load(opt_path, map_location='cpu', weights_only=False)
             min_loss = min(opt_data['loss'])
             if ~np.isnan(min_loss) and ~np.isinf(min_loss):
                 model_losses.append((folder, min_loss))

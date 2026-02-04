@@ -32,6 +32,17 @@ def _prepare_stimulus_config(config: dict, device: str) -> dict:
     return config_copy
 
 
+def _apply_config_overrides(config: dict, overrides: dict | None) -> dict:
+    if not overrides:
+        return config
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(config.get(key), dict):
+            config[key] = {**config[key], **value}
+        else:
+            config[key] = value
+    return config
+
+
 def _strip_blank_stimulus(stimulus: torch.Tensor, optic_flow: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if stimulus.shape[0] > 1:
         return stimulus[1:], optic_flow[1:]
@@ -51,34 +62,54 @@ def run_model_on_stimuli(
     model_path: str | Path = "models/best_model",
     device: str = "cpu",
     stimulus_types: list[str] | None = None,
+    stimulus_specs: list[dict] | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
     model_pt, model_folder = _resolve_model_paths(Path(model_path))
     config = du.load_config(model_folder / "config.toml")
     model = nm.NeuralModel.load(model_pt, device=device)
 
-    stim_config = _prepare_stimulus_config(config, str(model.device))
     column_phi_theta = model.column_phi_theta
     column_xyz = model.get_column_xyz()
 
-    if stimulus_types is None:
-        stimulus_types = ["sintel", "flow360", "random_sine"]
-
-    stimulus_map = {
-        "sintel": ("sintel", None),
-        "flow360": ("flow_360", None),
-        "random_sine": ("random_sine", column_phi_theta),
-    }
+    if stimulus_specs is None:
+        if stimulus_types is None:
+            stimulus_types = ["sintel", "flow360", "random_sine"]
+        stimulus_specs = []
+        stimulus_map = {
+            "sintel": ("sintel", None),
+            "flow360": ("flow_360", None),
+            "random_sine": ("random_sine", "column_phi_theta"),
+        }
+        for stim_name in stimulus_types:
+            if stim_name not in stimulus_map:
+                raise ValueError(f"Unsupported stimulus type: {stim_name}")
+            stim_type, column_info = stimulus_map[stim_name]
+            stimulus_specs.append(
+                {
+                    "name": stim_name,
+                    "stimulus_type": stim_type,
+                    "column_info": column_info,
+                }
+            )
 
     responses: dict[str, dict[str, torch.Tensor]] = {}
-    for stim_name in stimulus_types:
-        if stim_name not in stimulus_map:
-            raise ValueError(f"Unsupported stimulus type: {stim_name}")
-        stim_type, column_info = stimulus_map[stim_name]
-        stimulus, optic_flow = su.get_stimulus(stim_type, stim_config, column_info)
+    for spec in stimulus_specs:
+        stim_config = _prepare_stimulus_config(config, str(model.device))
+        stim_config = _apply_config_overrides(stim_config, spec.get("config_overrides"))
+        column_info = spec.get("column_info")
+        if column_info == "column_phi_theta":
+            column_info = column_phi_theta
+        stimulus_kwargs = spec.get("stimulus_kwargs", {})
+        stimulus, optic_flow = su.get_stimulus(
+            spec["stimulus_type"],
+            stim_config,
+            column_info,
+            **stimulus_kwargs,
+        )
         stimulus, optic_flow = _strip_blank_stimulus(stimulus, optic_flow)
 
         pred_flow = _predict_optic_flow(model, stimulus)
-        responses[stim_name] = {
+        responses[spec["name"]] = {
             "stimulus": stimulus,
             "optic_flow": optic_flow,
             "pred_flow": pred_flow,

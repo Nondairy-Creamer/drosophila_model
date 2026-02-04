@@ -59,9 +59,11 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
     
     # Generate optic flow (only left/right component)
     optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
-    optic_flow[:, :, 0] = temporal_frequency / wavelength  # LR flow
-    optic_flow[:, :, 1] = 0  # UD flow
+    optic_flow[pre_stim_index:post_stim_index, :, 0] = temporal_frequency / wavelength  # LR flow
+    optic_flow[pre_stim_index:post_stim_index, :, 1] = 0  # UD flow
     
+    sine_wave = (sine_wave + 1.0) / 2.0
+
     return sine_wave, optic_flow
 
 def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=4,
@@ -110,9 +112,11 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
     
     # Generate optic flow (only up/down component)
     optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
-    optic_flow[:, :, 0] = 0  # LR flow
-    optic_flow[:, :, 1] = temporal_frequency / wavelength  # UD flow
+    optic_flow[pre_stim_index:post_stim_index, :, 0] = 0  # LR flow
+    optic_flow[pre_stim_index:post_stim_index, :, 1] = temporal_frequency / wavelength  # UD flow
     
+    sine_wave = (sine_wave + 1.0) / 2.0
+
     return sine_wave, optic_flow
 
 def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
@@ -159,8 +163,8 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=n
         )
         sine_wave_dict['right'].append(sine_wave_right[None, :, :])
         sine_wave_dict['right'].append(sine_wave_right_shifted[None, :, :])
-        sine_wave_dict['right'].append((-sine_wave_right)[None, :, :])
-        sine_wave_dict['right'].append((-sine_wave_right_shifted)[None, :, :])
+        sine_wave_dict['right'].append((1.0 - sine_wave_right)[None, :, :])
+        sine_wave_dict['right'].append((1.0 - sine_wave_right_shifted)[None, :, :])
         optic_flow_dict['right'].append(optic_flow_right[None, :, :, :])
         optic_flow_dict['right'].append(optic_flow_right_shifted[None, :, :, :])
         optic_flow_dict['right'].append(optic_flow_right[None, :, :, :])
@@ -177,8 +181,8 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=n
         )
         sine_wave_dict['left'].append(sine_wave_left[None, :, :])
         sine_wave_dict['left'].append(sine_wave_left_shifted[None, :, :])
-        sine_wave_dict['left'].append((-sine_wave_left)[None, :, :])
-        sine_wave_dict['left'].append((-sine_wave_left_shifted)[None, :, :])
+        sine_wave_dict['left'].append((1.0 - sine_wave_left)[None, :, :])
+        sine_wave_dict['left'].append((1.0 - sine_wave_left_shifted)[None, :, :])
         optic_flow_dict['left'].append(optic_flow_left[None, :, :, :])
         optic_flow_dict['left'].append(optic_flow_left_shifted[None, :, :, :])
         optic_flow_dict['left'].append(optic_flow_left[None, :, :, :])
@@ -195,8 +199,8 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=n
         )
         sine_wave_dict['up'].append(sine_wave_up[None, :, :])
         sine_wave_dict['up'].append(sine_wave_up_shifted[None, :, :])
-        sine_wave_dict['up'].append((-sine_wave_up)[None, :, :])
-        sine_wave_dict['up'].append((-sine_wave_up_shifted)[None, :, :])
+        sine_wave_dict['up'].append((1.0 - sine_wave_up)[None, :, :])
+        sine_wave_dict['up'].append((1.0 - sine_wave_up_shifted)[None, :, :])
         optic_flow_dict['up'].append(optic_flow_up[None, :, :, :])
         optic_flow_dict['up'].append(optic_flow_up_shifted[None, :, :, :])
         optic_flow_dict['up'].append(optic_flow_up[None, :, :, :])
@@ -213,8 +217,8 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=n
         )
         sine_wave_dict['down'].append(sine_wave_down[None, :, :])
         sine_wave_dict['down'].append(sine_wave_down_shifted[None, :, :])
-        sine_wave_dict['down'].append((-sine_wave_down)[None, :, :])
-        sine_wave_dict['down'].append((-sine_wave_down_shifted)[None, :, :])
+        sine_wave_dict['down'].append((1.0 - sine_wave_down)[None, :, :])
+        sine_wave_dict['down'].append((1.0 - sine_wave_down_shifted)[None, :, :])
         optic_flow_dict['down'].append(optic_flow_down[None, :, :, :])
         optic_flow_dict['down'].append(optic_flow_down_shifted[None, :, :, :])
         optic_flow_dict['down'].append(optic_flow_down[None, :, :, :])
@@ -342,7 +346,34 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     optic_flow_dict['up_down'] += [optic_flow_mat] * 4
 
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
+    stimulus = (stimulus + 1.0) / 2.0
 
+    return stimulus, optic_flow
+
+
+def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1, wavelength=np.pi/6, temporal_frequency=4,
+                                 phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
+    """
+    Generate a single-direction sine wave stimulus.
+    """
+    direction = direction.lower()
+    if direction in ["right", "left"]:
+        tf = temporal_frequency if direction == "right" else -temporal_frequency
+        sine_wave, optic_flow = make_lr_sine_wave(
+            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=phase_init,
+            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
+        )
+    elif direction in ["up", "down"]:
+        tf = temporal_frequency if direction == "up" else -temporal_frequency
+        sine_wave, optic_flow = make_ud_sine_wave(
+            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=phase_init,
+            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
+        )
+    else:
+        raise ValueError(f"Unsupported direction for sine wave: {direction}")
+
+    stimulus = sine_wave[None, :, :]
+    optic_flow = optic_flow[None, :, :, :]
     return stimulus, optic_flow
 
 
@@ -412,7 +443,18 @@ def consolidate_stim(stim_dict, optic_flow_dict):
 
     return stimulus, optic_flow
 
-def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
+def get_stimulus(
+    stimulus_type: str,
+    config,
+    column_phi_theta=None,
+    *,
+    max_duration_s: float | None = None,
+    use_full_length: bool = False,
+    sine_direction: str | None = None,
+    sine_temporal_frequency: float | None = None,
+    random_sine_duration_s: float | None = None,
+    pre_stim_time_override: float | None = None,
+):
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])
     
@@ -422,6 +464,10 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
     post_stim_time = config['stimulus']['post_stim_time']  # seconds sine is stationary after the sine wave finishes moving
     temporal_frequencies = config['stimulus']['temporal_frequencies']
     stimulus_seed = config['stimulus']['seed']
+    if pre_stim_time_override is not None:
+        pre_stim_time = float(pre_stim_time_override)
+    sine_pre_stim_time = pre_stim_time
+    sine_post_stim_time = post_stim_time
 
     if stimulus_type == 'static_sine':
         if column_phi_theta is None:
@@ -434,7 +480,27 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
         )
 
         stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        stimulus = (stimulus + 1.0) / 2.0
+        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+
+    elif stimulus_type == 'directional_sine':
+        if column_phi_theta is None:
+            raise Exception('sine waves require column_phi_theta input')
+        if sine_direction is None:
+            raise ValueError('directional_sine requires sine_direction input')
+
+        tf = float(sine_temporal_frequency) if sine_temporal_frequency is not None else 4.0
+        sine_pre_stim_time = 0.0
+        sine_post_stim_time = 0.0
+        stimulus, optic_flow = create_directional_sine_wave(
+            column_phi_theta[:, 0], column_phi_theta[:, 1],
+            direction=sine_direction,
+            temporal_frequency=tf,
+            dt=model_dt,
+            stim_time=stim_time,
+            pre_stim_time=sine_pre_stim_time,
+            post_stim_time=sine_post_stim_time,
+        )
+        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
         optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
     elif stimulus_type == 'random_pano':
@@ -457,17 +523,24 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
             raise Exception('sine waves require column_phi_theta input')
 
         # --- generate a sine wave with random tf over time
+        random_sine_stim_time = stim_time
+        random_sine_num_repeats = config['stimulus']['num_repeats']
+        if random_sine_duration_s is not None:
+            if random_sine_duration_s <= 0:
+                raise ValueError("random_sine_duration_s must be positive")
+            random_sine_stim_time = float(random_sine_duration_s) / 2.0
+            random_sine_num_repeats = 1
         stimulus, optic_flow = create_random_tf_sine_wave(
             column_phi_theta[:, 0], column_phi_theta[:, 1],
             tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'],
-            num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
+            num_repeats=random_sine_num_repeats, dt=model_dt, stim_time=random_sine_stim_time, seed=stimulus_seed
         )
 
         stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
         optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
     elif stimulus_type == 'flow_360':
-        final_length = 98
+        default_length = 98
         # --- grab the natural movie stimulus ---
         stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
         with open(stimulus_path, 'rb') as f:
@@ -497,6 +570,19 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
         stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
         optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
         
+        # Resolve desired segment length after interpolation
+        _, time_length, _ = stimulus.shape
+        if use_full_length:
+            final_length = time_length
+        elif max_duration_s is not None:
+            if max_duration_s <= 0:
+                final_length = time_length
+            else:
+                final_length = min(time_length, int(round(max_duration_s / model_dt)))
+        else:
+            final_length = min(time_length, default_length)
+        final_length = max(1, int(final_length))
+
         # Split into non-overlapping segments of final_length
         num_stimuli, time_length, num_neurons = stimulus.shape
         num_segments = time_length // final_length
@@ -507,7 +593,7 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
             optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
 
     elif stimulus_type == 'sintel':
-        final_length = 100
+        default_length = 100
         sintel_path = Path('../connectome_data/sintel_data.pkl')
         with open(sintel_path, 'rb') as f:
             stimulus_in = pickle.load(f)
@@ -526,6 +612,19 @@ def get_stimulus(stimulus_type: str, config, column_phi_theta=None):
         stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
         optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
         
+        # Resolve desired segment length after interpolation
+        _, time_length, _ = stimulus.shape
+        if use_full_length:
+            final_length = time_length
+        elif max_duration_s is not None:
+            if max_duration_s <= 0:
+                final_length = time_length
+            else:
+                final_length = min(time_length, int(round(max_duration_s / model_dt)))
+        else:
+            final_length = min(time_length, default_length)
+        final_length = max(1, int(final_length))
+
         # Split into non-overlapping segments of final_length
         num_stimuli, time_length, num_neurons = stimulus.shape
         num_segments = time_length // final_length

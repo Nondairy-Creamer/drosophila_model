@@ -10,6 +10,7 @@ import os
 import inspect
 from abc import ABC, abstractmethod
 
+import data_utilities as du
 
 MODEL_CLASS_REGISTRY = {}
 
@@ -177,16 +178,13 @@ class NeuralModel(torch.nn.Module, ABC):
         axial_coords = self._hex_grid_axial_coords(conv_size_x)
         self.input_num_nearest_columns = axial_coords.shape[0]
 
-        # Low-rank 3D convolution parameters: outer product of x, y, and t vectors
-        spatial_init = np.zeros(conv_size_x)
-        spatial_init[conv_size_x // 2] = 1.0
+        # Full spatial kernel with separable temporal kernel
+        spatial_init = np.zeros((conv_size_x, conv_size_x))
+        spatial_init[conv_size_x // 2, conv_size_x // 2] = 1.0
         temporal_init = np.zeros(conv_size_t)
         temporal_init[0] = 1
 
-        self.input_conv_x = torch.nn.Parameter(
-            torch.tensor(spatial_init, device=self.device, dtype=self.dtype) 
-        )
-        self.input_conv_y = torch.nn.Parameter(
+        self.input_conv_xy = torch.nn.Parameter(
             torch.tensor(spatial_init, device=self.device, dtype=self.dtype)
         )
         self.input_conv_t = torch.nn.Parameter(
@@ -499,7 +497,7 @@ class NeuralModel(torch.nn.Module, ABC):
         radius = self.input_conv_size_x // 2
         q_idx = self.input_conv_axial_coords[:, 0] + radius
         r_idx = self.input_conv_axial_coords[:, 1] + radius
-        spatial_kernel = self.input_conv_y[r_idx] * self.input_conv_x[q_idx]
+        spatial_kernel = self.input_conv_xy[r_idx, q_idx]
         spatial_applied = torch.einsum('stqcn,n->stqc', spatial_windows, spatial_kernel)
         # Flip temporal kernel so index 0 corresponds to current time.
         temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
@@ -919,8 +917,9 @@ class NeuralModel(torch.nn.Module, ABC):
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
         data = torch.load(Path(path), map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
-        if device is not None:
-            inputs['device'] = device
+        # Always honor local config device to avoid remote mismatch.
+        local_config = du.load_config()
+        inputs['device'] = local_config['model']['device']
         if dtype is not None:
             inputs['dtype'] = dtype
 
@@ -939,7 +938,19 @@ class NeuralModel(torch.nn.Module, ABC):
         # construct directly from saved (or overridden) inputs
         inputs['init_new_model'] = False
         model = model_cls(**inputs)
-        model.load_state_dict(data['state_dict'], strict=False)
+
+        state_dict = data['state_dict']
+        if (
+            'input_conv_xy' not in state_dict
+            and 'input_conv_x' in state_dict
+            and 'input_conv_y' in state_dict
+        ):
+            input_conv_x = state_dict['input_conv_x']
+            input_conv_y = state_dict['input_conv_y']
+            state_dict = dict(state_dict)
+            state_dict['input_conv_xy'] = torch.outer(input_conv_y, input_conv_x)
+
+        model.load_state_dict(state_dict, strict=False)
 
         # Optionally freeze all parameters to disable gradients
         if freeze_params:

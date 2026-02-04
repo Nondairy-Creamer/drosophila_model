@@ -21,6 +21,7 @@ import matplotlib.colors as mcolors
 import imageio as iio_v2
 
 from analysis_utilities import run_model_on_stimuli
+from loss_functions import cos_loss
 
 
 def _resolve_model_folder(model_path: Path) -> Path:
@@ -180,12 +181,109 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    responses = run_model_on_stimuli(args.model_path)
+    stimulus_specs = [
+        {
+            "name": "sine_right_4hz",
+            "stimulus_type": "directional_sine",
+            "column_info": "column_phi_theta",
+            "config_overrides": {
+                "stimulus": {
+                    "stim_time": 2.0,
+                },
+            },
+            "stimulus_kwargs": {
+                "sine_direction": "right",
+                "sine_temporal_frequency": 8.0,
+                "pre_stim_time_override": 1.0,
+            },
+        },
+        {
+            "name": "sine_left_4hz",
+            "stimulus_type": "directional_sine",
+            "column_info": "column_phi_theta",
+            "config_overrides": {
+                "stimulus": {
+                    "stim_time": 2.0,
+                },
+            },
+            "stimulus_kwargs": {
+                "sine_direction": "left",
+                "sine_temporal_frequency": 8.0,
+                "pre_stim_time_override": 1.0,
+            },
+        },
+        {
+            "name": "sine_up_4hz",
+            "stimulus_type": "directional_sine",
+            "column_info": "column_phi_theta",
+            "config_overrides": {
+                "stimulus": {
+                    "stim_time": 2.0,
+                },
+            },
+            "stimulus_kwargs": {
+                "sine_direction": "up",
+                "sine_temporal_frequency": 8.0,
+                "pre_stim_time_override": 1.0,
+            },
+        },
+        {
+            "name": "sine_down_4hz",
+            "stimulus_type": "directional_sine",
+            "column_info": "column_phi_theta",
+            "config_overrides": {
+                "stimulus": {
+                    "stim_time": 2.0,
+                },
+            },
+            "stimulus_kwargs": {
+                "sine_direction": "down",
+                "sine_temporal_frequency": 8.0,
+                "pre_stim_time_override": 1.0,
+            },
+        },
+        {
+            "name": "random_sine_4s_warmup",
+            "stimulus_type": "random_sine",
+            "column_info": "column_phi_theta",
+            "config_overrides": {
+                "stimulus": {
+                    "seed": 100,
+                },
+            },
+            "stimulus_kwargs": {
+                "random_sine_duration_s": 4.0,
+                "pre_stim_time_override": 1.0,
+            },
+        },
+        {
+            "name": "sintel_max",
+            "stimulus_type": "sintel",
+            "stimulus_kwargs": {
+                "use_full_length": True,
+                "pre_stim_time_override": 1.0,
+            },
+        },
+        {
+            "name": "flow360_max",
+            "stimulus_type": "flow_360",
+            "stimulus_kwargs": {
+                "use_full_length": True,
+            },
+        },
+    ]
+
+    responses = run_model_on_stimuli(args.model_path, stimulus_specs=stimulus_specs)
     model_folder = _resolve_model_folder(Path(args.model_path))
     output_folder = Path(args.output_folder) if args.output_folder else model_folder / "optic_flow_movie_stimuli"
 
     for stim_name, response in responses.items():
         _make_movie_for_stim(stim_name, response, output_folder, args.stim_index)
+
+    print("Cosine similarity (1 - cos_loss) per stimulus:")
+    for stim_name, response in responses.items():
+        cosine_sim = 1.0 - cos_loss(response["optic_flow"], response["pred_flow"])
+        print(f"  {stim_name}: {cosine_sim.item():.6f}")
 
 
 if __name__ == "__main__":

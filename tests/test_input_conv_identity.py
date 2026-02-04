@@ -8,13 +8,11 @@ def test_input_conv_identity_no_shift():
     model.eval()
 
     with torch.no_grad():
-        model.input_conv_x.zero_()
-        model.input_conv_y.zero_()
+        model.input_conv_xy.zero_()
         model.input_conv_t.zero_()
 
         center = model.input_conv_size_x // 2
-        model.input_conv_x[center] = 1.0
-        model.input_conv_y[center] = 1.0
+        model.input_conv_xy[center, center] = 1.0
         # By convention, index 0 corresponds to the current time.
         model.input_conv_t[0] = 1.0
         model.input_conv_bias.zero_()
