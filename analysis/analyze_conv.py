@@ -5,6 +5,8 @@ Creates a 2x2 plot where each panel shows:
   - All columns (gray)
   - Columns included in the convolution for a chosen center column
   - The center column location
+
+Also optionally plots the flat-top hex grid used for registration.
 """
 import argparse
 import sys
@@ -112,6 +114,63 @@ def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path
     plt.close(fig)
 
 
+def _hex_grid_points(column_phi_theta: np.ndarray, conv_size: int) -> np.ndarray:
+    if conv_size % 2 == 0:
+        raise ValueError("conv_size must be odd for centered convolution.")
+
+    num_columns = column_phi_theta.shape[0]
+    if num_columns == 0:
+        return np.zeros((0, 2))
+
+    phi_theta_i = column_phi_theta[:, None, :]
+    phi_theta_j = column_phi_theta[None, :, :]
+    diff = phi_theta_i - phi_theta_j
+    distances = np.sqrt(np.sum(diff**2, axis=2))
+
+    nearest_neighbor_dist = np.partition(distances, 1, axis=1)[:, 1]
+    grid_spacing = np.nanmedian(nearest_neighbor_dist)
+    if not np.isfinite(grid_spacing) or grid_spacing <= 0:
+        grid_spacing = 1.0
+
+    base_grid = nm.NeuralModel._hex_grid_points(conv_size)
+    return base_grid * grid_spacing
+
+
+def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
+    column_phi_theta = model.column_phi_theta
+
+    decoder_grid = _hex_grid_points(column_phi_theta, model.conv_size)
+    grids = [("Decoder grid", decoder_grid)]
+    if model.use_input_conv:
+        input_grid = _hex_grid_points(column_phi_theta, model.input_conv_size_x)
+        grids.append(("Input grid", input_grid))
+
+    fig, axes = plt.subplots(
+        1,
+        len(grids),
+        figsize=(6 * len(grids), 5),
+        dpi=150,
+        sharex=False,
+        sharey=False,
+    )
+    if len(grids) == 1:
+        axes = [axes]
+
+    for ax, (title, grid) in zip(axes, grids):
+        ax.scatter(grid[:, 0], grid[:, 1], s=50, color='tab:blue', alpha=0.9, edgecolors='none')
+        ax.scatter(0, 0, s=80, color='black', edgecolors='none')
+        ax.set_title(title)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_aspect('equal', adjustable='box')
+
+    fig.suptitle('Flat-top hex grids used for convolution registration')
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def _plot_input_conv_columns(model: nm.CurrentModel, center_indices: list[int], output_path: Path) -> None:
     column_theta_phi = model.column_phi_theta
     phi = column_theta_phi[:, 0]
@@ -186,6 +245,12 @@ def main() -> None:
         default=None,
         help="Optional 4 center column indices to plot",
     )
+    parser.add_argument(
+        "--grid-output",
+        type=str,
+        default="figures/convolution_grid.png",
+        help="Output image path for convolution grids",
+    )
     args = parser.parse_args()
 
     config = du.load_config(Path(args.config))
@@ -204,6 +269,9 @@ def main() -> None:
         print(f"Saved plot to {args.input_output}")
     else:
         print("Skipping input convolution plot because use_input_conv is disabled.")
+
+    _plot_conv_grids(model, Path(args.grid_output))
+    print(f"Saved plot to {args.grid_output}")
 
 
 if __name__ == "__main__":

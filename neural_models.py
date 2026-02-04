@@ -165,7 +165,7 @@ class NeuralModel(torch.nn.Module, ABC):
         z = radius * np.cos(theta)
         return np.stack((x, y, z), axis=1)
 
-    def _initialize_input_conv(self, conv_size_x=3, conv_size_t=4):
+    def _initialize_input_conv(self, conv_size_x=5, conv_size_t=5):
         """Initialize input convolution parameters and precompute indices."""
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
@@ -174,7 +174,8 @@ class NeuralModel(torch.nn.Module, ABC):
 
         self.input_conv_size_x = conv_size_x
         self.input_conv_size_t = conv_size_t
-        self.input_num_nearest_columns = conv_size_x ** 2
+        axial_coords = self._hex_grid_axial_coords(conv_size_x)
+        self.input_num_nearest_columns = axial_coords.shape[0]
 
         # Low-rank 3D convolution parameters: outer product of x, y, and t vectors
         spatial_init = np.zeros(conv_size_x)
@@ -195,6 +196,11 @@ class NeuralModel(torch.nn.Module, ABC):
             torch.zeros((), device=self.device, dtype=self.dtype)
         )
 
+        self.register_buffer(
+            'input_conv_axial_coords',
+            torch.tensor(axial_coords, device=self.device, dtype=torch.int64)
+        )
+
         ordered_nearest_indices = self._compute_nearest_columns(conv_size_x)
         self.register_buffer(
             'input_nearest_column_indices',
@@ -203,10 +209,10 @@ class NeuralModel(torch.nn.Module, ABC):
 
     def _initialize_decoder(self, conv_size=5):
         """Initialize decoder parameters and precompute neuron indices."""
-        # conv_1: N^2 nearest columns, 8 channels, weights per neuron
-        # conv_2: N^2 inputs, 3 channels
+        # conv_1: nearest columns on hex grid, 8 channels, weights per neuron
+        # conv_2: nearest columns on hex grid, 3 channels
         self.conv_size = conv_size
-        self.num_nearest_columns = conv_size ** 2
+        self.num_nearest_columns = self._hex_grid_points(conv_size).shape[0]
         self.channels_1 = 8
         self.channels_2 = 3
         
@@ -326,18 +332,44 @@ class NeuralModel(torch.nn.Module, ABC):
         self.register_buffer('column_to_decoder_neurons', column_to_decoder_neurons_tensor)
 
     def _precompute_nearest_columns(self, conv_size):
-        """Pre-compute nearest columns using a shift + stretch aligned N x N grid.
+        """Pre-compute nearest columns using a shift + stretch aligned hex grid.
         
-        For each central column, take the N^2 nearest columns, fit a best rigid transform
-        from a fixed N x N grid to those points (including the central column), then order
-        the nearest columns by the grid's row-major ordering to keep convolution weights
-        consistently aligned across columns.
+        For each central column, take the nearest columns matching the hex grid count,
+        fit a best rigid transform from a fixed flat-top hex grid to those points
+        (including the central column), then order the nearest columns by the grid's
+        row-major ordering to keep convolution weights consistently aligned across columns.
         """
         ordered_nearest_indices = self._compute_nearest_columns(conv_size)
         self.register_buffer(
             'nearest_column_indices',
             torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
         )
+
+    @staticmethod
+    def _hex_grid_axial_coords(conv_size: int) -> np.ndarray:
+        """Return axial (q, r) coordinates for a flat-top hex grid."""
+        if conv_size % 2 == 0:
+            raise ValueError("conv_size must be odd for centered convolution.")
+
+        radius = conv_size // 2
+        coords = []
+        for r in range(-radius, radius + 1):
+            q_min = max(-radius, -r - radius)
+            q_max = min(radius, -r + radius)
+            for q in range(q_min, q_max + 1):
+                coords.append((q, r))
+
+        return np.array(coords, dtype=np.int64)
+
+    @staticmethod
+    def _hex_grid_points(conv_size: int) -> np.ndarray:
+        """Return flat-top hex grid points centered at (0,0)."""
+        axial = NeuralModel._hex_grid_axial_coords(conv_size).astype(np.float64)
+        q = axial[:, 0]
+        r = axial[:, 1]
+        grid_x = 1.5 * q
+        grid_y = np.sqrt(3.0) * (r + 0.5 * q)
+        return np.stack([grid_x, grid_y], axis=1)
 
     def _compute_nearest_columns(self, conv_size):
         if conv_size % 2 == 0:
@@ -346,7 +378,8 @@ class NeuralModel(torch.nn.Module, ABC):
         # (num_columns, 2) with [phi, theta]
         num_columns = self.column_phi_theta.shape[0]
 
-        num_nearest_columns = conv_size ** 2
+        base_grid = self._hex_grid_points(conv_size)
+        num_nearest_columns = base_grid.shape[0]
         
         # Compute pairwise Euclidean distances between phi-theta vectors
         phi_theta_i = self.column_phi_theta[:, None, :]  # (num_columns, 1, 2)
@@ -354,13 +387,8 @@ class NeuralModel(torch.nn.Module, ABC):
         diff = phi_theta_i - phi_theta_j  # (num_columns, num_columns, 2)
         distances = np.sqrt(np.sum(diff**2, axis=2))  # (num_columns, num_columns)
         
-        # For each column, find N^2 nearest (including itself)
-        nearest_indices = np.argsort(distances, axis=1)[:, :num_nearest_columns]  # (num_columns, N^2)
-        
-        # Fixed N x N grid centered at (0,0), row-major order (y then x)
-        offsets = np.arange(-(conv_size // 2), conv_size // 2 + 1, dtype=np.float64)
-        grid_x, grid_y = np.meshgrid(offsets, offsets, indexing='xy')
-        base_grid = np.stack([grid_x.reshape(-1), grid_y.reshape(-1)], axis=1)
+        # For each column, find nearest columns (including itself)
+        nearest_indices = np.argsort(distances, axis=1)[:, :num_nearest_columns]
         
         # Use median nearest-neighbor distance as global spacing
         nearest_neighbor_dist = np.partition(distances, 1, axis=1)[:, 1]
@@ -466,7 +494,10 @@ class NeuralModel(torch.nn.Module, ABC):
         spatial_windows = time_windows[:, :, self.input_nearest_column_indices, :]
         spatial_windows = spatial_windows.permute(0, 1, 4, 2, 3)
 
-        spatial_kernel = (self.input_conv_y[:, None] * self.input_conv_x[None, :]).reshape(-1)
+        radius = self.input_conv_size_x // 2
+        q_idx = self.input_conv_axial_coords[:, 0] + radius
+        r_idx = self.input_conv_axial_coords[:, 1] + radius
+        spatial_kernel = self.input_conv_y[r_idx] * self.input_conv_x[q_idx]
         spatial_applied = torch.einsum('stqcn,n->stqc', spatial_windows, spatial_kernel)
         # Flip temporal kernel so index 0 corresponds to current time.
         temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
