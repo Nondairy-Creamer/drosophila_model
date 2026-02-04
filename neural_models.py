@@ -215,6 +215,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_nearest_columns = self._hex_grid_points(conv_size).shape[0]
         self.channels_1 = 8
         self.channels_2 = 3
+        decoder_init = 0.2
         
         # Set list of neurons to use for decoding (from black box in figure panel g)
         self.neurons_to_decode = [
@@ -253,7 +254,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.decoder_conv_1 = torch.nn.Parameter(
             torch.full(
                 (self.channels_1, self.num_nearest_columns, num_decoder_neuron_types),
-                0.2,
+                decoder_init,
                 device=self.device,
                 dtype=self.dtype,
             )
@@ -271,7 +272,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.decoder_conv_2 = torch.nn.Parameter(
             torch.full(
                 (self.channels_2, self.num_nearest_columns, self.channels_1),
-                0.2,
+                decoder_init,
                 device=self.device,
                 dtype=self.dtype,
             )
