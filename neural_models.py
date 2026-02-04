@@ -376,16 +376,17 @@ class NeuralModel(torch.nn.Module, ABC):
         if conv_size % 2 == 0:
             raise ValueError("conv_size must be odd for centered convolution.")
 
-        # (num_columns, 2) with [phi, theta]
-        num_columns = self.column_phi_theta.shape[0]
+        # (num_columns, 3) with [x, y, z]
+        column_xyz = self.get_column_xyz()
+        num_columns = column_xyz.shape[0]
 
         base_grid = self._hex_grid_points(conv_size)
         num_nearest_columns = base_grid.shape[0]
         
-        # Compute pairwise Euclidean distances between phi-theta vectors
-        phi_theta_i = self.column_phi_theta[:, None, :]  # (num_columns, 1, 2)
-        phi_theta_j = self.column_phi_theta[None, :, :]  # (1, num_columns, 2)
-        diff = phi_theta_i - phi_theta_j  # (num_columns, num_columns, 2)
+        # Compute pairwise Euclidean distances between xyz vectors
+        xyz_i = column_xyz[:, None, :]  # (num_columns, 1, 3)
+        xyz_j = column_xyz[None, :, :]  # (1, num_columns, 3)
+        diff = xyz_i - xyz_j  # (num_columns, num_columns, 3)
         distances = np.sqrt(np.sum(diff**2, axis=2))  # (num_columns, num_columns)
         
         # For each column, find nearest columns (including itself)
