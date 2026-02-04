@@ -179,21 +179,14 @@ class NeuralModel(torch.nn.Module, ABC):
         exponential = np.exp(-t_idx / tau)
         exponential = exponential / exponential.sum()
 
-        noise_x = self.rng.standard_normal(conv_size_x) * self.init_std
-        noise_y = self.rng.standard_normal(conv_size_x) * self.init_std
-        noise_t = self.rng.standard_normal(conv_size_t) * self.init_std
-
-        input_conv_x_np = gaussian + noise_x
-        input_conv_y_np = gaussian + noise_y
-        input_conv_t_np = exponential + noise_t
         self.input_conv_x = torch.nn.Parameter(
-            torch.tensor(input_conv_x_np, device=self.device, dtype=self.dtype) 
+            torch.tensor(gaussian, device=self.device, dtype=self.dtype) 
         )
         self.input_conv_y = torch.nn.Parameter(
-            torch.tensor(input_conv_y_np, device=self.device, dtype=self.dtype)
+            torch.tensor(gaussian, device=self.device, dtype=self.dtype)
         )
         self.input_conv_t = torch.nn.Parameter(
-            torch.tensor(input_conv_t_np, device=self.device, dtype=self.dtype)
+            torch.tensor(exponential, device=self.device, dtype=self.dtype)
         )
         self.input_conv_bias = torch.nn.Parameter(
             torch.zeros((), device=self.device, dtype=self.dtype)
@@ -248,11 +241,13 @@ class NeuralModel(torch.nn.Module, ABC):
         num_decoder_neuron_types = len(self.neurons_to_decode)
         
         # Initialize conv_1 with weights per neuron: (channels_1, num_nearest_columns, num_decoder_neuron_types)
-        decoder_conv_1_np = self.rng.standard_normal(
-            (self.channels_1, self.num_nearest_columns, num_decoder_neuron_types)
-        )
         self.decoder_conv_1 = torch.nn.Parameter(
-            torch.tensor(decoder_conv_1_np, device=self.device, dtype=self.dtype) * self.init_std
+            torch.full(
+                (self.channels_1, self.num_nearest_columns, num_decoder_neuron_types),
+                0.2,
+                device=self.device,
+                dtype=self.dtype,
+            )
         )
         self.decoder_conv_1_bias = torch.nn.Parameter(
             torch.zeros(self.channels_1, device=self.device, dtype=self.dtype)
@@ -264,11 +259,13 @@ class NeuralModel(torch.nn.Module, ABC):
         
         # Initialize conv_2 (operates on conv_1_output channels from nearest columns)
         # Shape: (channels_2, num_nearest_columns, channels_1)
-        decoder_conv_2_np = self.rng.standard_normal(
-            (self.channels_2, self.num_nearest_columns, self.channels_1)
-        )
         self.decoder_conv_2 = torch.nn.Parameter(
-            torch.tensor(decoder_conv_2_np, device=self.device, dtype=self.dtype) * self.init_std
+            torch.full(
+                (self.channels_2, self.num_nearest_columns, self.channels_1),
+                0.2,
+                device=self.device,
+                dtype=self.dtype,
+            )
         )
         self.decoder_conv_2_bias = torch.nn.Parameter(
             torch.zeros(self.channels_2, device=self.device, dtype=self.dtype)
