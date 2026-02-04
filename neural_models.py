@@ -11,6 +11,15 @@ import inspect
 from abc import ABC, abstractmethod
 
 
+MODEL_CLASS_REGISTRY = {}
+
+
+def _register_model_class(model_cls):
+    """Register model class for checkpoint dispatch."""
+    MODEL_CLASS_REGISTRY[model_cls.__name__] = model_cls
+    return model_cls
+
+
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
@@ -565,10 +574,10 @@ class NeuralModel(torch.nn.Module, ABC):
         
         # Output: first 2 channels divided by 3rd channel
         # Avoid near-zero division to stabilize early training
-        denominator = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
-        denominator = torch.nn.functional.relu(denominator)
-        denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
-        optic_flow = conv_2_output[:, :, :2] / denominator  # (stimuli, num_columns, 2)
+        amplitude = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
+        amplitude = torch.nn.functional.softplus(amplitude)
+        # denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
+        optic_flow = conv_2_output[:, :, :2] * amplitude  # (stimuli, num_columns, 2)
         
         if squeeze_output:
             optic_flow = optic_flow.squeeze(0)
@@ -886,9 +895,21 @@ class NeuralModel(torch.nn.Module, ABC):
         if dtype is not None:
             inputs['dtype'] = dtype
 
+        # Choose the correct class based on the saved class name.
+        # Fall back to the class this was called on for older checkpoints.
+        class_name = data.get('class_name')
+        model_cls = cls
+        if class_name is not None:
+            model_cls = MODEL_CLASS_REGISTRY.get(class_name, cls)
+            if model_cls is cls and cls is NeuralModel:
+                raise ValueError(
+                    f"Unknown model class '{class_name}' in checkpoint. "
+                    "Register it in MODEL_CLASS_REGISTRY."
+                )
+
         # construct directly from saved (or overridden) inputs
         inputs['init_new_model'] = False
-        model = cls(**inputs)
+        model = model_cls(**inputs)
         model.load_state_dict(data['state_dict'], strict=False)
 
         # Optionally freeze all parameters to disable gradients
@@ -1096,6 +1117,7 @@ class NeuralModel(torch.nn.Module, ABC):
         return omega_star, T_star, Z_star
 
 
+@_register_model_class
 class CurrentModel(NeuralModel):
     """Current-based neural model where synaptic input is modeled as current injection."""
     
@@ -1321,6 +1343,7 @@ class CurrentModel(NeuralModel):
         return v_next
 
 
+@_register_model_class
 class ConductanceModel(NeuralModel):
     """Conductance-based neural model where synaptic input is modeled as conductance changes."""
     

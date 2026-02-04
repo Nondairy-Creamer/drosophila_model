@@ -82,7 +82,13 @@ def fig_to_rgb(fig):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Make optic flow movie for a model.")
-    parser.add_argument("model_path", type=str, help="Path to model folder or model.pt")
+    parser.add_argument(
+        "model_path",
+        type=str,
+        nargs="?",
+        default="models/best_model",
+        help="Path to model folder or model.pt",
+    )
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")
     args = parser.parse_args()
 
@@ -92,7 +98,6 @@ def main() -> None:
     model_type = config['model'].get('model_type')
     ModelClass = getattr(nm, model_type)
     model = ModelClass.load(model_file, device='cpu')
-    model.use_decoder = True
     device = model.device
     dtype = model.dtype
     frame_rate = max(1, int((1 / model.dt) / 2))
