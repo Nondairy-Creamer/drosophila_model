@@ -4,13 +4,13 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from neural_models import CurrentModel
+import neural_models as nm
 
 # This script loads the model and then iteratively calculates the optic flow in sequential stimuli
 
 # Load the model
 model_path = 'models/best_model/model.pt'
-model = CurrentModel.load(model_path, device='cpu')
+model = nm.NeuralModel.load(model_path, device='cpu')
 initial_state = None
 # this variable gives you the ommatidia locations in the polar coordinates phi and theta. The model will expect
 # an input for each of these columns.

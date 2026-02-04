@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import numpy as np
-from neural_models import CurrentModel
+import neural_models as nm
 import data_utilities as du
 import training_utilities as tu
 import model_utilities as mu
@@ -25,7 +25,7 @@ local_config = du.load_config()
 print("Loading model...")
 device = local_config['model']['device']
 print('running on', device)
-model = CurrentModel.load(model_path, device=device)
+model = nm.NeuralModel.load(model_path, device=device)
 dtype = model.dtype
 
 # --- Load training data ---
@@ -94,7 +94,7 @@ for cell_type_idx in sorted_indices:
     silenced_cell_types.append(cell_type)
     
     # Create a fresh model copy and apply silencing
-    model_copy = CurrentModel.load(model_path, device=device)
+    model_copy = nm.NeuralModel.load(model_path, device=device)
     model_copy.silence_neurons(silenced_cell_types, invert_silencing=False)
     
     # Calculate loss with silenced cell types

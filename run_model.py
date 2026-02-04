@@ -84,7 +84,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     if model_path is not None:
         model_file = Path(model_path) / 'model.pt'
         print(f"Loading existing model from {model_file}")
-        model = ModelClass.load(model_file, device=config['model']['device'], freeze_params=False)
+        model = nm.NeuralModel.load(model_file, device=config['model']['device'], freeze_params=False)
         model.add_noise_to_parameters()
     else:
         model = ModelClass(

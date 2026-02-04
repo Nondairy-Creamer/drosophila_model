@@ -95,9 +95,7 @@ def main() -> None:
     model_folder, model_file = _resolve_model_paths(Path(args.model_path))
     config = du.load_config(model_folder / 'config.toml')
     print("Loading model...")
-    model_type = config['model'].get('model_type')
-    ModelClass = getattr(nm, model_type)
-    model = ModelClass.load(model_file, device='cpu')
+    model = nm.NeuralModel.load(model_file, device='cpu')
     device = model.device
     dtype = model.dtype
     frame_rate = max(1, int((1 / model.dt) / 2))

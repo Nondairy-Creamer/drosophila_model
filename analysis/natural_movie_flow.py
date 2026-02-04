@@ -38,9 +38,7 @@ stim_index = 0   # which stimulus to visualize (first one)
 
 # --- Load the model ---
 print("Loading model...")
-model_type = config['model'].get('model_type')
-ModelClass = getattr(nm, model_type)
-model = ModelClass.load(model_folder / 'model.pt', device='cpu')
+model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
 device = model.device
 dtype = model.dtype
 frame_rate = int(1 / model.dt)  # fps for the output movie

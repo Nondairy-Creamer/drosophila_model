@@ -12,10 +12,7 @@ import model_utilities as mu
 
 # Load the model
 model_folder = Path('models/20260126_131210')
-model_config = du.load_config(model_folder / 'config.toml')
-model_type = model_config['model'].get('model_type')
-ModelClass = getattr(nm, model_type)
-model = ModelClass.load(model_folder / 'model.pt', device='cpu')
+model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
 
 # Compute average connections between cell types
 ave_con = mu.compute_average_connections(model)

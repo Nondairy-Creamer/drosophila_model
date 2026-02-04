@@ -13,11 +13,9 @@ model_folder = Path('models/20260126_125933')
 # Load config and determine model class
 model_config = du.load_config(model_folder / 'config.toml')
 local_config = du.load_config
-model_type = model_config['model'].get('model_type')
-ModelClass = getattr(nm, model_type)
-trained_model = ModelClass.load(model_folder / 'model.pt', device='cpu')
-init_model = ModelClass.load(model_folder / 'model_init.pt', device='cpu')
-target_model = ModelClass.load(model_folder / 'target_model.pt', device='cpu')
+trained_model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
+init_model = nm.NeuralModel.load(model_folder / 'model_init.pt', device='cpu')
+target_model = nm.NeuralModel.load(model_folder / 'target_model.pt', device='cpu')
 stimulus_in = torch.load(model_folder / 'cell_inputs.pt').to(trained_model.device)
 
 trained_input_weight = trained_model.input_strength_log.exp()

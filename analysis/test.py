@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import numpy as np
-from neural_models import CurrentModel
+import neural_models as nm
 from pathlib import Path
 import data_utilities as du
 import stimulus_utilities as su
@@ -19,7 +19,7 @@ stimulus_seed = 0
 
 # --- load the model ---
 model_path = 'models/best_model/model.pt'
-model = CurrentModel.load(model_path, device='cpu')
+model = nm.NeuralModel.load(model_path, device='cpu')
 device = model.device
 dtype = model.dtype
 

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import numpy as np
 import shutil
-from neural_models import CurrentModel
+import neural_models as nm
 from stimulus_utilities import make_lr_sine_wave
 import plotting_utilities as pu
 
@@ -25,7 +25,7 @@ def main():
     # Load the model
     model_path = 'models/best_model/model.pt'
     print(f"Loading model from {model_path}...")
-    model = CurrentModel.load(model_path, device='cpu')
+    model = nm.NeuralModel.load(model_path, device='cpu')
     
     print(f"Model loaded successfully")
     print(f"  Number of neurons: {model.num_neurons}")

@@ -25,12 +25,6 @@ def _resolve_model_paths(model_path: Path) -> tuple[Path, Path]:
     raise FileNotFoundError(f"Could not find model.pt at {model_path}")
 
 
-def _load_model(model_pt: Path, config: dict, device: str) -> nm.CurrentModel:
-    model_type = config["model"].get("model_type")
-    ModelClass = getattr(nm, model_type)
-    return ModelClass.load(model_pt, device=device)
-
-
 def _prepare_stimulus_config(config: dict, device: str) -> dict:
     config_copy = deepcopy(config)
     config_copy["model"]["device"] = device
@@ -44,7 +38,7 @@ def _strip_blank_stimulus(stimulus: torch.Tensor, optic_flow: torch.Tensor) -> t
     return stimulus, optic_flow
 
 
-def _predict_optic_flow(model: nm.CurrentModel, stimulus: torch.Tensor) -> torch.Tensor:
+def _predict_optic_flow(model: nm.NeuralModel, stimulus: torch.Tensor) -> torch.Tensor:
     with torch.no_grad():
         if model.use_decoder:
             outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])[0]
@@ -60,7 +54,7 @@ def run_model_on_stimuli(
 ) -> dict[str, dict[str, torch.Tensor]]:
     model_pt, model_folder = _resolve_model_paths(Path(model_path))
     config = du.load_config(model_folder / "config.toml")
-    model = _load_model(model_pt, config, device)
+    model = nm.NeuralModel.load(model_pt, device=device)
 
     stim_config = _prepare_stimulus_config(config, str(model.device))
     column_phi_theta = model.column_phi_theta

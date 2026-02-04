@@ -177,25 +177,19 @@ class NeuralModel(torch.nn.Module, ABC):
         self.input_num_nearest_columns = conv_size_x ** 2
 
         # Low-rank 3D convolution parameters: outer product of x, y, and t vectors
-        center = (conv_size_x - 1) / 2.0
-        sigma = conv_size_x / 4.0
-        x_idx = np.arange(conv_size_x, dtype=np.float64)
-        gaussian = np.exp(-0.5 * ((x_idx - center) / sigma) ** 2)
-        gaussian = gaussian / gaussian.sum()
-
-        tau = conv_size_t / 2.0
-        t_idx = np.arange(conv_size_t, dtype=np.float64)
-        exponential = np.exp(-t_idx / tau)
-        exponential = exponential / exponential.sum()
+        spatial_init = np.zeros(conv_size_x)
+        spatial_init[conv_size_x // 2] = 1.0
+        temporal_init = np.zeros(conv_size_t)
+        temporal_init[0] = 1
 
         self.input_conv_x = torch.nn.Parameter(
-            torch.tensor(gaussian, device=self.device, dtype=self.dtype) 
+            torch.tensor(spatial_init, device=self.device, dtype=self.dtype) 
         )
         self.input_conv_y = torch.nn.Parameter(
-            torch.tensor(gaussian, device=self.device, dtype=self.dtype)
+            torch.tensor(spatial_init, device=self.device, dtype=self.dtype)
         )
         self.input_conv_t = torch.nn.Parameter(
-            torch.tensor(exponential, device=self.device, dtype=self.dtype)
+            torch.tensor(temporal_init, device=self.device, dtype=self.dtype)
         )
         self.input_conv_bias = torch.nn.Parameter(
             torch.zeros((), device=self.device, dtype=self.dtype)
@@ -574,10 +568,10 @@ class NeuralModel(torch.nn.Module, ABC):
         
         # Output: first 2 channels divided by 3rd channel
         # Avoid near-zero division to stabilize early training
-        amplitude = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
-        amplitude = torch.nn.functional.softplus(amplitude)
-        # denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
-        optic_flow = conv_2_output[:, :, :2] * amplitude  # (stimuli, num_columns, 2)
+        denominator = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
+        denominator = torch.nn.functional.softplus(denominator)
+        denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
+        optic_flow = conv_2_output[:, :, :2] / denominator  # (stimuli, num_columns, 2)
         
         if squeeze_output:
             optic_flow = optic_flow.squeeze(0)

@@ -17,9 +17,7 @@ local_config = du.load_config()
 # Load model, stimulus, and config
 print("Loading model...")
 model_config = du.load_config(model_folder / 'config.toml')
-model_type = model_config['model'].get('model_type')
-ModelClass = getattr(nm, model_type)
-model = ModelClass.load(model_folder / 'model.pt', device='cpu')
+model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
 stimulus = torch.load(model_folder / 'cell_inputs.pt')
 target = torch.load(model_folder / 'target.pt')
 

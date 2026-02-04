@@ -65,10 +65,8 @@ def test_run_model_synthetic_learns(tmp_path):
 
     input_neurons, output_neurons = _get_io_neurons(config)
     loss_fn = getattr(tu, config["training"]["loss_fn"])
-    model_class = getattr(nm, config["model"]["model_type"])
-
-    init_model = model_class.load(model_dir / "model_init.pt", device="cpu", freeze_params=False)
-    trained_model = model_class.load(model_dir / "model.pt", device="cpu", freeze_params=False)
+    init_model = nm.NeuralModel.load(model_dir / "model_init.pt", device="cpu", freeze_params=False)
+    trained_model = nm.NeuralModel.load(model_dir / "model.pt", device="cpu", freeze_params=False)
 
     device = init_model.device
     stimulus = stimulus.to(device=device, dtype=init_model.dtype)
