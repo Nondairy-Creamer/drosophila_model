@@ -182,21 +182,21 @@ def main() -> None:
     args = parser.parse_args()
 
     stimulus_specs = [
-        {
-            "name": "sine_right_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 2.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "right",
-                "sine_temporal_frequency": 8.0,
-                "pre_stim_time_override": 1.0,
-            },
-        },
+        # {
+        #     "name": "sine_right_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 2.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "right",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 1.0,
+        #     },
+        # },
         {
             "name": "sine_left_4hz",
             "stimulus_type": "directional_sine",
@@ -208,40 +208,40 @@ def main() -> None:
             },
             "stimulus_kwargs": {
                 "sine_direction": "left",
-                "sine_temporal_frequency": 8.0,
+                "sine_temporal_frequency": 4.0,
                 "pre_stim_time_override": 1.0,
             },
         },
-        {
-            "name": "sine_up_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 2.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "up",
-                "sine_temporal_frequency": 8.0,
-                "pre_stim_time_override": 1.0,
-            },
-        },
-        {
-            "name": "sine_down_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 2.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "down",
-                "sine_temporal_frequency": 8.0,
-                "pre_stim_time_override": 1.0,
-            },
-        },
+        # {
+        #     "name": "sine_up_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 2.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "up",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 1.0,
+        #     },
+        # },
+        # {
+        #     "name": "sine_down_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 2.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "down",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 1.0,
+        #     },
+        # },
         {
             "name": "random_sine_4s_warmup",
             "stimulus_type": "random_sine",
@@ -257,20 +257,36 @@ def main() -> None:
             },
         },
         {
-            "name": "sintel_max",
-            "stimulus_type": "sintel",
+            "name": "sine_const_rand",
+            "stimulus_type": "sine_const_rand",
+            "column_info": "column_phi_theta",
+            "config_overrides": {
+                "stimulus": {
+                    "seed": 100,
+                },
+            },
             "stimulus_kwargs": {
-                "use_full_length": True,
+                "const_rand_const_time": 1.0,
+                "const_rand_const_tf": 4.0,
+                "const_rand_const_first": True,
                 "pre_stim_time_override": 1.0,
             },
         },
-        {
-            "name": "flow360_max",
-            "stimulus_type": "flow_360",
-            "stimulus_kwargs": {
-                "use_full_length": True,
-            },
-        },
+        # {
+        #     "name": "sintel_max",
+        #     "stimulus_type": "sintel",
+        #     "stimulus_kwargs": {
+        #         "use_full_length": True,
+        #         "pre_stim_time_override": 1.0,
+        #     },
+        # },
+        # {
+        #     "name": "flow360_max",
+        #     "stimulus_type": "flow_360",
+        #     "stimulus_kwargs": {
+        #         "use_full_length": True,
+        #     },
+        # },
     ]
 
     responses = run_model_on_stimuli(args.model_path, stimulus_specs=stimulus_specs)

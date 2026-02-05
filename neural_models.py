@@ -648,12 +648,14 @@ class NeuralModel(torch.nn.Module, ABC):
                 init_state=None, invert_input=True):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
+
+        if self.use_input_conv:
+            inputs = self.apply_input_conv(inputs)
+
         if invert_input:
             # inputs are usually given to L1 L2 and L3 mimicking input from the photo receptors
             # however in Drosophila photo receptors inhibit these cells, so we invert the input here
-            inputs = -inputs + 2 * torch.mean(inputs)
-        if self.use_input_conv:
-            inputs = self.apply_input_conv(inputs)
+            inputs = -inputs + 2 * torch.mean(inputs, dim=(1, 2), keepdim=True)
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):

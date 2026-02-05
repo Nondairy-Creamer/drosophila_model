@@ -4,6 +4,7 @@ Convert saved model checkpoints to the current NeuralModel save format.
 from __future__ import annotations
 
 import argparse
+import inspect
 from pathlib import Path
 import sys
 
@@ -28,9 +29,13 @@ def _restore_model(data: dict, use_input_conv: bool, device: str) -> nm.NeuralMo
     ModelClass = getattr(nm, class_name)
     inputs = dict(data["inputs"])
     inputs["init_new_model"] = False
-    inputs["use_input_conv"] = use_input_conv
+    if use_input_conv:
+        inputs["use_input_conv"] = True
     inputs["device"] = device
-    model = ModelClass(**inputs)
+    init_params = inspect.signature(ModelClass.__init__).parameters
+    valid_keys = set(init_params.keys()) - {"self"}
+    filtered_inputs = {k: v for k, v in inputs.items() if k in valid_keys}
+    model = ModelClass(**filtered_inputs)
     model.load_state_dict(data["state_dict"], strict=False)
     return model
 
