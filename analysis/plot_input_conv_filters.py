@@ -1,8 +1,8 @@
 """
-Plot input convolution filter parameters as heatmaps.
+Plot input convolution filter parameters.
 
 Generates:
-  - input_conv_xy (spatial kernel heatmap)
+  - input_conv_xy (spatial kernel scatter on hex grid)
   - input_conv_t (temporal kernel line plot)
 """
 import argparse
@@ -34,6 +34,15 @@ def _centered_norm(data: np.ndarray) -> tuple[float, float]:
     return -max_abs, max_abs
 
 
+def _hex_grid_points(axial_coords: np.ndarray) -> np.ndarray:
+    """Convert axial (q, r) hex coords to flat-top xy points."""
+    q = axial_coords[:, 0].astype(np.float64)
+    r = axial_coords[:, 1].astype(np.float64)
+    grid_x = 1.5 * q
+    grid_y = np.sqrt(3.0) * (r + 0.5 * q)
+    return np.stack([grid_x, grid_y], axis=1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot input convolution filter parameters.")
     parser.add_argument(
@@ -62,19 +71,35 @@ def main() -> None:
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 
-    vmin_xy, vmax_xy = _centered_norm(conv_xy)
-    im_xy = axes[0].imshow(
-        conv_xy,
+    axial_coords = model.input_conv_axial_coords.detach().cpu().numpy()
+    radius = model.input_conv_size_x // 2
+    q_idx = axial_coords[:, 0] + radius
+    r_idx = axial_coords[:, 1] + radius
+    spatial_weights = conv_xy[r_idx, q_idx]
+    grid_points = _hex_grid_points(axial_coords)
+
+    vmin_xy, vmax_xy = _centered_norm(spatial_weights)
+    scatter = axes[0].scatter(
+        grid_points[:, 0],
+        grid_points[:, 1],
+        c=spatial_weights,
         cmap="coolwarm",
         vmin=vmin_xy,
         vmax=vmax_xy,
-        origin="lower",
-        aspect="auto",
+        s=760,
+        linewidths=0.6,
+        edgecolors="black",
     )
     axes[0].set_title("input_conv_xy (spatial kernel)")
-    axes[0].set_xlabel("x index")
-    axes[0].set_ylabel("y index")
-    fig.colorbar(im_xy, ax=axes[0], shrink=0.8, pad=0.02)
+    axes[0].set_xlabel("hex x")
+    axes[0].set_ylabel("hex y")
+    axes[0].set_aspect("equal", adjustable="box")
+    x_min, x_max = float(grid_points[:, 0].min()), float(grid_points[:, 0].max())
+    y_min, y_max = float(grid_points[:, 1].min()), float(grid_points[:, 1].max())
+    pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
+    axes[0].set_xlim(x_min - pad, x_max + pad)
+    axes[0].set_ylim(y_min - pad, y_max + pad)
+    fig.colorbar(scatter, ax=axes[0], shrink=0.8, pad=0.02)
 
     axes[1].plot(conv_t, marker="o")
     axes[1].set_title("input_conv_t (temporal kernel)")
