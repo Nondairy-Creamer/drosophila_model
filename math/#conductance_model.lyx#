@@ -1,0 +1,391 @@
+#LyX 2.4 created this file. For more info see https://www.lyx.org/
+\lyxformat 620
+\begin_document
+\begin_header
+\save_transient_properties true
+\origin unavailable
+\textclass article
+\use_default_options true
+\maintain_unincluded_children no
+\language american
+\language_package default
+\inputencoding utf8
+\fontencoding auto
+\font_roman "default" "default"
+\font_sans "default" "default"
+\font_typewriter "default" "default"
+\font_math "auto" "auto"
+\font_default_family default
+\use_non_tex_fonts false
+\font_sc false
+\font_roman_osf false
+\font_sans_osf false
+\font_typewriter_osf false
+\font_sf_scale 100 100
+\font_tt_scale 100 100
+\use_microtype false
+\use_dash_ligatures true
+\graphics default
+\default_output_format default
+\output_sync 0
+\bibtex_command default
+\index_command default
+\float_placement class
+\float_alignment class
+\paperfontsize default
+\use_hyperref false
+\papersize default
+\use_geometry false
+\use_package amsmath 1
+\use_package amssymb 1
+\use_package cancel 1
+\use_package esint 1
+\use_package mathdots 1
+\use_package mathtools 1
+\use_package mhchem 1
+\use_package stackrel 1
+\use_package stmaryrd 1
+\use_package undertilde 1
+\cite_engine basic
+\cite_engine_type default
+\use_bibtopic false
+\use_indices false
+\paperorientation portrait
+\suppress_date false
+\justification true
+\use_refstyle 1
+\use_formatted_ref 0
+\use_minted 0
+\use_lineno 0
+\index Index
+\shortcut idx
+\color #008080
+\end_index
+\secnumdepth 3
+\tocdepth 3
+\paragraph_separation indent
+\paragraph_indentation default
+\is_math_indent 0
+\math_numbering_side default
+\quotes_style english
+\dynamic_quotes 0
+\papercolumns 1
+\papersides 1
+\paperpagestyle default
+\tablestyle default
+\tracking_changes false
+\output_changes false
+\change_bars false
+\postpone_fragile_content true
+\html_math_output 0
+\html_css_as_file 0
+\html_be_strict false
+\docbook_table_output 0
+\docbook_mathml_prefix 1
+\end_header
+
+\begin_body
+
+\begin_layout Standard
+Current model
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\mathbf{v}_{t}=\mathbf{p}\odot\mathbf{v}_{t-1}+(1-\mathbf{p})\odot(D_{in}SD_{out}f(\mathbf{v}_{t-1})+\mathbf{b}+\mathbf{c}\odot\mathbf{u}_{t})$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Conductance model
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $V\equiv V_{inside}-V_{outside}$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+inward flow of positive charge as defined as positive current
+\end_layout
+
+\begin_layout Standard
+Capacitance current 
+\begin_inset Formula $I_{C}=C_{m}\frac{dV}{dt}$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Cation channel current 
+\begin_inset Formula $I_{exc}=g(V-E)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Where 
+\begin_inset Formula $E$
+\end_inset
+
+ is the reversal potential and 
+\begin_inset Formula $g$
+\end_inset
+
+ is the conductance
+\end_layout
+
+\begin_layout Standard
+Kirchhoff's law (conservation of charge) where 
+\begin_inset Formula $r$
+\end_inset
+
+ is a neurotransmitter
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $I_{C}+\sum_{r}I_{r}+I_{leak}+I_{inj}=0$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $C_{m}\frac{dV}{dt}+\sum_{r}g_{r}(V-E_{r})+g_{leak}(V-E_{leak})+I_{inj}=0$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V(t)=-C_{m}^{-1}\left[\sum_{r\in\{glu,ach,gaba\}}(V(t)-E_{r})\odot g_{r}(t)+(V(t)-E_{leak})\odot g_{leak}+I_{inj}\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Discrete Conductance.
+ Define 
+\begin_inset Formula $I_{inj}\equiv-b\odot u_{t}$
+\end_inset
+
+ i.e.
+ positive inputs cause depolarization
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{t+1}=v_{t}-\Delta tC_{m}^{-1}\left[\sum_{r\in\{glu,ach,gaba\}}(v_{t}-E_{r})\odot g_{r}(v_{t})+(v_{t}-E_{leak})\odot g_{leak}-b\odot\mathbf{u}_{t}\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $g_{r}(t)=D_{in,r}S_{r}D_{out,r}f(V(t)-\theta)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+The conductance for a given neurotransmitter is governed by the strength of the presynaptic neuron 
+\begin_inset Formula $D_{out,r}$
+\end_inset
+
+ the strength of the postsynaptic connection 
+\begin_inset Formula $D_{in,r}$
+\end_inset
+
+ the number of synapses 
+\begin_inset Formula $S_{i,r}$
+\end_inset
+
+ and the firing rate of the presynaptic neuron 
+\begin_inset Formula $f(V(t)-\theta)$
+\end_inset
+
+ where 
+\begin_inset Formula $f$
+\end_inset
+
+ is a softplus
+\end_layout
+
+\begin_layout Standard
+Trainable parameters and init
+\end_layout
+
+\begin_layout Standard
+reversal potentials:
+ acetyl choline = 10 mV,
+ gaba,
+ glu = -70 mV,
+ leak = -50 mV
+\end_layout
+
+\begin_layout Standard
+D_in,
+ D_out per transmitter
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\theta$
+\end_inset
+
+ = -50 mV
+\end_layout
+
+\begin_layout Standard
+u_in = 1
+\end_layout
+
+\begin_layout Standard
+C = 40 pF
+\end_layout
+
+\begin_layout Standard
+g_leak = 1 nS
+\end_layout
+
+\begin_layout Paragraph*
+Frozen-conductance (exponential) update
+\end_layout
+
+\begin_layout Standard
+The explicit Euler step treats the entire right-hand side as constant over 
+\begin_inset Formula $t,t+\Delta t]$
+\end_inset
+
+.
+ In conductance models,
+ the dynamics are often stiff because the membrane equation is linear in 
+\begin_inset Formula $V$
+\end_inset
+
+ given fixed conductances;
+ Euler can overshoot in stiff regimes,
+ leading to blow-ups during training.
+\end_layout
+
+\begin_layout Standard
+An alternative is to use a semi-implicit / exponential integrator that freezes synaptic conductances over each timestep.
+ i.e.
+ compute 
+\begin_inset Formula $g_{r}$
+\end_inset
+
+ from 
+\begin_inset Formula $v_{t}$
+\end_inset
+
+ and hold them constant when integrating.
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V(t)=-C_{m}^{-1}\left[\sum_{r\in\{glu,ach,gaba\}}(V(t)-E_{r})\odot g_{r}(t)+(V(t)-E_{leak})\odot g_{leak}-b\odot\mathbf{u}_{t}\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Expand and collect terms in 
+\begin_inset Formula $V$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V(t)=-C_{m}^{-1}\left[\left(g_{leak}+\sum_{r}g_{r}(V)\right)V-\left(\sum_{r}E_{r}g_{r}(v)+g_{leak}E_{leak}+b\odot\mathbf{u}_{t}\right)\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $g_{tot}(V)\equiv g_{leak}+\sum_{r}g_{r}(V)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $I_{\infty}(V,u)\equiv\sum_{r}g_{r}(V)E_{r}+g_{leak}E_{leak}+b\odot\mathbf{u}_{t}$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Then the ODE can be written as
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V=-C_{m}^{-1}g_{tot}(V)V+C_{m}^{-1}I_{\infty}(V,u)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+We evaluate 
+\begin_inset Formula $g_{r}$
+\end_inset
+
+ at 
+\begin_inset Formula $v_{t}$
+\end_inset
+
+ and treat them as constant on 
+\begin_inset Formula $[t,t+\Delta t]$
+\end_inset
+
+.
+ The resulting ODE has the exact solution
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{t+1}=v_{\infty,t}+(v_{t}-v_{\infty,t})\exp\left(-\Delta tC_{m}^{-1}g_{tot,t}\right)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+With the instantaneous equilibrium voltage is
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{\infty,t}\equiv\frac{I_{\infty,t}}{g_{tot,t}}$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\alpha_{t}\equiv\exp\left(-\Delta tC_{m}^{-1}g_{tot,t}\right)\in(0,1]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+So the update is
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{t+1}=\alpha_{t}v_{t}+(1-\alpha_{t})v_{\infty,t}$
+\end_inset
+
+
+\end_layout
+
+\end_body
+\end_document

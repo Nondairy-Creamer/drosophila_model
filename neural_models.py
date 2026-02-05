@@ -1567,76 +1567,70 @@ class ConductanceModel(NeuralModel):
         # threshold_all has shape (num_neurons,), which broadcasts against the last dim of v
         return self.nonlinearity(v - threshold_all)
 
-    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None, eps=1e-6):
         """
-        Conductance-based forward pass.
-        
-        We're implementing this model:
-        
-        v_{t+1} = v_t - Δt * C_m^{-1} @ [Σ_{r∈{glu,ach,gaba}} (v_t - E_r) ⊙ g_r(v_t) + (v_t - E_leak) ⊙ g_leak - b ⊙ u_t]
-        
-        g_r(t) = D_{in,r} @ S_r @ D_{out,r} @ f(v(t) - θ)
-        
-        Where:
-            - V_t: membrane voltage at time t
-            - C_m: membrane capacitance
-            - E_r: reversal potential for neurotransmitter r (glu, ach, gaba)
-            - E_leak: leak reversal potential
-            - g_r(t): conductance for neurotransmitter r
-            - g_leak: leak conductance
-            - b: stimulus strength
-            - u_t: external stimulus
-            - D_{in,r}, D_{out,r}: input/output scaling matrices for neurotransmitter r
-            - S_r: synapse count matrix for neurotransmitter r
-            - f: nonlinearity (e.g., ReLU/Softplus)
-            - θ: firing threshold offset
-        
-        Args:
-            v_prev: tensor with shape (stimuli, neurons)
-            u_t: tensor with shape (stimuli, neurons)
-            stim_to_cell_mapping: sparse mapping from stimulus to individual neurons
+        Semi-implicit / exponential (frozen-conductance) update per step:
+
+        dv/dt = -(g_tot/C) * v + (1/C) * (sum_r g_r E_r + g_leak E_leak + b u)
+
+        => v_next = persistence * v_prev + (1-persistence) * v_inf
+        persistence = exp(-dt * g_tot / C)
+        v_inf = (sum_r g_r E_r + g_leak E_leak + b u) / g_tot
         """
-        
         # --- Expand parameters to per-neuron tensors ---
-        
-        # Per-cell-type params -> per-neuron
-        capacitance_inv = self.capacitance_inv_log.exp()[self.neuron_to_type_index]
-        rp_leak_all = self.rp_leak[self.neuron_to_type_index]
+        C_inv = self.capacitance_inv_log.exp()[self.neuron_to_type_index]          # 1/C
+
+        E_leak = self.rp_leak[self.neuron_to_type_index]
         g_leak = self.g_leak_log.exp()[self.neuron_to_type_index]
-        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
-        output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]  # (num_neurons,)
-        input_strength_full = self.input_strength_log.exp()[:, self.neuron_to_type_index]
-        rp_transmitter_all = self.rp_transmitter[:, self.neuron_to_type_index]
 
-        z = torch.zeros_like(v_prev)
-        # get the contribution of each neurotransmitter
-        # Σ_{r∈{glu,ach,gaba}} (v_t - E_r) ⊙ g_r(v_t)
-        firing_rate_scaled = output_strength[None, :] * self.firing_rate(v_prev)
-        for ri, r in enumerate(self.unique_transmitters):
-            # Output strength is per-neuron (shared across transmitters)
-            r_conductance = torch.sparse.mm(self.synapse_counts[ri], firing_rate_scaled.transpose(0, 1)).transpose(0, 1)
-            r_conductance = input_strength_full[None, ri, :] * r_conductance
-            z = z + (v_prev - rp_transmitter_all[None, ri, :]) * r_conductance
+        b = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
 
-        # add in the leak current
-        # (v_t - E_leak) ⊙ g_leak
-        z = z + (v_prev - rp_leak_all[None, :]) * g_leak
+        out_strength = self.output_strength_log.exp()[self.neuron_to_type_index]  # (N,)
+        in_strength = self.input_strength_log.exp()[:, self.neuron_to_type_index] # (R,N)
+        E_r_all = self.rp_transmitter[:, self.neuron_to_type_index]               # (R,N)
 
-        # add in the inputs
+        # --- Compute synaptic conductances g_r(v_prev) ---
+        firing_rate_scaled = out_strength[None, :] * self.firing_rate(v_prev)     # (B,N)
+
+        B, N = v_prev.shape
+        g_syn_sum = torch.zeros_like(v_prev)                                      # (B,N)
+        num = (g_leak[None, :] * E_leak[None, :])                                 # (B,N)  numerator piece
+
+        # sum_r g_r and sum_r g_r * E_r
+        for ri, _ in enumerate(self.unique_transmitters):
+            # sparse mm expects (N,N) @ (N,B) -> (N,B)
+            g_r = torch.sparse.mm(
+                self.synapse_counts[ri], firing_rate_scaled.transpose(0, 1)
+            ).transpose(0, 1)                                                     # (B,N)
+
+            g_r = in_strength[ri][None, :] * g_r                                  # (B,N)
+
+            g_syn_sum = g_syn_sum + g_r
+            num = num + g_r * E_r_all[ri][None, :]                                # (B,N)
+
+        # total conductance
+        g_tot = g_leak[None, :] + g_syn_sum                                       # (B,N)
+
+        # --- Add stimulus term into numerator: + b*u (same sign as your Euler form) ---
         if stim_to_cell_mapping is None:
-            z = z - u_t * stimulus_strength[None, :]
+            num = num + b[None, :] * u_t                                          # (B,N)
         else:
-            # because stimulus can be very sparse (only stimulate 3 cell types)
-            # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
-            cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
-            stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
-            # Guard against any negative indices
+            # u_t is (B, num_stimuli), map into neuron space sparsely
+            cell_idx = stim_to_cell_mapping["neuron_index"]
+            stim_idx = stim_to_cell_mapping["stimulus_index"]
             valid = (cell_idx >= 0) & (stim_idx >= 0)
             if torch.any(valid):
                 ci = cell_idx[valid]
                 si = stim_idx[valid]
-                z.index_add_(1, ci, -stimulus_strength[None, ci] * u_t[:, si])
+                # num[:, ci] += b[ci] * u_t[:, si]
+                num.index_add_(1, ci, b[ci][None, :] * u_t[:, si])
 
-        v_next = v_prev - self.dt * capacitance_inv * z
+        # --- Exponential step ---
+        # a = exp(-dt * g_tot / C) = exp(-dt * (g_tot * C_inv))
+        persistence = torch.exp(-self.dt * g_tot * C_inv)                                                # (B,N)
+
+        v_inf = num / (g_tot + eps)                                                # (B,N)
+        v_next = persistence * v_prev + (1.0 - persistence) * v_inf
 
         return v_next
+
