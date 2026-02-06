@@ -30,7 +30,7 @@ from analysis_utilities import interp_nan_column
 import sys
 
 if len(sys.argv) == 1:
-    model_folder = Path('models/best_model')
+    model_folder = Path('models/best_sine')
 else:
     model_folder = Path(sys.argv[1])
 
@@ -109,7 +109,7 @@ for mct in measured_cell_types:
     cell_resp = interp_nan_column(cell_resp, cell_phi, cell_theta)
     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
-seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+seq_data['stimulus'] = stimulus.detach().cpu().numpy()
 
 init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
 make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t4")
@@ -125,7 +125,7 @@ for mct in measured_cell_types:
     cell_resp = interp_nan_column(cell_resp, cell_phi, cell_theta)
     seq_data[mct] = cell_resp  # [num_stimuli, time, columns]
 
-seq_data['stimulus'] = stimulus.detach().cpu().numpy() / 2 + 0.5  # [num_stimuli, time, columns]
+seq_data['stimulus'] = stimulus.detach().cpu().numpy()
 
 init_scatter_diamond = make_scatter_diamond_sequence_factory(seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
 make_movie(init_scatter_diamond, ['sequence'], fig_folder, frame_rate, save_name="t5")

@@ -36,6 +36,10 @@ def main() -> None:
         "--fps", type=int, default=50, help="Output movie frame rate"
     )
     parser.add_argument(
+        "--stim-type", type=str, default=None,
+        help="Stimulus type (default: use value from config)"
+    )
+    parser.add_argument(
         "--output-dir", type=str, default="figures/natural_movie",
         help="Output directory for the movie"
     )
@@ -46,7 +50,7 @@ def main() -> None:
     output_folder = Path(args.output_dir)
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    stimulus_type = config['stimulus']['stimulus_type']
+    stimulus_type = args.stim_type if args.stim_type else config['stimulus']['stimulus_type']
     frame_rate = args.fps
 
     # --- Load stimulus and optic flow ---
