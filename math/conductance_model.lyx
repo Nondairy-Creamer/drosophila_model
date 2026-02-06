@@ -253,5 +253,139 @@ C = 40 pF
 g_leak = 1 nS
 \end_layout
 
+\begin_layout Paragraph*
+Frozen-conductance (exponential) update
+\end_layout
+
+\begin_layout Standard
+The explicit Euler step treats the entire right-hand side as constant over 
+\begin_inset Formula $t,t+\Delta t]$
+\end_inset
+
+.
+ In conductance models,
+ the dynamics are often stiff because the membrane equation is linear in 
+\begin_inset Formula $V$
+\end_inset
+
+ given fixed conductances;
+ Euler can overshoot in stiff regimes,
+ leading to blow-ups during training.
+\end_layout
+
+\begin_layout Standard
+An alternative is to use a semi-implicit / exponential integrator that freezes synaptic conductances over each timestep.
+ i.e.
+ compute 
+\begin_inset Formula $g_{r}$
+\end_inset
+
+ from 
+\begin_inset Formula $v_{t}$
+\end_inset
+
+ and hold them constant when integrating.
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V(t)=-C_{m}^{-1}\left[\sum_{r\in\{glu,ach,gaba\}}(V(t)-E_{r})\odot g_{r}(t)+(V(t)-E_{leak})\odot g_{leak}-b\odot\mathbf{u}_{t}\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Expand and collect terms in 
+\begin_inset Formula $V$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V(t)=-C_{m}^{-1}\left[\left(g_{leak}+\sum_{r}g_{r}(V)\right)V-\left(\sum_{r}E_{r}g_{r}(v)+g_{leak}E_{leak}+b\odot\mathbf{u}_{t}\right)\right]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $g_{tot}(V)\equiv g_{leak}+\sum_{r}g_{r}(V)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $I_{\infty}(V,u)\equiv\sum_{r}g_{r}(V)E_{r}+g_{leak}E_{leak}+b\odot\mathbf{u}_{t}$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+Then the ODE can be written as
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\frac{d}{dt}V=-C_{m}^{-1}g_{tot}(V)V+C_{m}^{-1}I_{\infty}(V,u)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+We evaluate 
+\begin_inset Formula $g_{r}$
+\end_inset
+
+ at 
+\begin_inset Formula $v_{t}$
+\end_inset
+
+ and treat them as constant on 
+\begin_inset Formula $[t,t+\Delta t]$
+\end_inset
+
+.
+ The resulting ODE has the exact solution
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{t+1}=v_{\infty,t}+(v_{t}-v_{\infty,t})\exp\left(-\Delta tC_{m}^{-1}g_{tot,t}\right)$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+With the instantaneous equilibrium voltage is
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{\infty,t}\equiv\frac{I_{\infty,t}}{g_{tot,t}}$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $\alpha_{t}\equiv\exp\left(-\Delta tC_{m}^{-1}g_{tot,t}\right)\in(0,1]$
+\end_inset
+
+
+\end_layout
+
+\begin_layout Standard
+So the update is
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula $v_{t+1}=\alpha_{t}v_{t}+(1-\alpha_{t})v_{\infty,t}$
+\end_inset
+
+
+\end_layout
+
 \end_body
 \end_document

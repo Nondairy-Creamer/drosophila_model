@@ -958,6 +958,7 @@ class NeuralModel(torch.nn.Module, ABC):
         if freeze_params:
             for param in model.parameters():
                 param.requires_grad_(False)
+            model.eval()
 
         return model
 

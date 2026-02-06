@@ -23,22 +23,7 @@ from matplotlib import pyplot as plt
 import torch
 import neural_models as nm
 
-
-def _resolve_model_folder(model_path: Path) -> Path:
-    return model_path if model_path.is_dir() else model_path.parent
-
-
-def _prepare_xt(activity: np.ndarray, phi: np.ndarray) -> tuple[np.ndarray, list[float]]:
-    valid_cols = np.isfinite(activity).all(axis=0)
-    if not np.any(valid_cols):
-        raise ValueError("No valid columns found for XT plot.")
-    activity_valid = activity[:, valid_cols]
-    phi_valid = phi[valid_cols]
-    sort_inds = np.argsort(phi_valid)
-    activity_sorted = activity_valid[:, sort_inds]
-    phi_sorted = phi_valid[sort_inds]
-    extent = [float(phi_sorted.min()), float(phi_sorted.max()), 0, activity_sorted.shape[0]]
-    return activity_sorted, extent
+from analysis_utilities import resolve_model_folder, prepare_xt
 
 
 def _get_available_types(model: nm.NeuralModel, requested: list[str]) -> list[str]:
@@ -82,7 +67,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_folder = _resolve_model_folder(Path(args.model_path))
+    model_folder = resolve_model_folder(Path(args.model_path))
     model_init_path = model_folder / "model_init.pt"
     model_path = model_init_path if args.use_init else model_folder / "model.pt"
     stimulus_path = model_folder / "cell_inputs.pt"
@@ -112,20 +97,20 @@ def main() -> None:
     outputs, _, _ = model.predict(stim, input_neurons=input_neurons, output_neurons=output_neurons, init_state=None)
 
     phi = model.column_phi_theta[:, 0]
-    stim_xt, stim_extent = _prepare_xt(stim[0].detach().cpu().numpy(), phi)
+    stim_xt, stim_extent = prepare_xt(stim[0].detach().cpu().numpy(), phi)
 
     if "L2" not in outputs["firing_rate"]:
         raise ValueError("L2 output not found in model predictions.")
     if "Tm1" not in outputs["firing_rate"]:
         raise ValueError("Tm1 output not found in model predictions.")
 
-    l2_xt, l2_extent = _prepare_xt(_extract_activity(outputs, "L2"), phi)
-    tm1_xt, tm1_extent = _prepare_xt(_extract_activity(outputs, "Tm1"), phi)
+    l2_xt, l2_extent = prepare_xt(_extract_activity(outputs, "L2"), phi)
+    tm1_xt, tm1_extent = prepare_xt(_extract_activity(outputs, "Tm1"), phi)
 
     t5_types = [ct for ct in ["T5a", "T5b", "T5c", "T5d"] if ct in outputs["firing_rate"]]
     if not t5_types:
         raise ValueError("No T5 outputs found (T5a-d).")
-    t5_xt, t5_extent = _prepare_xt(_extract_t5_activity(outputs, t5_types), phi)
+    t5_xt, t5_extent = prepare_xt(_extract_t5_activity(outputs, t5_types), phi)
 
     fig, axes = plt.subplots(1, 4, figsize=(16, 4), dpi=150)
 

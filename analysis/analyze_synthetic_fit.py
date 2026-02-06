@@ -22,27 +22,12 @@ import torch
 import data_utilities as du
 import neural_models as nm
 
-
-def _resolve_model_folder(model_path: Path) -> Path:
-    if model_path.is_dir():
-        return model_path
-    return model_path.parent
-
-
-def _hex_grid_points(axial_coords: np.ndarray) -> np.ndarray:
-    """Convert axial (q, r) hex coords to flat-top xy points."""
-    q = axial_coords[:, 0].astype(np.float64)
-    r = axial_coords[:, 1].astype(np.float64)
-    grid_x = 1.5 * q
-    grid_y = np.sqrt(3.0) * (r + 0.5 * q)
-    return np.stack([grid_x, grid_y], axis=1)
-
-
-def _centered_norm(values: np.ndarray) -> tuple[float, float]:
-    max_abs = float(np.max(np.abs(values)))
-    if max_abs == 0:
-        max_abs = 1.0
-    return -max_abs, max_abs
+from analysis_utilities import (
+    resolve_model_folder,
+    hex_grid_points,
+    centered_norm,
+    prepare_xt,
+)
 
 
 def _load_conv_params(model_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
@@ -79,15 +64,6 @@ def _predict_decoder(model, stimulus, input_neurons, output_neurons) -> np.ndarr
     return pred["decoder"].detach().cpu().numpy()
 
 
-def _prepare_xt(activity: np.ndarray, phi: np.ndarray) -> tuple[np.ndarray, list[float]]:
-    valid_cells = ~np.any(np.isnan(activity), axis=0)
-    valid_activity = activity[:, valid_cells]
-    valid_phi = phi[valid_cells]
-    sort_inds = np.argsort(valid_phi)
-    phi_sorted = valid_phi[sort_inds]
-    activity_sorted = valid_activity[:, sort_inds]
-    extent = [phi_sorted.min(), phi_sorted.max(), 0, activity_sorted.shape[0]]
-    return activity_sorted, extent
 
 
 def main() -> None:
@@ -105,7 +81,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_folder = _resolve_model_folder(Path(args.model_path))
+    model_folder = resolve_model_folder(Path(args.model_path))
     model_pt = model_folder / "model.pt"
     model_init_pt = model_folder / "model_init.pt"
     target_model_pt = model_folder / "target_model.pt"
@@ -135,16 +111,16 @@ def main() -> None:
     radius = conv_size_x // 2
     q_idx = axial_coords[:, 0] + radius
     r_idx = axial_coords[:, 1] + radius
-    grid_points = _hex_grid_points(axial_coords)
+    grid_points = hex_grid_points(axial_coords)
 
     spatial_init = conv_init_xy[r_idx, q_idx]
     spatial_trained = conv_trained_xy[r_idx, q_idx]
     spatial_true = conv_true_xy[r_idx, q_idx]
     spatial_stack = np.concatenate([spatial_init, spatial_trained, spatial_true], axis=0)
-    vmin_xy, vmax_xy = _centered_norm(spatial_stack)
+    vmin_xy, vmax_xy = centered_norm(spatial_stack)
 
     temporal_stack = np.concatenate([conv_init_t, conv_trained_t, conv_true_t], axis=0)
-    vmin_t, vmax_t = _centered_norm(temporal_stack)
+    vmin_t, vmax_t = centered_norm(temporal_stack)
 
     fig, axes = plt.subplots(2, 3, figsize=(12, 7), dpi=150)
     titles = ["Initial", "Trained", "True"]
@@ -215,12 +191,12 @@ def main() -> None:
 
     phi = model_trained.column_phi_theta[:, 0]
 
-    init_sorted_x, extent = _prepare_xt(decoder_init[:, :, 0], phi)
-    trained_sorted_x, _ = _prepare_xt(decoder_trained[:, :, 0], phi)
-    true_sorted_x, _ = _prepare_xt(decoder_true[:, :, 0], phi)
-    init_sorted_y, _ = _prepare_xt(decoder_init[:, :, 1], phi)
-    trained_sorted_y, _ = _prepare_xt(decoder_trained[:, :, 1], phi)
-    true_sorted_y, _ = _prepare_xt(decoder_true[:, :, 1], phi)
+    init_sorted_x, extent = prepare_xt(decoder_init[:, :, 0], phi)
+    trained_sorted_x, _ = prepare_xt(decoder_trained[:, :, 0], phi)
+    true_sorted_x, _ = prepare_xt(decoder_true[:, :, 0], phi)
+    init_sorted_y, _ = prepare_xt(decoder_init[:, :, 1], phi)
+    trained_sorted_y, _ = prepare_xt(decoder_trained[:, :, 1], phi)
+    true_sorted_y, _ = prepare_xt(decoder_true[:, :, 1], phi)
 
     xt_stack_x = np.concatenate([init_sorted_x.ravel(), trained_sorted_x.ravel(), true_sorted_x.ravel()])
     xt_stack_x = xt_stack_x[np.isfinite(xt_stack_x)]

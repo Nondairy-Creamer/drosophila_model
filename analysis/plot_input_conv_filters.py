@@ -20,27 +20,7 @@ from matplotlib import pyplot as plt
 
 import neural_models as nm
 
-
-def _resolve_model_folder(model_path: Path) -> Path:
-    if model_path.is_dir():
-        return model_path
-    return model_path.parent
-
-
-def _centered_norm(data: np.ndarray) -> tuple[float, float]:
-    max_abs = float(np.max(np.abs(data)))
-    if max_abs == 0:
-        max_abs = 1.0
-    return -max_abs, max_abs
-
-
-def _hex_grid_points(axial_coords: np.ndarray) -> np.ndarray:
-    """Convert axial (q, r) hex coords to flat-top xy points."""
-    q = axial_coords[:, 0].astype(np.float64)
-    r = axial_coords[:, 1].astype(np.float64)
-    grid_x = 1.5 * q
-    grid_y = np.sqrt(3.0) * (r + 0.5 * q)
-    return np.stack([grid_x, grid_y], axis=1)
+from analysis_utilities import resolve_model_folder, centered_norm, hex_grid_points
 
 
 def main() -> None:
@@ -76,9 +56,9 @@ def main() -> None:
     q_idx = axial_coords[:, 0] + radius
     r_idx = axial_coords[:, 1] + radius
     spatial_weights = conv_xy[r_idx, q_idx]
-    grid_points = _hex_grid_points(axial_coords)
+    grid_points = hex_grid_points(axial_coords)
 
-    vmin_xy, vmax_xy = _centered_norm(spatial_weights)
+    vmin_xy, vmax_xy = centered_norm(spatial_weights)
     scatter = axes[0].scatter(
         grid_points[:, 0],
         grid_points[:, 1],
@@ -109,7 +89,7 @@ def main() -> None:
 
     fig.tight_layout()
 
-    output_path = Path(args.output_path) if args.output_path else _resolve_model_folder(model_path) / "input_conv_filters.png"
+    output_path = Path(args.output_path) if args.output_path else resolve_model_folder(model_path) / "input_conv_filters.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
     plt.close(fig)
