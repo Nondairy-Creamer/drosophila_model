@@ -242,7 +242,34 @@ def main():
         help='Path to existing model folder to load (e.g., models/best_model)'
     )
     
+    parser.add_argument(
+        '--background', '--bg',
+        action='store_true',
+        default=True,
+        help='Detach from terminal and run in the background (like nohup). '
+             'Output is redirected to submit_runs.log.'
+    )
+    
     args = parser.parse_args()
+    
+    # If --background, re-launch ourselves detached from the terminal.
+    # The env var prevents the child from backgrounding itself again.
+    if args.background and os.environ.get('_SUBMIT_RUNS_BG') != '1':
+        child_args = [a for a in sys.argv if a not in ('--background', '--bg')]
+        env = os.environ.copy()
+        env['_SUBMIT_RUNS_BG'] = '1'
+        log_file = open('submit_runs.log', 'w')
+        proc = subprocess.Popen(
+            [sys.executable, '-u'] + child_args,  # re-run same script
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # detach from terminal (POSIX setsid)
+            env=env,
+        )
+        print(f"Running in background (PID {proc.pid}). Output: submit_runs.log")
+        print(f"To follow: tail -f submit_runs.log")
+        print(f"To stop:   kill {proc.pid}")
+        sys.exit(0)
     
     # Validate script path
     script_path = Path(args.script_path)
