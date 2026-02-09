@@ -24,7 +24,7 @@ def _register_model_class(model_cls):
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
-    def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
+    def __init__(self, *, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
                  use_decoder=True, use_input_conv=True):
@@ -626,11 +626,16 @@ class NeuralModel(torch.nn.Module, ABC):
         
         Call this at the end of __init__ to capture the constructor arguments for serialization.
         Child classes should call this after super().__init__() to overwrite with their own inputs.
+        Handles **kwargs by unpacking them into the saved dict so serialization stays flat.
         """
         frame = inspect.currentframe().f_back
         params = frame.f_locals.copy()
         params.pop('self', None)
         params.pop('__class__', None)
+        # Unpack **kwargs so serialized inputs stay flat (e.g. {'device': 'cpu'} not {'kwargs': {...}})
+        if 'kwargs' in params:
+            kwargs = params.pop('kwargs')
+            params.update(kwargs)
         self.init_inputs = params
     
     def add_noise_to_parameters(self, noise_std):
@@ -1164,16 +1169,10 @@ class NeuralModel(torch.nn.Module, ABC):
 class CurrentModel(NeuralModel):
     """Current-based neural model where synaptic input is modeled as current injection."""
     
-    def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
-                 init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True,
-                 use_input_conv=False, commit_hash=None):
+    def __init__(self, *, init_new_model=True, **kwargs):
         # Call parent init (handles NT filtering and orphan removal)
-        super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                         excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
-                         nonlinearity=nonlinearity, device=device, dtype=dtype,
-                         init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
-                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv)
+        # All NeuralModel args (data + config) pass through via **kwargs
+        super().__init__(**kwargs)
         
         # Sign the synapse counts based on neurotransmitter type
         # This converts unsigned counts to signed counts (excitatory = +, inhibitory = -)
@@ -1389,37 +1388,18 @@ class CurrentModel(NeuralModel):
 class ConductanceModel(NeuralModel):
     """Conductance-based neural model where synaptic input is modeled as conductance changes."""
     
-    def __init__(self, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                 excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32', init_new_model=True,
-                 dt=0.01, seed=None, init_std=0.1, count_threshold=2, use_decoder=True, use_input_conv=False, commit_hash=None):
-        """
-        Initialize a conductance-based neural model.
+    def __init__(self, *, init_new_model=True, **kwargs):
+        """Initialize a conductance-based neural model.
         
         Args:
-            synapse_counts_coo: COO matrix (N x 3 array with [pre_root_id, post_root_id, count])
-            root_ids: Array of root IDs corresponding to each neuron (same order as cell_types)
-            cell_types: Array of cell type labels for each neuron
-            neurotransmitters: Array of neurotransmitters for each neuron (same size as cell_types)
-            column_indices: Array of column indices for each neuron
-            column_phi_theta: Array of (phi, theta) coordinates for each column
-            excitatory_nt: List of excitatory neurotransmitter names (default: ['ACH'])
-            inhibitory_nt: List of inhibitory neurotransmitter names (default: ['GLUT', 'GABA'])
-            nonlinearity: Activation function name (default: 'Softplus')
-            device: Torch device (default: 'cpu')
-            dtype: Torch dtype as string (default: 'float32')
-            init_new_model: Do anything a new model needs like finding a baseline (default: True)
-            dt: Time step in seconds (default: 0.01)
-            seed: Random seed for initialization (default: None)
-            init_std: Standard deviation for parameter initialization noise (default: 0.1)
-            count_threshold: Minimum synapse count to include a connection (default: 2)
-            commit_hash: Git commit hash the model was created with (default: None)
+            init_new_model: Whether to run initialization steps like finding steady state (default: True)
+            **kwargs: All arguments passed to NeuralModel (synapse_counts_coo, root_ids,
+                cell_types, neurotransmitters, column_indices, column_phi_theta,
+                device, dtype, dt, seed, etc.)
         """
         # Call parent init (handles NT filtering, count_threshold filtering, and orphan removal)
-        super().__init__(synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta,
-                         excitatory_nt=excitatory_nt, inhibitory_nt=inhibitory_nt, 
-                         nonlinearity=nonlinearity, device=device, dtype=dtype,
-                         init_new_model=init_new_model, dt=dt, seed=seed, init_std=init_std, count_threshold=count_threshold, 
-                         commit_hash=commit_hash, use_decoder=use_decoder, use_input_conv=use_input_conv)
+        # All NeuralModel args (data + config) pass through via **kwargs
+        super().__init__(**kwargs)
         
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()
@@ -1427,7 +1407,7 @@ class ConductanceModel(NeuralModel):
         # --- Split synapse_counts_coo into per-neurotransmitter sparse matrices ---
         # Use the filtered COO from parent class
         synapse_counts_coo_filtered = self.synapse_counts_coo
-        dtype_torch = getattr(torch, dtype)
+        dtype_torch = self.dtype
         
         # Get the neurotransmitter for each presynaptic neuron in the COO matrix (directly from per-neuron array)
         pre_neuron_indices = synapse_counts_coo_filtered[:, 0]
@@ -1439,21 +1419,21 @@ class ConductanceModel(NeuralModel):
         # Build a sparse matrix for each neurotransmitter and track which cell types receive each
         self.synapse_counts = []
         # Track which cell types receive input from each transmitter: (num_transmitters, num_cell_types)
-        receives_transmitter = torch.zeros((self.num_transmitters, self.num_cell_types), dtype=torch.bool, device=device)
+        receives_transmitter = torch.zeros((self.num_transmitters, self.num_cell_types), dtype=torch.bool, device=self.device)
         
         for ri, r in enumerate(self.unique_transmitters):
             # Filter to synapses where presynaptic neuron expresses this transmitter
             mask = (pre_transmitters == r)
             coo_r = synapse_counts_coo_filtered[mask]
             
-            rows = torch.tensor(coo_r[:, 1], device=device, dtype=torch.int64)
-            cols = torch.tensor(coo_r[:, 0], device=device, dtype=torch.int64)
-            values = torch.tensor(coo_r[:, 2], device=device, dtype=dtype_torch)
+            rows = torch.tensor(coo_r[:, 1], device=self.device, dtype=torch.int64)
+            cols = torch.tensor(coo_r[:, 0], device=self.device, dtype=torch.int64)
+            values = torch.tensor(coo_r[:, 2], device=self.device, dtype=dtype_torch)
             
             indices = torch.stack([rows, cols], dim=0)
             sparse_mat = torch.sparse_coo_tensor(indices, values, 
                                                   size=(self.num_neurons, self.num_neurons), 
-                                                  dtype=dtype_torch, device=device).coalesce()
+                                                  dtype=dtype_torch, device=self.device).coalesce()
             self.synapse_counts.append(sparse_mat)
             
             # Determine which cell types receive this transmitter (have non-zero post-synaptic input)

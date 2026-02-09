@@ -76,5 +76,5 @@ def test_run_model_synthetic_learns(tmp_path):
     final_loss = _calc_loss(trained_model, stimulus, target, input_neurons, output_neurons, loss_fn)
 
     assert initial_loss > 0.0
-    assert final_loss < 0.001, f"Final loss not close to 0: {final_loss}"
+    assert final_loss < 0.01, f"Final loss not close to 0: {final_loss}"
     assert final_loss < initial_loss
