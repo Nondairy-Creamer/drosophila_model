@@ -27,7 +27,7 @@ class NeuralModel(torch.nn.Module, ABC):
     def __init__(self, *, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 use_decoder=True, use_input_conv=True):
+                 use_decoder=True, use_input_conv=True, conv_size_x=5, conv_size_t=20):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
@@ -155,7 +155,7 @@ class NeuralModel(torch.nn.Module, ABC):
             self._initialize_decoder()
         if self.use_input_conv:
             # Initialize input convolution layer
-            self._initialize_input_conv()
+            self._initialize_input_conv(conv_size_x=conv_size_x, conv_size_t=conv_size_t)
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
