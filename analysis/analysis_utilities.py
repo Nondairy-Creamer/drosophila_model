@@ -7,7 +7,7 @@ Provides:
   - Data prep (prepare_xt, interp_nan_column)
   - Hex grid (hex_grid_points)
   - Model prediction (predict_optic_flow, run_model_on_stimuli)
-  - Movie creation (make_flow_comparison_movie, make_stimulus_flow_movie)
+  - Movie creation (make_flow_comparison_movie)
 """
 import argparse
 import sys
@@ -163,13 +163,6 @@ def hex_grid_points(axial_coords: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _prepare_stimulus_config(config: dict, device: str) -> dict:
-    config_copy = deepcopy(config)
-    config_copy["model"]["device"] = device
-    config_copy["stimulus"]["pre_stim_time"] = 0.0
-    return config_copy
-
-
 def _apply_config_overrides(config: dict, overrides: dict | None) -> dict:
     if not overrides:
         return config
@@ -179,14 +172,6 @@ def _apply_config_overrides(config: dict, overrides: dict | None) -> dict:
         else:
             config[key] = value
     return config
-
-
-def _strip_blank_stimulus(
-    stimulus: torch.Tensor, optic_flow: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if stimulus.shape[0] > 1:
-        return stimulus[1:], optic_flow[1:]
-    return stimulus, optic_flow
 
 
 def predict_optic_flow(
@@ -241,7 +226,9 @@ def run_model_on_stimuli(
 
     responses: dict[str, dict[str, torch.Tensor]] = {}
     for spec in stimulus_specs:
-        stim_config = _prepare_stimulus_config(config, str(model.device))
+        stim_config = deepcopy(config)
+        stim_config["model"]["device"] = str(model.device)
+        stim_config["stimulus"]["pre_stim_time"] = 0.0
         stim_config = _apply_config_overrides(
             stim_config, spec.get("config_overrides")
         )
@@ -255,7 +242,8 @@ def run_model_on_stimuli(
             column_info,
             **stimulus_kwargs,
         )
-        stimulus, optic_flow = _strip_blank_stimulus(stimulus, optic_flow)
+        if stimulus.shape[0] > 1:
+            stimulus, optic_flow = stimulus[1:], optic_flow[1:]
 
         pred_flow = predict_optic_flow(model, stimulus)
         responses[spec["name"]] = {
@@ -279,20 +267,24 @@ def run_model_on_stimuli(
 def make_flow_comparison_movie(
     stimulus: np.ndarray,
     true_flow: np.ndarray,
-    pred_flow: np.ndarray,
-    cell_x: np.ndarray,
-    cell_z: np.ndarray,
-    output_path: Path,
-    frame_rate: int,
+    pred_flow: np.ndarray | None = None,
+    cell_x: np.ndarray = None,
+    cell_z: np.ndarray = None,
+    output_path: Path = None,
+    frame_rate: int = 30,
     stim_name: str = "",
 ) -> None:
-    """Create a 2x2 movie: stimulus, true flow, *(blank)*, predicted flow.
+    """Create a flow comparison movie.
+
+    When *pred_flow* is provided, creates a 2x2 layout (stimulus, true flow,
+    blank, predicted flow).  When *pred_flow* is ``None``, creates a 1x2
+    layout (stimulus, true flow).
 
     Parameters
     ----------
     stimulus : (time, columns)
     true_flow : (time, columns, 2)
-    pred_flow : (time, columns, 2)
+    pred_flow : (time, columns, 2) or None
     cell_x, cell_z : (columns,)
     output_path : Path for .mp4 output
     frame_rate : frames per second
@@ -310,8 +302,6 @@ def make_flow_comparison_movie(
 
     true_flow_u = true_flow[:, :, 0]
     true_flow_v = true_flow[:, :, 1]
-    pred_flow_u = pred_flow[:, :, 0]
-    pred_flow_v = pred_flow[:, :, 1]
 
     true_magnitude = np.hypot(true_flow_u, true_flow_v)
     max_mag = (
@@ -319,24 +309,30 @@ def make_flow_comparison_movie(
     )
     flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
-    ax_stim = axes[0, 0]
-    ax_true = axes[0, 1]
-    ax_blank = axes[1, 0]
-    ax_pred = axes[1, 1]
+    has_pred = pred_flow is not None
+    if has_pred:
+        pred_flow_u = pred_flow[:, :, 0]
+        pred_flow_v = pred_flow[:, :, 1]
+        fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
+        ax_stim, ax_true = axes[0, 0], axes[0, 1]
+        axes[1, 0].axis("off")
+        axes[1, 0].set_title("(reserved)")
+        ax_pred = axes[1, 1]
+    else:
+        fig, (ax_stim, ax_true) = plt.subplots(
+            1, 2, figsize=(12.8, 5.12), dpi=100
+        )
 
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
 
-    for ax in [ax_stim, ax_true, ax_pred]:
+    plot_axes = [ax_stim, ax_true] + ([ax_pred] if has_pred else [])
+    for ax in plot_axes:
         ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
         ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
         ax.set_aspect("equal")
         ax.set_xlabel("x (anterior ← → posterior)")
         ax.set_ylabel("z (ventral ↔ dorsal)")
-
-    ax_blank.axis("off")
-    ax_blank.set_title("(reserved)")
 
     sc_stim = ax_stim.scatter(
         cell_x,
@@ -369,21 +365,22 @@ def make_flow_comparison_movie(
     ax_true.set_title("True Optic Flow")
     fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
-    q_pred = ax_pred.quiver(
-        cell_x,
-        cell_z,
-        -pred_flow_u[0, :],
-        pred_flow_v[0, :],
-        np.hypot(pred_flow_u[0, :], pred_flow_v[0, :]),
-        cmap="viridis",
-        norm=flow_norm,
-        angles="xy",
-        scale_units="xy",
-        scale=1 / arrow_scale,
-        width=0.003,
-    )
-    ax_pred.set_title("Predicted Optic Flow")
-    fig.colorbar(q_pred, ax=ax_pred, label="magnitude")
+    if has_pred:
+        q_pred = ax_pred.quiver(
+            cell_x,
+            cell_z,
+            -pred_flow_u[0, :],
+            pred_flow_v[0, :],
+            np.hypot(pred_flow_u[0, :], pred_flow_v[0, :]),
+            cmap="viridis",
+            norm=flow_norm,
+            angles="xy",
+            scale_units="xy",
+            scale=1 / arrow_scale,
+            width=0.003,
+        )
+        ax_pred.set_title("Predicted Optic Flow")
+        fig.colorbar(q_pred, ax=ax_pred, label="magnitude")
 
     plt.tight_layout()
 
@@ -402,10 +399,11 @@ def make_flow_comparison_movie(
             mag_true_t = np.hypot(u_true_t, v_true_t)
             q_true.set_UVC(-u_true_t, v_true_t, mag_true_t)
 
-            u_pred_t = pred_flow_u[t, :]
-            v_pred_t = pred_flow_v[t, :]
-            mag_pred_t = np.hypot(u_pred_t, v_pred_t)
-            q_pred.set_UVC(-u_pred_t, v_pred_t, mag_pred_t)
+            if has_pred:
+                u_pred_t = pred_flow_u[t, :]
+                v_pred_t = pred_flow_v[t, :]
+                mag_pred_t = np.hypot(u_pred_t, v_pred_t)
+                q_pred.set_UVC(-u_pred_t, v_pred_t, mag_pred_t)
 
             frame_title = (
                 f"Stimulus ({stim_name}) frame {t+1}/{num_time}"
@@ -432,100 +430,18 @@ def make_stimulus_flow_movie(
 ) -> None:
     """Create a 1x2 movie: stimulus intensity + true optic flow.
 
-    Parameters
-    ----------
-    stimulus : (time, columns)
-    true_flow : (time, columns, 2)
-    cell_x, cell_z : (columns,)
-    output_path : Path for .mp4 output
-    frame_rate : frames per second
+    Thin wrapper around :func:`make_flow_comparison_movie` with no predicted
+    flow panel.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    from matplotlib import pyplot as plt
-    import matplotlib.colors as mcolors
-    import imageio as iio_v2
-
-    num_time, _ = stimulus.shape
-    stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
-    stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
-
-    true_flow_u = true_flow[:, :, 0]
-    true_flow_v = true_flow[:, :, 1]
-
-    true_magnitude = np.hypot(true_flow_u, true_flow_v)
-    max_mag = (
-        np.nanpercentile(true_magnitude, 99) if np.any(true_magnitude) else 1.0
+    make_flow_comparison_movie(
+        stimulus=stimulus,
+        true_flow=true_flow,
+        pred_flow=None,
+        cell_x=cell_x,
+        cell_z=cell_z,
+        output_path=output_path,
+        frame_rate=frame_rate,
     )
-    flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
-
-    fig, (ax_stim, ax_true) = plt.subplots(1, 2, figsize=(12.8, 5.12), dpi=100)
-
-    x_margin = 0.1 * (cell_x.max() - cell_x.min())
-    z_margin = 0.1 * (cell_z.max() - cell_z.min())
-
-    for ax in [ax_stim, ax_true]:
-        ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
-        ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
-        ax.set_aspect("equal")
-        ax.set_xlabel("x (anterior ← → posterior)")
-        ax.set_ylabel("z (ventral ↔ dorsal)")
-
-    sc_stim = ax_stim.scatter(
-        cell_x,
-        cell_z,
-        c=stimulus[0, :],
-        cmap="gray",
-        norm=stim_norm,
-        s=90,
-        edgecolors="none",
-    )
-    ax_stim.set_title("Stimulus")
-    fig.colorbar(sc_stim, ax=ax_stim, label="intensity")
-
-    arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
-
-    q_true = ax_true.quiver(
-        cell_x,
-        cell_z,
-        -true_flow_u[0, :],
-        true_flow_v[0, :],
-        np.hypot(true_flow_u[0, :], true_flow_v[0, :]),
-        cmap="viridis",
-        norm=flow_norm,
-        angles="xy",
-        scale_units="xy",
-        scale=1 / arrow_scale,
-        width=0.003,
-    )
-    ax_true.set_title("True Optic Flow")
-    fig.colorbar(q_true, ax=ax_true, label="magnitude")
-
-    plt.tight_layout()
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Writing movie to {output_path}...")
-
-    with iio_v2.get_writer(
-        str(output_path), codec="libx264", fps=frame_rate
-    ) as writer:
-        for t in range(num_time):
-            sc_stim.set_array(stimulus[t, :])
-
-            u_true_t = true_flow_u[t, :]
-            v_true_t = true_flow_v[t, :]
-            mag_true_t = np.hypot(u_true_t, v_true_t)
-            q_true.set_UVC(-u_true_t, v_true_t, mag_true_t)
-
-            ax_stim.set_title(f"Stimulus (frame {t+1}/{num_time})")
-            writer.append_data(fig_to_rgb(fig))
-
-            if (t + 1) % 20 == 0:
-                print(f"  Frame {t+1}/{num_time}")
-
-    plt.close(fig)
-    print(f"Done! Movie saved to {output_path}")
 
 
 # ---------------------------------------------------------------------------

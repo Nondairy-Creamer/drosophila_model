@@ -166,7 +166,7 @@ class NeuralModel(torch.nn.Module, ABC):
         z = radius * np.cos(theta)
         return np.stack((x, y, z), axis=1)
 
-    def _initialize_input_conv(self, conv_size_x=5, conv_size_t=5):
+    def _initialize_input_conv(self, conv_size_x=5, conv_size_t=20):
         """Initialize input convolution parameters and precompute indices."""
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
