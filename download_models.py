@@ -74,7 +74,7 @@ def _resolve_server(server: str) -> tuple[str, str, str, str]:
 def scp_transfer(
     server: str,
     transfer_type: str = 'pull',
-    model_folder: str | None = None,
+    folder: str | None = None,
 ) -> None:
     '''
     SCP files to or from a remote server.
@@ -83,30 +83,62 @@ def scp_transfer(
         server: Either an IP:port string (e.g. "194.68.245.60:22050") or an
                 SSH config host name (e.g. "RunPodServer1").
         transfer_type: "pull" to download from remote, "push" to upload.
-        model_folder: Optional name of a specific model folder. If omitted,
-                      the entire models directory is transferred.
+        folder: Optional name of a specific model folder. If omitted,
+                the entire models directory is transferred.
     '''
     hostname, port, user, identity_file = _resolve_server(server)
 
-    if model_folder:
-        remote_path = f'{_REMOTE_MODELS_DIR}/{model_folder}/'
-        local_path = str(_LOCAL_MODELS_DIR / model_folder)
+    # Strip leading "models/" if the user accidentally includes it,
+    # since _LOCAL_MODELS_DIR / _REMOTE_MODELS_DIR already point to the models dir.
+    if folder:
+        folder = folder.removeprefix('models/')
+        folder = folder.strip('/')
+
+    if folder:
+        remote_path = f'{_REMOTE_MODELS_DIR}/{folder}/'
+        local_path = str(_LOCAL_MODELS_DIR / folder)
     else:
         remote_path = f'{_REMOTE_MODELS_DIR}/'
         local_path = str(_LOCAL_MODELS_DIR) + '/'
 
-    remote_spec = f'{user}@{hostname}:{remote_path}'
+    ssh_base = ['ssh', '-p', port, '-i', identity_file, f'{user}@{hostname}']
+    scp_base = ['scp', '-P', port, '-i', identity_file]
 
     if transfer_type == 'pull':
-        # Ensure local destination exists
         os.makedirs(local_path, exist_ok=True)
-        src, dst = remote_spec, local_path
+        if folder:
+            # List only files (not subdirectories) on the remote
+            list_cmd = ssh_base + [f'find {remote_path} -maxdepth 1 -type f']
+            result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
+            remote_files = [f for f in result.stdout.strip().split('\n') if f]
+            if not remote_files:
+                print("No files found in remote directory.")
+                return
+            sources = [f'{user}@{hostname}:{f}' for f in remote_files]
+            cmd = scp_base + sources + [local_path + '/']
+        else:
+            remote_spec = f'{user}@{hostname}:{remote_path}'
+            cmd = scp_base + ['-r', remote_spec, local_path]
     elif transfer_type == 'push':
-        src, dst = local_path, remote_spec
+        # Ensure remote destination directory exists
+        mkdir_cmd = ssh_base + [f'mkdir -p {remote_path}']
+        print(f"Ensuring remote directory exists: {remote_path}")
+        subprocess.run(mkdir_cmd, check=True)
+        if folder:
+            # Collect only files (not subdirectories) from local folder
+            local_dir = Path(local_path)
+            files = sorted(str(f) for f in local_dir.iterdir() if f.is_file())
+            if not files:
+                print("No files found in local directory.")
+                return
+            remote_spec = f'{user}@{hostname}:{remote_path}'
+            cmd = scp_base + files + [remote_spec]
+        else:
+            remote_spec = f'{user}@{hostname}:{remote_path}'
+            cmd = scp_base + ['-r', local_path, remote_spec]
     else:
         raise ValueError(f"transfer_type must be 'pull' or 'push', got '{transfer_type}'")
 
-    cmd = ['scp', '-r', '-P', port, '-i', identity_file, src, dst]
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
     print("Transfer complete.")
@@ -132,7 +164,7 @@ def main() -> None:
         help="Transfer direction: 'pull' (download, default) or 'push' (upload).",
     )
     parser.add_argument(
-        '--model_folder',
+        '--folder',
         default=None,
         help='Name of a specific model folder to transfer. If omitted, transfers all.',
     )
@@ -141,7 +173,7 @@ def main() -> None:
     scp_transfer(
         server=args.server,
         transfer_type=args.transfer_type,
-        model_folder=args.model_folder,
+        folder=args.folder,
     )
 
 
