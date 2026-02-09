@@ -38,7 +38,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     fig_dir.mkdir(parents=True, exist_ok=True)
     for p in fig_dir.iterdir():
         if p.is_file() and not p.name.startswith('.'):
-            p.unlink()
+            p.unlink(missing_ok=True)  # another parallel process may have already deleted it
 
     # Extract parameters from config
     device = torch.device(config['model']['device'])

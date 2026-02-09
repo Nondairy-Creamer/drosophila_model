@@ -845,6 +845,24 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return
 
+    def to(self, *args, **kwargs):
+        """Override to also move non-parameter/buffer tensors and update self.device."""
+        result = super().to(*args, **kwargs)
+        # Move plain tensor attributes that nn.Module.to() doesn't handle
+        if hasattr(result, 'synapse_counts') and isinstance(result.synapse_counts, torch.Tensor):
+            result.synapse_counts = result.synapse_counts.to(*args, **kwargs)
+        if hasattr(result, 'neuron_to_type_index') and isinstance(result.neuron_to_type_index, torch.Tensor):
+            result.neuron_to_type_index = result.neuron_to_type_index.to(*args, **kwargs)
+        # Update self.device if a device was specified
+        device = None
+        if args and isinstance(args[0], (torch.device, str)):
+            device = torch.device(args[0])
+        elif 'device' in kwargs:
+            device = torch.device(kwargs['device'])
+        if device is not None:
+            result.device = device
+        return result
+
     def save(self, path):
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -924,9 +942,16 @@ class NeuralModel(torch.nn.Module, ABC):
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
         data = torch.load(Path(path), map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
-        # Always honor local config device to avoid remote mismatch.
-        local_config = du.load_config()
-        inputs['device'] = local_config['model']['device']
+
+        # Determine target device up front so we construct directly on it
+        # (avoids expensive CPU construction + .to(device) round-trip)
+        if device is not None:
+            target_device = device
+        else:
+            local_config = du.load_config()
+            target_device = local_config['model']['device']
+        inputs['device'] = target_device
+
         if dtype is not None:
             inputs['dtype'] = dtype
 

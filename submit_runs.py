@@ -54,20 +54,14 @@ def get_available_gpus():
         return ['cpu']
     
     num_gpus = torch.cuda.device_count()
-    gpus = [f'cuda:{i}' for i in range(num_gpus)]
+    if num_gpus == 0:
+        print("Warning: No CUDA GPUs detected. Will use CPU.")
+        return ['cpu']
     
-    # Check GPU availability (some GPUs might be in use)
-    available_gpus = []
-    for gpu in gpus:
-        try:
-            # Try to create a tensor on this GPU to check availability
-            test_tensor = torch.zeros(1, device=gpu)
-            del test_tensor
-            available_gpus.append(gpu)
-        except RuntimeError as e:
-            print(f"Warning: {gpu} is not available: {e}")
-    
-    return available_gpus if available_gpus else ['cpu']
+    # Don't create CUDA tensors here -- the parent process only dispatches
+    # jobs and never needs GPU access.  Initialising CUDA contexts would
+    # waste ~1.5 GB per GPU and can interfere with child processes after fork.
+    return [f'cuda:{i}' for i in range(num_gpus)]
 
 
 def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py', log_dir='logs', model_path=None):
@@ -185,16 +179,26 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py', model_p
         )
         _running_processes.append((process, run_config, log_file))
     
-    # Wait for all processes to complete
+    # Wait for all processes using polling so children are reaped as they finish
+    # (sequential process.wait() leaves zombies when an earlier child outlasts later ones)
     print(f"\nWaiting for {len(_running_processes)} jobs to complete...")
     print(f"Logs are being written to logs/{timestamp}_*.log")
-    for process, run_config, log_file in _running_processes:
-        process.wait()
-        log_file.close()
-        if process.returncode != 0:
-            print(f"Error in run {run_config['run_id']} (exit code {process.returncode}). Check logs/{timestamp}_{run_config['run_id']}.log")
-        else:
-            print(f"Completed run {run_config['run_id']} successfully")
+    remaining = list(_running_processes)
+    while remaining:
+        still_running = []
+        for process, run_config, log_file in remaining:
+            ret = process.poll()
+            if ret is not None:  # process has finished
+                log_file.close()
+                if ret != 0:
+                    print(f"Error in run {run_config['run_id']} (exit code {ret}). Check logs/{timestamp}_{run_config['run_id']}.log")
+                else:
+                    print(f"Completed run {run_config['run_id']} successfully")
+            else:
+                still_running.append((process, run_config, log_file))
+        remaining = still_running
+        if remaining:
+            time.sleep(5)
     
     _running_processes = []  # Clear after completion
     print("\nAll runs completed!")
@@ -243,24 +247,22 @@ def main():
     )
     
     parser.add_argument(
-        '--background', '--bg',
+        '--foreground', '--fg',
         action='store_true',
-        default=True,
-        help='Detach from terminal and run in the background (like nohup). '
-             'Output is redirected to submit_runs.log.'
+        default=False,
+        help='Run in the foreground instead of detaching (default: run in background).'
     )
     
     args = parser.parse_args()
     
-    # If --background, re-launch ourselves detached from the terminal.
-    # The env var prevents the child from backgrounding itself again.
-    if args.background and os.environ.get('_SUBMIT_RUNS_BG') != '1':
-        child_args = [a for a in sys.argv if a not in ('--background', '--bg')]
+    # By default, re-launch ourselves detached with output to submit_runs.log
+    # (replicates: nohup python -u submit_runs.py ... > submit_runs.log 2>&1 &)
+    if not args.foreground and os.environ.get('_SUBMIT_RUNS_FG') != '1':
         env = os.environ.copy()
-        env['_SUBMIT_RUNS_BG'] = '1'
+        env['_SUBMIT_RUNS_FG'] = '1'
         log_file = open('submit_runs.log', 'w')
         proc = subprocess.Popen(
-            [sys.executable, '-u'] + child_args,  # re-run same script
+            [sys.executable, '-u'] + sys.argv + ['--foreground'],
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # detach from terminal (POSIX setsid)
