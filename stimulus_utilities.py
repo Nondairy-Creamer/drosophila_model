@@ -780,8 +780,13 @@ def get_stimulus(
 
         expected_length = 49
         stimulus_dt = 1 / stimulus_in['framerate']
-        stimulus_list = [torch.tensor(i, device=device, dtype=dtype) for i in stimulus_in['responses'] if i.shape[0] == expected_length]
-        optic_flow_list = [torch.tensor(i, device=device, dtype=dtype) for i in stimulus_in['forward_flows'] if i.shape[0] == expected_length]
+        # Filter jointly to keep stimulus-flow pairs aligned
+        stimulus_list = []
+        optic_flow_list = []
+        for resp, flow in zip(stimulus_in['responses'], stimulus_in['forward_flows']):
+            if resp.shape[0] == expected_length and flow.shape[0] == expected_length:
+                stimulus_list.append(torch.tensor(resp, device=device, dtype=dtype))
+                optic_flow_list.append(torch.tensor(flow, device=device, dtype=dtype))
 
         stimulus = torch.stack(stimulus_list, axis=0)
         optic_flow = torch.stack(optic_flow_list, axis=0)

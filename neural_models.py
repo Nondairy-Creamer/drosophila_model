@@ -180,7 +180,7 @@ class NeuralModel(torch.nn.Module, ABC):
 
         # Full spatial kernel with separable temporal kernel
         spatial_init = np.zeros((conv_size_x, conv_size_x))
-        spatial_init[conv_size_x // 2, conv_size_x // 2] = 1.0
+        spatial_init[conv_size_x // 2, conv_size_x // 2] = -1.0
         temporal_init = np.zeros(conv_size_t)
         temporal_init[0] = 1
 
@@ -650,17 +650,12 @@ class NeuralModel(torch.nn.Module, ABC):
                 param.add_(noise)
 
     def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'],  output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], 
-                init_state=None, invert_input=True):
+                init_state=None):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
         if self.use_input_conv:
             inputs = self.apply_input_conv(inputs)
-
-        if invert_input:
-            # inputs are usually given to L1 L2 and L3 mimicking input from the photo receptors
-            # however in Drosophila photo receptors inhibit these cells, so we invert the input here
-            inputs = -inputs + 2 * torch.mean(inputs, dim=(1, 2), keepdim=True)
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):
