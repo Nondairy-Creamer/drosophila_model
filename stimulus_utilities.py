@@ -398,8 +398,30 @@ def _random_rotation_matrix(rng):
     return q
 
 
-def _load_and_filter_pano(pano_path, filter_std_rad=2.5 * np.pi / 180):
-    """Load a panoramic .mat file and apply 2D Gaussian spatial filtering.
+def _load_all_panos():
+    """Load all panoramic images from a single .pt file.
+
+    The .pt file contains a (N, H, W) float32 tensor of raw panoramic images
+    (created by consolidating the individual .mat files).
+
+    Returns:
+        panos: (N, H, W) numpy float64 array of raw panoramic images.
+    """
+    pt_path = Path('../connectome_data/all_panoramic.pt')
+    if not pt_path.exists():
+        raise FileNotFoundError(
+            f"Consolidated panoramic file not found at {pt_path.resolve()}. "
+            "Please run the consolidation step first."
+        )
+    panos = torch.load(pt_path, weights_only=True)
+    return panos.numpy().astype(np.float64)
+
+
+def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
+    """Apply 2D Gaussian spatial filtering to a raw panoramic image.
+
+    Args:
+        pano: (H, W) raw panoramic image array.
 
     Returns:
         pano_filtered: (H, W) float64 array normalised to [0, 1].
@@ -408,14 +430,6 @@ def _load_and_filter_pano(pano_path, filter_std_rad=2.5 * np.pi / 180):
     """
     from scipy.ndimage import gaussian_filter
 
-    pano_data = loadmat_v73(str(pano_path))
-    pano_candidates = [np.asarray(v) for v in pano_data.values() if np.ndim(v) == 2][1:]
-    if not pano_candidates:
-        raise ValueError(
-            f"Panoramic .mat file {pano_path} did not contain a 2D array. "
-            "Keys: " + ", ".join(pano_data.keys())
-        )
-    pano = max(pano_candidates, key=lambda a: a.size).T
     pano_y_lim = -np.array([47, -58]) * np.pi / 180 + np.pi / 2  # theta range
     pano_x_lim = np.array([np.pi, -np.pi])  # phi range
 
@@ -477,14 +491,11 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
         rng = np.random.default_rng()
 
     # --- load all panoramic images ---
-    pano_dir = Path('../connectome_data/panoramic')
-    pano_paths = sorted(pano_dir.glob('*.mat'))
-    if not pano_paths:
-        raise FileNotFoundError(f"No .mat files found in {pano_dir.resolve()}")
+    raw_panos = _load_all_panos()
 
     pano_images = []
-    for pp in pano_paths:
-        pano_filtered, pano_y_lim, pano_x_lim = _load_and_filter_pano(pp)
+    for i in range(raw_panos.shape[0]):
+        pano_filtered, pano_y_lim, pano_x_lim = _filter_pano(raw_panos[i])
         pano_images.append(pano_filtered)
 
     # --- time / velocity parameters (shared across panoramas) ---
