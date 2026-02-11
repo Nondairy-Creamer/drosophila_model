@@ -621,6 +621,10 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             u_right, u_up = generate_optic_flow(phi_t, theta_t, omega_body_t, T_zeros, 1.0)
             # generate_optic_flow returns rad/s; convert to deg/s
             of = np.stack([u_right.numpy(), u_up.numpy()], axis=-1) * (180.0 / np.pi)
+            # Mark optic flow as NaN where stimulus is out-of-bounds (constant),
+            # since the model cannot extract motion from a constant stimulus.
+            # NaN-aware loss functions will ignore these positions.
+            of[out_of_bounds, :] = np.nan
             optic_flow_list.append(of)
 
     # --- stack into final arrays ---
