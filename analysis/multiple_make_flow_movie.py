@@ -45,6 +45,7 @@ def _make_movie_for_stim(
 
     frame_rate = max(1, int((1 / dt) / 2))
     cell_x = column_xyz[:, 0]
+    cell_y = column_xyz[:, 1]
     cell_z = column_xyz[:, 2]
 
     out_path = output_folder / f"optic_flow_{stim_name}_stim_{stim_index}.mp4"
@@ -54,6 +55,7 @@ def _make_movie_for_stim(
         true_flow[stim_index],
         pred_flow[stim_index],
         cell_x,
+        cell_y,
         cell_z,
         out_path,
         frame_rate,

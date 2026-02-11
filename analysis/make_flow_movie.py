@@ -103,6 +103,7 @@ def main() -> None:
     # Use model column locations projected to 3D (radius=1)
     column_xyz = model.get_column_xyz()
     cell_x = column_xyz[:, 0]
+    cell_y = column_xyz[:, 1]
     cell_z = column_xyz[:, 2]
 
     stim_index = args.stim_index
@@ -116,6 +117,7 @@ def main() -> None:
         true_flow_np[stim_index],
         pred_flow_np[stim_index],
         cell_x,
+        cell_y,
         cell_z,
         out_path,
         frame_rate,

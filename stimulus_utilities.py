@@ -7,17 +7,17 @@ import torch
 # Stimulus: [examples, time, points in space]
 # Optic Flow: [examples, time, points in space, LR/UD optic flow]
 
-# import h5py
+import h5py
 import numpy as np
 
-# def loadmat_v73(path):
-#     out = {}
-#     with h5py.File(path, "r") as f:
-#         for k in f.keys():
-#             out[k] = np.array(f[k])
-#     return out
+def loadmat_v73(path):
+    out = {}
+    with h5py.File(path, "r") as f:
+        for k in f.keys():
+            out[k] = np.array(f[k])
+    return out
 
-def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=4,
+def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=4,
                       phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
     Generate a basic left-right sine wave stimulus.
@@ -26,7 +26,7 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
         sample_phi: azimuthal angles (radians)
         sample_theta: polar angles (radians)
         contrast: contrast of the sine wave
-        wavelength: spatial wavelength (radians)
+        wavelength: spatial wavelength (degrees)
         temporal_frequency: temporal frequency (positive = rightward, negative = leftward)
         phase_init: initial phase offset
         dt: time step
@@ -38,6 +38,7 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
         sine_wave: [time, points in space] array
         optic_flow: [time, points in space, 2] array (LR/UD flow)
     """
+    wavelength = wavelength * np.pi / 180  # convert degrees to radians
     filter_std_base = 2.5 * np.pi / 180  # radians
     t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
     pre_stim_index = int(pre_stim_time / dt)
@@ -66,7 +67,7 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
 
     return sine_wave, optic_flow
 
-def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=4,
+def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=4,
                       phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
     Generate a basic up-down sine wave stimulus.
@@ -75,7 +76,7 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
         sample_phi: azimuthal angles (radians)
         sample_theta: polar angles (radians)
         contrast: contrast of the sine wave
-        wavelength: spatial wavelength (radians)
+        wavelength: spatial wavelength (degrees)
         temporal_frequency: temporal frequency (positive = upward, negative = downward)
         phase_init: initial phase offset
         dt: time step
@@ -87,6 +88,7 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
         sine_wave: [time, points in space] array
         optic_flow: [time, points in space, 2] array (LR/UD flow)
     """
+    wavelength = wavelength * np.pi / 180  # convert degrees to radians
     filter_std_base = 2.5 * np.pi / 180  # radians
     t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
     pre_stim_index = int(pre_stim_time / dt)
@@ -119,7 +121,7 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, 
 
     return sine_wave, optic_flow
 
-def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
+def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=[4],
                               dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
     Generate balanced sine wave stimuli with multiple phases for left/right/up/down directions.
@@ -129,7 +131,7 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=n
         sample_phi: azimuthal angles (radians)
         sample_theta: polar angles (radians)
         contrast: contrast of the sine wave
-        wavelength: spatial wavelength (radians)
+        wavelength: spatial wavelength (degrees)
         temporal_frequency: list of temporal frequencies to test
         dt: time step
         stim_time: stimulus duration
@@ -228,7 +230,7 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=n
 
     return stimulus, optic_flow
 
-def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, temporal_frequency=[4],
+def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=[4],
                      dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
     Legacy function name for backward compatibility.
@@ -239,13 +241,18 @@ def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, t
         dt, stim_time, pre_stim_time, post_stim_time
     )
 
-def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, seed=None,
+def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, velocity_amp=150.0, velocity_time_scale=0.15, seed=None,
                                dt=0.01, stim_time=1.0, num_repeats=5):
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
     # the velocity of this sine wave is a smoothed gaussian random walk 
     # positive / negative temporal frequency is right / left and up / down sine waves
     
+    # Convert velocity (deg/s) to temporal frequency (Hz): degrees cancel
+    tf_amp = velocity_amp / wavelength
+    # Convert wavelength to radians for spatial calculations
+    wavelength = wavelength * np.pi / 180
+
     # Create RNG from seed
     if seed is not None:
         rng = np.random.default_rng(seed)
@@ -265,12 +272,12 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     # --- generate the shifting temporal frequency ---
     tf = rng.standard_normal(num_time // 2)
     tf = np.concatenate((tf, -tf), axis=0)
-    tf_filter = 1 / (np.sqrt(2 * np.pi * tf_time_scale**2)) * np.exp(-(time_vect-time_vect.mean())**2 / (2 * tf_time_scale**2)) * dt
+    tf_filter = 1 / (np.sqrt(2 * np.pi * velocity_time_scale**2)) * np.exp(-(time_vect-time_vect.mean())**2 / (2 * velocity_time_scale**2)) * dt
     tf_filter /= tf_filter.sum()
     tf_filter = np.fft.ifftshift(tf_filter)  # shift for our circular convolution
     tf = np.fft.ifft(np.fft.fft(tf) * np.fft.fft(tf_filter)).real
     # rescale the tf after smoothing to get the correct temporal frequency
-    expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / tf_time_scale)
+    expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / velocity_time_scale)
     tf *= tf_amp / expected_std
 
     # smooth the sign wave according to its location in theta. For simplicity, just assume that the ommatidia applies
@@ -351,163 +358,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     return stimulus, optic_flow
 
 
-def create_const_rand_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, tf_amp=5, tf_time_scale=0.15, seed=None,
-                                   dt=0.01, const_time=1.0, random_time=1.0, num_repeats=5,
-                                   const_tf=4.0, const_first=True):
-    """
-    Generate a sine wave with a constant velocity segment and a random velocity segment per repeat.
-    
-    Builds the temporal frequency signal piecewise: a constant-tf portion and a random-tf portion
-    (smoothed Gaussian random walk, same as create_random_tf_sine_wave). Because the sine wave
-    phase is accumulated iteratively, the phase is continuous across the two segments.
-    
-    Args:
-        sample_phi: azimuthal angles (radians)
-        sample_theta: polar angles (radians)
-        contrast: contrast of the sine wave
-        wavelength: spatial wavelength (radians)
-        tf_amp: amplitude of the random temporal frequency
-        tf_time_scale: time scale of the random temporal frequency smoothing
-        seed: random seed
-        dt: time step
-        const_time: duration of the constant velocity segment (seconds)
-        random_time: duration of the random velocity segment (seconds)
-        num_repeats: number of repeats (will be doubled internally for symmetrization)
-        const_tf: temporal frequency during the constant segment (Hz)
-        const_first: if True, constant segment comes first; if False, random comes first
-    
-    Returns:
-        stimulus: [examples, time, points in space]
-        optic_flow: [examples, time, points in space, LR/UD optic flow]
-    """
-    # Create RNG from seed
-    if seed is not None:
-        rng = np.random.default_rng(seed)
-    else:
-        rng = np.random.default_rng()
-
-    filter_std_base = 2.5 * np.pi / 180  # radians
-    # double the number of stim because we want to symmetrize the temporal frequencies
-    num_repeats = num_repeats * 2
-
-    const_steps = int(const_time / dt)
-    random_steps = int(random_time / dt)
-    time_per_stim = const_steps + random_steps
-
-    # --- generate the random tf for the random segments ---
-    random_total_steps = random_steps * num_repeats
-    random_time_vect = np.arange(random_total_steps) * dt
-
-    tf_random = rng.standard_normal(random_total_steps // 2)
-    tf_random = np.concatenate((tf_random, -tf_random), axis=0)
-    tf_filter = (1 / (np.sqrt(2 * np.pi * tf_time_scale**2))
-                 * np.exp(-(random_time_vect - random_time_vect.mean())**2 / (2 * tf_time_scale**2)) * dt)
-    tf_filter /= tf_filter.sum()
-    tf_filter = np.fft.ifftshift(tf_filter)
-    tf_random = np.fft.ifft(np.fft.fft(tf_random) * np.fft.fft(tf_filter)).real
-    # rescale the tf after smoothing to get the correct temporal frequency
-    expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / tf_time_scale)
-    tf_random *= tf_amp / expected_std
-
-    # reshape random tf into per-repeat segments: (num_repeats, random_steps)
-    tf_random = tf_random.reshape(num_repeats, random_steps)
-
-    # --- generate constant tf ---
-    # first half positive, second half negative (matches symmetrization of random portion)
-    tf_const = np.full((num_repeats, const_steps), const_tf)
-    tf_const[num_repeats // 2:] *= -1
-
-    # --- combine const and random segments per repeat ---
-    if const_first:
-        tf_per_repeat = np.concatenate((tf_const, tf_random), axis=1)  # (num_repeats, time_per_stim)
-    else:
-        tf_per_repeat = np.concatenate((tf_random, tf_const), axis=1)
-
-    # flatten to full tf signal
-    tf = tf_per_repeat.reshape(-1)
-
-    # --- generate the space time coordinates ---
-    num_time = len(tf)
-    time_vect = np.arange(num_time) * dt
-    t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
-    t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
-    num_time, num_cell = phi_mesh.shape
-
-    # smooth the sine wave according to its location in theta
-    def contrast_scaling_func(theta):
-        filter_std = filter_std_base * 1 / np.cos(theta - np.pi / 2)
-        return np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
-
-    contrast_scaling_factor = contrast_scaling_func(sample_theta)
-
-    # length scales for vertical sine waves (since the cylinder is flat vertically)
-    vert_wavelength = 2 * np.tan(wavelength / 2)  # length of sine wave in cartesian space
-    theta_to_length = np.tan(sample_theta - np.pi / 2)
-
-    blocks = ['right_left', 'up_down']
-    sine_wave_dict = {i: [] for i in blocks}
-    optic_flow_dict = {i: [] for i in blocks}
-
-    def make_lr_sine_wave(phase_init=0):
-        phase = phase_init
-        sine_wave = np.zeros_like(t_mesh)
-
-        for ti in range(time_vect.shape[0]):
-            phase += tf[ti] * dt
-            sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (sample_phi / wavelength + phase))
-
-        return sine_wave
-
-    def make_ud_sine_wave(phase_init=0):
-        phase = phase_init
-        sine_wave = np.zeros_like(t_mesh)
-
-        for ti in range(time_vect.shape[0]):
-            phase += tf[ti] * dt
-            sine_wave[ti, :] = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + phase))
-
-        return sine_wave
-
-    # -- right/left sine wave --
-    sine_wave_right_left = make_lr_sine_wave(phase_init=0)
-    sine_wave_right_left_shifted = make_lr_sine_wave(phase_init=np.pi/2)
-    sine_wave_right_left *= contrast_scaling_factor[None, :]
-    sine_wave_right_left_shifted *= contrast_scaling_factor[None, :]
-    sine_wave_dict['right_left'].append(sine_wave_right_left.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append(sine_wave_right_left_shifted.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append((-sine_wave_right_left).reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['right_left'].append((-sine_wave_right_left_shifted).reshape(num_repeats, time_per_stim, num_cell))
-
-    # add what the optic flow for the sine wave is at each point
-    optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
-    # this optic flow is only left/right so set the up/down flow to 0
-    optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
-
-    optic_flow_dict['right_left'] += [optic_flow_mat] * 4
-
-    # -- updown sine wave --
-    sine_wave_up_down = make_ud_sine_wave(phase_init=0)
-    sine_wave_up_down_shifted = make_ud_sine_wave(phase_init=np.pi/2)
-    sine_wave_up_down *= contrast_scaling_factor[None, :]
-    sine_wave_up_down_shifted *= contrast_scaling_factor[None, :]
-    sine_wave_dict['up_down'].append(sine_wave_up_down.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append(sine_wave_up_down_shifted.reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append((-sine_wave_up_down).reshape(num_repeats, time_per_stim, num_cell))
-    sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
-
-    # add what the optic flow for the sine wave is at each point
-    optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
-    # this optic flow is only up/down so set the left/right flow to 0
-    optic_flow_mat = np.concatenate((np.zeros_like(optic_flow_mat[:, :, :, None]), optic_flow_mat[:, :, :, None]), axis=3)
-    optic_flow_dict['up_down'] += [optic_flow_mat] * 4
-
-    stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
-    stimulus = (stimulus + 1.0) / 2.0
-
-    return stimulus, optic_flow
-
-
-def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1, wavelength=np.pi/6, temporal_frequency=4,
+def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1, wavelength=30, temporal_frequency=4,
                                  phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
     Generate a single-direction sine wave stimulus.
@@ -533,58 +384,217 @@ def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1
     return stimulus, optic_flow
 
 
-# def get_random_velocity_pano(sample_phi, sample_theta, contrast=1, wavelength=np.pi/6, velocity_amp=180, velocity_time_scale=0.25, seed=None,
-#                              dt=0.01, stim_time=1.0, num_repeats=5):
-#     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
-#     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
-#     # the velocity of this sine wave is a smoothed gaussian random walk 
-#     # positive / negative temporal frequency is right / left and up / down sine waves
-    
-#     # Create RNG from seed
-#     if seed is not None:
-#         rng = np.random.default_rng(seed)
-#     else:
-#         rng = np.random.default_rng()
-    
-#     # --- load in the stimuli ---
-#     pano = loadmat_v73('/Users/mcreamer/Documents/python/connectome_data/panoramic/0001-120515-142521.mat').T
-#     pano_y_lim = -np.array([47, -58]) * np.pi / 180 + np.pi / 2
-#     pano_x_lim = np.array([0, 2 * np.pi])
-
-#     # --- generate the space time coordinates ---
-#     # double the number of stim because we want to symmetrize the temporal frequnecies
-#     num_repeats = num_repeats * 2
-#     time_vect = np.arange(0, stim_time * num_repeats, step=dt)
-#     t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
-#     t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
-#     num_time, num_cell = phi_mesh.shape
-#     time_per_stim = num_time // num_repeats
-
-#     # --- generate the shifting velocity and angle ---
-#     #random velocity
-#     velocity = rng.standard_normal(num_time // 2)
-#     velocity = np.concatenate((velocity, -velocity), axis=0)
-#     angle = rng.uniform(low=0.0, high=2*np.pi, size=num_time)
-
-#     d_phi = velocity * np.cos(angle)
-#     d_theta = velocity * np.sin(angle)
-
-#     # make the filter of the velocity
-#     velocity_filter = 1 / (np.sqrt(2 * np.pi * velocity_time_scale**2)) * np.exp(-(time_vect-time_vect.mean())**2 / (2 * velocity_time_scale**2)) * dt
-#     velocity_filter /= velocity_filter.sum()
-#     velocity_filter = np.fft.ifftshift(velocity_filter)  # shift for our circular convolution
-#     expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / velocity_time_scale)
-
-#     # filter the dx and dy
-#     d_phi = np.fft.ifft(np.fft.fft(d_phi) * np.fft.fft(velocity_filter)).real
-#     d_theta = np.fft.ifft(np.fft.fft(d_theta) * np.fft.fft(velocity_filter)).real
-#     # rescale the tf after smoothing to get the correct amplitude
-#     d_phi *= velocity_amp / expected_std
-#     d_theta *= velocity_amp / expected_std
+def _random_rotation_matrix(rng):
+    """Return a uniformly random 3x3 rotation matrix (Arvo 1992, fast uniform
+    sampling of SO(3) via QR decomposition of a random matrix)."""
+    z = rng.standard_normal((3, 3))
+    q, r = np.linalg.qr(z)
+    # Ensure a proper rotation (det = +1) by flipping signs of columns
+    # whose corresponding diagonal entry of r is negative.
+    d = np.diag(r)
+    q *= np.sign(d)
+    if np.linalg.det(q) < 0:
+        q[:, 0] *= -1
+    return q
 
 
+def _load_and_filter_pano(pano_path, filter_std_rad=2.5 * np.pi / 180):
+    """Load a panoramic .mat file and apply 2D Gaussian spatial filtering.
 
-#     return stimulus, np.stack((d_phi, d_theta)).T
+    Returns:
+        pano_filtered: (H, W) float64 array normalised to [0, 1].
+        pano_y_lim: (2,) theta limits of the panorama.
+        pano_x_lim: (2,) phi limits of the panorama.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    pano_data = loadmat_v73(str(pano_path))
+    pano_candidates = [np.asarray(v) for v in pano_data.values() if np.ndim(v) == 2][1:]
+    if not pano_candidates:
+        raise ValueError(
+            f"Panoramic .mat file {pano_path} did not contain a 2D array. "
+            "Keys: " + ", ".join(pano_data.keys())
+        )
+    pano = max(pano_candidates, key=lambda a: a.size).T
+    pano_y_lim = -np.array([47, -58]) * np.pi / 180 + np.pi / 2  # theta range
+    pano_x_lim = np.array([np.pi, -np.pi])  # phi range
+
+    pano_height, pano_width = pano.shape
+    y_pixels_per_rad = pano_height / (pano_y_lim[1] - pano_y_lim[0])
+    x_pixels_per_rad = pano_width / (pano_x_lim[0] - pano_x_lim[1])
+    sigma_y = filter_std_rad * y_pixels_per_rad
+    sigma_x = filter_std_rad * x_pixels_per_rad
+    pano_filtered = gaussian_filter(
+        pano.astype(np.float64), sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
+    )
+
+    # Normalize to [0, 1]
+    pano_min, pano_max = pano_filtered.min(), pano_filtered.max()
+    pano_filtered = np.sqrt((pano_filtered - pano_min) / (pano_max - pano_min))
+
+    return pano_filtered, pano_y_lim, pano_x_lim
+
+
+def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocity_time_scale=0.25, seed=None,
+                             dt=0.01, stim_time=1.0, num_repeats=5):
+    """
+    Generate panoramic stimuli with smoothly varying rotational velocity AND
+    smoothly varying rotation axis.
+
+    Loads all panoramic images from ``../connectome_data/panoramic/``, applies
+    2D Gaussian spatial filtering (std=2.5 deg), then for **each** panorama
+    simulates pure rotation with an independent temporally-smoothed random
+    angular velocity vector (omega_x, omega_y, omega_z).  Each of the three
+    components is an independent smoothed Gaussian random walk, so both the
+    magnitude and direction of rotation evolve smoothly over time.  At each
+    time step the viewing directions are incrementally rotated and the filtered
+    panorama is sampled.  Optic flow is computed analytically (linear in omega).
+
+    Coordinate convention: +x forward, +y left, +z up.
+
+    Args:
+        sample_phi: (N,) azimuthal angles of viewing directions (radians)
+        sample_theta: (N,) polar angles of viewing directions (radians)
+        velocity_amp: RMS amplitude of rotational speed (deg/s)
+        velocity_time_scale: temporal smoothing scale for velocity (seconds)
+        seed: random seed
+        dt: time step (seconds)
+        stim_time: duration per repeat (seconds)
+        num_repeats: number of repeats *per panorama* (will be doubled for
+            symmetrization)
+
+    Returns:
+        stimulus: [examples, time, points in space] — pixel values in [0, 1]
+        optic_flow: [examples, time, points in space, 2] — (d_phi, d_theta) in rad/s
+    """
+    from scipy.ndimage import map_coordinates
+    from analysis.estimate_self_motion import generate_optic_flow
+
+    # Create RNG from seed
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng()
+
+    # --- load all panoramic images ---
+    pano_dir = Path('../connectome_data/panoramic')
+    pano_paths = sorted(pano_dir.glob('*.mat'))
+    if not pano_paths:
+        raise FileNotFoundError(f"No .mat files found in {pano_dir.resolve()}")
+
+    pano_images = []
+    for pp in pano_paths:
+        pano_filtered, pano_y_lim, pano_x_lim = _load_and_filter_pano(pp)
+        pano_images.append(pano_filtered)
+
+    # --- time / velocity parameters (shared across panoramas) ---
+    num_repeats_total = num_repeats * 2  # double for symmetrization
+    time_vect = np.arange(0, stim_time * num_repeats_total, step=dt)
+    num_time = len(time_vect)
+    time_per_stim = num_time // num_repeats_total
+
+    # Gaussian smoothing filter (circular convolution)
+    vel_filter = (1 / np.sqrt(2 * np.pi * velocity_time_scale**2)
+                  * np.exp(-(time_vect - time_vect.mean())**2 / (2 * velocity_time_scale**2)) * dt)
+    vel_filter /= vel_filter.sum()
+    vel_filter = np.fft.ifftshift(vel_filter)
+
+    expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / velocity_time_scale)
+    velocity_amp_rad = velocity_amp * np.pi / 180  # convert deg/s to rad/s
+
+    # Scale per-component amplitude so the total angular speed has the desired RMS
+    # E[|omega|^2] = 3 * sigma_comp^2,  so sigma_comp = velocity_amp / sqrt(3)
+    component_amp = velocity_amp_rad / np.sqrt(3)
+
+    # --- convert sample viewing directions to Cartesian ---
+    sample_xyz = np.stack([
+        np.sin(sample_theta) * np.cos(sample_phi),
+        np.sin(sample_theta) * np.sin(sample_phi),
+        np.cos(sample_theta)
+    ], axis=1)  # (N, 3)
+    num_cells = len(sample_phi)
+
+    T_zero = torch.tensor([0.0, 0.0, 0.0])
+    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
+    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
+
+    stimulus_list = []
+    optic_flow_list = []
+
+    for pano_filtered in pano_images:
+        pano_height, pano_width = pano_filtered.shape
+
+        # --- generate 3 independent smoothed angular velocity components ---
+        omega = np.zeros((3, num_time))
+        for dim in range(3):
+            v = rng.standard_normal(num_time // 2)
+            v = np.concatenate((v, -v))  # symmetrize: second half is negated
+            v = np.fft.ifft(np.fft.fft(v) * np.fft.fft(vel_filter)).real
+            v *= component_amp / expected_std
+            omega[dim] = v
+
+        # Reshape into per-repeat segments: (3, num_repeats_total, time_per_stim)
+        omega_per_repeat = omega.reshape(3, num_repeats_total, time_per_stim)
+
+        for ri in range(num_repeats_total):
+            omega_seg = omega_per_repeat[:, ri, :]  # (3, time_per_stim)
+
+            # --- compose incremental rotations (Rodrigues' formula) ---
+            # The update R = R_inc @ R is left-multiplication, so omega_seg is
+            # in the world frame.  For optic-flow we need the body-frame
+            # angular velocity: omega_body = R^T @ omega_world.
+            # Start each repeat at a uniformly random orientation so the
+            # observer samples different parts of the panorama across repeats.
+            R = _random_rotation_matrix(rng)
+            rotated_xyz = np.zeros((time_per_stim, num_cells, 3))
+            omega_body = np.zeros((time_per_stim, 3))
+
+            for ti in range(time_per_stim):
+                omega_world = omega_seg[:, ti]
+                angle = np.linalg.norm(omega_world) * dt
+                if angle > 1e-12:
+                    ax = omega_world / np.linalg.norm(omega_world)
+                    K = np.array([[0, -ax[2], ax[1]],
+                                  [ax[2], 0, -ax[0]],
+                                  [-ax[1], ax[0], 0]])
+                    R_inc = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+                    R = R_inc @ R
+                rotated_xyz[ti] = (R @ sample_xyz.T).T
+                omega_body[ti] = R.T @ omega_world
+
+            # Convert back to spherical coordinates
+            rotated_theta = np.arccos(np.clip(rotated_xyz[:, :, 2], -1, 1))
+            rotated_phi = np.arctan2(rotated_xyz[:, :, 1], rotated_xyz[:, :, 0])
+
+            # --- sample the filtered panoramic image ---
+            y_indices = (rotated_theta - pano_y_lim[0]) / (pano_y_lim[1] - pano_y_lim[0]) * (pano_height - 1)
+            x_indices = (pano_x_lim[0] - rotated_phi) / (pano_x_lim[0] - pano_x_lim[1]) * pano_width
+            x_indices = x_indices % pano_width  # wrap horizontally
+
+            # Mark out-of-bounds theta (above or below panorama) — set to 0
+            out_of_bounds = (y_indices < 0) | (y_indices > pano_height - 1)
+            y_indices = np.clip(y_indices, 0, pano_height - 1)
+
+            stim = map_coordinates(
+                pano_filtered, [y_indices.ravel(), x_indices.ravel()],
+                order=1, mode='nearest'
+            ).reshape(time_per_stim, num_cells)
+            stim[out_of_bounds] = 0.0
+            stimulus_list.append(stim)
+
+            # --- compute optic flow (batched over time) ---
+            omega_body_t = torch.tensor(omega_body, dtype=torch.float32)
+            T_zeros = T_zero.expand(omega_body_t.shape[0], -1)
+            u_right, u_up = generate_optic_flow(phi_t, theta_t, omega_body_t, T_zeros, 1.0)
+            of = np.stack([u_right.numpy(), u_up.numpy()], axis=-1)
+            optic_flow_list.append(of)
+
+    # --- stack into final arrays ---
+    stimulus = np.stack(stimulus_list)       # (num_panos * num_repeats_total, time_per_stim, num_cells)
+    optic_flow = np.stack(optic_flow_list)   # (num_panos * num_repeats_total, time_per_stim, num_cells, 2)
+
+    return stimulus, optic_flow
+
 
 def consolidate_stim(stim_dict, optic_flow_dict):
     time_per_stim, num_cell = next(iter(stim_dict.values()))[0].shape[1:]
@@ -670,12 +680,11 @@ def get_stimulus(
         # get pano stimulus with random velocity
         stimulus, optic_flow = get_random_velocity_pano(
             column_phi_theta[:, 0], column_phi_theta[:, 1],
-            velocity_amp=config['stimulus']['tf_amp'], velocity_time_scale=config['stimulus']['tf_time_scale'],
+            velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
             num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
         )
 
         stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        stimulus = (stimulus + 1.0) / 2.0
         optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
     elif stimulus_type == 'random_sine':
@@ -692,28 +701,8 @@ def get_stimulus(
             random_sine_num_repeats = 1
         stimulus, optic_flow = create_random_tf_sine_wave(
             column_phi_theta[:, 0], column_phi_theta[:, 1],
-            tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'],
+            velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
             num_repeats=random_sine_num_repeats, dt=model_dt, stim_time=random_sine_stim_time, seed=stimulus_seed
-        )
-
-        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-
-    elif stimulus_type == 'sine_const_rand':
-        if column_phi_theta is None:
-            raise Exception('sine waves require column_phi_theta input')
-
-        # --- generate a sine wave with constant tf segment + random tf segment per repeat ---
-        _const_time = float(const_rand_const_time) if const_rand_const_time is not None else stim_time
-        _const_tf = float(const_rand_const_tf) if const_rand_const_tf is not None else 4.0
-
-        stimulus, optic_flow = create_const_rand_tf_sine_wave(
-            column_phi_theta[:, 0], column_phi_theta[:, 1],
-            tf_amp=config['stimulus']['tf_amp'], tf_time_scale=config['stimulus']['tf_time_scale'],
-            num_repeats=config['stimulus']['num_repeats'], dt=model_dt,
-            const_time=_const_time, random_time=stim_time,
-            const_tf=_const_tf, const_first=const_rand_const_first,
-            seed=stimulus_seed
         )
 
         stimulus = torch.tensor(stimulus, device=device, dtype=dtype)

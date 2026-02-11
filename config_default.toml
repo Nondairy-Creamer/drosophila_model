@@ -32,8 +32,8 @@ stim_time = 1.0
 pre_stim_time = 0.0
 post_stim_time = 0.0
 seed = 0
-tf_amp = 5.0
-tf_time_scale = 0.15
+velocity_amp = 150.0
+velocity_time_scale = 0.2
 num_repeats = 5
 temporal_frequencies = [
     2,

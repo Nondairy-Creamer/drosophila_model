@@ -260,6 +260,47 @@ def run_model_on_stimuli(
 
 
 # ---------------------------------------------------------------------------
+# Flow coordinate helpers
+# ---------------------------------------------------------------------------
+
+
+def angular_flow_to_cartesian_xz(
+    flow_u: np.ndarray,
+    flow_v: np.ndarray,
+    cell_x: np.ndarray,
+    cell_y: np.ndarray,
+    cell_z: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert angular optic flow ``(u_right, u_up)`` to Cartesian ``(v_x, v_z)``.
+
+    The angular flow lives in the local tangent frame on the sphere:
+
+        v_3d = -u_right * e_phi - u_up * e_theta
+
+    Projecting onto the x-z plotting plane gives:
+
+        v_x = u_right * sin(phi) - u_up * cos(theta) * cos(phi)
+        v_z = u_up * sin(theta)
+
+    Parameters
+    ----------
+    flow_u : (..., N) rightward angular flow component
+    flow_v : (..., N) upward angular flow component
+    cell_x, cell_y, cell_z : (N,) Cartesian coordinates on the unit sphere
+    """
+    sin_theta = np.sqrt(np.maximum(cell_x ** 2 + cell_y ** 2, 1e-12))
+    cos_theta = cell_z
+    # Avoid division by zero at the poles
+    sin_phi = np.where(sin_theta > 1e-8, cell_y / sin_theta, 0.0)
+    cos_phi = np.where(sin_theta > 1e-8, cell_x / sin_theta, 1.0)
+
+    v_x = flow_u * sin_phi - flow_v * cos_theta * cos_phi
+    v_z = flow_v * sin_theta
+
+    return v_x, v_z
+
+
+# ---------------------------------------------------------------------------
 # Movie creation helpers
 # ---------------------------------------------------------------------------
 
@@ -269,6 +310,7 @@ def make_flow_comparison_movie(
     true_flow: np.ndarray,
     pred_flow: np.ndarray | None = None,
     cell_x: np.ndarray = None,
+    cell_y: np.ndarray = None,
     cell_z: np.ndarray = None,
     output_path: Path = None,
     frame_rate: int = 30,
@@ -283,9 +325,11 @@ def make_flow_comparison_movie(
     Parameters
     ----------
     stimulus : (time, columns)
-    true_flow : (time, columns, 2)
+    true_flow : (time, columns, 2) — angular flow ``(u_right, u_up)``
     pred_flow : (time, columns, 2) or None
-    cell_x, cell_z : (columns,)
+    cell_x, cell_y, cell_z : (columns,) Cartesian coords on unit sphere.
+        When *cell_y* is provided the angular flow is properly projected to
+        Cartesian ``(v_x, v_z)`` for the quiver arrows.
     output_path : Path for .mp4 output
     frame_rate : frames per second
     stim_name : label shown in the stimulus panel title
@@ -300,10 +344,17 @@ def make_flow_comparison_movie(
     stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
-    true_flow_u = true_flow[:, :, 0]
-    true_flow_v = true_flow[:, :, 1]
+    # Convert angular flow (u_right, u_up) to Cartesian (v_x, v_z)
+    if cell_y is not None:
+        true_flow_vx, true_flow_vz = angular_flow_to_cartesian_xz(
+            true_flow[:, :, 0], true_flow[:, :, 1], cell_x, cell_y, cell_z,
+        )
+    else:
+        # Legacy fallback (incorrect for non-trivial geometries)
+        true_flow_vx = -true_flow[:, :, 0]
+        true_flow_vz = true_flow[:, :, 1]
 
-    true_magnitude = np.hypot(true_flow_u, true_flow_v)
+    true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
     max_mag = (
         np.nanpercentile(true_magnitude, 99) if np.any(true_magnitude) else 1.0
     )
@@ -311,8 +362,13 @@ def make_flow_comparison_movie(
 
     has_pred = pred_flow is not None
     if has_pred:
-        pred_flow_u = pred_flow[:, :, 0]
-        pred_flow_v = pred_flow[:, :, 1]
+        if cell_y is not None:
+            pred_flow_vx, pred_flow_vz = angular_flow_to_cartesian_xz(
+                pred_flow[:, :, 0], pred_flow[:, :, 1], cell_x, cell_y, cell_z,
+            )
+        else:
+            pred_flow_vx = -pred_flow[:, :, 0]
+            pred_flow_vz = pred_flow[:, :, 1]
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         axes[1, 0].axis("off")
@@ -352,9 +408,9 @@ def make_flow_comparison_movie(
     q_true = ax_true.quiver(
         cell_x,
         cell_z,
-        -true_flow_u[0, :],
-        true_flow_v[0, :],
-        np.hypot(true_flow_u[0, :], true_flow_v[0, :]),
+        true_flow_vx[0, :],
+        true_flow_vz[0, :],
+        true_magnitude[0, :],
         cmap="viridis",
         norm=flow_norm,
         angles="xy",
@@ -366,12 +422,13 @@ def make_flow_comparison_movie(
     fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
     if has_pred:
+        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
         q_pred = ax_pred.quiver(
             cell_x,
             cell_z,
-            -pred_flow_u[0, :],
-            pred_flow_v[0, :],
-            np.hypot(pred_flow_u[0, :], pred_flow_v[0, :]),
+            pred_flow_vx[0, :],
+            pred_flow_vz[0, :],
+            pred_magnitude[0, :],
             cmap="viridis",
             norm=flow_norm,
             angles="xy",
@@ -394,16 +451,16 @@ def make_flow_comparison_movie(
         for t in range(num_time):
             sc_stim.set_array(stimulus[t, :])
 
-            u_true_t = true_flow_u[t, :]
-            v_true_t = true_flow_v[t, :]
-            mag_true_t = np.hypot(u_true_t, v_true_t)
-            q_true.set_UVC(-u_true_t, v_true_t, mag_true_t)
+            vx_true_t = true_flow_vx[t, :]
+            vz_true_t = true_flow_vz[t, :]
+            mag_true_t = np.hypot(vx_true_t, vz_true_t)
+            q_true.set_UVC(vx_true_t, vz_true_t, mag_true_t)
 
             if has_pred:
-                u_pred_t = pred_flow_u[t, :]
-                v_pred_t = pred_flow_v[t, :]
-                mag_pred_t = np.hypot(u_pred_t, v_pred_t)
-                q_pred.set_UVC(-u_pred_t, v_pred_t, mag_pred_t)
+                vx_pred_t = pred_flow_vx[t, :]
+                vz_pred_t = pred_flow_vz[t, :]
+                mag_pred_t = np.hypot(vx_pred_t, vz_pred_t)
+                q_pred.set_UVC(vx_pred_t, vz_pred_t, mag_pred_t)
 
             frame_title = (
                 f"Stimulus ({stim_name}) frame {t+1}/{num_time}"
@@ -427,6 +484,7 @@ def make_stimulus_flow_movie(
     cell_z: np.ndarray,
     output_path: Path,
     frame_rate: int,
+    cell_y: np.ndarray = None,
 ) -> None:
     """Create a 1x2 movie: stimulus intensity + true optic flow.
 
@@ -438,6 +496,7 @@ def make_stimulus_flow_movie(
         true_flow=true_flow,
         pred_flow=None,
         cell_x=cell_x,
+        cell_y=cell_y,
         cell_z=cell_z,
         output_path=output_path,
         frame_rate=frame_rate,

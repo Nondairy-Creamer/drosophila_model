@@ -36,7 +36,7 @@ def main() -> None:
         "--fps", type=int, default=50, help="Output movie frame rate"
     )
     parser.add_argument(
-        "--stim-type", type=str, default=None,
+        "--stim-type", type=str, default='random_pano',
         help="Stimulus type (default: use value from config)"
     )
     parser.add_argument(
@@ -53,19 +53,24 @@ def main() -> None:
     stimulus_type = args.stim_type if args.stim_type else config['stimulus']['stimulus_type']
     frame_rate = args.fps
 
+    # --- Load column positions for scatter/quiver plots ---
+    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+    column_phi_theta = column_info_df[['phi', 'theta']].to_numpy()
+
     # --- Load stimulus and optic flow ---
     print("Loading stimulus and optic flow...")
-    stimulus, optic_flow = su.get_stimulus(stimulus_type, config)
+    stimulus, optic_flow = su.get_stimulus(stimulus_type, config, column_phi_theta)
     stimulus = stimulus.numpy()
     optic_flow = optic_flow.numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"Optic flow shape: {optic_flow.shape}")
-
-    # --- Load column positions for scatter/quiver plots ---
-    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-    cell_x = column_info_df.x.to_numpy()
-    cell_z = column_info_df.z.to_numpy()
+    import numpy as np
+    phi = column_phi_theta[:, 0]
+    theta = column_phi_theta[:, 1]
+    cell_x = np.sin(theta) * np.cos(phi)
+    cell_y = np.sin(theta) * np.sin(phi)
+    cell_z = np.cos(theta)
 
     for stim_index in args.stim_index:
         print(f"\nCreating movie for stimulus {stim_index} with {stimulus.shape[1]} frames...")
@@ -78,6 +83,7 @@ def main() -> None:
             cell_z,
             out_path,
             frame_rate,
+            cell_y=cell_y,
         )
 
 

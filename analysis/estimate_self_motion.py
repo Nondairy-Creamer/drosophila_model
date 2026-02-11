@@ -28,22 +28,19 @@ def cross_matrix(a):
         torch.stack([ -ay,  ax,   O], dim=-1)
     ], dim=-2)
 
-# Load column info with theta/phi viewing directions
-connectome_folder = Path('../connectome_data')
-column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+def _load_viewing_directions():
+    """Load column info with theta/phi viewing directions for both hemispheres."""
+    connectome_folder = Path('../connectome_data')
+    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
 
-# Extract theta and phi as tensors
-# Include both hemispheres: original phi and negated phi (bilateral visual field)
-theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)
-phi_half = torch.tensor(column_info_df['phi'].values, dtype=torch.float32)
+    # Extract theta and phi as tensors
+    # Include both hemispheres: original phi and negated phi (bilateral visual field)
+    theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)
+    phi_half = torch.tensor(column_info_df['phi'].values, dtype=torch.float32)
 
-theta = torch.cat([theta_half, theta_half])
-phi = torch.cat([phi_half, -phi_half])
-N = len(theta)
-
-print(f"Loaded {N} viewing directions")
-print(f"Theta range: [{theta.min():.3f}, {theta.max():.3f}] rad")
-print(f"Phi range: [{phi.min():.3f}, {phi.max():.3f}] rad")
+    theta = torch.cat([theta_half, theta_half])
+    phi = torch.cat([phi_half, -phi_half])
+    return phi, theta
 
 
 def generate_optic_flow(phi, theta, omega, T, Z):
@@ -53,17 +50,27 @@ def generate_optic_flow(phi, theta, omega, T, Z):
     Args:
         phi: (N,) azimuthal angles
         theta: (N,) polar angles
-        omega: (3,) rotation vector
-        T: (3,) translation vector
+        omega: (3,) or (T, 3) rotation vector(s)
+        T: (3,) or (T, 3) translation vector(s)
         Z: (N,) or scalar depth values
     
     Returns:
-        d_phi: (N,) angular flow in phi direction
-        d_theta: (N,) angular flow in theta direction
+        u_right: (N,) or (T, N) arc length / s right
+        u_up: (N,) or (T, N) arc length / s up
+        When omega/T are (3,), returns (N,). When (T, 3), returns (T, N).
     """
     N = theta.shape[0]
+
+    # Handle batched inputs: promote (3,) → (1, 3) internally
+    if omega.dim() != T.dim():
+        raise ValueError(f"omega and T must have the same number of dimensions, "
+                         f"got omega: {omega.shape} and T: {T.shape}")
+    single_timepoint = omega.dim() == 1
+    if single_timepoint:
+        omega = omega.unsqueeze(0)  # (1, 3)
+        T = T.unsqueeze(0)          # (1, 3)
     
-    # Convert to 3D viewing directions (N,3)
+    # Convert to 3D viewing directions (N, 3)
     x = torch.stack((
         torch.sin(theta) * torch.cos(phi),
         torch.sin(theta) * torch.sin(phi),
@@ -83,34 +90,39 @@ def generate_optic_flow(phi, theta, omega, T, Z):
         torch.zeros_like(phi)
     ), dim=1)
     
-    # Rotation contribution: u = Ω × x = -x × Ω = -[x]_× Ω
+    # Rotation contribution: u = -Ω × x = x × Ω = [x]_× Ω
     # Physical: leftward rotation (positive omega_z) → rightward image motion (positive d_phi)
     A = cross_matrix(x)  # (N, 3, 3)
-    u_rot = -(A @ omega)  # (N, 3) - negate for correct physical sign
+    u_rot = torch.einsum('nij,tj->tni', A, omega)  # (T, N, 3)
     
-    # Translation contribution: u_trans = (1/Z) * Pi * T
+    # Translation contribution: u_trans = -(1/Z) * Pi * T
     # where Pi = I - x x^T (projection onto tangent plane)
     outer = x.unsqueeze(2) @ x.unsqueeze(1)  # (N, 3, 3)
-    I = torch.eye(3).expand(N, 3, 3)
+    I = torch.eye(3, device=phi.device, dtype=phi.dtype).expand(N, 3, 3)
     Pi = I - outer
     
     # Translation flow is OPPOSITE to motion direction (objects move backward when you move forward)
+    Pi_T = torch.einsum('nij,tj->tni', Pi, T)  # (T, N, 3)
     if torch.is_tensor(Z) and Z.dim() > 0:
-        u_trans = -(Pi @ T) / Z.unsqueeze(1)  # (N, 3)
+        u_trans = -Pi_T / Z.unsqueeze(0).unsqueeze(-1)  # (T, N, 3)
     else:
-        u_trans = -(Pi @ T) / Z  # (N, 3)
+        u_trans = -Pi_T / Z  # (T, N, 3)
     
     # Total flow in 3D
-    u = u_rot + u_trans
+    u = u_rot + u_trans  # (T, N, 3)
     
     # Project onto spherical basis to get angular flow
-    # d_phi: positive = rightward motion on retina (leftward observer rotation)
-    # d_theta: positive = upward motion on retina (downward observer motion)
-    # Negate d_theta because e_theta points downward but we want up=positive
-    d_theta = -(u * e_theta).sum(dim=1)
-    d_phi = (u * e_phi).sum(dim=1)
-    
-    return d_phi, d_theta
+    # u_right: positive = rightward motion on retina (leftward observer rotation)
+    # u_up: positive = upward motion on retina (downward observer motion)
+    u_right = -(u * e_phi).sum(dim=-1)   # (T, N)
+    u_up = -(u * e_theta).sum(dim=-1)    # (T, N)
+
+    # Squeeze back to (N,) if a single timepoint was provided
+    if single_timepoint:
+        u_right = u_right.squeeze(0)
+        u_up = u_up.squeeze(0)
+
+    return u_right, u_up
 
 
 def format_vec(v, name):
@@ -520,6 +532,13 @@ def visualize_coverage():
 
 
 if __name__ == "__main__":
+    phi, theta = _load_viewing_directions()  # noqa: used by test functions as globals
+    N = len(theta)
+
+    print(f"Loaded {N} viewing directions")
+    print(f"Theta range: [{theta.min():.3f}, {theta.max():.3f}] rad")
+    print(f"Phi range: [{phi.min():.3f}, {phi.max():.3f}] rad")
+
     print("Optic Flow Self-Motion Estimation Tests")
     print("Using Drosophila connectome visual field data")
     
