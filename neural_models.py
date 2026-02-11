@@ -27,7 +27,7 @@ class NeuralModel(torch.nn.Module, ABC):
     def __init__(self, *, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 use_decoder=True, use_input_conv=True, conv_size_x=5, conv_size_t=20):
+                 use_decoder=True, use_input_conv=True, conv_size_x=5, conv_size_t=20, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will overwrite with their own)
         self._save_init_inputs()
@@ -121,6 +121,11 @@ class NeuralModel(torch.nn.Module, ABC):
         self.column_phi_theta = column_phi_theta
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
+
+        # Optional layer normalization applied to voltage in predict()
+        self.use_layer_norm = use_layer_norm
+        if self.use_layer_norm:
+            self.layer_norm = torch.nn.LayerNorm(self.num_neurons, device=self.device, dtype=self.dtype)
 
         # readout from the neurons to optic flow in units of degrees per second
         # Cell lists stored as attributes, readout tensors as buffers (auto-saved in state_dict)
@@ -712,6 +717,8 @@ class NeuralModel(torch.nn.Module, ABC):
 
         for t in range(num_time):
             v = self(v, inputs[:, t, :], stim_to_cell_mapping)
+            if self.use_layer_norm:
+                v = self.layer_norm(v)
             # Compute firing_rate on full v (has neuron dimension for proper threshold broadcasting)
             fr = self.firing_rate(v)
 

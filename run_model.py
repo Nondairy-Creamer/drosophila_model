@@ -96,6 +96,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
             nonlinearity=config['model']['nonlinearity'],
             count_threshold=config['model']['synapse_count_threshold'],
+            use_layer_norm=config['model']['use_layer_norm'],
             device=config['model']['device'],
             dtype=config['model']['dtype'],
             use_decoder=config['model']['use_decoder'],

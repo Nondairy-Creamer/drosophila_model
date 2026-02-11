@@ -2,9 +2,9 @@
 model_type = 'CurrentModel'
 device = "cpu"
 dtype = "float32"
-use_layer_norm = false
+use_layer_norm = true
 nonlinearity = "Softplus"
-use_decoder = false
+use_decoder = true
 use_input_conv = true
 dt = 0.01
 synapse_count_threshold = 2
