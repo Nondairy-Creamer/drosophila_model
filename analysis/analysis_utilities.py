@@ -344,15 +344,10 @@ def make_flow_comparison_movie(
     stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
-    # Convert angular flow (u_right, u_up) to Cartesian (v_x, v_z)
-    if cell_y is not None:
-        true_flow_vx, true_flow_vz = angular_flow_to_cartesian_xz(
-            true_flow[:, :, 0], true_flow[:, :, 1], cell_x, cell_y, cell_z,
-        )
-    else:
-        # Legacy fallback (incorrect for non-trivial geometries)
-        true_flow_vx = -true_flow[:, :, 0]
-        true_flow_vz = true_flow[:, :, 1]
+    # Use raw angular flow components (u_right, u_up) directly as arrow directions.
+    # Negate u_right so rightward retinal flow maps to visual right on the flipped x-axis.
+    true_flow_vx = -true_flow[:, :, 0]
+    true_flow_vz = true_flow[:, :, 1]
 
     true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
     max_mag = (
@@ -362,13 +357,8 @@ def make_flow_comparison_movie(
 
     has_pred = pred_flow is not None
     if has_pred:
-        if cell_y is not None:
-            pred_flow_vx, pred_flow_vz = angular_flow_to_cartesian_xz(
-                pred_flow[:, :, 0], pred_flow[:, :, 1], cell_x, cell_y, cell_z,
-            )
-        else:
-            pred_flow_vx = -pred_flow[:, :, 0]
-            pred_flow_vz = pred_flow[:, :, 1]
+        pred_flow_vx = -pred_flow[:, :, 0]
+        pred_flow_vz = pred_flow[:, :, 1]
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         axes[1, 0].axis("off")

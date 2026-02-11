@@ -58,10 +58,21 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
     sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + temporal_frequency * t_mesh) + phase_init)
     sine_wave *= contrast_scaling_factor[None, :]
     
-    # Generate optic flow (only left/right component)
+    # Generate optic flow assuming fly rotates in a virtual cylinder.
+    # For LR sine waves, the fly rotates counter-clockwise about z at omega_z = velocity.
+    from analysis.estimate_self_motion import generate_optic_flow
+    velocity_rad_s = temporal_frequency * wavelength  # rad/s (wavelength already in radians)
+    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
+    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
+    omega = torch.tensor([0.0, 0.0, float(velocity_rad_s)], dtype=torch.float32)
+    T_vec = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+    u_right, u_up = generate_optic_flow(phi_t, theta_t, omega, T_vec, 1.0)
+    u_right_deg = u_right.numpy() * (180.0 / np.pi)
+    u_up_deg = u_up.numpy() * (180.0 / np.pi)
+
     optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
-    optic_flow[pre_stim_index:post_stim_index, :, 0] = temporal_frequency / wavelength  # LR flow
-    optic_flow[pre_stim_index:post_stim_index, :, 1] = 0  # UD flow
+    optic_flow[pre_stim_index:post_stim_index, :, 0] = u_right_deg[None, :]
+    optic_flow[pre_stim_index:post_stim_index, :, 1] = u_up_deg[None, :]
     
     sine_wave = (sine_wave + 1.0) / 2.0
 
@@ -112,10 +123,23 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
     sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + temporal_frequency * t_mesh) + phase_init)
     sine_wave *= contrast_scaling_factor[None, :]
     
-    # Generate optic flow (only up/down component)
+    # Generate optic flow assuming fly translates vertically in a virtual cylinder.
+    # The cylinder wall is at distance Z = 1/sin(theta) (unit radius at theta=pi/2).
+    # T_z is chosen so the flow at theta=pi/2 equals the requested velocity.
+    from analysis.estimate_self_motion import generate_optic_flow
+    velocity_rad_s = temporal_frequency * wavelength  # rad/s at theta=pi/2
+    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
+    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
+    omega = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+    T_vec = torch.tensor([0.0, 0.0, float(-velocity_rad_s)], dtype=torch.float32)
+    Z = 1.0 / torch.sin(theta_t)
+    u_right, u_up = generate_optic_flow(phi_t, theta_t, omega, T_vec, Z)
+    u_right_deg = u_right.numpy() * (180.0 / np.pi)
+    u_up_deg = u_up.numpy() * (180.0 / np.pi)
+
     optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
-    optic_flow[pre_stim_index:post_stim_index, :, 0] = 0  # LR flow
-    optic_flow[pre_stim_index:post_stim_index, :, 1] = temporal_frequency / wavelength  # UD flow
+    optic_flow[pre_stim_index:post_stim_index, :, 0] = u_right_deg[None, :]
+    optic_flow[pre_stim_index:post_stim_index, :, 1] = u_up_deg[None, :]
     
     sine_wave = (sine_wave + 1.0) / 2.0
 
@@ -327,10 +351,18 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['right_left'].append((-sine_wave_right_left).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['right_left'].append((-sine_wave_right_left_shifted).reshape(num_repeats, time_per_stim, num_cell))
 
-    # add what the optic flow for the sine wave is at each point
-    optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
-    # this optic flow is only left/right so set the up/down flow to 0
-    optic_flow_mat = np.concatenate((optic_flow_mat[:, :, :, None], np.zeros_like(optic_flow_mat[:, :, :, None])), axis=3)
+    # Compute optic flow for LR using generate_optic_flow (rotation about z-axis in cylinder)
+    from analysis.estimate_self_motion import generate_optic_flow
+    velocity_rad_s = tf * wavelength  # (num_time,) in rad/s
+    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
+    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
+    omega_batch = torch.zeros(num_time, 3, dtype=torch.float32)
+    omega_batch[:, 2] = torch.tensor(velocity_rad_s.copy(), dtype=torch.float32)
+    T_batch = torch.zeros(num_time, 3, dtype=torch.float32)
+    u_right_lr, u_up_lr = generate_optic_flow(phi_t, theta_t, omega_batch, T_batch, 1.0)
+    lr_flow = np.stack([u_right_lr.numpy() * (180.0 / np.pi),
+                        u_up_lr.numpy() * (180.0 / np.pi)], axis=-1)
+    optic_flow_mat = lr_flow.reshape(num_repeats, time_per_stim, num_cell, 2)
 
     optic_flow_dict['right_left'] += [optic_flow_mat] * 4
 
@@ -344,12 +376,16 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['up_down'].append((-sine_wave_up_down).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
 
-    # add what the optic flow for the sine wave is at each point
-    # phase increases for upward motion (tf > 0), so upward flow should be positive
-    # phase decreases for downward motion (tf < 0), so downward flow should be negative
-    optic_flow_mat = np.tile(tf / wavelength, (num_cell, 1)).T.reshape(num_repeats, time_per_stim, num_cell)
-    # this optic flow is only up/down so set the left/right flow to 0
-    optic_flow_mat = np.concatenate((np.zeros_like(optic_flow_mat[:, :, :, None]), optic_flow_mat[:, :, :, None]), axis=3)
+    # Compute optic flow for UD using generate_optic_flow (vertical translation in cylinder)
+    # Cylinder distance: Z = 1/sin(theta). T_z chosen so flow at theta=pi/2 = requested velocity.
+    T_batch_ud = torch.zeros(num_time, 3, dtype=torch.float32)
+    T_batch_ud[:, 2] = -torch.tensor(velocity_rad_s.copy(), dtype=torch.float32)
+    omega_batch_ud = torch.zeros(num_time, 3, dtype=torch.float32)
+    Z = 1.0 / torch.sin(theta_t)
+    u_right_ud, u_up_ud = generate_optic_flow(phi_t, theta_t, omega_batch_ud, T_batch_ud, Z)
+    ud_flow = np.stack([u_right_ud.numpy() * (180.0 / np.pi),
+                        u_up_ud.numpy() * (180.0 / np.pi)], axis=-1)
+    optic_flow_mat = ud_flow.reshape(num_repeats, time_per_stim, num_cell, 2)
     optic_flow_dict['up_down'] += [optic_flow_mat] * 4
 
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
