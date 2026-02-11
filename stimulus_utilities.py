@@ -604,7 +604,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             x_indices = (pano_x_lim[0] - rotated_phi) / (pano_x_lim[0] - pano_x_lim[1]) * pano_width
             x_indices = x_indices % pano_width  # wrap horizontally
 
-            # Mark out-of-bounds theta (above or below panorama) — set to 0
+            # Mark out-of-bounds theta (above or below panorama) — set to mean
             out_of_bounds = (y_indices < 0) | (y_indices > pano_height - 1)
             y_indices = np.clip(y_indices, 0, pano_height - 1)
 
@@ -612,7 +612,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
                 pano_filtered, [y_indices.ravel(), x_indices.ravel()],
                 order=1, mode='nearest'
             ).reshape(time_per_stim, num_cells)
-            stim[out_of_bounds] = 0.0
+            stim[out_of_bounds] = pano_filtered.mean()
             stimulus_list.append(stim)
 
             # --- compute optic flow (batched over time) ---
