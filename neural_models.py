@@ -21,6 +21,36 @@ def _register_model_class(model_cls):
     return model_cls
 
 
+class CellTypeLayerNorm(torch.nn.Module):
+    """Layer normalization with weight and bias shared per cell type instead of per neuron.
+
+    Works like torch.nn.LayerNorm but stores only one weight and one bias per cell type,
+    expanding them to per-neuron via a neuron-to-type index mapping before applying.
+    """
+
+    def __init__(self, num_cell_types, neuron_to_type_index, eps=1e-5, device=None, dtype=None):
+        super().__init__()
+        self.num_cell_types = num_cell_types
+        self.eps = eps
+        # neuron_to_type_index is a (num_neurons,) int64 tensor mapping each neuron to its cell type
+        self.register_buffer('neuron_to_type_index', neuron_to_type_index)
+        self.weight = torch.nn.Parameter(torch.ones(num_cell_types, device=device, dtype=dtype))
+        self.bias = torch.nn.Parameter(torch.zeros(num_cell_types, device=device, dtype=dtype))
+
+    def forward(self, x):
+        # x shape: (..., num_neurons)
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_norm = (x - mean) / torch.sqrt(var + self.eps)
+        # Expand per-cell-type params to per-neuron
+        w = self.weight[self.neuron_to_type_index]
+        b = self.bias[self.neuron_to_type_index]
+        return x_norm * w + b
+
+    def extra_repr(self):
+        return f'num_cell_types={self.num_cell_types}, eps={self.eps}'
+
+
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
@@ -122,10 +152,8 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
 
-        # Optional layer normalization applied to voltage in predict()
+        # Layer norm flag (actual module created after neuron_to_type_index is built)
         self.use_layer_norm = use_layer_norm
-        if self.use_layer_norm:
-            self.layer_norm = torch.nn.LayerNorm(self.num_neurons, device=self.device, dtype=self.dtype)
 
         # readout from the neurons to optic flow in units of degrees per second
         # Cell lists stored as attributes, readout tensors as buffers (auto-saved in state_dict)
@@ -154,6 +182,13 @@ class NeuralModel(torch.nn.Module, ABC):
             ct_mask = torch.from_numpy(ct_mask_np).to(device=self.device)
             self.neuron_to_type_index[ct_mask] = cti
         assert torch.all(self.neuron_to_type_index != -1), 'some cell type to neuron mappings not assigned'
+
+        # Optional layer normalization with shared weight/bias per cell type
+        if self.use_layer_norm:
+            self.layer_norm = CellTypeLayerNorm(
+                self.num_cell_types, self.neuron_to_type_index,
+                device=self.device, dtype=self.dtype,
+            )
 
         if self.use_decoder:
             # Initialize decoder
