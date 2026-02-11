@@ -33,7 +33,7 @@ def main() -> None:
         help="Stimulus indices to visualize (space-separated list)"
     )
     parser.add_argument(
-        "--fps", type=int, default=50, help="Output movie frame rate"
+        "--fps", type=int, default=100, help="Output movie frame rate"
     )
     parser.add_argument(
         "--stim-type", type=str, default='random_pano',
