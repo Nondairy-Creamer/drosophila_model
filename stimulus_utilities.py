@@ -417,14 +417,23 @@ def _load_all_panos():
     return panos.numpy().astype(np.float64)
 
 
-def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
-    """Apply 2D Gaussian spatial filtering to a raw panoramic image.
+def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180, eps=1e-6):
+    """Apply local contrast normalization then ommatidia blur to a panoramic image.
+
+    Two-stage pipeline:
+      1. Local Contrast Normalization (LCN): subtract local mean, divide by
+         local RMS to remove slow illumination gradients and equalize contrast.
+      2. Gaussian blur (ommatidia optical filtering / anti-alias) so the image
+         can be safely sampled at the sparse column grid without aliasing.
 
     Args:
         pano: (H, W) raw panoramic image array.
+        filter_std_rad: Gaussian sigma in radians used for both LCN and the
+            ommatidia blur (default 2.5 deg).
+        eps: Small constant to avoid division by zero in LCN.
 
     Returns:
-        pano_filtered: (H, W) float64 array normalised to [0, 1].
+        pano_out: (H, W) float64 array normalised to [0, 1].
         pano_y_lim: (2,) theta limits of the panorama.
         pano_x_lim: (2,) phi limits of the panorama.
     """
@@ -438,15 +447,28 @@ def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
     x_pixels_per_rad = pano_width / (pano_x_lim[0] - pano_x_lim[1])
     sigma_y = filter_std_rad * y_pixels_per_rad
     sigma_x = filter_std_rad * x_pixels_per_rad
-    pano_filtered = gaussian_filter(
+
+    # --- Stage 1: Local Contrast Normalization ---
+    local_mean = gaussian_filter(
         pano.astype(np.float64), sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
+    )
+    pano_centered = pano - local_mean
+
+    local_var = gaussian_filter(
+        pano_centered.astype(np.float64)**2, sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
+    )
+    pano_norm = pano_centered / (np.sqrt(local_var) + eps)
+
+    # --- Stage 2: Ommatidia blur (anti-alias before column sampling) ---
+    pano_out = gaussian_filter(
+        pano_norm, sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
     )
 
     # Normalize to [0, 1]
-    pano_min, pano_max = pano_filtered.min(), pano_filtered.max()
-    pano_filtered = np.sqrt((pano_filtered - pano_min) / (pano_max - pano_min))
+    pano_min, pano_max = pano_out.min(), pano_out.max()
+    pano_out = (pano_out - pano_min) / (pano_max - pano_min)
 
-    return pano_filtered, pano_y_lim, pano_x_lim
+    return pano_out, pano_y_lim, pano_x_lim
 
 
 def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocity_time_scale=0.25, seed=None,
