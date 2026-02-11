@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import Dataset, DataLoader
 import plotting_utilities as pu
 import numpy as np
 import neural_models as nm
@@ -18,11 +19,28 @@ from loss_functions import (
     calc_loss_dict,
 )
 
+
+class StimulusDataset(Dataset):
+    """Dataset that pairs inputs with targets (tensor or dict of tensors)."""
+    def __init__(self, inputs, target):
+        self.inputs = inputs
+        self.target = target
+        self._target_is_dict = isinstance(target, dict)
+
+    def __len__(self):
+        return self.inputs.shape[0]
+
+    def __getitem__(self, idx):
+        if self._target_is_dict:
+            return self.inputs[idx], {k: v[idx] for k, v in self.target.items()}
+        return self.inputs[idx], self.target[idx]
+
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
                 sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
-                input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False):
+                input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
+                batch_size=None):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
@@ -59,36 +77,63 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
     # Index of last GPU loss converted to CPU for plotting
     last_saved_idx = -1
 
+    # --- set up DataLoader for mini-batching ---
+    num_stimuli = inputs.shape[0]
+    use_batching = batch_size is not None and batch_size < num_stimuli
+    if use_batching:
+        dataloader = DataLoader(
+            StimulusDataset(inputs, target),
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=True,
+        )
+        batch_iter = iter(dataloader)
+
     for step in range(num_steps):
         if (step % reset_init_every) == 0:
             last_state = None
 
-        # --- do any data augmentation ---
-        inputs_augmented = inputs.clone()
+        # --- mini-batch: draw next batch from DataLoader ---
+        if use_batching:
+            try:
+                inputs_batch, target_batch = next(batch_iter)
+            except StopIteration:
+                batch_iter = iter(dataloader)
+                inputs_batch, target_batch = next(batch_iter)
+            inputs_batch = inputs_batch.clone()
+            batch_init_state = None
+        else:
+            inputs_batch = inputs.clone()
+            target_batch = target
+            batch_init_state = last_state
 
+        # --- data augmentation (applied only to the batch) ---
         if luminance_std > 0:
             luminance = torch.tensor(rng.standard_normal(1) * luminance_std, device=inputs.device, dtype=inputs.dtype)
-            inputs_augmented = inputs_augmented + luminance
+            inputs_batch = inputs_batch + luminance
 
         if contrast_std > 0:
             contrast = torch.tensor(np.exp(rng.standard_normal(1) * contrast_std), device=inputs.device, dtype=inputs.dtype)
-            inputs_augmented = (inputs_augmented - torch.mean(inputs_augmented)) * contrast + torch.mean(inputs_augmented)
+            inputs_batch = (inputs_batch - torch.mean(inputs_batch)) * contrast + torch.mean(inputs_batch)
 
         if input_noise_std > 0:
-            noise = torch.tensor(rng.standard_normal(inputs.shape) * input_noise_std, device=inputs.device, dtype=inputs.dtype)
-            inputs_augmented = inputs_augmented + noise
-            
+            noise = torch.tensor(rng.standard_normal(inputs_batch.shape) * input_noise_std, device=inputs.device, dtype=inputs.dtype)
+            inputs_batch = inputs_batch + noise
+
         start = time.time()
         opt.zero_grad()
-        pred, last_state, cached_mappings = model.predict(inputs_augmented, init_state=last_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+        pred, step_state, cached_mappings = model.predict(inputs_batch, init_state=batch_init_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+        # Only carry forward hidden state when using full batch (states match stimuli)
+        if not use_batching:
+            last_state = step_state
 
         if model.use_decoder:
             # When using decoder, pred['decoder'] and target are tensors, not dicts
             # decoder output: (batches, time, num_columns, 2)
             # target (optic_flow): (batches, time, num_columns, 2)
-            loss = loss_fn(target, pred['decoder'])
+            loss = loss_fn(target_batch, pred['decoder'])
         else:
-            loss = calc_loss_dict(loss_fn, pred['firing_rate'], target)
+            loss = calc_loss_dict(loss_fn, pred['firing_rate'], target_batch)
 
         if sigma_lambda > 0:
             # add a regularizer based on the operator norm of the model

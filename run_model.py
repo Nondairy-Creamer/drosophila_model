@@ -159,6 +159,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         input_noise_std=config['training']['input_noise_std'],
         contrast_std=config['training']['contrast_std'],
         luminance_std=config['training']['luminance_std'],
+        batch_size=config['training']['batch_size'],
     )
 
 

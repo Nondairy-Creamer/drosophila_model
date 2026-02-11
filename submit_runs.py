@@ -255,12 +255,12 @@ def main():
     
     args = parser.parse_args()
     
-    # By default, re-launch ourselves detached with output to submit_runs.log
-    # (replicates: nohup python -u submit_runs.py ... > submit_runs.log 2>&1 &)
+    # By default, re-launch ourselves detached with output to log_submit_runs.log
+    # (replicates: nohup python -u submit_runs.py ... > log_submit_runs.log 2>&1 &)
     if not args.foreground and os.environ.get('_SUBMIT_RUNS_FG') != '1':
         env = os.environ.copy()
         env['_SUBMIT_RUNS_FG'] = '1'
-        log_file = open('submit_runs.log', 'w')
+        log_file = open('log_submit_runs.log', 'w')
         proc = subprocess.Popen(
             [sys.executable, '-u'] + sys.argv + ['--foreground'],
             stdout=log_file,
@@ -268,8 +268,8 @@ def main():
             start_new_session=True,  # detach from terminal (POSIX setsid)
             env=env,
         )
-        print(f"Running in background (PID {proc.pid}). Output: submit_runs.log")
-        print(f"To follow: tail -f submit_runs.log")
+        print(f"Running in background (PID {proc.pid}). Output: log_submit_runs.log")
+        print(f"To follow: tail -f log_submit_runs.log")
         print(f"To stop:   kill {proc.pid}")
         sys.exit(0)
     

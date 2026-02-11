@@ -16,3 +16,4 @@ av
 debugpy
 scipy
 pytest
+h5py

@@ -25,6 +25,7 @@ sigma_lambda = 0.0
 peak_lambda = 0.0
 l1_lambda = 0.0
 use_synthetic_data = false
+batch_size = 'none'
 
 [stimulus]
 stimulus_type = 'random_sine'
