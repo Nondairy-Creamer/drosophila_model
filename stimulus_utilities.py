@@ -501,7 +501,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
 
     Returns:
         stimulus: [examples, time, points in space] — pixel values in [0, 1]
-        optic_flow: [examples, time, points in space, 2] — (d_phi, d_theta) in rad/s
+        optic_flow: [examples, time, points in space, 2] — (d_phi, d_theta) in deg/s
     """
     from scipy.ndimage import map_coordinates
     from analysis.estimate_self_motion import generate_optic_flow
@@ -619,7 +619,8 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             omega_body_t = torch.tensor(omega_body, dtype=torch.float32)
             T_zeros = T_zero.expand(omega_body_t.shape[0], -1)
             u_right, u_up = generate_optic_flow(phi_t, theta_t, omega_body_t, T_zeros, 1.0)
-            of = np.stack([u_right.numpy(), u_up.numpy()], axis=-1)
+            # generate_optic_flow returns rad/s; convert to deg/s
+            of = np.stack([u_right.numpy(), u_up.numpy()], axis=-1) * (180.0 / np.pi)
             optic_flow_list.append(of)
 
     # --- stack into final arrays ---
