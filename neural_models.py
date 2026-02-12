@@ -1,8 +1,6 @@
 from logging import warning
 import torch
 import numpy as np
-import pandas as pd
-from scipy.optimize import linear_sum_assignment
 from pathlib import Path
 from functools import reduce
 import tempfile
@@ -125,6 +123,7 @@ class NeuralModel(torch.nn.Module, ABC):
 
         # --- Convert root IDs to matrix indices (done once after all filtering) ---
         self.root_ids = root_ids
+        import pandas as pd
         root_id_index = pd.Index(root_ids)
         pre_matrix_indices = root_id_index.get_indexer(synapse_counts_coo[:, 0])
         post_matrix_indices = root_id_index.get_indexer(synapse_counts_coo[:, 1])
@@ -467,6 +466,7 @@ class NeuralModel(torch.nn.Module, ABC):
             remaining_actual = np.where(~actual_used)[0]
             if remaining_grid.size > 0:
                 reduced_cost = distance_matrix[np.ix_(remaining_grid, remaining_actual)]
+                from scipy.optimize import linear_sum_assignment
                 row_ind, col_ind = linear_sum_assignment(reduced_cost)
                 assignment[remaining_grid[row_ind]] = remaining_actual[col_ind]
             return assignment

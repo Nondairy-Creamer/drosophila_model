@@ -2,15 +2,18 @@
 Simple TOML configuration loader for the Drosophila neural model.
 '''
 
+from __future__ import annotations
+
 from pathlib import Path
 import os
 import tempfile
-from typing import Any, Dict
-import pandas as pd
+from typing import Any, Dict, TYPE_CHECKING
+
 import numpy as np
 import pickle
-import plotting_utilities as pu
-import stimulus_utilities as su
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 try:
     import tomllib

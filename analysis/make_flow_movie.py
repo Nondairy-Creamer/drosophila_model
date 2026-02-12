@@ -70,13 +70,16 @@ def main() -> None:
     args = parser.parse_args()
 
     model_file, model_folder = resolve_model_paths(Path(args.model_path))
-    config = du.load_config(model_folder / 'config.toml')
-    device = config['model'].get('device', 'cpu')
-    print(f"Loading model on {device}...")
+    local_config = du.load_config()
+    device = local_config['model'].get('device', 'cpu')
+    batch_size = local_config['training'].get('batch_size', 1)
+    print(f"Loading model on {device} (batch_size={batch_size})...")
     model = nm.NeuralModel.load(model_file, device=device)
     device = model.device
     dtype = model.dtype
     frame_rate = max(1, int((1 / model.dt) / 2))
+
+    stim_index = args.stim_index
 
     print("Loading inputs and targets...")
     cell_inputs = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
@@ -84,18 +87,25 @@ def main() -> None:
     target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
     true_flow = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
 
-    print("Running model prediction...")
+    num_stim = cell_inputs.shape[0]
+    print(f"Running model prediction in batches of {batch_size} ({num_stim} stimuli)...")
+    pred_flow_parts = []
     with torch.no_grad():
-        pred_output = model.predict(cell_inputs)
-    pred_flow = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)
+        for i in range(0, num_stim, batch_size):
+            batch = cell_inputs[i : i + batch_size]
+            pred_output = model.predict(batch)
+            pred_flow_parts.append(
+                _extract_pred_flow(pred_output).to(device=device, dtype=dtype)
+            )
+    pred_flow = torch.cat(pred_flow_parts, dim=0)
 
     from training_utilities import cos_loss
     print("Cosine similarity", 1 - cos_loss(true_flow, pred_flow))
 
-    # Convert to numpy for plotting
-    stimulus = cell_inputs.detach().cpu().numpy()
-    true_flow_np = true_flow.detach().cpu().numpy()
-    pred_flow_np = pred_flow.detach().cpu().numpy()
+    # Convert selected stimulus to numpy for plotting
+    stimulus = cell_inputs[stim_index].detach().cpu().numpy()
+    true_flow_np = true_flow[stim_index].detach().cpu().numpy()
+    pred_flow_np = pred_flow[stim_index].detach().cpu().numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"True flow shape: {true_flow_np.shape}")
@@ -107,16 +117,15 @@ def main() -> None:
     cell_y = column_xyz[:, 1]
     cell_z = column_xyz[:, 2]
 
-    stim_index = args.stim_index
-    print(f"Creating movie for stimulus {stim_index} with {stimulus.shape[1]} frames...")
+    print(f"Creating movie for stimulus {stim_index} with {stimulus.shape[0]} frames...")
 
     output_folder = model_folder / 'optic_flow_movie'
     out_path = output_folder / f'optic_flow_comparison_stim_{stim_index}.mp4'
 
     make_flow_comparison_movie(
-        stimulus[stim_index],
-        true_flow_np[stim_index],
-        pred_flow_np[stim_index],
+        stimulus,
+        true_flow_np,
+        pred_flow_np,
         cell_x,
         cell_y,
         cell_z,
