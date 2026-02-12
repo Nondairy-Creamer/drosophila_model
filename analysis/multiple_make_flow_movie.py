@@ -93,7 +93,7 @@ def main() -> None:
             "column_info": "column_phi_theta",
             "config_overrides": {
                 "stimulus": {
-                    "stim_time": 2.0,
+                    "stim_time": 10.0,
                 },
             },
             "stimulus_kwargs": {
@@ -108,13 +108,13 @@ def main() -> None:
             "column_info": "column_phi_theta",
             "config_overrides": {
                 "stimulus": {
-                    "stim_time": 2.0,
+                    "stim_time": 10.0,
                 },
             },
             "stimulus_kwargs": {
                 "sine_direction": "left",
                 "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 1.0,
+                "pre_stim_time_override": 2.0,
             },
         },
         {
@@ -123,13 +123,13 @@ def main() -> None:
             "column_info": "column_phi_theta",
             "config_overrides": {
                 "stimulus": {
-                    "stim_time": 2.0,
+                    "stim_time": 10.0,
                 },
             },
             "stimulus_kwargs": {
                 "sine_direction": "up",
                 "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 1.0,
+                "pre_stim_time_override": 2.0,
             },
         },
         {
@@ -138,13 +138,13 @@ def main() -> None:
             "column_info": "column_phi_theta",
             "config_overrides": {
                 "stimulus": {
-                    "stim_time": 2.0,
+                    "stim_time": 10.0,
                 },
             },
             "stimulus_kwargs": {
                 "sine_direction": "down",
                 "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 1.0,
+                "pre_stim_time_override": 2.0,
             },
         },
         {
@@ -158,23 +158,22 @@ def main() -> None:
             },
             "stimulus_kwargs": {
                 "random_sine_duration_s": 4.0,
-                "pre_stim_time_override": 1.0,
+                "pre_stim_time_override": 2.0,
             },
         },
         {
-            "name": "sine_const_rand",
-            "stimulus_type": "sine_const_rand",
+            "name": "random_pano_4s_warmup",
+            "stimulus_type": "random_pano",
             "column_info": "column_phi_theta",
             "config_overrides": {
                 "stimulus": {
                     "seed": 100,
+                    "stim_time": 10.0,
+                    "num_repeats": 1,
                 },
             },
             "stimulus_kwargs": {
-                "const_rand_const_time": 1.0,
-                "const_rand_const_tf": 4.0,
-                "const_rand_const_first": True,
-                "pre_stim_time_override": 1.0,
+                "pre_stim_time_override": 2.0,
             },
         },
         {
@@ -182,7 +181,7 @@ def main() -> None:
             "stimulus_type": "sintel",
             "stimulus_kwargs": {
                 "use_full_length": True,
-                "pre_stim_time_override": 1.0,
+                "pre_stim_time_override": 2.0,
             },
         },
         {
@@ -194,17 +193,32 @@ def main() -> None:
         },
     ]
 
-    responses = run_model_on_stimuli(args.model_path, stimulus_specs=stimulus_specs)
+
     model_folder = resolve_model_folder(Path(args.model_path))
     output_folder = Path(args.output_folder) if args.output_folder else model_folder / "optic_flow_movie_stimuli"
 
-    for stim_name, response in responses.items():
+    cosine_sims: dict[str, float] = {}
+
+    # Process one stimulus at a time to avoid holding all responses in memory.
+    for spec in stimulus_specs:
+        stim_name = spec["name"]
+        print(f"\n--- Processing {stim_name} ---")
+        responses = run_model_on_stimuli(
+            args.model_path, stimulus_specs=[spec]
+        )
+        response = responses[stim_name]
+
         _make_movie_for_stim(stim_name, response, output_folder, args.stim_index)
 
-    print("Cosine similarity (1 - cos_loss) per stimulus:")
-    for stim_name, response in responses.items():
         cosine_sim = 1.0 - cos_loss(response["optic_flow"], response["pred_flow"])
-        print(f"  {stim_name}: {cosine_sim.item():.6f}")
+        cosine_sims[stim_name] = cosine_sim.item()
+
+        # Free memory before the next stimulus.
+        del responses, response
+
+    print("\nCosine similarity (1 - cos_loss) per stimulus:")
+    for stim_name, sim in cosine_sims.items():
+        print(f"  {stim_name}: {sim:.6f}")
 
 
 if __name__ == "__main__":

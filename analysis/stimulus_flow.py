@@ -36,7 +36,7 @@ def main() -> None:
         "--fps", type=int, default=100, help="Output movie frame rate"
     )
     parser.add_argument(
-        "--stim-type", type=str, default='sintel',
+        "--stim-type", type=str, default='flyview',
         help="Stimulus type (default: use value from config)"
     )
     parser.add_argument(

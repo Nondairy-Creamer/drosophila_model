@@ -46,9 +46,6 @@ frame_rate = int(1 / model_config['model']['dt'])
 color_percentile = 99
 concat_all = False
 
-cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-
 # --- load the sine wave stimuli ---
 # directions = ['right', 'left', 'up', 'down']
 directions = ['right_left', 'up_down']
@@ -89,12 +86,12 @@ with torch.no_grad():
     pred = pred['firing_rate']
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)
-column_info_df.to_parquet(fig_folder / 'column_info_df.parquet', index=False)
 
-cell_x = -column_info_df.x.to_numpy()
-cell_z = column_info_df.z.to_numpy()
-cell_theta = column_info_df.theta.to_numpy()
-cell_phi = column_info_df.phi.to_numpy()
+xyz = model.get_column_xyz()
+cell_x = -xyz[:, 0]
+cell_z = xyz[:, 1]
+cell_phi = model.column_phi_theta[:, 0]
+cell_theta = model.column_phi_theta[:, 1]
 num_stim, num_time, num_columns = stimulus.shape
 num_neurons = model.num_neurons
 

@@ -888,7 +888,6 @@ def get_stimulus(
         with open(sintel_path, 'rb') as f:
             stimulus_in = pickle.load(f)
 
-        expected_length = 49
         stimulus_dt = 1 / stimulus_in['fps']
         # Split each entry into non-overlapping segments of required_length, discarding remainders.
         # Remove first time point from responses so lengths match forward_flows.
@@ -909,11 +908,10 @@ def get_stimulus(
         stimulus = torch.stack(stimulus_list, axis=0)
         optic_flow = torch.stack(optic_flow_list, axis=0)
         optic_flow[:, :, :, 0] *= -1
-        # stimulus /= 255.0
-        # TODO remove this once this division error is fixed
-        optic_flow[torch.isnan(stimulus)] = 0
-        stimulus[torch.isnan(stimulus)] = 0
-        stimulus /= torch.max(stimulus)
+        # # TODO remove this once this division error is fixed
+        # optic_flow[torch.isnan(stimulus)] = 0
+        # stimulus[torch.isnan(stimulus)] = 0
+        # stimulus /= torch.max(stimulus)
 
         # Zero out entries where optic flow magnitude exceeds 1
         flow_magnitude = torch.sqrt(optic_flow[:, :, :, 0] ** 2 + optic_flow[:, :, :, 1] ** 2)
@@ -923,7 +921,7 @@ def get_stimulus(
 
         # Interpolate to model timestep
         stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
+        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt) * 180 / np.pi / model_dt
         
     else:
         raise ValueError(
