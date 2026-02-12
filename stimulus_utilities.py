@@ -453,23 +453,20 @@ def _load_all_panos():
     return panos.numpy().astype(np.float64)
 
 
-def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180, eps=1e-6):
-    """Apply local contrast normalization then ommatidia blur to a panoramic image.
+def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
+    """Apply Gaussian low-pass filter to a panoramic image for anti-aliasing.
 
-    Two-stage pipeline:
-      1. Local Contrast Normalization (LCN): subtract local mean, divide by
-         local RMS to remove slow illumination gradients and equalize contrast.
-      2. Gaussian blur (ommatidia optical filtering / anti-alias) so the image
-         can be safely sampled at the sparse column grid without aliasing.
+    Blurs the raw panorama with a Gaussian kernel (ommatidia optical filtering)
+    so the image can be safely sampled at the sparse column grid without
+    aliasing.  Contrast normalization is handled by the learnable input
+    convolution in the model.
 
     Args:
         pano: (H, W) raw panoramic image array.
-        filter_std_rad: Gaussian sigma in radians used for both LCN and the
-            ommatidia blur (default 2.5 deg).
-        eps: Small constant to avoid division by zero in LCN.
+        filter_std_rad: Gaussian sigma in radians (default 2.5 deg).
 
     Returns:
-        pano_out: (H, W) float64 array normalised to [0, 1].
+        pano_out: (H, W) float64 array.
         pano_y_lim: (2,) theta limits of the panorama.
         pano_x_lim: (2,) phi limits of the panorama.
     """
@@ -484,25 +481,9 @@ def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180, eps=1e-6):
     sigma_y = filter_std_rad * y_pixels_per_rad
     sigma_x = filter_std_rad * x_pixels_per_rad
 
-    # --- Stage 1: Local Contrast Normalization ---
-    local_mean = gaussian_filter(
+    pano_out = gaussian_filter(
         pano.astype(np.float64), sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
     )
-    pano_centered = pano - local_mean
-
-    local_var = gaussian_filter(
-        pano_centered.astype(np.float64)**2, sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
-    )
-    pano_norm = pano_centered / (np.sqrt(local_var) + eps)
-
-    # --- Stage 2: Ommatidia blur (anti-alias before column sampling) ---
-    pano_out = gaussian_filter(
-        pano_norm, sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
-    )
-
-    # Normalize to [0, 1]
-    pano_min, pano_max = pano_out.min(), pano_out.max()
-    pano_out = (pano_out - pano_min) / (pano_max - pano_min)
 
     return pano_out, pano_y_lim, pano_x_lim
 

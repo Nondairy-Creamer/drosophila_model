@@ -217,11 +217,15 @@ class NeuralModel(torch.nn.Module, ABC):
         axial_coords = self._hex_grid_axial_coords(conv_size_x)
         self.input_num_nearest_columns = axial_coords.shape[0]
 
-        # Full spatial kernel with separable temporal kernel
+        # Initialize spatial filter: 1 for inner 7 hexes (center + 6 neighbors), 0 elsewhere
         spatial_init = np.zeros((conv_size_x, conv_size_x))
-        spatial_init[conv_size_x // 2, conv_size_x // 2] = -1.0
+        radius = conv_size_x // 2
+        for q, r in axial_coords:
+            if max(abs(q), abs(r), abs(q + r)) <= 1:
+                spatial_init[r + radius, q + radius] = 1.0
+        # Initialize temporal filter as delta at current time (index 0=1, rest=0)
         temporal_init = np.zeros(conv_size_t)
-        temporal_init[0] = 1
+        temporal_init[0] = 1.0
 
         self.input_conv_xy = torch.nn.Parameter(
             torch.tensor(spatial_init, device=self.device, dtype=self.dtype)
@@ -509,8 +513,50 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return ordered_nearest_indices
 
+    def _apply_spatial_conv(self, inputs):
+        """Apply spatial convolution only (no temporal filtering).
+
+        Args:
+            inputs: Tensor with shape (stimuli, time, columns).
+
+        Returns:
+            Convolved tensor with same shape.
+        """
+        # Gather spatial neighbors: (stimuli, time, columns, neighbors)
+        spatial_windows = inputs[:, :, self.input_nearest_column_indices]
+
+        radius = self.input_conv_size_x // 2
+        q_idx = self.input_conv_axial_coords[:, 0] + radius
+        r_idx = self.input_conv_axial_coords[:, 1] + radius
+        spatial_kernel = self.input_conv_xy[r_idx, q_idx]
+        return torch.einsum('stcn,n->stc', spatial_windows, spatial_kernel)
+
+    def _apply_temporal_conv(self, inputs):
+        """Apply temporal convolution only (no spatial filtering).
+
+        Args:
+            inputs: Tensor with shape (stimuli, time, columns).
+
+        Returns:
+            Convolved tensor with same shape.
+        """
+        pad = self.input_conv_size_t - 1
+        inputs_padded = torch.nn.functional.pad(inputs, (0, 0, pad, 0))
+        time_windows = inputs_padded.unfold(1, self.input_conv_size_t, 1)
+        # time_windows: (stimuli, time, columns, temporal_window)
+        temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
+        return torch.einsum('stcq,q->stc', time_windows, temporal_kernel)
+
     def apply_input_conv(self, inputs):
-        """Apply the low-rank input convolution over time and columns."""
+        """Apply local contrast normalization (spatial) then temporal filtering.
+
+        Computes:
+            local_mean = spatial_conv(input)
+            input_centered = input - local_mean
+            local_var = spatial_conv(input_centered ** 2)
+            input_norm = input_centered / sqrt(local_var + eps)
+            output = temporal_conv(-input_norm)
+        """
         if not self.use_input_conv:
             return inputs
 
@@ -528,26 +574,20 @@ class NeuralModel(torch.nn.Module, ABC):
                 f"inputs has {inputs.shape[2]} columns, expected {num_columns}."
             )
 
-        pad = self.input_conv_size_t - 1
-        inputs_padded = torch.nn.functional.pad(inputs, (0, 0, pad, 0))
-        time_windows = inputs_padded.unfold(1, self.input_conv_size_t, 1)
-        spatial_windows = time_windows[:, :, self.input_nearest_column_indices, :]
-        spatial_windows = spatial_windows.permute(0, 1, 4, 2, 3)
+        # Spatial contrast normalization
+        local_mean = self._apply_spatial_conv(inputs)
+        input_centered = inputs - local_mean
+        local_var = self._apply_spatial_conv(input_centered ** 2)
+        eps = 1e-6
+        input_norm = input_centered / torch.sqrt(local_var + eps)
 
-        radius = self.input_conv_size_x // 2
-        q_idx = self.input_conv_axial_coords[:, 0] + radius
-        r_idx = self.input_conv_axial_coords[:, 1] + radius
-        spatial_kernel = self.input_conv_xy[r_idx, q_idx]
-        spatial_applied = torch.einsum('stqcn,n->stqc', spatial_windows, spatial_kernel)
-        # Flip temporal kernel so index 0 corresponds to current time.
-        temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
-        convolved = torch.einsum('stqc,q->stc', spatial_applied, temporal_kernel)
-        convolved = convolved + self.input_conv_bias
+        # Negate and apply temporal kernel
+        result = self._apply_temporal_conv(-input_norm)
 
         if squeeze_output:
-            convolved = convolved.squeeze(0)
+            result = result.squeeze(0)
 
-        return convolved
+        return result
 
     def _precompute_nearest_decoder_neurons(self):
         """Pre-compute decoder neuron indices for each column's nearest columns.
