@@ -315,12 +315,13 @@ def make_flow_comparison_movie(
     output_path: Path = None,
     frame_rate: int = 30,
     stim_name: str = "",
+    filtered_stimulus: np.ndarray | None = None,
 ) -> None:
     """Create a flow comparison movie.
 
     When *pred_flow* is provided, creates a 2x2 layout (stimulus, true flow,
-    blank, predicted flow).  When *pred_flow* is ``None``, creates a 1x2
-    layout (stimulus, true flow).
+    filtered stimulus, predicted flow).  When *pred_flow* is ``None``, creates
+    a 1x2 layout (stimulus, true flow).
 
     Parameters
     ----------
@@ -333,6 +334,8 @@ def make_flow_comparison_movie(
     output_path : Path for .mp4 output
     frame_rate : frames per second
     stim_name : label shown in the stimulus panel title
+    filtered_stimulus : (time, columns) or None — stimulus after the model's
+        input filter.  Shown in the bottom-left panel when provided.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -356,23 +359,35 @@ def make_flow_comparison_movie(
     flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
 
     has_pred = pred_flow is not None
+    has_filtered = filtered_stimulus is not None
     if has_pred:
         pred_flow_vx = -pred_flow[:, :, 0]
         pred_flow_vz = pred_flow[:, :, 1]
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
-        axes[1, 0].axis("off")
-        axes[1, 0].set_title("(reserved)")
+        ax_bottom_left = axes[1, 0]
         ax_pred = axes[1, 1]
     else:
         fig, (ax_stim, ax_true) = plt.subplots(
             1, 2, figsize=(12.8, 5.12), dpi=100
         )
 
+    # Set up the bottom-left panel
+    if has_pred and has_filtered:
+        filt_min, filt_max = np.nanmin(filtered_stimulus), np.nanmax(filtered_stimulus)
+        # Use a symmetric (diverging) colormap so zero is visually neutral
+        filt_abs = max(abs(filt_min), abs(filt_max), 1e-8)
+        filt_norm = mcolors.TwoSlopeNorm(vmin=-filt_abs, vcenter=0.0, vmax=filt_abs)
+    elif has_pred:
+        ax_bottom_left.axis("off")
+        ax_bottom_left.set_title("(reserved)")
+
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
 
     plot_axes = [ax_stim, ax_true] + ([ax_pred] if has_pred else [])
+    if has_pred and has_filtered:
+        plot_axes.append(ax_bottom_left)
     for ax in plot_axes:
         ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
         ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
@@ -392,6 +407,21 @@ def make_flow_comparison_movie(
     title_label = f"Stimulus ({stim_name})" if stim_name else "Stimulus"
     ax_stim.set_title(title_label)
     fig.colorbar(sc_stim, ax=ax_stim, label="intensity")
+
+    # Filtered stimulus scatter plot (bottom-left)
+    sc_filt = None
+    if has_pred and has_filtered:
+        sc_filt = ax_bottom_left.scatter(
+            cell_x,
+            cell_z,
+            c=filtered_stimulus[0, :],
+            cmap="RdBu_r",
+            norm=filt_norm,
+            s=90,
+            edgecolors="none",
+        )
+        ax_bottom_left.set_title("Filtered Stimulus")
+        fig.colorbar(sc_filt, ax=ax_bottom_left, label="intensity")
 
     arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
 
@@ -440,6 +470,8 @@ def make_flow_comparison_movie(
     ) as writer:
         for t in range(num_time):
             sc_stim.set_array(stimulus[t, :])
+            if sc_filt is not None:
+                sc_filt.set_array(filtered_stimulus[t, :])
 
             vx_true_t = true_flow_vx[t, :]
             vz_true_t = true_flow_vz[t, :]

@@ -3,7 +3,7 @@ Create a movie comparing true vs predicted optic flow.
 2x2 layout:
   - Top left: Stimulus intensity (scatter plot)
   - Top right: True optic flow (quiver plot)
-  - Bottom left: Blank (reserved)
+  - Bottom left: Filtered stimulus (after model input conv)
   - Bottom right: Predicted optic flow (quiver plot)
 """
 import argparse
@@ -102,8 +102,16 @@ def main() -> None:
     from training_utilities import cos_loss
     print("Cosine similarity", 1 - cos_loss(true_flow, pred_flow))
 
+    # Compute filtered stimulus (after model's input convolution)
+    with torch.no_grad():
+        if model.use_input_conv:
+            filtered_inputs = model.apply_input_conv(cell_inputs)
+        else:
+            filtered_inputs = cell_inputs
+
     # Convert selected stimulus to numpy for plotting
     stimulus = cell_inputs[stim_index].detach().cpu().numpy()
+    filtered_stim_np = filtered_inputs[stim_index].detach().cpu().numpy()
     true_flow_np = true_flow[stim_index].detach().cpu().numpy()
     pred_flow_np = pred_flow[stim_index].detach().cpu().numpy()
 
@@ -131,6 +139,7 @@ def main() -> None:
         cell_z,
         out_path,
         frame_rate,
+        filtered_stimulus=filtered_stim_np,
     )
 
 
