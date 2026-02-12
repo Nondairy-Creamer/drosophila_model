@@ -82,38 +82,35 @@ def main() -> None:
     stim_index = args.stim_index
 
     print("Loading inputs and targets...")
-    cell_inputs = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
-    cell_inputs = cell_inputs.to(device=device, dtype=dtype)
+    cell_inputs_all = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
+    cell_inputs_all = cell_inputs_all.to(device=device, dtype=dtype)
     target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
-    true_flow = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
+    true_flow_all = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
 
-    num_stim = cell_inputs.shape[0]
-    print(f"Running model prediction in batches of {batch_size} ({num_stim} stimuli)...")
-    pred_flow_parts = []
+    # Only process the selected stimulus
+    stim_input = cell_inputs_all[stim_index:stim_index+1]
+    true_flow_single = true_flow_all[stim_index]
+
+    print(f"Running model prediction for stimulus {stim_index}...")
     with torch.no_grad():
-        for i in range(0, num_stim, batch_size):
-            batch = cell_inputs[i : i + batch_size]
-            pred_output = model.predict(batch)
-            pred_flow_parts.append(
-                _extract_pred_flow(pred_output).to(device=device, dtype=dtype)
-            )
-    pred_flow = torch.cat(pred_flow_parts, dim=0)
+        pred_output = model.predict(stim_input)
+        pred_flow = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
 
     from training_utilities import cos_loss
-    print("Cosine similarity", 1 - cos_loss(true_flow, pred_flow))
+    print("Cosine similarity", 1 - cos_loss(true_flow_single, pred_flow))
 
     # Compute filtered stimulus (after model's input convolution)
     with torch.no_grad():
         if model.use_input_conv:
-            filtered_inputs = model.apply_input_conv(cell_inputs)
+            filtered_input = model.apply_input_conv(stim_input)[0]
         else:
-            filtered_inputs = cell_inputs
+            filtered_input = stim_input[0]
 
-    # Convert selected stimulus to numpy for plotting
-    stimulus = cell_inputs[stim_index].detach().cpu().numpy()
-    filtered_stim_np = filtered_inputs[stim_index].detach().cpu().numpy()
-    true_flow_np = true_flow[stim_index].detach().cpu().numpy()
-    pred_flow_np = pred_flow[stim_index].detach().cpu().numpy()
+    # Convert to numpy for plotting
+    stimulus = stim_input[0].detach().cpu().numpy()
+    filtered_stim_np = filtered_input.detach().cpu().numpy()
+    true_flow_np = true_flow_single.detach().cpu().numpy()
+    pred_flow_np = pred_flow.detach().cpu().numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"True flow shape: {true_flow_np.shape}")

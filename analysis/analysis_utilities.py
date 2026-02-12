@@ -347,22 +347,27 @@ def make_flow_comparison_movie(
     stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
-    # Use raw angular flow components (u_right, u_up) directly as arrow directions.
-    # Negate u_right so rightward retinal flow maps to visual right on the flipped x-axis.
-    true_flow_vx = -true_flow[:, :, 0]
-    true_flow_vz = true_flow[:, :, 1]
+    # Project angular flow (u_right, u_up) to Cartesian (v_x, v_z) for the x-z plotting plane
+    true_flow_vx, true_flow_vz = angular_flow_to_cartesian_xz(
+        true_flow[:, :, 0], true_flow[:, :, 1],
+        cell_x, cell_y, cell_z,
+    )
 
     true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
-    max_mag = (
-        np.nanpercentile(true_magnitude, 99) if np.any(true_magnitude) else 1.0
-    )
+    finite_magnitudes = true_magnitude[np.isfinite(true_magnitude)]
+    if finite_magnitudes.size > 0 and finite_magnitudes.max() > 0:
+        max_mag = np.percentile(finite_magnitudes, 99)
+    else:
+        max_mag = 1.0
     flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
 
     has_pred = pred_flow is not None
     has_filtered = filtered_stimulus is not None
     if has_pred:
-        pred_flow_vx = -pred_flow[:, :, 0]
-        pred_flow_vz = pred_flow[:, :, 1]
+        pred_flow_vx, pred_flow_vz = angular_flow_to_cartesian_xz(
+            pred_flow[:, :, 0], pred_flow[:, :, 1],
+            cell_x, cell_y, cell_z,
+        )
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         ax_bottom_left = axes[1, 0]
@@ -375,9 +380,7 @@ def make_flow_comparison_movie(
     # Set up the bottom-left panel
     if has_pred and has_filtered:
         filt_min, filt_max = np.nanmin(filtered_stimulus), np.nanmax(filtered_stimulus)
-        # Use a symmetric (diverging) colormap so zero is visually neutral
-        filt_abs = max(abs(filt_min), abs(filt_max), 1e-8)
-        filt_norm = mcolors.TwoSlopeNorm(vmin=-filt_abs, vcenter=0.0, vmax=filt_abs)
+        filt_norm = mcolors.Normalize(vmin=filt_min, vmax=filt_max)
     elif has_pred:
         ax_bottom_left.axis("off")
         ax_bottom_left.set_title("(reserved)")
@@ -415,7 +418,7 @@ def make_flow_comparison_movie(
             cell_x,
             cell_z,
             c=filtered_stimulus[0, :],
-            cmap="RdBu_r",
+            cmap="gray",
             norm=filt_norm,
             s=90,
             edgecolors="none",
@@ -424,6 +427,11 @@ def make_flow_comparison_movie(
         fig.colorbar(sc_filt, ax=ax_bottom_left, label="intensity")
 
     arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
+
+    # Replace NaN in flow data with 0 so quiver arrows render correctly
+    true_flow_vx = np.nan_to_num(true_flow_vx, nan=0.0)
+    true_flow_vz = np.nan_to_num(true_flow_vz, nan=0.0)
+    true_magnitude = np.nan_to_num(true_magnitude, nan=0.0)
 
     q_true = ax_true.quiver(
         cell_x,
@@ -442,6 +450,8 @@ def make_flow_comparison_movie(
     fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
     if has_pred:
+        pred_flow_vx = np.nan_to_num(pred_flow_vx, nan=0.0)
+        pred_flow_vz = np.nan_to_num(pred_flow_vz, nan=0.0)
         pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
         q_pred = ax_pred.quiver(
             cell_x,
