@@ -217,8 +217,10 @@ class NeuralModel(torch.nn.Module, ABC):
         axial_coords = self._hex_grid_axial_coords(conv_size_x)
         self.input_num_nearest_columns = axial_coords.shape[0]
 
-        # Initialize spatial filter: 1 for inner 7 hexes (center + 6 neighbors), 0 elsewhere
-        spatial_init = np.zeros((conv_size_x, conv_size_x))
+        # Initialize spatial filter: 1 for inner 7 hexes (center + 6 neighbors), small value elsewhere
+        # Store as log so exp() is always non-negative
+        spatial_floor = 1e-4
+        spatial_init = np.full((conv_size_x, conv_size_x), spatial_floor)
         radius = conv_size_x // 2
         for q, r in axial_coords:
             if max(abs(q), abs(r), abs(q + r)) <= 1:
@@ -227,8 +229,8 @@ class NeuralModel(torch.nn.Module, ABC):
         temporal_init = np.zeros(conv_size_t)
         temporal_init[0] = 1.0
 
-        self.input_conv_xy = torch.nn.Parameter(
-            torch.tensor(spatial_init, device=self.device, dtype=self.dtype)
+        self.input_conv_xy_log = torch.nn.Parameter(
+            torch.tensor(np.log(spatial_init), device=self.device, dtype=self.dtype)
         )
         self.input_conv_t = torch.nn.Parameter(
             torch.tensor(temporal_init, device=self.device, dtype=self.dtype)
@@ -528,7 +530,7 @@ class NeuralModel(torch.nn.Module, ABC):
         radius = self.input_conv_size_x // 2
         q_idx = self.input_conv_axial_coords[:, 0] + radius
         r_idx = self.input_conv_axial_coords[:, 1] + radius
-        spatial_kernel = self.input_conv_xy[r_idx, q_idx]
+        spatial_kernel = self.input_conv_xy_log.exp()[r_idx, q_idx]
         return torch.einsum('stcn,n->stc', spatial_windows, spatial_kernel)
 
     def _apply_temporal_conv(self, inputs):
@@ -578,7 +580,7 @@ class NeuralModel(torch.nn.Module, ABC):
         local_mean = self._apply_spatial_conv(inputs)
         input_centered = inputs - local_mean
         local_var = self._apply_spatial_conv(input_centered ** 2)
-        eps = 1e-6
+        eps = 1e-3
         input_norm = input_centered / torch.sqrt(local_var + eps)
 
         # Negate and apply temporal kernel
@@ -1049,15 +1051,15 @@ class NeuralModel(torch.nn.Module, ABC):
         model = model_cls(**inputs)
 
         state_dict = data['state_dict']
-        if (
-            'input_conv_xy' not in state_dict
-            and 'input_conv_x' in state_dict
-            and 'input_conv_y' in state_dict
-        ):
-            input_conv_x = state_dict['input_conv_x']
-            input_conv_y = state_dict['input_conv_y']
-            state_dict = dict(state_dict)
-            state_dict['input_conv_xy'] = torch.outer(input_conv_y, input_conv_x)
+        # Migrate old parameter names to _log variants
+        state_dict = dict(state_dict)
+        if 'input_conv_x' in state_dict and 'input_conv_y' in state_dict:
+            input_conv_xy = torch.outer(state_dict.pop('input_conv_y'), state_dict.pop('input_conv_x'))
+            state_dict['input_conv_xy_log'] = torch.log(input_conv_xy.clamp(min=1e-8))
+        if 'input_conv_xy' in state_dict and 'input_conv_xy_log' not in state_dict:
+            state_dict['input_conv_xy_log'] = torch.log(state_dict.pop('input_conv_xy').clamp(min=1e-8))
+        if 'input_conv_t_log' in state_dict and 'input_conv_t' not in state_dict:
+            state_dict['input_conv_t'] = state_dict.pop('input_conv_t_log').exp()
 
         model.load_state_dict(state_dict, strict=False)
 

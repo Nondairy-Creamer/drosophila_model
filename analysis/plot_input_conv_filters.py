@@ -46,7 +46,7 @@ def main() -> None:
     if not model.use_input_conv:
         raise ValueError("Model does not have input convolution enabled.")
 
-    conv_xy = model.input_conv_xy.detach().cpu().numpy()
+    conv_xy = model.input_conv_xy_log.exp().detach().cpu().numpy()
     conv_t = model.input_conv_t.detach().cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
