@@ -32,17 +32,45 @@ class CellTypeLayerNorm(torch.nn.Module):
         self.eps = eps
         # neuron_to_type_index is a (num_neurons,) int64 tensor mapping each neuron to its cell type
         self.register_buffer('neuron_to_type_index', neuron_to_type_index)
-        self.weight = torch.nn.Parameter(torch.ones(num_cell_types, device=device, dtype=dtype))
+        # Store weight in log space so exp() is always positive
+        init_weight = 1.0
+        init_weights = np.full(num_cell_types, np.log(init_weight))
+        self.weight_log = torch.nn.Parameter(
+            torch.tensor(init_weights, device=device, dtype=dtype)
+        )
         self.bias = torch.nn.Parameter(torch.zeros(num_cell_types, device=device, dtype=dtype))
 
     def forward(self, x):
         # x shape: (..., num_neurons)
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        x_norm = (x - mean) / torch.sqrt(var + self.eps)
+        # Compute mean and var per cell type, then scatter back to per-neuron
+        idx = self.neuron_to_type_index  # (num_neurons,)
+        batch_shape = x.shape[:-1]
+        num_neurons = x.shape[-1]
+        # Flatten batch dims for scatter_add
+        x_flat = x.reshape(-1, num_neurons)  # (B, N)
+        B = x_flat.shape[0]
+        idx_expanded = idx.unsqueeze(0).expand(B, -1)  # (B, N)
+        # Sum and count per cell type
+        type_sum = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
+        type_sum.scatter_add_(1, idx_expanded, x_flat)
+        type_count = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
+        type_count.scatter_add_(1, idx_expanded, torch.ones_like(x_flat))
+        type_count = type_count.clamp(min=1)
+        type_mean = type_sum / type_count  # (B, C)
+        # Gather per-neuron mean
+        neuron_mean = type_mean.gather(1, idx_expanded)  # (B, N)
+        # Compute per cell type variance
+        type_var_sum = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
+        type_var_sum.scatter_add_(1, idx_expanded, (x_flat - neuron_mean) ** 2)
+        type_var = type_var_sum / type_count  # (B, C)
+        # Gather per-neuron var
+        neuron_var = type_var.gather(1, idx_expanded)  # (B, N)
+        # Normalize
+        x_norm_flat = (x_flat - neuron_mean) / torch.sqrt(neuron_var + self.eps)
+        x_norm = x_norm_flat.reshape(x.shape)
         # Expand per-cell-type params to per-neuron
-        w = self.weight[self.neuron_to_type_index]
-        b = self.bias[self.neuron_to_type_index]
+        w = self.weight_log.exp()[idx]
+        b = self.bias[idx]
         return x_norm * w + b
 
     def extra_repr(self):
@@ -258,7 +286,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_nearest_columns = self._hex_grid_points(conv_size).shape[0]
         self.channels_1 = 8
         self.channels_2 = 3
-        decoder_init = 0.2
+        decoder_init = 0.0
         
         # Set list of neurons to use for decoding (from black box in figure panel g)
         self.neurons_to_decode = [
@@ -531,6 +559,7 @@ class NeuralModel(torch.nn.Module, ABC):
         q_idx = self.input_conv_axial_coords[:, 0] + radius
         r_idx = self.input_conv_axial_coords[:, 1] + radius
         spatial_kernel = self.input_conv_xy_log.exp()[r_idx, q_idx]
+        spatial_kernel = spatial_kernel / spatial_kernel.sum()
         return torch.einsum('stcn,n->stc', spatial_windows, spatial_kernel)
 
     def _apply_temporal_conv(self, inputs):
@@ -1060,6 +1089,8 @@ class NeuralModel(torch.nn.Module, ABC):
             state_dict['input_conv_xy_log'] = torch.log(state_dict.pop('input_conv_xy').clamp(min=1e-8))
         if 'input_conv_t_log' in state_dict and 'input_conv_t' not in state_dict:
             state_dict['input_conv_t'] = state_dict.pop('input_conv_t_log').exp()
+        if 'layer_norm.weight' in state_dict and 'layer_norm.weight_log' not in state_dict:
+            state_dict['layer_norm.weight_log'] = torch.log(state_dict.pop('layer_norm.weight').clamp(min=1e-8))
 
         model.load_state_dict(state_dict, strict=False)
 
@@ -1311,8 +1342,8 @@ class CurrentModel(NeuralModel):
         self.offset = torch.full((self.num_cell_types,), offset_init, dtype=self.dtype, device=self.device)
         
         # Initialize strength per cell type based on the inverse of fan in / out
-        synapses_in_per_neuron = self.synapse_counts.pow(2).sum(dim=1).to_dense()
-        synapses_out_per_neuron = self.synapse_counts.pow(2).sum(dim=0).to_dense()
+        synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()
+        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
         
         synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)

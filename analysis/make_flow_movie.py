@@ -63,7 +63,7 @@ def main() -> None:
         "model_path",
         type=str,
         nargs="?",
-        default="models/best_model",
+        default="models/20260212_214842_gpu0_run0",
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")
@@ -94,7 +94,7 @@ def main() -> None:
     print(f"Running model prediction for stimulus {stim_index}...")
     with torch.no_grad():
         pred_output = model.predict(stim_input)
-        pred_flow = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
+        pred_flow = 10 * _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
 
     from training_utilities import cos_loss
     print("Cosine similarity", 1 - cos_loss(true_flow_single, pred_flow))
