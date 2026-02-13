@@ -87,25 +87,22 @@ def main() -> None:
     target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
     true_flow = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
 
-    num_stim = cell_inputs.shape[0]
-    print(f"Running model prediction in batches of {batch_size} ({num_stim} stimuli)...")
-    pred_flow_parts = []
+    # Predict only the requested stimulus
+    print(f"Running model prediction for stimulus {stim_index}...")
+    single_input = cell_inputs[stim_index : stim_index + 1]
+    single_true = true_flow[stim_index : stim_index + 1]
     with torch.no_grad():
-        for i in range(0, num_stim, batch_size):
-            batch = cell_inputs[i : i + batch_size]
-            pred_output = model.predict(batch)
-            pred_flow_parts.append(
-                _extract_pred_flow(pred_output).to(device=device, dtype=dtype)
-            )
-    pred_flow = torch.cat(pred_flow_parts, dim=0)
+        pred_output = model.predict(single_input)
+    single_pred = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)
 
     from training_utilities import cos_loss
-    print("Cosine similarity", 1 - cos_loss(true_flow, pred_flow))
+    cos_sim = 1 - cos_loss(single_true, single_pred)
+    print(f"Cosine similarity (stim {stim_index}): {cos_sim:.6f}")
 
     # Convert selected stimulus to numpy for plotting
-    stimulus = cell_inputs[stim_index].detach().cpu().numpy()
-    true_flow_np = true_flow[stim_index].detach().cpu().numpy()
-    pred_flow_np = pred_flow[stim_index].detach().cpu().numpy()
+    stimulus = single_input[0].detach().cpu().numpy()
+    true_flow_np = single_true[0].detach().cpu().numpy()
+    pred_flow_np = single_pred[0].detach().cpu().numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"True flow shape: {true_flow_np.shape}")
