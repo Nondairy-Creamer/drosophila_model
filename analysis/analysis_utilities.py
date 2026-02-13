@@ -354,12 +354,12 @@ def make_flow_comparison_movie(
     )
 
     true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
-    finite_magnitudes = true_magnitude[np.isfinite(true_magnitude)]
-    if finite_magnitudes.size > 0 and finite_magnitudes.max() > 0:
-        max_mag = np.percentile(finite_magnitudes, 99)
+    finite_true_mag = true_magnitude[np.isfinite(true_magnitude)]
+    if finite_true_mag.size > 0 and finite_true_mag.max() > 0:
+        true_max_mag = np.percentile(finite_true_mag, 99)
     else:
-        max_mag = 1.0
-    flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
+        true_max_mag = 1.0
+    true_flow_norm = mcolors.Normalize(vmin=0.0, vmax=true_max_mag)
 
     has_pred = pred_flow is not None
     has_filtered = filtered_stimulus is not None
@@ -368,6 +368,13 @@ def make_flow_comparison_movie(
             pred_flow[:, :, 0], pred_flow[:, :, 1],
             cell_x, cell_y, cell_z,
         )
+        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
+        finite_pred_mag = pred_magnitude[np.isfinite(pred_magnitude)]
+        if finite_pred_mag.size > 0 and finite_pred_mag.max() > 0:
+            pred_max_mag = np.percentile(finite_pred_mag, 99)
+        else:
+            pred_max_mag = 1.0
+        pred_flow_norm = mcolors.Normalize(vmin=0.0, vmax=pred_max_mag)
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         ax_bottom_left = axes[1, 0]
@@ -426,7 +433,7 @@ def make_flow_comparison_movie(
         ax_bottom_left.set_title("Filtered Stimulus")
         fig.colorbar(sc_filt, ax=ax_bottom_left, label="intensity")
 
-    arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
+    true_arrow_scale = 0.2 / true_max_mag if true_max_mag > 0 else 1.0
 
     # Replace NaN in flow data with 0 so quiver arrows render correctly
     true_flow_vx = np.nan_to_num(true_flow_vx, nan=0.0)
@@ -440,19 +447,20 @@ def make_flow_comparison_movie(
         true_flow_vz[0, :],
         true_magnitude[0, :],
         cmap="viridis",
-        norm=flow_norm,
+        norm=true_flow_norm,
         angles="xy",
         scale_units="xy",
-        scale=1 / arrow_scale,
+        scale=1 / true_arrow_scale,
         width=0.003,
     )
     ax_true.set_title("True Optic Flow")
     fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
     if has_pred:
+        pred_arrow_scale = 0.2 / pred_max_mag if pred_max_mag > 0 else 1.0
         pred_flow_vx = np.nan_to_num(pred_flow_vx, nan=0.0)
         pred_flow_vz = np.nan_to_num(pred_flow_vz, nan=0.0)
-        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
+        pred_magnitude = np.nan_to_num(pred_magnitude, nan=0.0)
         q_pred = ax_pred.quiver(
             cell_x,
             cell_z,
@@ -460,10 +468,10 @@ def make_flow_comparison_movie(
             pred_flow_vz[0, :],
             pred_magnitude[0, :],
             cmap="viridis",
-            norm=flow_norm,
+            norm=pred_flow_norm,
             angles="xy",
             scale_units="xy",
-            scale=1 / arrow_scale,
+            scale=1 / pred_arrow_scale,
             width=0.003,
         )
         ax_pred.set_title("Predicted Optic Flow")

@@ -94,7 +94,7 @@ def main() -> None:
     print(f"Running model prediction for stimulus {stim_index}...")
     with torch.no_grad():
         pred_output = model.predict(stim_input)
-        pred_flow = 10 * _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
+        pred_flow = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
 
     from training_utilities import cos_loss
     print("Cosine similarity", 1 - cos_loss(true_flow_single, pred_flow))
