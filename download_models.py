@@ -105,8 +105,8 @@ def scp_transfer(
     scp_base = ['scp', '-P', port, '-i', identity_file]
 
     if transfer_type == 'pull':
-        os.makedirs(local_path, exist_ok=True)
         if folder:
+            os.makedirs(local_path, exist_ok=True)
             # List only files (not subdirectories) on the remote
             list_cmd = ssh_base + [f'find {remote_path} -maxdepth 1 -type f']
             result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
@@ -117,8 +117,36 @@ def scp_transfer(
             sources = [f'{user}@{hostname}:{f}' for f in remote_files]
             cmd = scp_base + sources + [local_path + '/']
         else:
-            remote_spec = f'{user}@{hostname}:{remote_path}'
-            cmd = scp_base + ['-r', remote_spec, local_path]
+            # List remote subdirectories and group by timestamp prefix
+            list_cmd = ssh_base + [f'ls -1 {remote_path}']
+            result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
+            remote_entries = [
+                e.strip().rstrip('/') for e in result.stdout.strip().split('\n') if e.strip()
+            ]
+            if not remote_entries:
+                print("No entries found in remote models directory.")
+                return
+
+            # Group by timestamp prefix (YYYYMMDD_HHMMSS)
+            groups: dict[str, list[str]] = {}
+            for entry in remote_entries:
+                match = re.match(r'(\d{8}_\d{6})', entry)
+                ts = match.group(1) if match else 'other'
+                groups.setdefault(ts, []).append(entry)
+
+            for ts, entries in groups.items():
+                local_ts_dir = _LOCAL_MODELS_DIR / ts
+                os.makedirs(local_ts_dir, exist_ok=True)
+                print(f"Pulling {len(entries)} folder(s) into {local_ts_dir}/")
+                for entry in entries:
+                    remote_spec = f'{user}@{hostname}:{_REMOTE_MODELS_DIR}/{entry}'
+                    cmd = scp_base + ['-r', remote_spec, str(local_ts_dir) + '/']
+                    print(f"Running: {' '.join(cmd)}")
+                    subprocess.run(cmd, check=True)
+
+            print("Transfer complete.")
+            return
+
     elif transfer_type == 'push':
         # Ensure remote destination directory exists
         mkdir_cmd = ssh_base + [f'mkdir -p {remote_path}']
