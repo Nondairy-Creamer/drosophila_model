@@ -2,7 +2,7 @@
 model_type = 'CurrentModel'
 device = "cuda"
 dtype = "float32"
-use_layer_norm = true
+use_layer_norm = false
 nonlinearity = "Softplus"
 use_decoder = true
 use_input_conv = true

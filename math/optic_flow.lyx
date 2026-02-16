@@ -91,7 +91,7 @@ Problem:
 \end_layout
 
 \begin_layout Standard
-You have a point observer that sees at a set of points along a sphere.
+You have a point observer that sees at a set of points along a unit sphere.
  At each of these points the observer measures the optic flow,
  but does not have access to the depth of the object.
  In this world objects can be at any depth,

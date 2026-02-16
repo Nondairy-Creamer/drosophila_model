@@ -3,7 +3,7 @@ Create a movie comparing true vs predicted optic flow.
 2x2 layout:
   - Top left: Stimulus intensity (scatter plot)
   - Top right: True optic flow (quiver plot)
-  - Bottom left: Blank (reserved)
+  - Bottom left: Filtered stimulus (after model input conv)
   - Bottom right: Predicted optic flow (quiver plot)
 """
 import argparse
@@ -63,7 +63,7 @@ def main() -> None:
         "model_path",
         type=str,
         nargs="?",
-        default="models/best_model",
+        default="models/20260212_214842_gpu0_run0",
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")
@@ -82,27 +82,35 @@ def main() -> None:
     stim_index = args.stim_index
 
     print("Loading inputs and targets...")
-    cell_inputs = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
-    cell_inputs = cell_inputs.to(device=device, dtype=dtype)
+    cell_inputs_all = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
+    cell_inputs_all = cell_inputs_all.to(device=device, dtype=dtype)
     target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
-    true_flow = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
+    true_flow_all = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
 
-    # Predict only the requested stimulus
+    # Only process the selected stimulus
+    stim_input = cell_inputs_all[stim_index:stim_index+1]
+    true_flow_single = true_flow_all[stim_index]
+
     print(f"Running model prediction for stimulus {stim_index}...")
-    single_input = cell_inputs[stim_index : stim_index + 1]
-    single_true = true_flow[stim_index : stim_index + 1]
     with torch.no_grad():
-        pred_output = model.predict(single_input)
-    single_pred = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)
+        pred_output = model.predict(stim_input)
+        pred_flow = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
 
     from training_utilities import cos_loss
-    cos_sim = 1 - cos_loss(single_true, single_pred)
-    print(f"Cosine similarity (stim {stim_index}): {cos_sim:.6f}")
+    print("Cosine similarity", 1 - cos_loss(true_flow_single, pred_flow))
 
-    # Convert selected stimulus to numpy for plotting
-    stimulus = single_input[0].detach().cpu().numpy()
-    true_flow_np = single_true[0].detach().cpu().numpy()
-    pred_flow_np = single_pred[0].detach().cpu().numpy()
+    # Compute filtered stimulus (after model's input convolution)
+    with torch.no_grad():
+        if model.use_input_conv:
+            filtered_input = model.apply_input_conv(stim_input)[0]
+        else:
+            filtered_input = stim_input[0]
+
+    # Convert to numpy for plotting
+    stimulus = stim_input[0].detach().cpu().numpy()
+    filtered_stim_np = filtered_input.detach().cpu().numpy()
+    true_flow_np = true_flow_single.detach().cpu().numpy()
+    pred_flow_np = pred_flow.detach().cpu().numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"True flow shape: {true_flow_np.shape}")
@@ -128,6 +136,7 @@ def main() -> None:
         cell_z,
         out_path,
         frame_rate,
+        filtered_stimulus=filtered_stim_np,
     )
 
 

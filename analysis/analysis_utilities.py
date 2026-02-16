@@ -315,12 +315,13 @@ def make_flow_comparison_movie(
     output_path: Path = None,
     frame_rate: int = 30,
     stim_name: str = "",
+    filtered_stimulus: np.ndarray | None = None,
 ) -> None:
     """Create a flow comparison movie.
 
     When *pred_flow* is provided, creates a 2x2 layout (stimulus, true flow,
-    blank, predicted flow).  When *pred_flow* is ``None``, creates a 1x2
-    layout (stimulus, true flow).
+    filtered stimulus, predicted flow).  When *pred_flow* is ``None``, creates
+    a 1x2 layout (stimulus, true flow).
 
     Parameters
     ----------
@@ -333,6 +334,8 @@ def make_flow_comparison_movie(
     output_path : Path for .mp4 output
     frame_rate : frames per second
     stim_name : label shown in the stimulus panel title
+    filtered_stimulus : (time, columns) or None — stimulus after the model's
+        input filter.  Shown in the bottom-left panel when provided.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -344,35 +347,57 @@ def make_flow_comparison_movie(
     stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
-    # Use raw angular flow components (u_right, u_up) directly as arrow directions.
-    # Negate u_right so rightward retinal flow maps to visual right on the flipped x-axis.
-    true_flow_vx = -true_flow[:, :, 0]
-    true_flow_vz = true_flow[:, :, 1]
+    # Project angular flow (u_right, u_up) to Cartesian (v_x, v_z) for the x-z plotting plane
+    true_flow_vx, true_flow_vz = angular_flow_to_cartesian_xz(
+        true_flow[:, :, 0], true_flow[:, :, 1],
+        cell_x, cell_y, cell_z,
+    )
 
     true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
-    max_mag = (
-        np.nanpercentile(true_magnitude, 99) if np.any(true_magnitude) else 1.0
-    )
-    flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
+    finite_true_mag = true_magnitude[np.isfinite(true_magnitude)]
+    if finite_true_mag.size > 0 and finite_true_mag.max() > 0:
+        true_max_mag = np.percentile(finite_true_mag, 99)
+    else:
+        true_max_mag = 1.0
+    true_flow_norm = mcolors.Normalize(vmin=0.0, vmax=true_max_mag)
 
     has_pred = pred_flow is not None
+    has_filtered = filtered_stimulus is not None
     if has_pred:
-        pred_flow_vx = -pred_flow[:, :, 0]
-        pred_flow_vz = pred_flow[:, :, 1]
+        pred_flow_vx, pred_flow_vz = angular_flow_to_cartesian_xz(
+            pred_flow[:, :, 0], pred_flow[:, :, 1],
+            cell_x, cell_y, cell_z,
+        )
+        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
+        finite_pred_mag = pred_magnitude[np.isfinite(pred_magnitude)]
+        if finite_pred_mag.size > 0 and finite_pred_mag.max() > 0:
+            pred_max_mag = np.percentile(finite_pred_mag, 99)
+        else:
+            pred_max_mag = 1.0
+        pred_flow_norm = mcolors.Normalize(vmin=0.0, vmax=pred_max_mag)
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
-        axes[1, 0].axis("off")
-        axes[1, 0].set_title("(reserved)")
+        ax_bottom_left = axes[1, 0]
         ax_pred = axes[1, 1]
     else:
         fig, (ax_stim, ax_true) = plt.subplots(
             1, 2, figsize=(12.8, 5.12), dpi=100
         )
 
+    # Set up the bottom-left panel
+    if has_pred and has_filtered:
+        filt_min, filt_max = np.nanmin(filtered_stimulus), np.nanmax(filtered_stimulus)
+        filt_norm = mcolors.Normalize(vmin=filt_min, vmax=filt_max)
+    elif has_pred:
+        ax_bottom_left.axis("off")
+        ax_bottom_left.set_title("(reserved)")
+
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
 
     plot_axes = [ax_stim, ax_true] + ([ax_pred] if has_pred else [])
+    if has_pred and has_filtered:
+        plot_axes.append(ax_bottom_left)
     for ax in plot_axes:
         ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
         ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
@@ -393,7 +418,27 @@ def make_flow_comparison_movie(
     ax_stim.set_title(title_label)
     fig.colorbar(sc_stim, ax=ax_stim, label="intensity")
 
-    arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
+    # Filtered stimulus scatter plot (bottom-left)
+    sc_filt = None
+    if has_pred and has_filtered:
+        sc_filt = ax_bottom_left.scatter(
+            cell_x,
+            cell_z,
+            c=filtered_stimulus[0, :],
+            cmap="gray",
+            norm=filt_norm,
+            s=90,
+            edgecolors="none",
+        )
+        ax_bottom_left.set_title("Filtered Stimulus")
+        fig.colorbar(sc_filt, ax=ax_bottom_left, label="intensity")
+
+    true_arrow_scale = 0.2 / true_max_mag if true_max_mag > 0 else 1.0
+
+    # Replace NaN in flow data with 0 so quiver arrows render correctly
+    true_flow_vx = np.nan_to_num(true_flow_vx, nan=0.0)
+    true_flow_vz = np.nan_to_num(true_flow_vz, nan=0.0)
+    true_magnitude = np.nan_to_num(true_magnitude, nan=0.0)
 
     q_true = ax_true.quiver(
         cell_x,
@@ -402,17 +447,20 @@ def make_flow_comparison_movie(
         true_flow_vz[0, :],
         true_magnitude[0, :],
         cmap="viridis",
-        norm=flow_norm,
+        norm=true_flow_norm,
         angles="xy",
         scale_units="xy",
-        scale=1 / arrow_scale,
+        scale=1 / true_arrow_scale,
         width=0.003,
     )
     ax_true.set_title("True Optic Flow")
     fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
     if has_pred:
-        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
+        pred_arrow_scale = 0.2 / pred_max_mag if pred_max_mag > 0 else 1.0
+        pred_flow_vx = np.nan_to_num(pred_flow_vx, nan=0.0)
+        pred_flow_vz = np.nan_to_num(pred_flow_vz, nan=0.0)
+        pred_magnitude = np.nan_to_num(pred_magnitude, nan=0.0)
         q_pred = ax_pred.quiver(
             cell_x,
             cell_z,
@@ -420,10 +468,10 @@ def make_flow_comparison_movie(
             pred_flow_vz[0, :],
             pred_magnitude[0, :],
             cmap="viridis",
-            norm=flow_norm,
+            norm=pred_flow_norm,
             angles="xy",
             scale_units="xy",
-            scale=1 / arrow_scale,
+            scale=1 / pred_arrow_scale,
             width=0.003,
         )
         ax_pred.set_title("Predicted Optic Flow")
@@ -440,6 +488,8 @@ def make_flow_comparison_movie(
     ) as writer:
         for t in range(num_time):
             sc_stim.set_array(stimulus[t, :])
+            if sc_filt is not None:
+                sc_filt.set_array(filtered_stimulus[t, :])
 
             vx_true_t = true_flow_vx[t, :]
             vz_true_t = true_flow_vz[t, :]

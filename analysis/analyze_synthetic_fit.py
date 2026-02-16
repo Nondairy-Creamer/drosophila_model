@@ -34,7 +34,7 @@ def _load_conv_params(model_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndar
     model = nm.NeuralModel.load(model_path, device="cpu")
     if not model.use_input_conv:
         raise ValueError(f"Model at {model_path} does not have input convolution enabled.")
-    conv_xy = model.input_conv_xy.detach().cpu().numpy()
+    conv_xy = model.input_conv_xy_log.exp().detach().cpu().numpy()
     conv_t = model.input_conv_t.detach().cpu().numpy()
     axial_coords = model.input_conv_axial_coords.detach().cpu().numpy()
     conv_size_x = model.input_conv_size_x

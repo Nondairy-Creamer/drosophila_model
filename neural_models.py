@@ -32,17 +32,45 @@ class CellTypeLayerNorm(torch.nn.Module):
         self.eps = eps
         # neuron_to_type_index is a (num_neurons,) int64 tensor mapping each neuron to its cell type
         self.register_buffer('neuron_to_type_index', neuron_to_type_index)
-        self.weight = torch.nn.Parameter(torch.ones(num_cell_types, device=device, dtype=dtype))
+        # Store weight in log space so exp() is always positive
+        init_weight = 1.0
+        init_weights = np.full(num_cell_types, np.log(init_weight))
+        self.weight_log = torch.nn.Parameter(
+            torch.tensor(init_weights, device=device, dtype=dtype)
+        )
         self.bias = torch.nn.Parameter(torch.zeros(num_cell_types, device=device, dtype=dtype))
 
     def forward(self, x):
         # x shape: (..., num_neurons)
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        x_norm = (x - mean) / torch.sqrt(var + self.eps)
+        # Compute mean and var per cell type, then scatter back to per-neuron
+        idx = self.neuron_to_type_index  # (num_neurons,)
+        batch_shape = x.shape[:-1]
+        num_neurons = x.shape[-1]
+        # Flatten batch dims for scatter_add
+        x_flat = x.reshape(-1, num_neurons)  # (B, N)
+        B = x_flat.shape[0]
+        idx_expanded = idx.unsqueeze(0).expand(B, -1)  # (B, N)
+        # Sum and count per cell type
+        type_sum = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
+        type_sum.scatter_add_(1, idx_expanded, x_flat)
+        type_count = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
+        type_count.scatter_add_(1, idx_expanded, torch.ones_like(x_flat))
+        type_count = type_count.clamp(min=1)
+        type_mean = type_sum / type_count  # (B, C)
+        # Gather per-neuron mean
+        neuron_mean = type_mean.gather(1, idx_expanded)  # (B, N)
+        # Compute per cell type variance
+        type_var_sum = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
+        type_var_sum.scatter_add_(1, idx_expanded, (x_flat - neuron_mean) ** 2)
+        type_var = type_var_sum / type_count  # (B, C)
+        # Gather per-neuron var
+        neuron_var = type_var.gather(1, idx_expanded)  # (B, N)
+        # Normalize
+        x_norm_flat = (x_flat - neuron_mean) / torch.sqrt(neuron_var + self.eps)
+        x_norm = x_norm_flat.reshape(x.shape)
         # Expand per-cell-type params to per-neuron
-        w = self.weight[self.neuron_to_type_index]
-        b = self.bias[self.neuron_to_type_index]
+        w = self.weight_log.exp()[idx]
+        b = self.bias[idx]
         return x_norm * w + b
 
     def extra_repr(self):
@@ -217,14 +245,20 @@ class NeuralModel(torch.nn.Module, ABC):
         axial_coords = self._hex_grid_axial_coords(conv_size_x)
         self.input_num_nearest_columns = axial_coords.shape[0]
 
-        # Full spatial kernel with separable temporal kernel
-        spatial_init = np.zeros((conv_size_x, conv_size_x))
-        spatial_init[conv_size_x // 2, conv_size_x // 2] = -1.0
+        # Initialize spatial filter: 1 for inner 7 hexes (center + 6 neighbors), small value elsewhere
+        # Store as log so exp() is always non-negative
+        spatial_floor = 1e-4
+        spatial_init = np.full((conv_size_x, conv_size_x), spatial_floor)
+        radius = conv_size_x // 2
+        for q, r in axial_coords:
+            if max(abs(q), abs(r), abs(q + r)) <= 1:
+                spatial_init[r + radius, q + radius] = 1.0
+        # Initialize temporal filter as delta at current time (index 0=1, rest=0)
         temporal_init = np.zeros(conv_size_t)
-        temporal_init[0] = 1
+        temporal_init[0] = 1.0
 
-        self.input_conv_xy = torch.nn.Parameter(
-            torch.tensor(spatial_init, device=self.device, dtype=self.dtype)
+        self.input_conv_xy_log = torch.nn.Parameter(
+            torch.tensor(np.log(spatial_init), device=self.device, dtype=self.dtype)
         )
         self.input_conv_t = torch.nn.Parameter(
             torch.tensor(temporal_init, device=self.device, dtype=self.dtype)
@@ -252,7 +286,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_nearest_columns = self._hex_grid_points(conv_size).shape[0]
         self.channels_1 = 8
         self.channels_2 = 3
-        decoder_init = 0.2
+        decoder_init = 0.0
         
         # Set list of neurons to use for decoding (from black box in figure panel g)
         self.neurons_to_decode = [
@@ -509,8 +543,51 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return ordered_nearest_indices
 
+    def _apply_spatial_conv(self, inputs):
+        """Apply spatial convolution only (no temporal filtering).
+
+        Args:
+            inputs: Tensor with shape (stimuli, time, columns).
+
+        Returns:
+            Convolved tensor with same shape.
+        """
+        # Gather spatial neighbors: (stimuli, time, columns, neighbors)
+        spatial_windows = inputs[:, :, self.input_nearest_column_indices]
+
+        radius = self.input_conv_size_x // 2
+        q_idx = self.input_conv_axial_coords[:, 0] + radius
+        r_idx = self.input_conv_axial_coords[:, 1] + radius
+        spatial_kernel = self.input_conv_xy_log.exp()[r_idx, q_idx]
+        spatial_kernel = spatial_kernel / spatial_kernel.sum()
+        return torch.einsum('stcn,n->stc', spatial_windows, spatial_kernel)
+
+    def _apply_temporal_conv(self, inputs):
+        """Apply temporal convolution only (no spatial filtering).
+
+        Args:
+            inputs: Tensor with shape (stimuli, time, columns).
+
+        Returns:
+            Convolved tensor with same shape.
+        """
+        pad = self.input_conv_size_t - 1
+        inputs_padded = torch.nn.functional.pad(inputs, (0, 0, pad, 0))
+        time_windows = inputs_padded.unfold(1, self.input_conv_size_t, 1)
+        # time_windows: (stimuli, time, columns, temporal_window)
+        temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
+        return torch.einsum('stcq,q->stc', time_windows, temporal_kernel)
+
     def apply_input_conv(self, inputs):
-        """Apply the low-rank input convolution over time and columns."""
+        """Apply local contrast normalization (spatial) then temporal filtering.
+
+        Computes:
+            local_mean = spatial_conv(input)
+            input_centered = input - local_mean
+            local_var = spatial_conv(input_centered ** 2)
+            input_norm = input_centered / sqrt(local_var + eps)
+            output = temporal_conv(-input_norm)
+        """
         if not self.use_input_conv:
             return inputs
 
@@ -528,26 +605,20 @@ class NeuralModel(torch.nn.Module, ABC):
                 f"inputs has {inputs.shape[2]} columns, expected {num_columns}."
             )
 
-        pad = self.input_conv_size_t - 1
-        inputs_padded = torch.nn.functional.pad(inputs, (0, 0, pad, 0))
-        time_windows = inputs_padded.unfold(1, self.input_conv_size_t, 1)
-        spatial_windows = time_windows[:, :, self.input_nearest_column_indices, :]
-        spatial_windows = spatial_windows.permute(0, 1, 4, 2, 3)
+        # Spatial contrast normalization
+        local_mean = self._apply_spatial_conv(inputs)
+        input_centered = inputs - local_mean
+        local_var = self._apply_spatial_conv(input_centered ** 2)
+        eps = 1e-3
+        input_norm = input_centered / torch.sqrt(local_var + eps)
 
-        radius = self.input_conv_size_x // 2
-        q_idx = self.input_conv_axial_coords[:, 0] + radius
-        r_idx = self.input_conv_axial_coords[:, 1] + radius
-        spatial_kernel = self.input_conv_xy[r_idx, q_idx]
-        spatial_applied = torch.einsum('stqcn,n->stqc', spatial_windows, spatial_kernel)
-        # Flip temporal kernel so index 0 corresponds to current time.
-        temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
-        convolved = torch.einsum('stqc,q->stc', spatial_applied, temporal_kernel)
-        convolved = convolved + self.input_conv_bias
+        # Negate and apply temporal kernel
+        result = self._apply_temporal_conv(-input_norm)
 
         if squeeze_output:
-            convolved = convolved.squeeze(0)
+            result = result.squeeze(0)
 
-        return convolved
+        return result
 
     def _precompute_nearest_decoder_neurons(self):
         """Pre-compute decoder neuron indices for each column's nearest columns.
@@ -782,10 +853,6 @@ class NeuralModel(torch.nn.Module, ABC):
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def find_steady_state(self, run_time=100, max_iter=25):
-        # TODO remove this
-        print('Finding steady state currently broken. Skipping')
-        return
-        
         inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
         # Start from current steady state buffer
         original_state = self.steady_state.clone()
@@ -1009,15 +1076,17 @@ class NeuralModel(torch.nn.Module, ABC):
         model = model_cls(**inputs)
 
         state_dict = data['state_dict']
-        if (
-            'input_conv_xy' not in state_dict
-            and 'input_conv_x' in state_dict
-            and 'input_conv_y' in state_dict
-        ):
-            input_conv_x = state_dict['input_conv_x']
-            input_conv_y = state_dict['input_conv_y']
-            state_dict = dict(state_dict)
-            state_dict['input_conv_xy'] = torch.outer(input_conv_y, input_conv_x)
+        # Migrate old parameter names to _log variants
+        state_dict = dict(state_dict)
+        if 'input_conv_x' in state_dict and 'input_conv_y' in state_dict:
+            input_conv_xy = torch.outer(state_dict.pop('input_conv_y'), state_dict.pop('input_conv_x'))
+            state_dict['input_conv_xy_log'] = torch.log(input_conv_xy.clamp(min=1e-8))
+        if 'input_conv_xy' in state_dict and 'input_conv_xy_log' not in state_dict:
+            state_dict['input_conv_xy_log'] = torch.log(state_dict.pop('input_conv_xy').clamp(min=1e-8))
+        if 'input_conv_t_log' in state_dict and 'input_conv_t' not in state_dict:
+            state_dict['input_conv_t'] = state_dict.pop('input_conv_t_log').exp()
+        if 'layer_norm.weight' in state_dict and 'layer_norm.weight_log' not in state_dict:
+            state_dict['layer_norm.weight_log'] = torch.log(state_dict.pop('layer_norm.weight').clamp(min=1e-8))
 
         model.load_state_dict(state_dict, strict=False)
 
@@ -1269,8 +1338,8 @@ class CurrentModel(NeuralModel):
         self.offset = torch.full((self.num_cell_types,), offset_init, dtype=self.dtype, device=self.device)
         
         # Initialize strength per cell type based on the inverse of fan in / out
-        synapses_in_per_neuron = self.synapse_counts.pow(2).sum(dim=1).to_dense()
-        synapses_out_per_neuron = self.synapse_counts.pow(2).sum(dim=0).to_dense()
+        synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()
+        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
         
         synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
