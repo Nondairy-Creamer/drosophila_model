@@ -518,7 +518,8 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
 
     Returns:
         stimulus: [examples, time, points in space] — pixel values in [0, 1]
-        optic_flow: [examples, time, points in space, 2] — (d_phi, d_theta) in deg/s
+        optic_flow: [examples, time, points in space, 2] — (d_right, d_up) in deg/s
+        rotation_vectors: [examples, time, 3] — body-frame angular velocity (rad/s)
     """
     from scipy.ndimage import map_coordinates
     from analysis.estimate_self_motion import generate_optic_flow
@@ -570,6 +571,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
 
     stimulus_list = []
     optic_flow_list = []
+    omega_body_list = []
 
     for pano_filtered in pano_images:
         pano_height, pano_width = pano_filtered.shape
@@ -631,6 +633,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             ).reshape(time_per_stim, num_cells)
             stim[out_of_bounds] = pano_filtered.mean()
             stimulus_list.append(stim)
+            omega_body_list.append(omega_body)
 
             # --- compute optic flow (batched over time) ---
             omega_body_t = torch.tensor(omega_body, dtype=torch.float32)
@@ -645,10 +648,11 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             optic_flow_list.append(of)
 
     # --- stack into final arrays ---
-    stimulus = np.stack(stimulus_list)       # (num_panos * num_repeats_total, time_per_stim, num_cells)
-    optic_flow = np.stack(optic_flow_list)   # (num_panos * num_repeats_total, time_per_stim, num_cells, 2)
+    stimulus = np.stack(stimulus_list)             # (num_panos * num_repeats_total, time_per_stim, num_cells)
+    optic_flow = np.stack(optic_flow_list)         # (num_panos * num_repeats_total, time_per_stim, num_cells, 2)
+    rotation_vectors = np.stack(omega_body_list)   # (num_panos * num_repeats_total, time_per_stim, 3)
 
-    return stimulus, optic_flow
+    return stimulus, optic_flow, rotation_vectors
 
 
 def consolidate_stim(stim_dict, optic_flow_dict):
@@ -733,7 +737,7 @@ def get_stimulus(
             raise Exception('panoramic require column_phi_theta input')
 
         # get pano stimulus with random velocity
-        stimulus, optic_flow = get_random_velocity_pano(
+        stimulus, optic_flow, _ = get_random_velocity_pano(
             column_phi_theta[:, 0], column_phi_theta[:, 1],
             velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
             num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed

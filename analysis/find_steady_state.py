@@ -35,8 +35,7 @@ def main() -> None:
     print(f"Loading model from {model_pt} ...")
     model = nm.NeuralModel.load(model_pt, device=device)
 
-    print("Finding steady state ...")
-    model.find_steady_state()
+    model.find_steady_state(max_iter=25)
 
     print(f"Saving model to {model_pt} ...")
     model.save(model_pt)

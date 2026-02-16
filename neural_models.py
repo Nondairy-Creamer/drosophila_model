@@ -853,9 +853,9 @@ class NeuralModel(torch.nn.Module, ABC):
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def find_steady_state(self, run_time=100, max_iter=25):
+        print("Finding steady state ...")
         inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
         # Start from current steady state buffer
-        original_state = self.steady_state.clone()
         initial_state = self.steady_state.unsqueeze(0)
         initial_ave = initial_state.abs().mean()
 
@@ -863,7 +863,7 @@ class NeuralModel(torch.nn.Module, ABC):
             final_state = self.predict(inputs, init_state=initial_state)[1]
 
             # Check if state converged (didn't change from input to output)
-            if torch.allclose(final_state, initial_state, rtol=1e-3, atol=1e-5):
+            if torch.allclose(final_state, initial_state, atol=1e-3):
                 print('steady state found after', i + 1, 'iterations')
                 self.steady_state.copy_(final_state.detach().squeeze(0))
                 return
@@ -876,6 +876,8 @@ class NeuralModel(torch.nn.Module, ABC):
             print('Warning: cannot find steady state, dynamics may be unstable')
             return
             
+        print('Average abs diff:', (final_state - initial_state).abs().mean())
+
         print('steady state not found after', max_iter, 'iterations')
         self.steady_state.copy_(final_state.detach().squeeze(0))
 
@@ -1098,79 +1100,70 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return model
 
-    def estimate_self_motion_from_image(self, right_eye_inputs, left_eye_inputs, equilibration_steps=0):
+    def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs, initial_state_right=None, initial_state_left=None):
         # right_eye_inputs: (stimuli, time, columns) where columns correspond to
         # ommatidia at the locations in self.column_phi_theta
         # left_eye_inputs: (stimuli, time, columns) where columns correspond to
         # ommatidia at the locations in self.column_phi_theta but with phi = -phi (flipped over the mid point of the fly)
-        # equilibration_steps: number of time indices to skip at the beginning for equilibration (default: 0)
+        # initial_state: None or tuple (right_state, left_state) from a previous call
 
-        # calculate optic flow from the left eye and right eye stimulus. Concatenate them together for total optic flow
-        optic_flow_right = self.calculate_optic_flow(right_eye_inputs, eye='right')[0]
-        optic_flow_left = self.calculate_optic_flow(left_eye_inputs, eye='left')[0]
-        optic_flow = torch.cat((optic_flow_right, optic_flow_left), axis=2)
+        # Run predictions for each eye to get decoder optic flow and final states
+        outputs_right, final_state_right = self.predict(right_eye_inputs, init_state=initial_state_right)[0:2]
+        outputs_left, final_state_left = self.predict(left_eye_inputs, init_state=initial_state_left)[0:2]
+
+        # Get decoder outputs: (stimuli, time, columns, 2) where last dim is (d_right, d_up)
+        # Flip horizontal (d_right) for left eye to put it in a consistent coordinate frame
+        optic_flow_right = outputs_right['decoder']
+        optic_flow_left = outputs_left['decoder'].clone()
+        optic_flow_left[:, :, :, 0] = -optic_flow_left[:, :, :, 0]
+
+        # Concatenate along column dimension
+        optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
         # optic_flow shape: (stimuli, time, columns*2, 2)
 
-        # generate the column locations for both eyes
+        # Generate column locations for both eyes
         left_column_locations = self.column_phi_theta.copy()
         left_column_locations[:, 0] = -left_column_locations[:, 0]
         column_locations = np.concatenate((self.column_phi_theta, left_column_locations), axis=0)
 
-        # Convert column locations to tensors for estimate_self_motion_from_flow
         phi_tensor = torch.tensor(column_locations[:, 0], device=optic_flow.device, dtype=optic_flow.dtype)
         theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
 
-        # Estimate self-motion for each stimulus and time point
-        num_stimuli, num_time, num_columns_total, _ = optic_flow.shape
-        num_columns_per_eye = self.column_phi_theta.shape[0]
+        # Estimate self-motion for each stimulus and time step.
+        # Use a per-time-step NaN mask since valid columns can vary over time.
+        num_stimuli = optic_flow.shape[0]
+        num_time = optic_flow.shape[1]
         rotations = []
         translations = []
-        depths = []
-        
+
         for s in range(num_stimuli):
-            rot_t = []
-            trans_t = []
-            depth_t = []
-            
-            # Skip equilibration_steps at the beginning
-            for t in range(equilibration_steps, num_time):
-                d_phi = optic_flow[s, t, :, 0]  # (columns*2,)
-                d_theta = optic_flow[s, t, :, 1]  # (columns*2,)
-                
-                # Filter out NaN values (columns without valid optic flow)
-                valid_mask = ~torch.isnan(d_phi) & ~torch.isnan(d_theta)
-                phi_valid = phi_tensor[valid_mask]
-                theta_valid = theta_tensor[valid_mask]
-                d_phi_valid = d_phi[valid_mask]
-                d_theta_valid = d_theta[valid_mask]
-                
-                rotation, translation, depth = self.estimate_self_motion_from_flow(
-                    phi_valid, theta_valid, d_phi_valid, d_theta_valid
+            rot_t_list = []
+            trans_t_list = []
+            for t in range(num_time):
+                valid_t = ~torch.isnan(optic_flow[s, t, :, 0]) & ~torch.isnan(optic_flow[s, t, :, 1])
+                d_right_t = optic_flow[s, t, valid_t, 0]  # (valid_columns,)
+                d_up_t = optic_flow[s, t, valid_t, 1]
+
+                rotation_t, translation_t, _ = self.estimate_ego_motion_from_flow(
+                    phi_tensor[valid_t], theta_tensor[valid_t], d_right_t, d_up_t
                 )
-                rot_t.append(rotation)
-                trans_t.append(translation)
-                
-                # Expand depth back to full size with NaN for invalid columns
-                depth_full = torch.full((num_columns_total,), float('nan'), 
-                                        device=depth.device, dtype=depth.dtype)
-                depth_full[valid_mask] = depth
-                depth_t.append(depth_full)
-            
-            rotations.append(torch.stack(rot_t))      # (time, 3)
-            translations.append(torch.stack(trans_t))  # (time, 3)
-            depths.append(torch.stack(depth_t))        # (time, columns*2)
-        
-        # Stack results: (stimuli, time, ...) 
-        rotations = torch.stack(rotations)      # (stimuli, time, 3)
-        translations = torch.stack(translations) # (stimuli, time, 3)
-        depths = torch.stack(depths)             # (stimuli, time, columns*2)
-        
-        return rotations, translations, depths
+                rot_t_list.append(rotation_t)
+                trans_t_list.append(translation_t)
+            rotations.append(torch.stack(rot_t_list))       # (time, 3)
+            translations.append(torch.stack(trans_t_list))   # (time, 3)
+
+        rotations = torch.stack(rotations)       # (stimuli, time, 3)
+        translations = torch.stack(translations)  # (stimuli, time, 3)
+
+        return rotations, translations, final_state_right, final_state_left
 
     @staticmethod
-    def estimate_self_motion_from_flow(phi, theta, d_phi, d_theta):
+    def estimate_ego_motion_from_flow(phi, theta, d_right, d_up):
         """
-        Estimate self-motion (rotation and translation) from optic flow.
+        Estimate ego-motion (rotation and translation) from optic flow.
+        
+        Supports batched computation over time: if d_right and d_up have a leading
+        time dimension, all time steps are solved in parallel.
         
         Coordinate system:
             - +X: Forward (phi=0, theta=π/2)
@@ -1178,20 +1171,20 @@ class NeuralModel(torch.nn.Module, ABC):
             - +Z: Up (theta=0)
         
         Flow sign convention:
-            - Positive d_phi: rightward motion on retina → leftward observer rotation
-            - Positive d_theta: upward motion on retina → downward observer motion
+            - Positive d_right: rightward motion on retina → leftward observer rotation
+            - Positive d_up: upward motion on retina → downward observer motion
         
         Args:
             phi: (N,) azimuthal angles of viewing directions  
             theta: (N,) polar angles of viewing directions
-            d_phi: (N,) angular flow in phi direction (positive = rightward on retina)
-            d_theta: (N,) angular flow in theta direction (positive = upward on retina)
+            d_right: (N,) or (T, N) angular flow in phi direction (positive = rightward on retina)
+            d_up: (N,) or (T, N) angular flow in theta direction (positive = upward on retina)
         
         Returns:
-            omega_star: (3,) estimated rotation vector [roll, pitch, yaw]
+            omega_star: (3,) or (T, 3) estimated rotation vector [roll, pitch, yaw]
                 Positive omega_z = leftward rotation (world moves right on retina)
-            T_star: (3,) estimated translation direction (up to sign ambiguity)
-            Z_star: (N,) estimated depths (positive when T_star sign is correct)
+            T_star: (3,) or (T, 3) estimated translation direction (up to sign ambiguity)
+            Z_star: (N,) or (T, N) estimated depths (positive when T_star sign is correct)
         """
 
         def cross_matrix(a):
@@ -1207,91 +1200,112 @@ class NeuralModel(torch.nn.Module, ABC):
                 torch.stack([ -ay,  ax,   O], dim=-1)
             ], dim=-2)
 
-        N = theta.shape[0]
+        # Handle unbatched input: (N,) → (1, N)
+        unbatched = d_right.dim() == 1
+        if unbatched:
+            d_right = d_right.unsqueeze(0)
+            d_up = d_up.unsqueeze(0)
 
-        # === Convert to 3D viewing directions (N,3) ===
+        T, N = d_right.shape
+
+        # === Convert to 3D viewing directions (N, 3) — shared across time ===
         x = torch.stack((
             torch.sin(theta)*torch.cos(phi),
             torch.sin(theta)*torch.sin(phi),
             torch.cos(theta)
-        ), dim=1)                              # (N,3)
+        ), dim=1)                              # (N, 3)
 
-        # === Convert angular flow to 3D tangent vectors u_i ∈ R^3 ===
-        # Basis vectors of sphere
+        # === Basis vectors of sphere — shared across time ===
         e_theta = torch.stack((
             torch.cos(theta)*torch.cos(phi),
             torch.cos(theta)*torch.sin(phi),
             -torch.sin(theta)
-        ), dim=1)                              # (N,3)
+        ), dim=1)                              # (N, 3)
 
         e_phi = torch.stack((
             -torch.sin(phi),
             torch.cos(phi),
             torch.zeros_like(phi)
-        ), dim=1)                              # (N,3)
+        ), dim=1)                              # (N, 3)
 
         # Reconstruct 3D flow from angular components
-        # d_phi: positive = rightward motion on retina (leftward observer rotation)
-        # d_theta: positive = upward motion on retina (downward observer motion)
-        # Negate d_theta because e_theta points downward but we want up=positive
-        u = -d_theta[:, None] * e_theta + d_phi[:, None] * e_phi   # (N,3)
+        # d_right is rightward on retina; rightward = -e_phi (since e_phi points left)
+        # d_up is upward on retina; upward = -e_theta (since e_theta points down)
+        u = -d_right[..., None] * e_phi - d_up[..., None] * e_theta  # (T, N, 3)
 
-        # === Rotation estimation: solve u ≈ [x]_× Ω ===
-        # Physical relationship: image motion u = Ω × x = -x × Ω = -[x]_× Ω
-        # So [x]_× Ω = -u, meaning Ω = -solve([x]_× Ω = u)
-        A = cross_matrix(x)                    # (N,3,3)
-        A_flat = A.reshape(3*N, 3)
-        u_flat = u.reshape(3*N)
+        # === Rotation estimation: solve u ≈ [x]_× Ω for each time step ===
+        # Physical relationship: image motion u = -Ω × x = x × Ω = [x]_× Ω
+        # So Ω = lstsq([x]_×, u)
+        A = cross_matrix(x)                    # (N, 3, 3)
+        A_flat = A.reshape(3*N, 3)             # (3N, 3)
+        u_flat = u.reshape(T, 3*N).T           # (3N, T) — multiple RHS for lstsq
 
-        omega_star = -torch.linalg.lstsq(A_flat, u_flat)[0]  # Negate for correct physical sign
+        omega_star = torch.linalg.lstsq(A_flat, u_flat).solution.T  # (T, 3)
 
-        # === De-rotated flow: v_i = u_i - u_rot where u_rot = -[x]_× Ω ===
-        # So v = u - (-[x]_× Ω) = u + [x]_× Ω
-        v = u + (A @ omega_star)               # (N,3)
-        
-        # === Measure translation signal strength ===
+        # === De-rotated flow: v = u - u_rot where u_rot = [x]_× Ω ===
+        v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
+
+        # === Measure translation signal strength (per time step) ===
         # RMS of de-rotated flow - if near zero, there's no translation
-        translation_magnitude = torch.sqrt((v**2).mean())
+        translation_magnitude = torch.sqrt((v**2).mean(dim=(-2, -1)))  # (T,)
 
-        # === Projection matrices Π_i = I - x_i x_iᵀ ===
-        # Each Pi is (N,3,3)
-        outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N,3,3)
-        I = torch.eye(3, device=x.device).expand(N,3,3)
-        P = I - outer
+        # === Projection matrices Π_i = I - x_i x_iᵀ — shared across time ===
+        outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
+        I = torch.eye(3, device=x.device).expand(N, 3, 3)
+        P = I - outer                              # (N, 3, 3)
 
         # === Construct stacked C matrix: each block = [v_i]_× Π_i ===
-        vx = cross_matrix(v)                   # (N,3,3)
-        C_blocks = vx @ P                      # (N,3,3)
+        vx = cross_matrix(v)                   # (T, N, 3, 3)
+        C_blocks = vx @ P                      # (T, N, 3, 3)
+        C = C_blocks.reshape(T, 3*N, 3)        # (T, 3N, 3)
 
-        C = C_blocks.reshape(3*N, 3)           # (3N,3)
+        # === Solve C T = 0 via smallest singular vector (batched SVD) ===
+        # For pure rotation the de-rotated flow is ~0, making C ill-conditioned.
+        # Only run SVD on time steps with meaningful translational signal.
+        trans_eps = 1e-6
+        has_translation = translation_magnitude > trans_eps  # (T,)
 
-        # === Solve C T = 0 via smallest singular vector ===
-        _, _, Vh = torch.linalg.svd(C, full_matrices=False)
-        T_dir = Vh[-1]  # unit direction (sign ambiguous)
+        T_dir = torch.zeros(T, 3, device=x.device, dtype=d_right.dtype)
+        v_dot_w = torch.zeros(T, N, device=x.device, dtype=d_right.dtype)
+        w_norm_sq = torch.zeros(T, N, device=x.device, dtype=d_right.dtype)
 
-        # === Disambiguate sign using physical constraint ===
-        # Convention: progressive flow (expansion) = positive T_x (forward motion)
-        # For expansion at point x: flow v points away from focus of expansion
-        # w = Π @ T points toward focus, so v · w < 0 for expansion with correct T
-        # We flip T if v · w > 0 (wrong sign), keeping v · w < 0
-        w_i = (P @ T_dir)                      # (N,3)
-        v_dot_w = (v * w_i).sum(dim=1)         # (N,)
-        
-        # Use weighted sum (weight by ||w||² to emphasize reliable points)
-        w_norm_sq = (w_i * w_i).sum(dim=1)     # (N,)
-        weighted_sign = (v_dot_w * w_norm_sq).sum()
-        
-        # Flip T if weighted_sign < 0 so that expansion gives positive T
-        if weighted_sign < 0:
-            T_dir = -T_dir
-            w_i = -w_i
-            v_dot_w = -v_dot_w
+        if has_translation.any():
+            C_valid = C[has_translation]                         # (T_valid, 3N, 3)
+            _, _, Vh = torch.linalg.svd(C_valid, full_matrices=False)  # Vh: (T_valid, 3, 3)
+            T_dir_valid = Vh[:, -1]                              # (T_valid, 3)
+
+            # === Disambiguate sign using physical constraint ===
+            # Convention: progressive flow (expansion) = positive T_x (forward motion)
+            # For expansion at point x: flow v points away from focus of expansion
+            # w = Π @ T points toward focus, so v · w < 0 for expansion with correct T
+            # We flip T if v · w > 0 (wrong sign), keeping v · w < 0
+            w_i_valid = torch.einsum('nij,tj->tni', P, T_dir_valid)  # (T_valid, N, 3)
+            v_dot_w_valid = (v[has_translation] * w_i_valid).sum(dim=-1)  # (T_valid, N)
+
+            # Use weighted sum (weight by ||w||² to emphasize reliable points)
+            w_norm_sq_valid = (w_i_valid * w_i_valid).sum(dim=-1)  # (T_valid, N)
+            weighted_sign = (v_dot_w_valid * w_norm_sq_valid).sum(dim=-1)  # (T_valid,)
+
+            # Flip T where weighted_sign < 0 so that expansion gives positive T
+            flip_mask = weighted_sign < 0
+            T_dir_valid[flip_mask] = -T_dir_valid[flip_mask]
+            v_dot_w_valid[flip_mask] = -v_dot_w_valid[flip_mask]
+
+            T_dir[has_translation] = T_dir_valid
+            v_dot_w[has_translation] = v_dot_w_valid
+            w_norm_sq[has_translation] = w_norm_sq_valid
 
         # Scale T by translation magnitude
-        T_star = T_dir * translation_magnitude
+        T_star = T_dir * translation_magnitude[:, None]  # (T, 3)
 
         # Depth: Z = ||w||² / (v · w) with v · w > 0 after disambiguation
-        Z_star = w_norm_sq / (v_dot_w + 1e-12)
+        Z_star = w_norm_sq / (v_dot_w + 1e-12)  # (T, N)
+
+        # Squeeze back if input was unbatched
+        if unbatched:
+            omega_star = omega_star.squeeze(0)
+            T_star = T_star.squeeze(0)
+            Z_star = Z_star.squeeze(0)
 
         return omega_star, T_star, Z_star
 
