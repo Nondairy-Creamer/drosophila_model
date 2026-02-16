@@ -1132,28 +1132,24 @@ class NeuralModel(torch.nn.Module, ABC):
         phi_tensor = torch.tensor(column_locations[:, 0], device=optic_flow.device, dtype=optic_flow.dtype)
         theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
 
-        # Estimate self-motion for each stimulus and time step.
-        # Use a per-time-step NaN mask since valid columns can vary over time.
+        # Decoder NaN columns are constant across time, so one mask suffices.
+        valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
+        phi_valid = phi_tensor[valid_mask]
+        theta_valid = theta_tensor[valid_mask]
+
         num_stimuli = optic_flow.shape[0]
-        num_time = optic_flow.shape[1]
         rotations = []
         translations = []
 
         for s in range(num_stimuli):
-            rot_t_list = []
-            trans_t_list = []
-            for t in range(num_time):
-                valid_t = ~torch.isnan(optic_flow[s, t, :, 0]) & ~torch.isnan(optic_flow[s, t, :, 1])
-                d_right_t = optic_flow[s, t, valid_t, 0]  # (valid_columns,)
-                d_up_t = optic_flow[s, t, valid_t, 1]
+            d_right = optic_flow[s, :, valid_mask, 0]  # (time, valid_columns)
+            d_up = optic_flow[s, :, valid_mask, 1]
 
-                rotation_t, translation_t, _ = self.estimate_ego_motion_from_flow(
-                    phi_tensor[valid_t], theta_tensor[valid_t], d_right_t, d_up_t
-                )
-                rot_t_list.append(rotation_t)
-                trans_t_list.append(translation_t)
-            rotations.append(torch.stack(rot_t_list))       # (time, 3)
-            translations.append(torch.stack(trans_t_list))   # (time, 3)
+            rotation, translation, _ = self.estimate_ego_motion_from_flow(
+                phi_valid, theta_valid, d_right, d_up
+            )
+            rotations.append(rotation)       # (time, 3)
+            translations.append(translation) # (time, 3)
 
         rotations = torch.stack(rotations)       # (stimuli, time, 3)
         translations = torch.stack(translations)  # (stimuli, time, 3)
