@@ -1046,7 +1046,10 @@ class NeuralModel(torch.nn.Module, ABC):
 
     @classmethod
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
-        data = torch.load(Path(path), map_location='cpu', weights_only=False)
+        path = Path(path)
+        if path.is_dir():
+            path = path / "model.pt"
+        data = torch.load(path, map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
 
         # Determine target device up front so we construct directly on it

@@ -19,7 +19,6 @@ import torch
 import numpy as np
 import neural_models as nm
 import stimulus_utilities as su
-from analysis_utilities import resolve_model_paths
 
 
 def main() -> None:
@@ -57,9 +56,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_pt, model_folder = resolve_model_paths(Path(args.model_path))
-    print(f"Loading model from {model_pt} ...")
-    model = nm.NeuralModel.load(model_pt, device=args.device)
+    print(f"Loading model from {args.model_path} ...")
+    model = nm.NeuralModel.load(args.model_path, device=args.device)
     model.eval()
 
     # Column locations for right eye and left eye
