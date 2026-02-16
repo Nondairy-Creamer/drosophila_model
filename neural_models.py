@@ -853,10 +853,6 @@ class NeuralModel(torch.nn.Module, ABC):
         return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
 
     def find_steady_state(self, run_time=100, max_iter=25):
-        # TODO remove this
-        print('Finding steady state currently broken. Skipping')
-        return
-        
         inputs = torch.zeros((1, run_time, self.num_columns), device=self.device, dtype=self.dtype)
         # Start from current steady state buffer
         original_state = self.steady_state.clone()

@@ -254,7 +254,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             with torch.no_grad():
                 # Find the model's new steady state should be close ish to the previous one
                 # so only do it every save_every steps
-                model.find_steady_state()
+                # model.find_steady_state()  # done post-training via analysis/find_steady_state.py
 
                 # Convert only new GPU losses to CPU floats for plotting/logging
                 for i in range(last_saved_idx + 1, len(loss_list)):
