@@ -155,6 +155,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         reset_init_every=config['training'].get('reset_init_every', 1),
         sigma_lambda=config['training'].get('sigma_lambda', 0),
         peak_lambda=config['training'].get('peak_lambda', 0),
+        l1_lambda=config['training'].get('l1_lambda', 0),
         loss_fn=loss_fn, 
         input_noise_std=config['training']['input_noise_std'],
         contrast_std=config['training']['contrast_std'],

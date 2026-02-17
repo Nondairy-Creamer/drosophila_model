@@ -152,7 +152,14 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             # L1 regularizer to sparsify strength weights (encourage smaller magnitudes)
             input_l1 = model.input_strength_log.exp().mean()
             output_l1 = model.output_strength_log.exp().mean()
+
             loss = loss + l1_lambda * (input_l1 + output_l1) / 2
+
+            if model.use_decoder:
+                conv1_l1 = model.decoder_conv_1.abs().mean()
+                conv2_l1 = model.decoder_conv_2.abs().mean()
+
+                loss = loss + l1_lambda * (conv1_l1 + conv2_l1) / 2
 
         # Record GPU-side loss scalar without sync (must happen before best-loss check
         # so the current loss is included when syncing to loss_plot for checkpoints)
