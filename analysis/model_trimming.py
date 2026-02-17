@@ -13,8 +13,8 @@ import torch
 import numpy as np
 import neural_models as nm
 import data_utilities as du
-import training_utilities as tu
 import model_utilities as mu
+from loss_functions import mse_loss
 
 # --- Configuration ---
 model_path = 'models/best_model_resaved/model.pt'
@@ -30,9 +30,9 @@ dtype = model.dtype
 
 # --- Load training data ---
 print("Loading training data...")
-stimulus = torch.load('models/best_model/cell_inputs.pt', map_location=device).to(dtype=dtype)
-target = torch.load('models/best_model/target.pt', map_location=device)
-target = {k: v.to(dtype=dtype) for k, v in target.items()}
+model_data_path = Path(model_path).parent
+stimulus = torch.load(model_data_path / 'cell_inputs.pt', map_location=device).to(dtype=dtype)
+target = torch.load(model_data_path / 'target.pt', map_location=device).to(device=device, dtype=dtype)
 
 # --- Calculate importance score for each cell type ---
 print("Calculating cell type importance scores...")
@@ -63,11 +63,10 @@ print(f"Importance range: {importance.min():.6f} to {importance.max():.6f}")
 # --- Calculate initial loss ---
 print("\nCalculating initial loss...")
 input_neurons = ['L1', 'L2', 'L3']
-output_neurons = list(target.keys())
 
 with torch.no_grad():
-    pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
-    initial_loss = tu.calc_loss_dict(tu.cos_loss, pred['firing_rate'], target).item()
+    pred = model.predict(stimulus, input_neurons=input_neurons)[0]
+    initial_loss = mse_loss(target, pred['decoder']).item()
 
 print(f"Initial loss: {initial_loss:.6f}")
 print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
@@ -99,8 +98,8 @@ for cell_type_idx in sorted_indices:
     
     # Calculate loss with silenced cell types
     with torch.no_grad():
-        pred = model_copy.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
-        current_loss = tu.calc_loss_dict(tu.cos_loss, pred['firing_rate'], target).item()
+        pred = model_copy.predict(stimulus, input_neurons=input_neurons)[0]
+        current_loss = mse_loss(target, pred['decoder']).item()
     
     loss_ratio = current_loss / initial_loss
     
