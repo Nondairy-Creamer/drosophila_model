@@ -916,9 +916,11 @@ def get_stimulus(
     #     pu.xt_plot(column_phi_theta[:, 0], column_phi_theta[:, 1], optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
 
     # Add a blank stimulus (all zeros) with zero optic flow
-    blank_stim = torch.zeros((2, stimulus.shape[1], stimulus.shape[2]), device=device, dtype=dtype)
-    blank_stim[1, :, :] = 1.0
-    blank_flow = torch.zeros((2, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
+    blank_stim = torch.zeros((3, stimulus.shape[1], stimulus.shape[2]), device=device, dtype=dtype)
+    blank_stim[0, :, :] = 0.0
+    blank_stim[1, :, :] = 0.5
+    blank_stim[2, :, :] = 1.0
+    blank_flow = torch.zeros((3, optic_flow.shape[1], optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
     stimulus = torch.cat([blank_stim, stimulus], dim=0)
     optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
 
