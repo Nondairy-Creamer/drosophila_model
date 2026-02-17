@@ -68,6 +68,7 @@ tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     sigma_lambda=config['training']['sigma_lambda'],
     peak_lambda=config['training']['peak_lambda'],    
     reset_init_every=config['training']['reset_init_every'],
+    pre_stim_time=config['stimulus']['pre_stim_time'],
     )
 
                

@@ -40,10 +40,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
                 sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
-                batch_size=None):
+                batch_size=None, pre_stim_time=0.0):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
+
+    # Number of initial time steps to exclude from loss (pre-stimulus period)
+    loss_start_step = int(round(pre_stim_time / model.dt)) if pre_stim_time > 0 else 0
 
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
@@ -131,9 +134,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             # When using decoder, pred['decoder'] and target are tensors, not dicts
             # decoder output: (batches, time, num_columns, 2)
             # target (optic_flow): (batches, time, num_columns, 2)
-            loss = loss_fn(target_batch, pred['decoder'])
+            pred_loss = pred['decoder'][:, loss_start_step:]
+            target_loss = target_batch[:, loss_start_step:]
+            loss = loss_fn(target_loss, pred_loss)
         else:
-            loss = calc_loss_dict(loss_fn, pred['firing_rate'], target_batch)
+            pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
+            target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
+            loss = calc_loss_dict(loss_fn, pred_loss, target_loss)
 
         if sigma_lambda > 0:
             # add a regularizer based on the operator norm of the model

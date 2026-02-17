@@ -161,6 +161,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         contrast_std=config['training']['contrast_std'],
         luminance_std=config['training']['luminance_std'],
         batch_size=config['training']['batch_size'],
+        pre_stim_time=config['stimulus']['pre_stim_time'],
     )
 
 
