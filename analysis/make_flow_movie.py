@@ -63,7 +63,7 @@ def main() -> None:
         "model_path",
         type=str,
         nargs="?",
-        default="models/20260212_214842_gpu0_run0",
+        default="models/best_model",
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")

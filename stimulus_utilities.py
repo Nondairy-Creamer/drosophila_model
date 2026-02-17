@@ -679,9 +679,6 @@ def get_stimulus(
     sine_temporal_frequency: float | None = None,
     random_sine_duration_s: float | None = None,
     pre_stim_time_override: float | None = None,
-    const_rand_const_time: float | None = None,
-    const_rand_const_tf: float | None = None,
-    const_rand_const_first: bool = True,
 ):
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])

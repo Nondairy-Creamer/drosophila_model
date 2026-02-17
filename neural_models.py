@@ -85,7 +85,7 @@ class NeuralModel(torch.nn.Module, ABC):
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
                  use_decoder=True, use_input_conv=True, conv_size_x=5, conv_size_t=20, use_layer_norm=True):
         super().__init__()
-        # Save constructor inputs for serialization (child classes will overwrite with their own)
+        # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
         self.commit_hash = commit_hash
         self.silence_val = 1e-8  # when silencing neurons this is the value we set their connections to
@@ -735,9 +735,14 @@ class NeuralModel(torch.nn.Module, ABC):
     def _save_init_inputs(self):
         """Save the __init__ inputs from the calling frame to self.init_inputs.
         
-        Call this at the end of __init__ to capture the constructor arguments for serialization.
-        Child classes should call this after super().__init__() to overwrite with their own inputs.
-        Handles **kwargs by unpacking them into the saved dict so serialization stays flat.
+        Call this at the start of each __init__ to capture the constructor arguments for
+        serialization. Handles **kwargs by unpacking them into the saved dict so
+        serialization stays flat.
+        
+        When a child class calls this after super().__init__(), the parent's resolved
+        defaults are preserved and the child's inputs are merged on top. This ensures
+        every parameter (including defaults the caller didn't explicitly pass) is saved,
+        so old checkpoints remain valid even if defaults later change.
         """
         frame = inspect.currentframe().f_back
         params = frame.f_locals.copy()
@@ -747,7 +752,14 @@ class NeuralModel(torch.nn.Module, ABC):
         if 'kwargs' in params:
             kwargs = params.pop('kwargs')
             params.update(kwargs)
-        self.init_inputs = params
+        # Merge with previously saved inputs (e.g. parent class defaults) so that
+        # resolved default values are never lost when a child class overwrites.
+        if hasattr(self, 'init_inputs'):
+            merged = dict(self.init_inputs)
+            merged.update(params)
+            self.init_inputs = merged
+        else:
+            self.init_inputs = params
     
     def add_noise_to_parameters(self, noise_std):
         """Add Gaussian noise to all trainable parameters."""

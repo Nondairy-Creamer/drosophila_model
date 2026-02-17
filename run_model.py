@@ -27,7 +27,6 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     # Load configuration from TOML file
     config = du.load_config(config_path or 'config.toml')
-    stimulus_seed = 0
 
     # Override device if specified
     if device_override is not None:
