@@ -1391,7 +1391,7 @@ class CurrentModel(NeuralModel):
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
-                self.find_steady_state()
+                # self.find_steady_state()
 
     def _sign_synapses(self):
         """
@@ -1692,9 +1692,9 @@ class ConductanceModel(NeuralModel):
             self.steady_state.copy_(rp_leak_all)
         
         # Find steady state
-        if init_new_model:
-            with torch.no_grad():
-                self.find_steady_state()
+        # if init_new_model:
+        #     with torch.no_grad():
+        #         self.find_steady_state()
 
     def firing_rate(self, v):
         """Convert voltage to firing rate with threshold subtraction.
