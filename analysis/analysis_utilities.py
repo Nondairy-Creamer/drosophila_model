@@ -190,8 +190,14 @@ def run_model_on_stimuli(
     device: str = "cpu",
     stimulus_types: list[str] | None = None,
     stimulus_specs: list[dict] | None = None,
+    max_stimuli: int | None = None,
 ) -> dict[str, dict[str, torch.Tensor]]:
     """Generate stimuli, run a model, and collect responses.
+
+    Parameters
+    ----------
+    max_stimuli : int or None
+        If given, keep at most this many stimuli per stimulus type.
 
     Returns a dict keyed by stimulus name with values containing
     ``stimulus``, ``optic_flow``, ``pred_flow``, ``column_xyz``, and ``dt``.
@@ -205,11 +211,12 @@ def run_model_on_stimuli(
 
     if stimulus_specs is None:
         if stimulus_types is None:
-            stimulus_types = ["sintel", "flow360", "random_sine"]
+            stimulus_types = ["sintel", "flow360", "flyview", "random_sine"]
         stimulus_specs = []
         stimulus_map = {
             "sintel": ("sintel", None),
             "flow360": ("flow_360", None),
+            "flyview": ("flyview", None),
             "random_sine": ("random_sine", "column_phi_theta"),
         }
         for stim_name in stimulus_types:
@@ -244,6 +251,10 @@ def run_model_on_stimuli(
         )
         if stimulus.shape[0] > 1:
             stimulus, optic_flow = stimulus[1:], optic_flow[1:]
+
+        if max_stimuli is not None and stimulus.shape[0] > max_stimuli:
+            stimulus = stimulus[:max_stimuli]
+            optic_flow = optic_flow[:max_stimuli]
 
         pred_flow = predict_optic_flow(model, stimulus)
         responses[spec["name"]] = {

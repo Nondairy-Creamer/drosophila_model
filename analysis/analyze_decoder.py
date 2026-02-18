@@ -120,6 +120,64 @@ def main() -> None:
     plt.close(fig)
     print(f"Saved hex scatter to {hex_path}")
 
+    # ------------------------------------------------------------------
+    # Per-neuron conv_1 weight maps: 3x3 grid (center empty), one figure
+    # per neuron type, one subplot per channel
+    # ------------------------------------------------------------------
+    channels_1 = conv_1.shape[0]
+
+    # Map channels 0-7 to 3x3 grid positions, skipping center (1,1)
+    positions = [(0, 0), (0, 1), (0, 2),
+                 (1, 0),         (1, 2),
+                 (2, 0), (2, 1), (2, 2)]
+
+    for neuron_idx, neuron_name in enumerate(neuron_names):
+        fig, axes = plt.subplots(3, 3, figsize=(10, 10), dpi=150)
+
+        # Symmetric color limits shared across all channels for this neuron
+        weights_all_channels = conv_1[:, :, neuron_idx]  # (channels_1, num_nearest)
+        vmax = np.max(np.abs(weights_all_channels))
+        if vmax == 0:
+            vmax = 1.0
+
+        for ch_idx in range(min(channels_1, len(positions))):
+            row, col = positions[ch_idx]
+            ax = axes[row, col]
+            weights = conv_1[ch_idx, :, neuron_idx]  # (num_nearest,)
+
+            scatter = ax.scatter(
+                grid_points[:, 0],
+                grid_points[:, 1],
+                c=weights,
+                cmap="coolwarm",
+                vmin=-vmax,
+                vmax=vmax,
+                s=760,
+                linewidths=0.6,
+                edgecolors="black",
+            )
+            ax.set_title(f"Channel {ch_idx}", fontsize=10)
+            ax.set_aspect("equal", adjustable="box")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            fig.colorbar(scatter, ax=ax, shrink=0.7, pad=0.04)
+
+        # Hide center subplot
+        axes[1, 1].axis("off")
+
+        # Hide any extra subplots if channels_1 < 8
+        for ch_idx in range(channels_1, len(positions)):
+            row, col = positions[ch_idx]
+            axes[row, col].axis("off")
+
+        fig.suptitle(f"Decoder conv_1 weights — {neuron_name}", fontsize=14)
+        fig.tight_layout()
+
+        save_path = output_dir / f"decoder_conv1_weights_{neuron_name}.png"
+        fig.savefig(save_path)
+        plt.close(fig)
+        print(f"Saved {save_path}")
+
 
 if __name__ == "__main__":
     main()

@@ -6,7 +6,7 @@ Creates a 2x2 plot where each panel shows:
   - Columns included in the convolution for a chosen center column
   - The center column location
 
-Also optionally plots the flat-top hex grid used for registration.
+Also optionally plots the hex grid offsets used for convolution in p,q space.
 """
 import argparse
 import sys
@@ -38,7 +38,6 @@ def _load_model(config: dict, device: str) -> nm.CurrentModel:
             cell_info_df, synapse_counts_df, config['model']['use_connectome_subset']
         )
 
-    column_phi_theta = column_info_df[['phi', 'theta']].to_numpy()
     commit_hash = mu.get_git_commit_hash()
 
     model = nm.CurrentModel(
@@ -47,7 +46,8 @@ def _load_model(config: dict, device: str) -> nm.CurrentModel:
         cell_types=cell_info_df['type'].to_numpy(),
         neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
         column_indices=cell_info_df['column_index'].to_numpy(),
-        column_phi_theta=column_phi_theta,
+        column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
+        column_p_q=column_info_df[['p', 'q']].to_numpy(),
         nonlinearity=config['model']['nonlinearity'],
         count_threshold=config['model']['synapse_count_threshold'],
         device=device,
@@ -74,9 +74,8 @@ def _choose_center_indices(column_phi_theta: np.ndarray) -> list[int]:
 
 
 def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path: Path) -> None:
-    column_theta_phi = model.column_phi_theta
-    phi = column_theta_phi[:, 0]
-    theta = column_theta_phi[:, 1]
+    phi = model.column_phi_theta[:, 0]
+    theta = model.column_phi_theta[:, 1]
 
     nearest_indices = model.nearest_column_indices.detach().cpu().numpy()
     center_color = 'black'
@@ -86,8 +85,10 @@ def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path
     axes = axes.ravel()
 
     for ax, center_idx in zip(axes, center_indices):
-        conv_indices = nearest_indices[center_idx]
-        conv_order = np.arange(conv_indices.size)
+        all_conv_indices = nearest_indices[center_idx]
+        valid = all_conv_indices >= 0
+        conv_indices = all_conv_indices[valid]
+        conv_order = np.arange(all_conv_indices.size)[valid]
 
         ax.scatter(phi, theta, s=18, color='lightgray', alpha=0.7, edgecolors='none')
         conv_scatter = ax.scatter(
@@ -114,36 +115,21 @@ def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path
     plt.close(fig)
 
 
-def _hex_grid_points(column_phi_theta: np.ndarray, conv_size: int) -> np.ndarray:
-    if conv_size % 2 == 0:
-        raise ValueError("conv_size must be odd for centered convolution.")
-
-    num_columns = column_phi_theta.shape[0]
-    if num_columns == 0:
-        return np.zeros((0, 2))
-
-    phi_theta_i = column_phi_theta[:, None, :]
-    phi_theta_j = column_phi_theta[None, :, :]
-    diff = phi_theta_i - phi_theta_j
-    distances = np.sqrt(np.sum(diff**2, axis=2))
-
-    nearest_neighbor_dist = np.partition(distances, 1, axis=1)[:, 1]
-    grid_spacing = np.nanmedian(nearest_neighbor_dist)
-    if not np.isfinite(grid_spacing) or grid_spacing <= 0:
-        grid_spacing = 1.0
-
-    base_grid = nm.NeuralModel._hex_grid_points(conv_size)
-    return base_grid * grid_spacing
+def _pq_to_xy(pq: np.ndarray) -> np.ndarray:
+    """Project p,q hex lattice coordinates to flat x,y space."""
+    angle_1 = np.pi / 6
+    angle_2 = 2 * np.pi / 3 + angle_1
+    basis = np.array([[np.cos(angle_1), np.cos(angle_2)],
+                      [np.sin(angle_1), np.sin(angle_2)]])
+    return (basis @ pq.T).T
 
 
 def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
-    column_phi_theta = model.column_phi_theta
-
-    decoder_grid = _hex_grid_points(column_phi_theta, model.conv_size)
-    grids = [("Decoder grid", decoder_grid)]
+    decoder_offsets = nm.NeuralModel._hex_grid_pq_offsets(model.conv_size)
+    grids = [("Decoder grid", decoder_offsets)]
     if model.use_input_conv:
-        input_grid = _hex_grid_points(column_phi_theta, model.input_conv_size_x)
-        grids.append(("Input grid", input_grid))
+        input_offsets = nm.NeuralModel._hex_grid_pq_offsets(model.input_conv_size_x)
+        grids.append(("Input grid", input_offsets))
 
     fig, axes = plt.subplots(
         1,
@@ -156,15 +142,16 @@ def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
     if len(grids) == 1:
         axes = [axes]
 
-    for ax, (title, grid) in zip(axes, grids):
-        ax.scatter(grid[:, 0], grid[:, 1], s=50, color='tab:blue', alpha=0.9, edgecolors='none')
+    for ax, (title, offsets) in zip(axes, grids):
+        xy = _pq_to_xy(offsets.astype(np.float64))
+        ax.scatter(xy[:, 0], xy[:, 1], s=50, color='tab:blue', alpha=0.9, edgecolors='none')
         ax.scatter(0, 0, s=80, color='black', edgecolors='none')
         ax.set_title(title)
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         ax.set_aspect('equal', adjustable='box')
 
-    fig.suptitle('Flat-top hex grids used for convolution registration')
+    fig.suptitle('Hex grid convolution offsets')
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
@@ -172,9 +159,8 @@ def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
 
 
 def _plot_input_conv_columns(model: nm.CurrentModel, center_indices: list[int], output_path: Path) -> None:
-    column_theta_phi = model.column_phi_theta
-    phi = column_theta_phi[:, 0]
-    theta = column_theta_phi[:, 1]
+    phi = model.column_phi_theta[:, 0]
+    theta = model.column_phi_theta[:, 1]
 
     nearest_indices = model.input_nearest_column_indices.detach().cpu().numpy()
     center_color = 'black'
@@ -184,8 +170,10 @@ def _plot_input_conv_columns(model: nm.CurrentModel, center_indices: list[int], 
     axes = axes.ravel()
 
     for ax, center_idx in zip(axes, center_indices):
-        conv_indices = nearest_indices[center_idx]
-        conv_order = np.arange(conv_indices.size)
+        all_conv_indices = nearest_indices[center_idx]
+        valid = all_conv_indices >= 0
+        conv_indices = all_conv_indices[valid]
+        conv_order = np.arange(all_conv_indices.size)[valid]
 
         ax.scatter(phi, theta, s=18, color='lightgray', alpha=0.7, edgecolors='none')
         conv_scatter = ax.scatter(

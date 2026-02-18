@@ -36,7 +36,7 @@ def main() -> None:
         "--output-path",
         type=str,
         default=None,
-        help="Optional output file path (default: <model_folder>/input_conv_filters.png)",
+        help="Optional output file path (default: <model_folder>/figures/input_conv_filters.png)",
     )
     args = parser.parse_args()
 
@@ -89,7 +89,7 @@ def main() -> None:
 
     fig.tight_layout()
 
-    output_path = Path(args.output_path) if args.output_path else resolve_model_folder(model_path) / "input_conv_filters.png"
+    output_path = Path(args.output_path) if args.output_path else resolve_model_folder(model_path) / "figures" / "input_conv_filters.png"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path)
     plt.close(fig)

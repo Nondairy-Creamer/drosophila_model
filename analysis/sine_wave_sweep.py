@@ -126,7 +126,8 @@ def main():
 
     t4_types = ["T4a", "T4b", "T4c", "T4d"]
     t5_types = ["T5a", "T5b", "T5c", "T5d"]
-    output_neurons = t4_types + t5_types
+    other_types = ['T1', 'Tm1', 'Tm2', 'Tm20']
+    output_neurons = t4_types + t5_types + other_types
 
     with torch.no_grad():
         pred = model.predict(all_stim_tensor, input_neurons=["L1", "L2", "L3"],
@@ -199,7 +200,7 @@ def main():
 
     # --- T4 and T5 figures (one per group per wavelength) ---
     # Each subplot is a cell type (a–d); lines are directions.
-    for group_name, cell_types in [("T4", t4_types), ("T5", t5_types)]:
+    for group_name, cell_types in [("T4", t4_types), ("T5", t5_types), ("other", other_types)]:
         for wavelength in wavelengths:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
             cell_axes = {ct: ax for ct, ax in zip(cell_types, axes.flat)}

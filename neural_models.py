@@ -80,7 +80,8 @@ class CellTypeLayerNorm(torch.nn.Module):
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
-    def __init__(self, *, synapse_counts_coo, root_ids, cell_types, neurotransmitters, column_indices, column_phi_theta, 
+    def __init__(self, *, synapse_counts_coo, root_ids, cell_types, neurotransmitters, 
+                 column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
                  use_decoder=True, use_input_conv=True, conv_size_x=5, conv_size_t=20, use_layer_norm=True):
@@ -176,6 +177,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_transmitters = len(self.unique_transmitters)
         self.column_indices = column_indices
         self.column_phi_theta = column_phi_theta
+        self.column_p_q = column_p_q
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
 
@@ -242,17 +244,17 @@ class NeuralModel(torch.nn.Module, ABC):
 
         self.input_conv_size_x = conv_size_x
         self.input_conv_size_t = conv_size_t
-        axial_coords = self._hex_grid_axial_coords(conv_size_x)
-        self.input_num_nearest_columns = axial_coords.shape[0]
+        pq_offsets = self._hex_grid_pq_offsets(conv_size_x)
+        self.input_num_nearest_columns = pq_offsets.shape[0]
 
         # Initialize spatial filter: 1 for inner 7 hexes (center + 6 neighbors), small value elsewhere
         # Store as log so exp() is always non-negative
         spatial_floor = 1e-4
         spatial_init = np.full((conv_size_x, conv_size_x), spatial_floor)
         radius = conv_size_x // 2
-        for q, r in axial_coords:
-            if max(abs(q), abs(r), abs(q + r)) <= 1:
-                spatial_init[r + radius, q + radius] = 1.0
+        for dp, dq in pq_offsets:
+            if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
+                spatial_init[dq + radius, dp + radius] = 1.0
         # Initialize temporal filter as delta at current time (index 0=1, rest=0)
         temporal_init = np.zeros(conv_size_t)
         temporal_init[0] = 1.0
@@ -268,8 +270,8 @@ class NeuralModel(torch.nn.Module, ABC):
         )
 
         self.register_buffer(
-            'input_conv_axial_coords',
-            torch.tensor(axial_coords, device=self.device, dtype=torch.int64)
+            'input_conv_pq_offsets',
+            torch.tensor(pq_offsets, device=self.device, dtype=torch.int64)
         )
 
         ordered_nearest_indices = self._compute_nearest_columns(conv_size_x)
@@ -283,7 +285,7 @@ class NeuralModel(torch.nn.Module, ABC):
         # conv_1: nearest columns on hex grid, 8 channels, weights per neuron
         # conv_2: nearest columns on hex grid, 3 channels
         self.conv_size = conv_size
-        self.num_nearest_columns = self._hex_grid_points(conv_size).shape[0]
+        self.num_nearest_columns = self._hex_grid_pq_offsets(conv_size).shape[0]
         self.channels_1 = 8
         self.channels_2 = 3
         decoder_init = 0.0
@@ -404,13 +406,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.register_buffer('column_to_decoder_neurons', column_to_decoder_neurons_tensor)
 
     def _precompute_nearest_columns(self, conv_size):
-        """Pre-compute nearest columns using a shift + stretch aligned hex grid.
-        
-        For each central column, take the nearest columns matching the hex grid count,
-        fit a best rigid transform from a fixed flat-top hex grid to those points
-        (including the central column), then order the nearest columns by the grid's
-        row-major ordering to keep convolution weights consistently aligned across columns.
-        """
+        """Pre-compute nearest columns using direct p,q hex lattice lookup."""
         ordered_nearest_indices = self._compute_nearest_columns(conv_size)
         self.register_buffer(
             'nearest_column_indices',
@@ -443,103 +439,53 @@ class NeuralModel(torch.nn.Module, ABC):
         grid_y = np.sqrt(3.0) * (r + 0.5 * q)
         return np.stack([grid_x, grid_y], axis=1)
 
-    def _compute_nearest_columns(self, conv_size):
+    @staticmethod
+    def _hex_grid_pq_offsets(conv_size: int) -> np.ndarray:
+        """Return (dp, dq) offsets for a hex grid in the connectome's p,q lattice coordinates.
+
+        The p,q basis vectors are at 120 degrees apart. A point (dp, dq) is within
+        radius r of the origin when max(|dp|, |dq|, |dp - dq|) <= r.
+        """
         if conv_size % 2 == 0:
             raise ValueError("conv_size must be odd for centered convolution.")
+        radius = conv_size // 2
+        coords = []
+        for dp in range(-radius, radius + 1):
+            for dq in range(-radius, radius + 1):
+                if max(abs(dp), abs(dq), abs(dp - dq)) <= radius:
+                    coords.append((dp, dq))
+        return np.array(coords, dtype=np.int64)
 
-        # (num_columns, 3) with [x, y, z]
-        column_xyz = self.get_column_xyz()
-        num_columns = column_xyz.shape[0]
+    def _compute_nearest_columns(self, conv_size):
+        """Compute neighbor column indices for each column using the p,q hex lattice.
 
-        base_grid = self._hex_grid_points(conv_size)
-        num_nearest_columns = base_grid.shape[0]
-        
-        # Compute pairwise Euclidean distances between xyz vectors
-        xyz_i = column_xyz[:, None, :]  # (num_columns, 1, 3)
-        xyz_j = column_xyz[None, :, :]  # (1, num_columns, 3)
-        diff = xyz_i - xyz_j  # (num_columns, num_columns, 3)
-        distances = np.sqrt(np.sum(diff**2, axis=2))  # (num_columns, num_columns)
-        
-        # For each column, find nearest columns (including itself)
-        nearest_indices = np.argsort(distances, axis=1)[:, :num_nearest_columns]
-        
-        # Use median nearest-neighbor distance as global spacing
-        nearest_neighbor_dist = np.partition(distances, 1, axis=1)[:, 1]
-        grid_spacing = np.nanmedian(nearest_neighbor_dist)
-        if not np.isfinite(grid_spacing) or grid_spacing <= 0:
-            grid_spacing = 1.0
-        grid_points = base_grid * grid_spacing
-        
-        center_grid_idx = np.where(
-            (grid_points[:, 0] == 0) & (grid_points[:, 1] == 0)
-        )[0][0]
-        
-        def _no_rotation_affine(src_points, dst_points):
-            """Return per-axis scale and translation (no rotation) best fit."""
-            # Solve independently per axis: dst = src * s + t
-            A = np.column_stack([src_points[:, 0], np.ones(src_points.shape[0])])
-            sx, tx = np.linalg.lstsq(A, dst_points[:, 0], rcond=None)[0]
-            A = np.column_stack([src_points[:, 1], np.ones(src_points.shape[0])])
-            sy, ty = np.linalg.lstsq(A, dst_points[:, 1], rcond=None)[0]
-            scale = np.array([sx, sy])
-            translation = np.array([tx, ty])
-            return scale, translation
-        
-        def _hungarian_assignment(distance_matrix, fixed_pairs):
-            """Optimal one-to-one assignment with optional fixed grid->actual pairs."""
-            n = distance_matrix.shape[0]
-            assignment = np.full(n, -1, dtype=np.int64)
-            grid_used = np.zeros(n, dtype=bool)
-            actual_used = np.zeros(n, dtype=bool)
-            for grid_idx, actual_idx in fixed_pairs:
-                assignment[grid_idx] = actual_idx
-                grid_used[grid_idx] = True
-                actual_used[actual_idx] = True
-            
-            remaining_grid = np.where(~grid_used)[0]
-            remaining_actual = np.where(~actual_used)[0]
-            if remaining_grid.size > 0:
-                reduced_cost = distance_matrix[np.ix_(remaining_grid, remaining_actual)]
-                from scipy.optimize import linear_sum_assignment
-                row_ind, col_ind = linear_sum_assignment(reduced_cost)
-                assignment[remaining_grid[row_ind]] = remaining_actual[col_ind]
-            return assignment
-        
-        ordered_nearest_indices = np.zeros_like(nearest_indices)
-        max_icp_iters = 6
-        
+        For each column at (p, q), looks up neighbors at the hex grid offsets.
+        Neighbors outside the dataset are marked as -1.
+
+        Returns:
+            (num_columns, num_grid_points) int64 array of column indices (-1 = missing).
+        """
+        if conv_size % 2 == 0:
+            raise ValueError("conv_size must be odd for centered convolution.")
+        if self.column_p_q is None:
+            raise ValueError("column_p_q is required for convolution. "
+                             "Provide p,q coordinates from column_info_df.")
+
+        pq_offsets = self._hex_grid_pq_offsets(conv_size)
+        num_grid_points = pq_offsets.shape[0]
+        num_columns = self.num_columns
+
+        p = self.column_p_q[:, 0].astype(np.int64)
+        q = self.column_p_q[:, 1].astype(np.int64)
+        pq_to_col = {(p[i], q[i]): i for i in range(num_columns)}
+
+        ordered_nearest_indices = np.full((num_columns, num_grid_points), -1, dtype=np.int64)
         for col_idx in range(num_columns):
-            actual_points = self.column_phi_theta[nearest_indices[col_idx]].astype(np.float64)
-            center_actual_pos = np.where(nearest_indices[col_idx] == col_idx)[0]
-            if center_actual_pos.size == 0:
-                center_actual_pos = 0
-            else:
-                center_actual_pos = int(center_actual_pos[0])
-            
-            scale = np.ones(2, dtype=np.float64)
-            translation = actual_points.mean(axis=0) - grid_points.mean(axis=0)
-            assignment = None
-            
-            for _ in range(max_icp_iters):
-                transformed_grid = (grid_points * scale[None, :]) + translation
-                dists = np.linalg.norm(
-                    transformed_grid[:, None, :] - actual_points[None, :, :],
-                    axis=2
-                )
-                assignment_new = _hungarian_assignment(
-                    dists,
-                    fixed_pairs=[(center_grid_idx, center_actual_pos)]
-                )
-                matched_actual = actual_points[assignment_new]
-                scale_new, translation_new = _no_rotation_affine(grid_points, matched_actual)
-                
-                if assignment is not None and np.array_equal(assignment_new, assignment):
-                    scale, translation = scale_new, translation_new
-                    break
-                assignment = assignment_new
-                scale, translation = scale_new, translation_new
-            
-            ordered_nearest_indices[col_idx] = nearest_indices[col_idx][assignment]
+            pc, qc = p[col_idx], q[col_idx]
+            for gi in range(num_grid_points):
+                key = (pc + pq_offsets[gi, 0], qc + pq_offsets[gi, 1])
+                if key in pq_to_col:
+                    ordered_nearest_indices[col_idx, gi] = pq_to_col[key]
 
         return ordered_nearest_indices
 
@@ -552,15 +498,24 @@ class NeuralModel(torch.nn.Module, ABC):
         Returns:
             Convolved tensor with same shape.
         """
-        # Gather spatial neighbors: (stimuli, time, columns, neighbors)
-        spatial_windows = inputs[:, :, self.input_nearest_column_indices]
+        indices = self.input_nearest_column_indices  # (num_columns, num_neighbors)
+        valid_mask = indices >= 0  # (num_columns, num_neighbors)
+        safe_indices = indices.clamp(min=0)
+
+        # Gather spatial neighbors: (stimuli, time, num_columns, num_neighbors)
+        spatial_windows = inputs[:, :, safe_indices]
 
         radius = self.input_conv_size_x // 2
-        q_idx = self.input_conv_axial_coords[:, 0] + radius
-        r_idx = self.input_conv_axial_coords[:, 1] + radius
-        spatial_kernel = self.input_conv_xy_log.exp()[r_idx, q_idx]
-        spatial_kernel = spatial_kernel / spatial_kernel.sum()
-        return torch.einsum('stcn,n->stc', spatial_windows, spatial_kernel)
+        dp_idx = self.input_conv_pq_offsets[:, 0] + radius
+        dq_idx = self.input_conv_pq_offsets[:, 1] + radius
+        raw_kernel = self.input_conv_xy_log.exp()[dq_idx, dp_idx]  # (num_neighbors,)
+
+        # Zero out weights for missing neighbors, normalize per column
+        masked_kernel = raw_kernel.unsqueeze(0) * valid_mask.to(raw_kernel.dtype)  # (num_columns, num_neighbors)
+        kernel_sum = masked_kernel.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        normalized_kernel = masked_kernel / kernel_sum  # (num_columns, num_neighbors)
+
+        return torch.einsum('stcn,cn->stc', spatial_windows, normalized_kernel)
 
     def _apply_temporal_conv(self, inputs):
         """Apply temporal convolution only (no spatial filtering).
@@ -624,11 +579,16 @@ class NeuralModel(torch.nn.Module, ABC):
         """Pre-compute decoder neuron indices for each column's nearest columns.
         
         Creates tensor (num_columns, num_nearest, num_decoder_neuron_types) with neuron indices.
-        Missing neurons are marked as -1.
+        Missing neurons (or neurons in missing neighbor columns) are marked as -1.
         """
-        # nearest_column_indices: (num_columns, num_nearest)
+        # nearest_column_indices: (num_columns, num_nearest) -- may contain -1 for boundary
+        valid_col_mask = self.nearest_column_indices >= 0  # (num_columns, num_nearest)
+        safe_col_indices = self.nearest_column_indices.clamp(min=0)
+
         # column_to_decoder_neurons: (num_columns, num_decoder_neuron_types)
-        nearest_decoder_neuron_indices = self.column_to_decoder_neurons[self.nearest_column_indices]
+        nearest_decoder_neuron_indices = self.column_to_decoder_neurons[safe_col_indices]
+        # Mark all neuron types as missing for neighbor columns that don't exist
+        nearest_decoder_neuron_indices[~valid_col_mask.unsqueeze(-1).expand_as(nearest_decoder_neuron_indices)] = -1
         self.register_buffer('nearest_decoder_neuron_indices', nearest_decoder_neuron_indices)
 
     def decode_motion(self, v):
@@ -694,8 +654,12 @@ class NeuralModel(torch.nn.Module, ABC):
         # Apply conv_2: (stimuli, num_columns, channels_1) -> (stimuli, num_columns, channels_2)
         # conv_2 operates on conv_1_output from nearest columns, weighting the channels_1 channels
         # Get conv_1_output from nearest columns: (stimuli, num_columns, num_nearest, channels_1)
-        # Advanced indexing: conv_1_output[:, nearest_indices] broadcasts over stimuli dimension
-        nearest_conv_1_output = conv_1_output[:, self.nearest_column_indices]  # (stimuli, num_columns, num_nearest, channels_1)
+        safe_col_indices = self.nearest_column_indices.clamp(min=0)
+        valid_col_mask = self.nearest_column_indices >= 0  # (num_columns, num_nearest)
+        nearest_conv_1_output = conv_1_output[:, safe_col_indices]  # (stimuli, num_columns, num_nearest, channels_1)
+        nearest_conv_1_output = nearest_conv_1_output.masked_fill(
+            ~valid_col_mask.unsqueeze(0).unsqueeze(-1), 0.0
+        )
         
         # Apply conv_2 filter: (stimuli, num_columns, num_nearest, channels_1) @ (channels_2, num_nearest, channels_1)
         # decoder_conv_2: (channels_2, num_nearest, channels_1)
@@ -1102,6 +1066,8 @@ class NeuralModel(torch.nn.Module, ABC):
             state_dict['input_conv_xy_log'] = torch.log(state_dict.pop('input_conv_xy').clamp(min=1e-8))
         if 'input_conv_t_log' in state_dict and 'input_conv_t' not in state_dict:
             state_dict['input_conv_t'] = state_dict.pop('input_conv_t_log').exp()
+        if 'input_conv_axial_coords' in state_dict and 'input_conv_pq_offsets' not in state_dict:
+            state_dict['input_conv_pq_offsets'] = state_dict.pop('input_conv_axial_coords')
         if 'layer_norm.weight' in state_dict and 'layer_norm.weight_log' not in state_dict:
             state_dict['layer_norm.weight_log'] = torch.log(state_dict.pop('layer_norm.weight').clamp(min=1e-8))
 
@@ -1551,7 +1517,7 @@ class ConductanceModel(NeuralModel):
             init_new_model: Whether to run initialization steps like finding steady state (default: True)
             **kwargs: All arguments passed to NeuralModel (synapse_counts_coo, root_ids,
                 cell_types, neurotransmitters, column_indices, column_phi_theta,
-                device, dtype, dt, seed, etc.)
+                column_p_q, device, dtype, dt, seed, etc.)
         """
         # Call parent init (handles NT filtering, count_threshold filtering, and orphan removal)
         # All NeuralModel args (data + config) pass through via **kwargs
