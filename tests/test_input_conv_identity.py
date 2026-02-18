@@ -67,11 +67,15 @@ def test_full_pipeline_spatial_norm_negate_temporal():
     )
 
     with torch.no_grad():
-        local_mean = model.input_spatial_conv(inputs.unsqueeze(-1)).squeeze(-1)
+        w = model.input_spatial_conv.weight[0, :, 0]
+        valid = model.input_spatial_conv.nearest_column_indices >= 0
+        eff_sum = (w.unsqueeze(0) * valid.float()).sum(dim=1).clamp(min=1e-8)
+
+        raw_mean = model.input_spatial_conv(inputs.unsqueeze(-1)).squeeze(-1)
+        local_mean = raw_mean / eff_sum
         centered = inputs - local_mean
-        local_var = model.input_spatial_conv(
-            (centered ** 2).unsqueeze(-1)
-        ).squeeze(-1)
+        raw_var = model.input_spatial_conv((centered ** 2).unsqueeze(-1)).squeeze(-1)
+        local_var = raw_var / eff_sum
         normed = -centered / torch.sqrt(local_var + 1e-3)
 
         pad = model.input_conv_size_t - 1

@@ -56,6 +56,7 @@ def build_model_from_test_config(decoder_type: str = 'conv_2', use_input_conv: b
         neurotransmitters=cell_info_df["neurotransmitter"].to_numpy(),
         column_indices=cell_info_df["column_index"].to_numpy(),
         column_phi_theta=column_info_df[["phi", "theta"]].to_numpy(),
+        column_p_q=column_info_df[["p", "q"]].to_numpy(),
         nonlinearity=config["model"]["nonlinearity"],
         count_threshold=config["model"]["synapse_count_threshold"],
         device=config["model"]["device"],

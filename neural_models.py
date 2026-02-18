@@ -333,10 +333,9 @@ class MotionDecoder(torch.nn.Module):
                 x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
                 x = torch.nn.functional.softplus(x)
 
-        last_channel = x.shape[2]
-        denom = torch.nn.functional.softplus(x[:, :, last_channel, None].clone())
+        denom = torch.nn.functional.softplus(x[:, :, -1:].clone())
         denom = torch.clamp(denom, min=self.denom_eps)
-        optic_flow = x[:, :, :last_channel] / denom
+        optic_flow = x[:, :, :-1] / denom
 
         if squeeze:
             optic_flow = optic_flow.squeeze(0)
@@ -532,12 +531,13 @@ class NeuralModel(torch.nn.Module, ABC):
             column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
         )
 
-        # Initialize spatial kernel: ~1/7 for inner hex ring, ~0 elsewhere
+        # Initialize spatial kernel: 1.0 for inner hex ring, ~0 elsewhere.
+        # apply_input_conv normalizes by the effective weight sum per column.
         pq_offsets = NeuralModelConv.hex_grid_pq_offsets(conv_size_x)
         with torch.no_grad():
             for i, (dp, dq) in enumerate(pq_offsets):
                 if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
-                    self.input_spatial_conv.weight[0, i, 0] = 1.0 / 7.0
+                    self.input_spatial_conv.weight[0, i, 0] = 1.0
 
         self.input_conv_size_t = conv_size_t
         temporal_init = np.zeros(conv_size_t)
@@ -603,11 +603,16 @@ class NeuralModel(torch.nn.Module, ABC):
         else:
             raise ValueError("inputs must have shape (time, columns) or (stimuli, time, columns).")
 
-        local_mean = self.input_spatial_conv(inputs.unsqueeze(-1)).squeeze(-1)
+        def _normalized_spatial(x):
+            raw = self.input_spatial_conv(x.unsqueeze(-1)).squeeze(-1)
+            w = self.input_spatial_conv.weight[0, :, 0]
+            valid = self.input_spatial_conv.nearest_column_indices >= 0
+            eff_sum = (w.unsqueeze(0) * valid.float()).sum(dim=1).clamp(min=1e-8)
+            return raw / eff_sum
+
+        local_mean = _normalized_spatial(inputs)
         centered = inputs - local_mean
-        local_var = self.input_spatial_conv(
-            (centered ** 2).unsqueeze(-1)
-        ).squeeze(-1)
+        local_var = _normalized_spatial(centered ** 2)
         normed = -centered / torch.sqrt(local_var + 1e-3)
 
         # Causal temporal convolution
