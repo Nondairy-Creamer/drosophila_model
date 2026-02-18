@@ -77,6 +77,272 @@ class CellTypeLayerNorm(torch.nn.Module):
         return f'num_cell_types={self.num_cell_types}, eps={self.eps}'
 
 
+class NeuralModelConv(torch.nn.Module):
+    """Hex-grid spatial convolution layer.
+
+    Gathers per-column features from hex-grid neighbours, applies a learned
+    weight tensor via einsum, and adds a bias.  Missing neighbours (boundary
+    columns marked ``-1``) and ``NaN`` input features (e.g. absent neuron
+    types) are zeroed out before the contraction.
+    """
+
+    def __init__(self, in_features, out_features, conv_size, column_p_q,
+                 device=None, dtype=None):
+        super().__init__()
+        nearest_column_indices = self.compute_nearest_columns(conv_size, column_p_q)
+        self.register_buffer(
+            'nearest_column_indices',
+            torch.tensor(nearest_column_indices, device=device, dtype=torch.int64),
+        )
+        num_nearest = nearest_column_indices.shape[1]
+        self.weight = torch.nn.Parameter(
+            torch.zeros(out_features, num_nearest, in_features,
+                        device=device, dtype=dtype)
+        )
+        self.bias = torch.nn.Parameter(
+            torch.zeros(out_features, device=device, dtype=dtype)
+        )
+
+    def forward(self, x):
+        """Apply hex-grid convolution.
+
+        Args:
+            x: ``(..., num_columns, in_features)``.  Arbitrary leading
+               dimensions are preserved.  May contain ``NaN`` for missing
+               features (they are replaced with 0).
+
+        Returns:
+            ``(..., num_columns, out_features)``
+        """
+        leading = x.shape[:-2]
+        x_flat = x.reshape(-1, x.shape[-2], x.shape[-1])
+
+        safe_idx = self.nearest_column_indices.clamp(min=0)
+        valid_mask = self.nearest_column_indices >= 0
+
+        gathered = x_flat[:, safe_idx]
+        gathered = gathered.masked_fill(~valid_mask.unsqueeze(0).unsqueeze(-1), 0.0)
+        gathered = torch.where(torch.isnan(gathered),
+                               torch.zeros_like(gathered), gathered)
+
+        out = torch.einsum('scnf,knf->sck', gathered, self.weight)
+        out = out + self.bias.view(1, 1, -1)
+        return out.reshape(*leading, out.shape[-2], out.shape[-1])
+
+    # ------------------------------------------------------------------
+    # Hex-grid geometry helpers (static, shared by all conv users)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def hex_grid_axial_coords(conv_size: int) -> np.ndarray:
+        """Return axial (q, r) coordinates for a flat-top hex grid."""
+        if conv_size % 2 == 0:
+            raise ValueError("conv_size must be odd for centered convolution.")
+        radius = conv_size // 2
+        coords = []
+        for r in range(-radius, radius + 1):
+            q_min = max(-radius, -r - radius)
+            q_max = min(radius, -r + radius)
+            for q in range(q_min, q_max + 1):
+                coords.append((q, r))
+        return np.array(coords, dtype=np.int64)
+
+    @staticmethod
+    def hex_grid_points(conv_size: int) -> np.ndarray:
+        """Return flat-top hex grid points centered at (0,0)."""
+        axial = NeuralModelConv.hex_grid_axial_coords(conv_size).astype(np.float64)
+        q, r = axial[:, 0], axial[:, 1]
+        return np.stack([1.5 * q, np.sqrt(3.0) * (r + 0.5 * q)], axis=1)
+
+    @staticmethod
+    def hex_grid_pq_offsets(conv_size: int) -> np.ndarray:
+        """Return (dp, dq) offsets for a hex grid in the connectome's p,q
+        lattice coordinates.
+
+        The p,q basis vectors are at 120 degrees apart.  A point (dp, dq) is
+        within radius *r* of the origin when ``max(|dp|, |dq|, |dp-dq|) <= r``.
+        """
+        if conv_size % 2 == 0:
+            raise ValueError("conv_size must be odd for centered convolution.")
+        radius = conv_size // 2
+        coords = []
+        for dp in range(-radius, radius + 1):
+            for dq in range(-radius, radius + 1):
+                if max(abs(dp), abs(dq), abs(dp - dq)) <= radius:
+                    coords.append((dp, dq))
+        return np.array(coords, dtype=np.int64)
+
+    @staticmethod
+    def compute_nearest_columns(conv_size, column_p_q):
+        """Compute neighbour column indices for every column on a p,q hex lattice.
+
+        Args:
+            conv_size: Odd integer giving the hex-grid diameter.
+            column_p_q: ``(num_columns, 2)`` array of integer lattice coords.
+
+        Returns:
+            ``(num_columns, num_grid_points)`` int64 array (``-1`` = missing).
+        """
+        if conv_size % 2 == 0:
+            raise ValueError("conv_size must be odd for centered convolution.")
+        if column_p_q is None:
+            raise ValueError("column_p_q is required for convolution.")
+
+        pq_offsets = NeuralModelConv.hex_grid_pq_offsets(conv_size)
+        num_grid_points = pq_offsets.shape[0]
+        p = column_p_q[:, 0].astype(np.int64)
+        q = column_p_q[:, 1].astype(np.int64)
+        num_columns = len(p)
+        pq_to_col = {(p[i], q[i]): i for i in range(num_columns)}
+
+        result = np.full((num_columns, num_grid_points), -1, dtype=np.int64)
+        for col_idx in range(num_columns):
+            pc, qc = p[col_idx], q[col_idx]
+            for gi in range(num_grid_points):
+                key = (pc + pq_offsets[gi, 0], qc + pq_offsets[gi, 1])
+                if key in pq_to_col:
+                    result[col_idx, gi] = pq_to_col[key]
+        return result
+
+
+class MotionDecoder(torch.nn.Module):
+    """N-layer hex-grid convolutional decoder: firing rates -> optic flow.
+
+    Each entry in *num_channels* adds a ``NeuralModelConv`` layer.  All layers
+    except the last are followed by BatchNorm + softplus.  The final layer's
+    first two channels are divided by softplus of the third to produce 2-D
+    optic flow per column.
+
+    Args:
+        num_channels: List of output channel counts, one per conv layer.
+        conv_sizes: List of hex-grid diameters (odd ints), same length as
+            *num_channels*.
+        neurons_to_decode: Ordered list of cell-type names used as decoder
+            input features.
+        column_p_q: ``(num_columns, 2)`` p,q lattice coordinates.
+        cell_types: Per-neuron cell type array (length *num_neurons*).
+        column_indices: Per-neuron column index array (length *num_neurons*).
+        num_neurons: Total neuron count in the model.
+        num_columns: Total column count in the model.
+        denom_eps: Clamping floor for the normalising denominator.
+    """
+
+    def __init__(self, num_channels, conv_sizes, neurons_to_decode,
+                 column_p_q, cell_types, column_indices, num_neurons,
+                 num_columns, denom_eps=1e-2, device=None, dtype=None):
+        super().__init__()
+        if len(num_channels) != len(conv_sizes):
+            raise ValueError("num_channels and conv_sizes must have the same length.")
+        self.denom_eps = denom_eps
+        self.neurons_to_decode = list(neurons_to_decode)
+        self.conv_sizes = list(conv_sizes)
+
+        self._build_column_to_neuron_mapping(
+            cell_types, column_indices, num_neurons, num_columns, device,
+        )
+
+        num_decoder_neuron_types = len(self.neurons_to_decode)
+        in_features = num_decoder_neuron_types
+        self.conv_layers = torch.nn.ModuleList()
+        self.batch_norms = torch.nn.ModuleList()
+        for i, (channels, csz) in enumerate(zip(num_channels, conv_sizes)):
+            self.conv_layers.append(NeuralModelConv(
+                in_features=in_features,
+                out_features=channels,
+                conv_size=csz,
+                column_p_q=column_p_q,
+                device=device,
+                dtype=dtype,
+            ))
+            if i < len(num_channels) - 1:
+                self.batch_norms.append(
+                    torch.nn.BatchNorm1d(channels).to(device=device, dtype=dtype)
+                )
+            in_features = channels
+
+    # ------------------------------------------------------------------
+    # Neuron-to-column mapping (built once at init)
+    # ------------------------------------------------------------------
+
+    def _build_column_to_neuron_mapping(self, cell_types, column_indices,
+                                        num_neurons, num_columns, device):
+        """Create ``column_to_decoder_neurons`` buffer.
+
+        Shape ``(num_columns, num_decoder_neuron_types)`` with neuron indices;
+        ``-1`` marks absent neuron types in a given column.
+        """
+        cell_types = np.asarray(cell_types)
+        column_indices = np.asarray(column_indices, dtype=np.float64)
+        cell_type_to_idx = {ct: i for i, ct in enumerate(self.neurons_to_decode)}
+        num_types = len(self.neurons_to_decode)
+
+        decoder_mask = np.zeros(num_neurons, dtype=bool)
+        for ct in self.neurons_to_decode:
+            decoder_mask |= (cell_types == ct)
+
+        mapping = np.full((num_columns, num_types), -1, dtype=np.int64)
+        for neuron_idx in np.where(decoder_mask)[0]:
+            col = column_indices[neuron_idx]
+            if np.isnan(col):
+                continue
+            col = int(col)
+            type_idx = cell_type_to_idx.get(cell_types[neuron_idx])
+            if type_idx is not None and mapping[col, type_idx] == -1:
+                mapping[col, type_idx] = neuron_idx
+
+        self.register_buffer(
+            'column_to_decoder_neurons',
+            torch.tensor(mapping, device=device, dtype=torch.int64),
+        )
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
+
+    def _extract_column_features(self, v):
+        """Map raw neuron firing rates to per-column features.
+
+        Returns ``(batch, num_columns, num_decoder_neuron_types)`` with
+        ``NaN`` for neuron types absent from a column.
+        """
+        valid = self.column_to_decoder_neurons >= 0
+        safe = self.column_to_decoder_neurons.clamp(min=0)
+        features = v[:, safe]
+        return features.masked_fill(~valid.unsqueeze(0), float('nan'))
+
+    def forward(self, v):
+        """Decode optic flow from firing rates.
+
+        Args:
+            v: ``(stimuli, num_neurons)`` or ``(num_neurons,)``.
+
+        Returns:
+            Optic flow ``(stimuli, num_columns, 2)`` or ``(num_columns, 2)``.
+        """
+        if v.dim() == 1:
+            v = v.unsqueeze(0)
+            squeeze = True
+        else:
+            squeeze = False
+
+        x = self._extract_column_features(v)
+
+        for i, conv in enumerate(self.conv_layers):
+            x = conv(x)
+            if i < len(self.batch_norms):
+                x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
+                x = torch.nn.functional.softplus(x)
+
+        last_channel = x.shape[2]
+        denom = torch.nn.functional.softplus(x[:, :, last_channel, None].clone())
+        denom = torch.clamp(denom, min=self.denom_eps)
+        optic_flow = x[:, :, :last_channel] / denom
+
+        if squeeze:
+            optic_flow = optic_flow.squeeze(0)
+        return optic_flow
+
+
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
@@ -84,7 +350,7 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 use_decoder=True, use_input_conv=True, conv_size_x=5, conv_size_t=20, use_layer_norm=True):
+                 decoder_type='none', use_input_conv=True, conv_size_x=5, conv_size_t=20, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
@@ -94,7 +360,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.count_threshold = count_threshold
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
-        self.use_decoder = use_decoder
+        self.decoder_type = decoder_type
         self.use_input_conv = use_input_conv
         self.decoder_denom_eps = 1e-2
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
@@ -115,50 +381,15 @@ class NeuralModel(torch.nn.Module, ABC):
         self.dtype = getattr(torch, dtype)
         self.dt = dt
         
-        # Ensure arrays are numpy with correct dtypes
-        neurotransmitters = np.array(neurotransmitters)
-        assert root_ids.dtype == np.int64, 'root_ids must have dtype np.int64'
-        assert synapse_counts_coo.dtype == np.int64, 'root_ids must have dtype np.int64'
-        
-        # --- Filter out neurons in order ---
-        # remove connections that have too few synapses
-        # remove neurons with invalid neurotransmitters
-        # remove connections to invalid neurons
-        # remove neurons with no connections
+        root_ids, cell_types, neurotransmitters, column_indices, synapse_counts_coo = (
+            self._preprocess_connectome(
+                synapse_counts_coo, root_ids, cell_types, neurotransmitters,
+                column_indices, valid_neurotransmitters, count_threshold,
+            )
+        )
 
-        # --- Remove Small Connections ---
-        # Apply synapse count threshold and make sure connections are to valid neurons
-        above_threshold_connections = np.abs(synapse_counts_coo[:, 2]) >= count_threshold
-        synapse_counts_coo = synapse_counts_coo[above_threshold_connections, :]
-
-        # --- Filter out neurons ---
-        # Filter neurons by valid neurotransmitters
-        valid_nt_mask = np.isin(neurotransmitters, valid_neurotransmitters)
-
-        # remove connections to invalid neurons
-        valid_connections = np.isin(synapse_counts_coo[:, 0], root_ids[valid_nt_mask]) & np.isin(synapse_counts_coo[:, 1], root_ids[valid_nt_mask])
-        synapse_counts_coo = synapse_counts_coo[valid_connections, :]
-        
-        # Filter if the neuron has no connections
-        connected_root_ids = np.unique(synapse_counts_coo[:, 0:2])
-        connected_neurons = np.isin(root_ids, connected_root_ids)
-        valid_neurons = valid_nt_mask & connected_neurons
-        
-        # remove the invalid neurons based on neurotransmitter and if it has no connections
-        root_ids = root_ids[valid_neurons]
-        cell_types = cell_types[valid_neurons]
-        neurotransmitters = neurotransmitters[valid_neurons]
-        column_indices = column_indices[valid_neurons]
-
-        # --- Convert root IDs to matrix indices (done once after all filtering) ---
-        self.root_ids = root_ids
-        import pandas as pd
-        root_id_index = pd.Index(root_ids)
-        pre_matrix_indices = root_id_index.get_indexer(synapse_counts_coo[:, 0])
-        post_matrix_indices = root_id_index.get_indexer(synapse_counts_coo[:, 1])
-        synapse_counts_coo = np.column_stack([pre_matrix_indices, post_matrix_indices, synapse_counts_coo[:, 2]])
-        
         # --- Now set up the model with filtered data ---
+        self.root_ids = root_ids
         self.cell_types = cell_types
         self.num_neurons = cell_types.shape[0]
         self.unique_cell_types = np.unique(cell_types)
@@ -183,15 +414,6 @@ class NeuralModel(torch.nn.Module, ABC):
 
         # Layer norm flag (actual module created after neuron_to_type_index is built)
         self.use_layer_norm = use_layer_norm
-
-        # readout from the neurons to optic flow in units of degrees per second
-        # Cell lists stored as attributes, readout tensors as buffers (auto-saved in state_dict)
-        self.optic_flow_horizontal_cells = ['T4a', 'T4b', 'T5a', 'T5b']
-        self.optic_flow_vertical_cells = ['T4c', 'T4d', 'T5c', 'T5d']
-        self.register_buffer('optic_flow_horizontal_readout', 
-                             torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
-        self.register_buffer('optic_flow_vertical_readout',
-                             torch.tensor([1., -1., 1., -1., 0.], device=self.device, dtype=torch.double))
 
         # --- create the matrix of synapse counts ---
         # Store filtered COO for subclasses that may need it (e.g., ConductanceModel)
@@ -219,12 +441,18 @@ class NeuralModel(torch.nn.Module, ABC):
                 device=self.device, dtype=self.dtype,
             )
 
-        if self.use_decoder:
-            # Initialize decoder
+        if self.decoder_type == 'conv_1':
+            pass  # placeholder for future conv_1 decoder
+        if self.decoder_type == 'conv_2':
             self._initialize_decoder()
         if self.use_input_conv:
             # Initialize input convolution layer
             self._initialize_input_conv(conv_size_x=conv_size_x, conv_size_t=conv_size_t)
+
+    @property
+    def has_decoder(self):
+        """Whether the model has a trained decoder (any type other than 'none')."""
+        return self.decoder_type != 'none'
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
@@ -235,456 +463,167 @@ class NeuralModel(torch.nn.Module, ABC):
         z = radius * np.cos(theta)
         return np.stack((x, y, z), axis=1)
 
+    @staticmethod
+    def _preprocess_connectome(synapse_counts_coo, root_ids, cell_types,
+                               neurotransmitters, column_indices,
+                               valid_neurotransmitters, count_threshold):
+        """Filter the raw connectome and convert root IDs to matrix indices.
+
+        Filtering steps (in order):
+        1. Remove connections below the synapse count threshold.
+        2. Remove neurons with invalid neurotransmitters.
+        3. Remove connections involving removed neurons.
+        4. Remove neurons with no remaining connections.
+
+        Returns the filtered ``(root_ids, cell_types, neurotransmitters,
+        column_indices, synapse_counts_coo)`` where the COO now stores
+        matrix indices instead of root IDs.
+        """
+        import pandas as pd
+
+        neurotransmitters = np.array(neurotransmitters)
+        assert root_ids.dtype == np.int64, 'root_ids must have dtype np.int64'
+        assert synapse_counts_coo.dtype == np.int64, 'synapse_counts_coo must have dtype np.int64'
+
+        # Remove connections below threshold
+        above_threshold = np.abs(synapse_counts_coo[:, 2]) >= count_threshold
+        synapse_counts_coo = synapse_counts_coo[above_threshold]
+
+        # Keep only neurons with valid neurotransmitters
+        valid_nt_mask = np.isin(neurotransmitters, valid_neurotransmitters)
+
+        # Remove connections involving invalid neurons
+        valid_ids = root_ids[valid_nt_mask]
+        valid_connections = (
+            np.isin(synapse_counts_coo[:, 0], valid_ids)
+            & np.isin(synapse_counts_coo[:, 1], valid_ids)
+        )
+        synapse_counts_coo = synapse_counts_coo[valid_connections]
+
+        # Remove neurons with no remaining connections
+        connected_ids = np.unique(synapse_counts_coo[:, 0:2])
+        valid_neurons = valid_nt_mask & np.isin(root_ids, connected_ids)
+
+        root_ids = root_ids[valid_neurons]
+        cell_types = cell_types[valid_neurons]
+        neurotransmitters = neurotransmitters[valid_neurons]
+        column_indices = column_indices[valid_neurons]
+
+        # Convert root IDs to matrix indices
+        root_id_index = pd.Index(root_ids)
+        pre_idx = root_id_index.get_indexer(synapse_counts_coo[:, 0])
+        post_idx = root_id_index.get_indexer(synapse_counts_coo[:, 1])
+        synapse_counts_coo = np.column_stack([pre_idx, post_idx, synapse_counts_coo[:, 2]])
+
+        return root_ids, cell_types, neurotransmitters, column_indices, synapse_counts_coo
+
     def _initialize_input_conv(self, conv_size_x=5, conv_size_t=20):
-        """Initialize input convolution parameters and precompute indices."""
+        """Set up input convolution using a ``NeuralModelConv`` for the spatial
+        part and a learned 1-D causal kernel for the temporal part.
+        """
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
         if conv_size_t < 1:
             raise ValueError("conv_size_t must be >= 1 for temporal convolution.")
 
         self.input_conv_size_x = conv_size_x
-        self.input_conv_size_t = conv_size_t
-        pq_offsets = self._hex_grid_pq_offsets(conv_size_x)
-        self.input_num_nearest_columns = pq_offsets.shape[0]
+        self.input_spatial_conv = NeuralModelConv(
+            in_features=1, out_features=1, conv_size=conv_size_x,
+            column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
+        )
 
-        # Initialize spatial filter: 1 for inner 7 hexes (center + 6 neighbors), small value elsewhere
-        # Store as log so exp() is always non-negative
-        spatial_floor = 1e-4
-        spatial_init = np.full((conv_size_x, conv_size_x), spatial_floor)
-        radius = conv_size_x // 2
-        for dp, dq in pq_offsets:
-            if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
-                spatial_init[dq + radius, dp + radius] = 1.0
-        # Initialize temporal filter as delta at current time (index 0=1, rest=0)
+        # Initialize spatial kernel: ~1/7 for inner hex ring, ~0 elsewhere
+        pq_offsets = NeuralModelConv.hex_grid_pq_offsets(conv_size_x)
+        with torch.no_grad():
+            for i, (dp, dq) in enumerate(pq_offsets):
+                if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
+                    self.input_spatial_conv.weight[0, i, 0] = 1.0 / 7.0
+
+        self.input_conv_size_t = conv_size_t
         temporal_init = np.zeros(conv_size_t)
         temporal_init[0] = 1.0
-
-        self.input_conv_xy_log = torch.nn.Parameter(
-            torch.tensor(np.log(spatial_init), device=self.device, dtype=self.dtype)
-        )
-        self.input_conv_t = torch.nn.Parameter(
+        self.input_conv_temporal = torch.nn.Parameter(
             torch.tensor(temporal_init, device=self.device, dtype=self.dtype)
         )
-        self.input_conv_bias = torch.nn.Parameter(
-            torch.zeros((), device=self.device, dtype=self.dtype)
-        )
 
-        self.register_buffer(
-            'input_conv_pq_offsets',
-            torch.tensor(pq_offsets, device=self.device, dtype=torch.int64)
-        )
+    def _initialize_decoder(self, num_channels=None, conv_sizes=None):
+        """Create the ``MotionDecoder`` sub-module.
 
-        ordered_nearest_indices = self._compute_nearest_columns(conv_size_x)
-        self.register_buffer(
-            'input_nearest_column_indices',
-            torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
-        )
+        All decoder-specific computation (neuron mapping, hex-grid neighbour
+        lookup, conv layers) lives inside ``MotionDecoder`` and
+        ``NeuralModelConv``.  This method simply passes the model's structural
+        data through.
+        """
+        if num_channels is None:
+            num_channels = [8, 3]
+        if conv_sizes is None:
+            conv_sizes = [5, 5]
 
-    def _initialize_decoder(self, conv_size=5):
-        """Initialize decoder parameters and precompute neuron indices."""
-        # conv_1: nearest columns on hex grid, 8 channels, weights per neuron
-        # conv_2: nearest columns on hex grid, 3 channels
-        self.conv_size = conv_size
-        self.num_nearest_columns = self._hex_grid_pq_offsets(conv_size).shape[0]
-        self.channels_1 = 8
-        self.channels_2 = 3
-        decoder_init = 0.0
-        
-        # Set list of neurons to use for decoding (from black box in figure panel g)
-        self.neurons_to_decode = [
-            # T-shaped cells
+        neurons_to_decode = [
             'T1', 'T2', 'T2a', 'T3',
             'T4a', 'T4b', 'T4c', 'T4d',
             'T5a', 'T5b', 'T5c', 'T5d',
-            # Transmedullary cells (Tm)
             'Tm1', 'Tm2', 'Tm3', 'Tm4',
             'Tm5Y', 'Tm5a', 'Tm5b', 'Tm5c',
             'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
-            # Transmedullary Y cells (TmY)
             'TmY3', 'TmY4', 'TmY9', 'TmY10', 'TmY15', 'TmY18', 'TmY5a'
         ]
-        
-        # Pre-compute neuron indices for decoder neurons
-        decoder_neuron_mask_np = np.zeros(self.num_neurons, dtype=bool)
-        for ct_name in self.neurons_to_decode:
-            decoder_neuron_mask_np |= (self.cell_types == ct_name)
-        decoder_neuron_indices_np = np.where(decoder_neuron_mask_np)[0]
-        # Store as buffer so it's saved with the model
-        self.register_buffer('decoder_neuron_indices', 
-                           torch.tensor(decoder_neuron_indices_np, device=self.device, dtype=torch.int64))
-        # Also store mask for efficient column lookups
-        self.register_buffer('decoder_neuron_mask',
-                           torch.tensor(decoder_neuron_mask_np, device=self.device, dtype=torch.bool))
-        
-        # Pre-compute column_indices as tensor (used in decode_motion)
-        self.register_buffer('column_indices_tensor',
-                           torch.from_numpy(self.column_indices).to(device=self.device))
-        
-        # Number of decoder neuron types (fixed size for the tensor)
-        num_decoder_neuron_types = len(self.neurons_to_decode)
-        
-        # Initialize conv_1 with weights per neuron: (channels_1, num_nearest_columns, num_decoder_neuron_types)
-        self.decoder_conv_1 = torch.nn.Parameter(
-            torch.full(
-                (self.channels_1, self.num_nearest_columns, num_decoder_neuron_types),
-                decoder_init,
-                device=self.device,
-                dtype=self.dtype,
-            )
-        )
-        self.decoder_conv_1_bias = torch.nn.Parameter(
-            torch.zeros(self.channels_1, device=self.device, dtype=self.dtype)
-        )
-        self.decoder_conv_1_bn = torch.nn.BatchNorm1d(self.channels_1).to(device=self.device, dtype=self.dtype)
-        
-        # Pre-compute mapping from column to decoder neuron indices
-        self._precompute_column_to_decoder_neurons(num_decoder_neuron_types)
-        
-        # Initialize conv_2 (operates on conv_1_output channels from nearest columns)
-        # Shape: (channels_2, num_nearest_columns, channels_1)
-        self.decoder_conv_2 = torch.nn.Parameter(
-            torch.full(
-                (self.channels_2, self.num_nearest_columns, self.channels_1),
-                decoder_init,
-                device=self.device,
-                dtype=self.dtype,
-            )
-        )
-        self.decoder_conv_2_bias = torch.nn.Parameter(
-            torch.zeros(self.channels_2, device=self.device, dtype=self.dtype)
-        )
-        
-        # Pre-compute nearest column indices for each column
-        self._precompute_nearest_columns(self.conv_size)
-        # Pre-compute decoder neuron indices for nearest columns (used in decode_motion)
-        self._precompute_nearest_decoder_neurons()
 
-    def _precompute_column_to_decoder_neurons(self, num_decoder_neuron_types):
-        """Pre-compute mapping from column index to decoder neuron indices in that column.
-        
-        Creates a tensor (num_columns, num_decoder_neuron_types) with neuron indices.
-        Each position corresponds to a specific neuron type (by index in self.neurons_to_decode),
-        ensuring the same neuron type always maps to the same filter weight index.
-        Missing neurons are padded with -1 (will be converted to NaN when indexing firing rates).
-        
-        Args:
-            num_decoder_neuron_types: Number of decoder neuron types (from len(self.neurons_to_decode))
-        """
-        # Create mapping from cell type name to index in self.neurons_to_decode
-        # This ensures each neuron type always maps to the same filter weight index
-        cell_type_to_index = {ct_name: idx for idx, ct_name in enumerate(self.neurons_to_decode)}
-        
-        # Create tensor: (num_columns, num_decoder_neuron_types)
-        # Use -1 as sentinel value (will be converted to NaN when indexing)
-        column_to_decoder_neurons_tensor = torch.full(
-            (self.num_columns, num_decoder_neuron_types),
-            -1,
+        self.decoder = MotionDecoder(
+            num_channels=num_channels,
+            conv_sizes=conv_sizes,
+            neurons_to_decode=neurons_to_decode,
+            column_p_q=self.column_p_q,
+            cell_types=self.cell_types,
+            column_indices=self.column_indices,
+            num_neurons=self.num_neurons,
+            num_columns=self.num_columns,
+            denom_eps=self.decoder_denom_eps,
             device=self.device,
-            dtype=torch.int64
+            dtype=self.dtype,
         )
-        
-        for col_idx in range(self.num_columns):
-            # Find neurons in this column
-            in_column_mask = (self.column_indices_tensor == col_idx) & ~torch.isnan(self.column_indices_tensor)
-            # Intersect with decoder neurons
-            decoder_in_column_mask = in_column_mask & self.decoder_neuron_mask
-            decoder_neuron_indices = torch.where(decoder_in_column_mask)[0]
-            
-            # Map each neuron to its type index
-            for neuron_idx in decoder_neuron_indices:
-                neuron_idx_np = neuron_idx.item()
-                cell_type = self.cell_types[neuron_idx_np]
-                # Find which type index this neuron corresponds to
-                if cell_type in cell_type_to_index:
-                    type_idx = cell_type_to_index[cell_type]
-                    # Store neuron index at the correct type-index position
-                    # If multiple neurons of same type exist in column, keep the first one
-                    if column_to_decoder_neurons_tensor[col_idx, type_idx] == -1:
-                        column_to_decoder_neurons_tensor[col_idx, type_idx] = neuron_idx
-        
-        # Store as buffer so it's saved with the model
-        self.register_buffer('column_to_decoder_neurons', column_to_decoder_neurons_tensor)
-
-    def _precompute_nearest_columns(self, conv_size):
-        """Pre-compute nearest columns using direct p,q hex lattice lookup."""
-        ordered_nearest_indices = self._compute_nearest_columns(conv_size)
-        self.register_buffer(
-            'nearest_column_indices',
-            torch.tensor(ordered_nearest_indices, device=self.device, dtype=torch.int64)
-        )
-
-    @staticmethod
-    def _hex_grid_axial_coords(conv_size: int) -> np.ndarray:
-        """Return axial (q, r) coordinates for a flat-top hex grid."""
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-
-        radius = conv_size // 2
-        coords = []
-        for r in range(-radius, radius + 1):
-            q_min = max(-radius, -r - radius)
-            q_max = min(radius, -r + radius)
-            for q in range(q_min, q_max + 1):
-                coords.append((q, r))
-
-        return np.array(coords, dtype=np.int64)
-
-    @staticmethod
-    def _hex_grid_points(conv_size: int) -> np.ndarray:
-        """Return flat-top hex grid points centered at (0,0)."""
-        axial = NeuralModel._hex_grid_axial_coords(conv_size).astype(np.float64)
-        q = axial[:, 0]
-        r = axial[:, 1]
-        grid_x = 1.5 * q
-        grid_y = np.sqrt(3.0) * (r + 0.5 * q)
-        return np.stack([grid_x, grid_y], axis=1)
-
-    @staticmethod
-    def _hex_grid_pq_offsets(conv_size: int) -> np.ndarray:
-        """Return (dp, dq) offsets for a hex grid in the connectome's p,q lattice coordinates.
-
-        The p,q basis vectors are at 120 degrees apart. A point (dp, dq) is within
-        radius r of the origin when max(|dp|, |dq|, |dp - dq|) <= r.
-        """
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-        radius = conv_size // 2
-        coords = []
-        for dp in range(-radius, radius + 1):
-            for dq in range(-radius, radius + 1):
-                if max(abs(dp), abs(dq), abs(dp - dq)) <= radius:
-                    coords.append((dp, dq))
-        return np.array(coords, dtype=np.int64)
-
-    def _compute_nearest_columns(self, conv_size):
-        """Compute neighbor column indices for each column using the p,q hex lattice.
-
-        For each column at (p, q), looks up neighbors at the hex grid offsets.
-        Neighbors outside the dataset are marked as -1.
-
-        Returns:
-            (num_columns, num_grid_points) int64 array of column indices (-1 = missing).
-        """
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-        if self.column_p_q is None:
-            raise ValueError("column_p_q is required for convolution. "
-                             "Provide p,q coordinates from column_info_df.")
-
-        pq_offsets = self._hex_grid_pq_offsets(conv_size)
-        num_grid_points = pq_offsets.shape[0]
-        num_columns = self.num_columns
-
-        p = self.column_p_q[:, 0].astype(np.int64)
-        q = self.column_p_q[:, 1].astype(np.int64)
-        pq_to_col = {(p[i], q[i]): i for i in range(num_columns)}
-
-        ordered_nearest_indices = np.full((num_columns, num_grid_points), -1, dtype=np.int64)
-        for col_idx in range(num_columns):
-            pc, qc = p[col_idx], q[col_idx]
-            for gi in range(num_grid_points):
-                key = (pc + pq_offsets[gi, 0], qc + pq_offsets[gi, 1])
-                if key in pq_to_col:
-                    ordered_nearest_indices[col_idx, gi] = pq_to_col[key]
-
-        return ordered_nearest_indices
-
-    def _apply_spatial_conv(self, inputs):
-        """Apply spatial convolution only (no temporal filtering).
-
-        Args:
-            inputs: Tensor with shape (stimuli, time, columns).
-
-        Returns:
-            Convolved tensor with same shape.
-        """
-        indices = self.input_nearest_column_indices  # (num_columns, num_neighbors)
-        valid_mask = indices >= 0  # (num_columns, num_neighbors)
-        safe_indices = indices.clamp(min=0)
-
-        # Gather spatial neighbors: (stimuli, time, num_columns, num_neighbors)
-        spatial_windows = inputs[:, :, safe_indices]
-
-        radius = self.input_conv_size_x // 2
-        dp_idx = self.input_conv_pq_offsets[:, 0] + radius
-        dq_idx = self.input_conv_pq_offsets[:, 1] + radius
-        raw_kernel = self.input_conv_xy_log.exp()[dq_idx, dp_idx]  # (num_neighbors,)
-
-        # Zero out weights for missing neighbors, normalize per column
-        masked_kernel = raw_kernel.unsqueeze(0) * valid_mask.to(raw_kernel.dtype)  # (num_columns, num_neighbors)
-        kernel_sum = masked_kernel.sum(dim=1, keepdim=True).clamp(min=1e-8)
-        normalized_kernel = masked_kernel / kernel_sum  # (num_columns, num_neighbors)
-
-        return torch.einsum('stcn,cn->stc', spatial_windows, normalized_kernel)
-
-    def _apply_temporal_conv(self, inputs):
-        """Apply temporal convolution only (no spatial filtering).
-
-        Args:
-            inputs: Tensor with shape (stimuli, time, columns).
-
-        Returns:
-            Convolved tensor with same shape.
-        """
-        pad = self.input_conv_size_t - 1
-        inputs_padded = torch.nn.functional.pad(inputs, (0, 0, pad, 0))
-        time_windows = inputs_padded.unfold(1, self.input_conv_size_t, 1)
-        # time_windows: (stimuli, time, columns, temporal_window)
-        temporal_kernel = torch.flip(self.input_conv_t, dims=(0,))
-        return torch.einsum('stcq,q->stc', time_windows, temporal_kernel)
 
     def apply_input_conv(self, inputs):
         """Apply local contrast normalization (spatial) then temporal filtering.
 
-        Computes:
-            local_mean = spatial_conv(input)
-            input_centered = input - local_mean
-            local_var = spatial_conv(input_centered ** 2)
-            input_norm = input_centered / sqrt(local_var + eps)
-            output = temporal_conv(-input_norm)
+        Spatial: ``self.input_spatial_conv`` (a ``NeuralModelConv``) computes a
+        local weighted sum used for mean and variance estimation.
+        Temporal: a learned 1-D causal kernel (``self.input_conv_temporal``).
+
+        Returns *inputs* unchanged when ``use_input_conv`` is ``False``.
         """
         if not self.use_input_conv:
             return inputs
 
         if inputs.dim() == 2:
             inputs = inputs.unsqueeze(0)
-            squeeze_output = True
+            squeeze = True
         elif inputs.dim() == 3:
-            squeeze_output = False
+            squeeze = False
         else:
             raise ValueError("inputs must have shape (time, columns) or (stimuli, time, columns).")
 
-        num_columns = self.input_nearest_column_indices.shape[0]
-        if inputs.shape[2] != num_columns:
-            raise ValueError(
-                f"inputs has {inputs.shape[2]} columns, expected {num_columns}."
-            )
+        local_mean = self.input_spatial_conv(inputs.unsqueeze(-1)).squeeze(-1)
+        centered = inputs - local_mean
+        local_var = self.input_spatial_conv(
+            (centered ** 2).unsqueeze(-1)
+        ).squeeze(-1)
+        normed = -centered / torch.sqrt(local_var + 1e-3)
 
-        # Spatial contrast normalization
-        local_mean = self._apply_spatial_conv(inputs)
-        input_centered = inputs - local_mean
-        local_var = self._apply_spatial_conv(input_centered ** 2)
-        eps = 1e-3
-        input_norm = input_centered / torch.sqrt(local_var + eps)
+        # Causal temporal convolution
+        pad = self.input_conv_size_t - 1
+        padded = torch.nn.functional.pad(normed, (0, 0, pad, 0))
+        windows = padded.unfold(1, self.input_conv_size_t, 1)
+        kernel = torch.flip(self.input_conv_temporal, dims=(0,))
+        result = torch.einsum('stcq,q->stc', windows, kernel)
 
-        # Negate and apply temporal kernel
-        result = self._apply_temporal_conv(-input_norm)
-
-        if squeeze_output:
+        if squeeze:
             result = result.squeeze(0)
-
         return result
 
-    def _precompute_nearest_decoder_neurons(self):
-        """Pre-compute decoder neuron indices for each column's nearest columns.
-        
-        Creates tensor (num_columns, num_nearest, num_decoder_neuron_types) with neuron indices.
-        Missing neurons (or neurons in missing neighbor columns) are marked as -1.
-        """
-        # nearest_column_indices: (num_columns, num_nearest) -- may contain -1 for boundary
-        valid_col_mask = self.nearest_column_indices >= 0  # (num_columns, num_nearest)
-        safe_col_indices = self.nearest_column_indices.clamp(min=0)
-
-        # column_to_decoder_neurons: (num_columns, num_decoder_neuron_types)
-        nearest_decoder_neuron_indices = self.column_to_decoder_neurons[safe_col_indices]
-        # Mark all neuron types as missing for neighbor columns that don't exist
-        nearest_decoder_neuron_indices[~valid_col_mask.unsqueeze(-1).expand_as(nearest_decoder_neuron_indices)] = -1
-        self.register_buffer('nearest_decoder_neuron_indices', nearest_decoder_neuron_indices)
-
     def decode_motion(self, v):
-        """
-        Decode motion from firing rates using hand-implemented convolutions.
-        
-        Args:
-            v: Firing rate tensor with shape (stimuli, num_neurons) or (num_neurons,)
-                All operations broadcast over the first dimension (stimuli)
-        
-        Returns:
-            motion: Decoded motion with shape (stimuli, num_columns, 2) or (num_columns, 2)
-                First 2 channels divided by 3rd channel
-        """
-        # Handle both batched and unbatched inputs
-        if v.dim() == 1:
-            v = v.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-        
-        # v has shape (stimuli, num_neurons)
-        # All operations will broadcast over the first dimension (stimuli)
-        stimuli_size = v.shape[0]
-        num_columns = self.num_columns
-        num_nearest = self.nearest_column_indices.shape[1]
-
-        # Apply conv_1: For each column, operate on individual decoder neurons in N nearest columns
-        # Collect firing rates from decoder neurons for each nearest column (precomputed mapping)
-        # Shape: (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
-        decoder_indices = self.nearest_decoder_neuron_indices  # (num_columns, num_nearest, num_decoder_neuron_types)
-        valid_mask = decoder_indices >= 0
-        safe_indices = decoder_indices.clamp(min=0)
-        nearest_decoder_voltages = v[:, safe_indices]
-        nearest_decoder_voltages = nearest_decoder_voltages.masked_fill(~valid_mask.unsqueeze(0), float('nan'))
-        
-        # Apply conv_1 filter: (stimuli, num_columns, num_nearest, num_decoder_neuron_types) @ (channels_1, num_nearest, num_decoder_neuron_types)
-        # decoder_conv_1: (channels_1, num_nearest, num_decoder_neuron_types)
-        # nearest_decoder_voltages: (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
-        # Broadcasts over stimuli dimension
-        # Handle NaNs by setting them to 0 before multiplication, then mask out contributions
-        # Replace NaN with 0 for computation, but track which values were NaN
-        valid_mask = ~torch.isnan(nearest_decoder_voltages)  # (stimuli, num_columns, num_nearest, num_decoder_neuron_types)
-        nearest_decoder_voltages_clean = torch.where(
-            valid_mask,
-            nearest_decoder_voltages,
-            torch.zeros_like(nearest_decoder_voltages)
-        )
-        
-        # Single fused contraction: (stimuli, columns, nearest, types) x (channels_1, nearest, types)
-        # -> (stimuli, columns, channels_1)
-        conv_1_output = torch.einsum(
-            'scnt,knt->sck',
-            nearest_decoder_voltages_clean,
-            self.decoder_conv_1
-        )
-        conv_1_output = conv_1_output + self.decoder_conv_1_bias.view(1, 1, -1)
-        conv_1_output = self.decoder_conv_1_bn(conv_1_output.permute(0, 2, 1)).permute(0, 2, 1)
-        
-        # Apply softplus activation after conv_1
-        conv_1_output = torch.nn.functional.softplus(conv_1_output)
-        
-        # Apply conv_2: (stimuli, num_columns, channels_1) -> (stimuli, num_columns, channels_2)
-        # conv_2 operates on conv_1_output from nearest columns, weighting the channels_1 channels
-        # Get conv_1_output from nearest columns: (stimuli, num_columns, num_nearest, channels_1)
-        safe_col_indices = self.nearest_column_indices.clamp(min=0)
-        valid_col_mask = self.nearest_column_indices >= 0  # (num_columns, num_nearest)
-        nearest_conv_1_output = conv_1_output[:, safe_col_indices]  # (stimuli, num_columns, num_nearest, channels_1)
-        nearest_conv_1_output = nearest_conv_1_output.masked_fill(
-            ~valid_col_mask.unsqueeze(0).unsqueeze(-1), 0.0
-        )
-        
-        # Apply conv_2 filter: (stimuli, num_columns, num_nearest, channels_1) @ (channels_2, num_nearest, channels_1)
-        # decoder_conv_2: (channels_2, num_nearest, channels_1)
-        # nearest_conv_1_output: (stimuli, num_columns, num_nearest, channels_1)
-        # Broadcasts over stimuli dimension
-        # Single fused contraction: (stimuli, columns, nearest, channels_1) x (channels_2, nearest, channels_1)
-        # -> (stimuli, columns, channels_2)
-        conv_2_output = torch.einsum(
-            'scnf,knf->sck',
-            nearest_conv_1_output,
-            self.decoder_conv_2
-        )
-        conv_2_output = conv_2_output + self.decoder_conv_2_bias.view(1, 1, -1)
-        
-        # Output: first 2 channels divided by 3rd channel
-        # Avoid near-zero division to stabilize early training
-        denominator = conv_2_output[:, :, 2:3].clone()  # (stimuli, num_columns, 1)
-        denominator = torch.nn.functional.softplus(denominator)
-        denominator = torch.clamp(denominator, min=self.decoder_denom_eps)
-        optic_flow = conv_2_output[:, :, :2] / denominator  # (stimuli, num_columns, 2)
-        
-        if squeeze_output:
-            optic_flow = optic_flow.squeeze(0)
-        
-        return optic_flow
+        """Decode motion from firing rates via the decoder created in ``_initialize_decoder``."""
+        return self.decoder(v)
 
     @abstractmethod
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
@@ -793,18 +732,16 @@ class NeuralModel(torch.nn.Module, ABC):
             outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
             outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
-        # Initialize decoder output if decoder is enabled (only once, outside the loop)
-        if self.use_decoder:
+        if self.has_decoder:
             outputs['decoder'] = torch.full((num_batches, num_time, self.num_columns, 2), float('nan'), device=self.device, dtype=self.dtype)
 
         for t in range(num_time):
             v = self(v, inputs[:, t, :], stim_to_cell_mapping)
             if self.use_layer_norm:
                 v = self.layer_norm(v)
-            # Compute firing_rate on full v (has neuron dimension for proper threshold broadcasting)
             fr = self.firing_rate(v)
 
-            if self.use_decoder:
+            if self.has_decoder:
                 outputs['decoder'][:, t, :, :] = self.decode_motion(fr)
 
             for i in readout_keys:
@@ -856,74 +793,6 @@ class NeuralModel(torch.nn.Module, ABC):
 
         print('steady state not found after', max_iter, 'iterations')
         self.steady_state.copy_(final_state.detach().squeeze(0))
-
-        return
-
-    def calculate_optic_flow(self, inputs, input_neurons=['L1', 'L2', 'L3'], eye='right', initial_state=None):
-        # The eye is assumed to be bilaterally symmetric and is trained on the right eye
-        # To estimate the response of the left eye, flip the inputs in space, calculate optic flow
-        # then flip the optic flow estimate to get the flow estimate in a consistant basis
-
-        # inputs should be given with the form (stimuli, time, columns) where columns correspond to
-        # ommatidia at the locations in self.column_phi_theta
-        # if eye='left' then the stimulus should be generated such that it corresponds to locations with
-        # self.column_phi_theta but with phi = -phi (flipped over the mid point of the fly)
-
-        horizontal_cells = self.optic_flow_horizontal_cells
-        vertical_cells = self.optic_flow_vertical_cells
-
-        outputs, final_state = self.predict(inputs, input_neurons=input_neurons, 
-                               output_neurons=horizontal_cells+vertical_cells, init_state=initial_state)[0:2]
-
-        horizontal = torch.zeros_like(outputs['firing_rate'][horizontal_cells[0]]) + self.optic_flow_horizontal_readout[-1]
-        vertical = torch.zeros_like(outputs['firing_rate'][vertical_cells[0]]) + self.optic_flow_vertical_readout[-1]
-
-        for hi, h in enumerate(horizontal_cells):
-            horizontal += self.optic_flow_horizontal_readout[hi] * outputs['firing_rate'][h]
-
-        for vi, v in enumerate(vertical_cells):
-            vertical += self.optic_flow_vertical_readout[vi] * outputs['firing_rate'][v]
-
-        if eye == 'left':
-            horizontal = -horizontal
-
-        optic_flow = torch.stack((horizontal, vertical), axis=-1)
-        
-        return optic_flow, final_state
-
-    def fit_optic_flow_readout(self, inputs, target):
-        outputs = self.predict(inputs, input_neurons=['L1', 'L2', 'L3'], 
-                               output_neurons=self.optic_flow_horizontal_cells+self.optic_flow_vertical_cells, 
-                               init_state=None)[0]
-
-        horizontal_target = target[:, :, :, 0].reshape(-1)
-        vertical_target = target[:, :, :, 1].reshape(-1)
-        horizontal_list = []
-        vertical_list = []
-
-        for h in self.optic_flow_horizontal_cells:
-            horizontal_list.append(outputs['firing_rate'][h].reshape(-1))
-        for v in self.optic_flow_vertical_cells:
-            vertical_list.append(outputs['firing_rate'][v].reshape(-1))
-
-        horizontal_list.append(torch.ones_like(horizontal_list[0]))
-        vertical_list.append(torch.ones_like(vertical_list[0]))
-
-        horizontal_rates = torch.stack(horizontal_list, axis=-1)
-        vertical_rates = torch.stack(vertical_list, axis=-1)
-
-        # get the indices where there are no nans and keep the non nan values
-        horizontal_valid_inds = ~torch.any(torch.isnan(horizontal_rates), axis=1) & ~torch.isnan(horizontal_target)
-        horizontal_rates = horizontal_rates[horizontal_valid_inds, :]
-        horizontal_target = horizontal_target[horizontal_valid_inds]
-
-        vertical_valid_inds = ~torch.any(torch.isnan(vertical_rates), axis=1) & ~torch.isnan(vertical_target)
-        vertical_rates = vertical_rates[vertical_valid_inds, :]
-        vertical_target = vertical_target[vertical_valid_inds]
-
-        # find the best fit between the rates and the target
-        self.optic_flow_horizontal_readout = torch.linalg.lstsq(horizontal_rates.double(), horizontal_target.double())[0]
-        self.optic_flow_vertical_readout = torch.linalg.lstsq(vertical_rates.double(), vertical_target.double())[0]
 
         return
 
@@ -1022,58 +891,27 @@ class NeuralModel(torch.nn.Module, ABC):
 
     @classmethod
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
+        # should not have any backwards compatibility. Old models will be updated with other code if the
+        # model structure changes
         path = Path(path)
         if path.is_dir():
             path = path / "model.pt"
         data = torch.load(path, map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
 
-        # Determine target device up front so we construct directly on it
-        # (avoids expensive CPU construction + .to(device) round-trip)
         if device is not None:
-            target_device = device
+            inputs['device'] = device
         else:
-            local_config = du.load_config()
-            target_device = local_config['model']['device']
-        inputs['device'] = target_device
+            inputs['device'] = du.load_config()['model']['device']
 
         if dtype is not None:
             inputs['dtype'] = dtype
 
-        # Choose the correct class based on the saved class name.
-        # Fall back to the class this was called on for older checkpoints.
-        class_name = data.get('class_name')
-        model_cls = cls
-        if class_name is not None:
-            model_cls = MODEL_CLASS_REGISTRY.get(class_name, cls)
-            if model_cls is cls and cls is NeuralModel:
-                raise ValueError(
-                    f"Unknown model class '{class_name}' in checkpoint. "
-                    "Register it in MODEL_CLASS_REGISTRY."
-                )
-
-        # construct directly from saved (or overridden) inputs
+        model_cls = MODEL_CLASS_REGISTRY[data['class_name']]
         inputs['init_new_model'] = False
         model = model_cls(**inputs)
+        model.load_state_dict(data['state_dict'])
 
-        state_dict = data['state_dict']
-        # Migrate old parameter names to _log variants
-        state_dict = dict(state_dict)
-        if 'input_conv_x' in state_dict and 'input_conv_y' in state_dict:
-            input_conv_xy = torch.outer(state_dict.pop('input_conv_y'), state_dict.pop('input_conv_x'))
-            state_dict['input_conv_xy_log'] = torch.log(input_conv_xy.clamp(min=1e-8))
-        if 'input_conv_xy' in state_dict and 'input_conv_xy_log' not in state_dict:
-            state_dict['input_conv_xy_log'] = torch.log(state_dict.pop('input_conv_xy').clamp(min=1e-8))
-        if 'input_conv_t_log' in state_dict and 'input_conv_t' not in state_dict:
-            state_dict['input_conv_t'] = state_dict.pop('input_conv_t_log').exp()
-        if 'input_conv_axial_coords' in state_dict and 'input_conv_pq_offsets' not in state_dict:
-            state_dict['input_conv_pq_offsets'] = state_dict.pop('input_conv_axial_coords')
-        if 'layer_norm.weight' in state_dict and 'layer_norm.weight_log' not in state_dict:
-            state_dict['layer_norm.weight_log'] = torch.log(state_dict.pop('layer_norm.weight').clamp(min=1e-8))
-
-        model.load_state_dict(state_dict, strict=False)
-
-        # Optionally freeze all parameters to disable gradients
         if freeze_params:
             for param in model.parameters():
                 param.requires_grad_(False)

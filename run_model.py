@@ -99,7 +99,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             use_layer_norm=config['model']['use_layer_norm'],
             device=config['model']['device'],
             dtype=config['model']['dtype'],
-            use_decoder=config['model']['use_decoder'],
+            decoder_type=config['model']['decoder_type'],
             use_input_conv=config['model']['use_input_conv'],
             dt=dt,
             seed=seed,
@@ -112,7 +112,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
         target_model.save(model_save_folder / 'target_model.pt')
 
-    elif config['model']['use_decoder']:
+    elif config['model']['decoder_type'] != 'none':
         target = optic_flow
     else:
         # specify the target responses you expect for each cell type. this is what we will train on

@@ -13,7 +13,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
             [
                 "[model]",
                 'device = "cpu"',
-                "use_decoder = true",
+                'decoder_type = "conv_2"',
                 "",
                 "[training]",
                 "num_steps = 123",
@@ -30,7 +30,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
     config = du.load_config(str(user_config))
 
     assert config["model"]["device"] == "cpu"
-    assert config["model"]["use_decoder"] is True
+    assert config["model"]["decoder_type"] == "conv_2"
     assert config["training"]["num_steps"] == 123
     assert config["training"]["alpha"] == 0.123
     assert config["training"]["loss_fn"] == "cos_loss"

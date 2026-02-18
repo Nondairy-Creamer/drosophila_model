@@ -25,10 +25,10 @@ def load_test_config() -> tuple[dict, Path]:
     return config, repo_root
 
 
-def build_model_from_test_config(use_decoder: bool = True, use_input_conv: bool = True):
+def build_model_from_test_config(decoder_type: str = 'conv_2', use_input_conv: bool = True):
     config, repo_root = load_test_config()
     config["model"]["device"] = "cpu"
-    config["model"]["use_decoder"] = use_decoder
+    config["model"]["decoder_type"] = decoder_type
     config["model"]["use_input_conv"] = use_input_conv
 
     connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
@@ -60,7 +60,7 @@ def build_model_from_test_config(use_decoder: bool = True, use_input_conv: bool 
         count_threshold=config["model"]["synapse_count_threshold"],
         device=config["model"]["device"],
         dtype=config["model"]["dtype"],
-        use_decoder=config["model"]["use_decoder"],
+        decoder_type=config["model"]["decoder_type"],
         use_input_conv=config["model"]["use_input_conv"],
         dt=config["model"]["dt"],
         seed=0,

@@ -52,7 +52,7 @@ def _load_model(config: dict, device: str) -> nm.CurrentModel:
         count_threshold=config['model']['synapse_count_threshold'],
         device=device,
         dtype=config['model']['dtype'],
-        use_decoder=True,
+        decoder_type='conv_2',
         use_input_conv=config['model']['use_input_conv'],
         dt=config['model']['dt'],
         seed=None,
@@ -77,7 +77,7 @@ def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path
     phi = model.column_phi_theta[:, 0]
     theta = model.column_phi_theta[:, 1]
 
-    nearest_indices = model.nearest_column_indices.detach().cpu().numpy()
+    nearest_indices = model.decoder.conv_layers[0].nearest_column_indices.detach().cpu().numpy()
     center_color = 'black'
     conv_cmap = plt.get_cmap('viridis')
 
@@ -125,10 +125,10 @@ def _pq_to_xy(pq: np.ndarray) -> np.ndarray:
 
 
 def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
-    decoder_offsets = nm.NeuralModel._hex_grid_pq_offsets(model.conv_size)
+    decoder_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.decoder.conv_sizes[0])
     grids = [("Decoder grid", decoder_offsets)]
     if model.use_input_conv:
-        input_offsets = nm.NeuralModel._hex_grid_pq_offsets(model.input_conv_size_x)
+        input_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.input_conv_size_x)
         grids.append(("Input grid", input_offsets))
 
     fig, axes = plt.subplots(
@@ -162,7 +162,7 @@ def _plot_input_conv_columns(model: nm.CurrentModel, center_indices: list[int], 
     phi = model.column_phi_theta[:, 0]
     theta = model.column_phi_theta[:, 1]
 
-    nearest_indices = model.input_nearest_column_indices.detach().cpu().numpy()
+    nearest_indices = model.input_spatial_conv.nearest_column_indices.detach().cpu().numpy()
     center_color = 'black'
     conv_cmap = plt.get_cmap('viridis')
 

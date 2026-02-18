@@ -46,16 +46,13 @@ def main() -> None:
     if not model.use_input_conv:
         raise ValueError("Model does not have input convolution enabled.")
 
-    conv_xy = model.input_conv_xy_log.exp().detach().cpu().numpy()
-    conv_t = model.input_conv_t.detach().cpu().numpy()
+    conv_xy = model.input_spatial_conv.weight[0, :, 0].detach().cpu().numpy()
+    conv_t = model.input_conv_temporal.detach().cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 
-    axial_coords = model.input_conv_axial_coords.detach().cpu().numpy()
-    radius = model.input_conv_size_x // 2
-    q_idx = axial_coords[:, 0] + radius
-    r_idx = axial_coords[:, 1] + radius
-    spatial_weights = conv_xy[r_idx, q_idx]
+    axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(model.input_conv_size_x)
+    spatial_weights = conv_xy
     grid_points = hex_grid_points(axial_coords)
 
     vmin_xy, vmax_xy = centered_norm(spatial_weights)

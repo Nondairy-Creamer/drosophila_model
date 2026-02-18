@@ -34,9 +34,9 @@ def _load_conv_params(model_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndar
     model = nm.NeuralModel.load(model_path, device="cpu")
     if not model.use_input_conv:
         raise ValueError(f"Model at {model_path} does not have input convolution enabled.")
-    conv_xy = model.input_conv_xy_log.exp().detach().cpu().numpy()
-    conv_t = model.input_conv_t.detach().cpu().numpy()
-    axial_coords = model.input_conv_axial_coords.detach().cpu().numpy()
+    conv_xy = model.input_spatial_conv.weight[0, :, 0].detach().cpu().numpy()
+    conv_t = model.input_conv_temporal.detach().cpu().numpy()
+    axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(model.input_conv_size_x)
     conv_size_x = model.input_conv_size_x
     return conv_xy, conv_t, axial_coords, conv_size_x
 
@@ -60,7 +60,7 @@ def _predict_decoder(model, stimulus, input_neurons, output_neurons) -> np.ndarr
             init_state=None,
         )
     if "decoder" not in pred:
-        raise ValueError("Decoder output not found. Ensure model.use_decoder is True.")
+        raise ValueError("Decoder output not found. Ensure model.decoder_type is not 'none'.")
     return pred["decoder"].detach().cpu().numpy()
 
 
@@ -108,14 +108,11 @@ def main() -> None:
     if not np.array_equal(axial_coords, axial_coords_trained) or not np.array_equal(axial_coords, axial_coords_true):
         raise ValueError("Input conv axial coordinates do not match across models.")
 
-    radius = conv_size_x // 2
-    q_idx = axial_coords[:, 0] + radius
-    r_idx = axial_coords[:, 1] + radius
     grid_points = hex_grid_points(axial_coords)
 
-    spatial_init = conv_init_xy[r_idx, q_idx]
-    spatial_trained = conv_trained_xy[r_idx, q_idx]
-    spatial_true = conv_true_xy[r_idx, q_idx]
+    spatial_init = conv_init_xy
+    spatial_trained = conv_trained_xy
+    spatial_true = conv_true_xy
     spatial_stack = np.concatenate([spatial_init, spatial_trained, spatial_true], axis=0)
     vmin_xy, vmax_xy = centered_norm(spatial_stack)
 

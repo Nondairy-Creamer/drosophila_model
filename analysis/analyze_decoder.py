@@ -51,15 +51,15 @@ def main() -> None:
     model_pt, model_folder = resolve_model_paths(Path(args.model_path))
     model = nm.NeuralModel.load(model_pt, device=args.device)
 
-    if not model.use_decoder:
+    if not model.has_decoder:
         raise ValueError("Model does not have a decoder.")
 
     output_dir = Path(args.output_dir) if args.output_dir else model_folder / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Extract decoder_conv_1 weights: (channels_1, num_nearest_columns, num_decoder_neuron_types)
-    conv_1 = model.decoder_conv_1.detach().cpu().numpy()
-    neuron_names = model.neurons_to_decode
+    conv_1 = model.decoder.conv_layers[0].weight.detach().cpu().numpy()
+    neuron_names = model.decoder.neurons_to_decode
 
     # ------------------------------------------------------------------
     # Bar plot: average |weight| per neuron type across 8 channels
@@ -89,7 +89,7 @@ def main() -> None:
     # Average across channels and neuron types -> (num_nearest_columns,)
     avg_per_position = np.mean(np.abs(conv_1), axis=(0, 2))
 
-    axial_coords = nm.NeuralModel._hex_grid_axial_coords(model.conv_size)
+    axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(model.decoder.conv_sizes[0])
     grid_points = hex_grid_points(axial_coords)
 
     fig, ax = plt.subplots(figsize=(6, 5), dpi=150)

@@ -6,7 +6,7 @@ from tests.test_model_factory import build_model_from_test_config
 
 def test_model_gradients():
     model, _, input_neurons, _ = build_model_from_test_config(
-        use_decoder=True,
+        decoder_type='conv_2',
         use_input_conv=True,
     )
     model.train()

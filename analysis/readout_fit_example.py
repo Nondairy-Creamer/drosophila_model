@@ -10,29 +10,20 @@ import neural_models as nm
 import plotting_utilities as pu
 import data_utilities as du
 
-fit_model_readout = True
 model_folder = Path('models/best_on_sintel/20260120_181237_gpu0_run0')
-local_config = du.load_config()
 
 # Load model, stimulus, and config
 print("Loading model...")
-model_config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
 stimulus = torch.load(model_folder / 'cell_inputs.pt')
-target = torch.load(model_folder / 'target.pt')
 
-if fit_model_readout:
-    # fit a simple readout from model to flow
-    # The model stores the readout, so not necessary to do every time. Just once
-    model.find_steady_state()
-    sine_wave_velocity = torch.zeros_like(torch.stack([stimulus, stimulus], axis=-1))
-    sine_wave_velocity[:, :, :, 0] = target['T4a'] - target['T4b']
-    sine_wave_velocity[:, :, :, 1] = target['T4c'] - target['T4d']
-    model.fit_optic_flow_readout(stimulus, sine_wave_velocity)
-    model.save(model_folder / 'model.pt')
+if not model.has_decoder:
+    raise ValueError("Model has no decoder. Cannot predict optic flow.")
 
-# Calculate optic flow from model, format is [stimuli, time, ommatidia, (horizontal, vertical flow)]
-optic_flow = model.calculate_optic_flow(stimulus)[0]
+# Run model to get decoder optic flow: [stimuli, time, ommatidia, (horizontal, vertical flow)]
+with torch.no_grad():
+    outputs = model.predict(stimulus, input_neurons=['L1', 'L2', 'L3'])[0]
+    optic_flow = outputs['decoder']
 
 # Plot XT plots with optic flow
 pu.xt_plot(

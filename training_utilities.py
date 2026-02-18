@@ -130,10 +130,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         if not use_batching:
             last_state = step_state
 
-        if model.use_decoder:
-            # When using decoder, pred['decoder'] and target are tensors, not dicts
-            # decoder output: (batches, time, num_columns, 2)
-            # target (optic_flow): (batches, time, num_columns, 2)
+        if model.has_decoder:
             pred_loss = pred['decoder'][:, loss_start_step:]
             target_loss = target_batch[:, loss_start_step:]
             loss = loss_fn(target_loss, pred_loss)
@@ -162,11 +159,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
             loss = loss + l1_lambda * (input_l1 + output_l1) / 2
 
-            if model.use_decoder:
-                conv1_l1 = model.decoder_conv_1.abs().mean()
-                conv2_l1 = model.decoder_conv_2.abs().mean()
-
-                loss = loss + l1_lambda * (conv1_l1 + conv2_l1) / 2
+            if model.has_decoder:
+                decoder_l1 = torch.stack([p.abs().mean() for p in model.decoder.conv_layers.parameters()]).mean()
+                loss = loss + l1_lambda * decoder_l1
 
         # Record GPU-side loss scalar without sync (must happen before best-loss check
         # so the current loss is included when syncing to loss_plot for checkpoints)

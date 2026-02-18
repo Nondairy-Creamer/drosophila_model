@@ -1015,7 +1015,7 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
         output_neurons: List of output neuron types (e.g., ['T4a', 'T4b', ...])
         
     Returns:
-        target: If model.use_decoder, a tensor [batches, time, columns, 2];
+        target: If model.has_decoder, a tensor [batches, time, columns, 2];
                 otherwise a dict mapping output neuron types to firing rate tensors.
     """
     import copy
@@ -1035,7 +1035,7 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
             init_state=None
         )
     
-    if perturbed_model.use_decoder:
+    if perturbed_model.has_decoder:
         target = pred['decoder'].clone()
     else:
         # Extract the firing rates as target dictionary
