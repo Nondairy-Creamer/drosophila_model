@@ -106,29 +106,33 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             commit_hash=commit_hash,
         )
 
-    stimulus, optic_flow = su.get_stimulus(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
+    fit_odometry = config['training'].get('fit_odometry', False)
 
-    if config['training']['use_synthetic_data']:
-        target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
-        target_model.save(model_save_folder / 'target_model.pt')
-
-    elif config['model']['decoder_type'] != 'none':
-        target = optic_flow
+    if fit_odometry:
+        stim_right, stim_left, optic_flow, target_rotation, target_translation = \
+            su.get_stimulus_two_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
+        stimulus = torch.stack([stim_right, stim_left], dim=1)
+        target = {'rotation': target_rotation, 'translation': target_translation}
     else:
-        # specify the target responses you expect for each cell type. this is what we will train on
-        target = {}
+        stimulus, optic_flow = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
 
-        # --- make stimulus for random velocity sine wave ---
-        # Use torch.relu to create independent copies and avoid in-place modification bugs
-        for n, d in zip(output_neurons, output_neurons_direction):
-            if d == 'right':
-                target[n] = torch.relu(optic_flow[:, :, :, 0])
-            elif d == 'left':
-                target[n] = torch.relu(-optic_flow[:, :, :, 0])
-            elif d == 'up':
-                target[n] = torch.relu(optic_flow[:, :, :, 1])
-            elif d == 'down':
-                target[n] = torch.relu(-optic_flow[:, :, :, 1])
+        if config['training']['use_synthetic_data']:
+            target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
+            target_model.save(model_save_folder / 'target_model.pt')
+
+        elif config['model']['decoder_type'] != 'none':
+            target = optic_flow
+        else:
+            target = {}
+            for n, d in zip(output_neurons, output_neurons_direction):
+                if d == 'right':
+                    target[n] = torch.relu(optic_flow[:, :, :, 0])
+                elif d == 'left':
+                    target[n] = torch.relu(-optic_flow[:, :, :, 0])
+                elif d == 'up':
+                    target[n] = torch.relu(optic_flow[:, :, :, 1])
+                elif d == 'down':
+                    target[n] = torch.relu(-optic_flow[:, :, :, 1])
 
     # Save seed info to config (filter out None values since TOML doesn't support them)
     run_info = {'seed': seed, 'device': str(device), 'run_id': run_id}
@@ -163,6 +167,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         luminance_std=config['training']['luminance_std'],
         batch_size=config['training']['batch_size'],
         pre_stim_time=config['stimulus']['pre_stim_time'],
+        fit_odometry=fit_odometry,
     )
 
 

@@ -1037,8 +1037,8 @@ class NeuralModel(torch.nn.Module, ABC):
         # Get decoder outputs: (stimuli, time, columns, 2) where last dim is (d_right, d_up)
         # Flip horizontal (d_right) for left eye to put it in a consistent coordinate frame
         optic_flow_right = outputs_right['decoder']
-        optic_flow_left = outputs_left['decoder'].clone()
-        optic_flow_left[:, :, :, 0] = -optic_flow_left[:, :, :, 0]
+        lr_flip = torch.tensor([-1.0, 1.0], device=optic_flow_right.device, dtype=optic_flow_right.dtype)
+        optic_flow_left = outputs_left['decoder'] * lr_flip
 
         # Concatenate along column dimension
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
@@ -1154,12 +1154,14 @@ class NeuralModel(torch.nn.Module, ABC):
 
         # === Rotation estimation: solve u ≈ [x]_× Ω for each time step ===
         # Physical relationship: image motion u = -Ω × x = x × Ω = [x]_× Ω
-        # So Ω = lstsq([x]_×, u)
+        # Normal equations: (A^T A) Ω = A^T u  (differentiable via torch.linalg.solve)
         A = cross_matrix(x)                    # (N, 3, 3)
         A_flat = A.reshape(3*N, 3)             # (3N, 3)
-        u_flat = u.reshape(T, 3*N).T           # (3N, T) — multiple RHS for lstsq
+        u_flat = u.reshape(T, 3*N).T           # (3N, T)
 
-        omega_star = torch.linalg.lstsq(A_flat, u_flat).solution.T  # (T, 3)
+        AtA = A_flat.T @ A_flat                # (3, 3) — constant across time
+        Atb = A_flat.T @ u_flat                # (3, T)
+        omega_star = torch.linalg.solve(AtA, Atb).T  # (T, 3)
 
         # === De-rotated flow: v = u - u_rot where u_rot = [x]_× Ω ===
         v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
@@ -1206,9 +1208,10 @@ class NeuralModel(torch.nn.Module, ABC):
             weighted_sign = (v_dot_w_valid * w_norm_sq_valid).sum(dim=-1)  # (T_valid,)
 
             # Flip T where weighted_sign < 0 so that expansion gives positive T
-            flip_mask = weighted_sign < 0
-            T_dir_valid[flip_mask] = -T_dir_valid[flip_mask]
-            v_dot_w_valid[flip_mask] = -v_dot_w_valid[flip_mask]
+            sign_flip = torch.where(weighted_sign < 0, torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
+                                    torch.tensor(1.0, device=x.device, dtype=d_right.dtype))
+            T_dir_valid = T_dir_valid * sign_flip[:, None]
+            v_dot_w_valid = v_dot_w_valid * sign_flip[:, None]
 
             T_dir[has_translation] = T_dir_valid
             v_dot_w[has_translation] = v_dot_w_valid

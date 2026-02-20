@@ -243,7 +243,7 @@ def run_model_on_stimuli(
         if column_info == "column_phi_theta":
             column_info = column_phi_theta
         stimulus_kwargs = spec.get("stimulus_kwargs", {})
-        stimulus, optic_flow = su.get_stimulus(
+        stimulus, optic_flow = su.get_stimulus_one_eye(
             spec["stimulus_type"],
             stim_config,
             column_info,

@@ -84,6 +84,118 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
     return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
 
 
+def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
+                        data_dir='../connectome_data/copter_videos',
+                        frame_start=500, frame_end=1500,
+                        phi_right_deg=(-30, -150), phi_left_deg=(150, 30),
+                        theta_deg=(45, 135)):
+    """
+    Load stereo copter video and sample at ommatidia locations using
+    precomputed Gaussian ommatidium filters.
+
+    The right eye uses sample_phi/sample_theta directly. The left eye
+    mirrors phi (uses -sample_phi) to sample from the left camera.
+
+    Args:
+        sample_phi: (N,) azimuthal angles of right-eye ommatidia (radians).
+        sample_theta: (N,) polar angles of ommatidia (radians).
+        model_dt: model time step for temporal interpolation (seconds).
+        filter_std: Gaussian filter std in degrees (default 2.5).
+        data_dir: directory containing left.mp4, right.mp4, and pose CSV.
+        frame_start: first model time step to include (after interpolation).
+        frame_end: last model time step to include (after interpolation).
+        phi_right_deg: (start, end) phi limits of right camera in degrees.
+        phi_left_deg: (start, end) phi limits of left camera in degrees.
+        theta_deg: (start, end) theta limits of both cameras in degrees.
+
+    Returns:
+        stimulus_right: (time, N) right-eye stimulus in [0, 1].
+        stimulus_left: (time, N) left-eye stimulus in [0, 1].
+        true_rotation: (time, 3) rotation in degrees (model coords: x=roll, y=pitch, z=yaw).
+        true_translation: (time, 3) translation (model coords: +x forward, +y left, +z up).
+    """
+    import cv2
+    import pandas as pd
+
+    data_dir = Path(data_dir)
+
+    pose_logs = sorted(data_dir.glob('apriltag_pose_log_*.csv'))
+    if not pose_logs:
+        raise FileNotFoundError(f"No pose log CSV found in {data_dir}")
+    pose_log = pd.read_csv(pose_logs[0])
+    video_dt = float(pose_log['t_video_s'].iloc[1])
+
+    # -- Ground truth pose (CSV → model coordinate convention) --
+    # CSV axes: +x forward, +y up, +z right
+    # Model axes: +x forward, +y left, +z up
+    true_rotation = pose_log[['roll_used_deg', 'yaw_used_deg', 'pitch_used_deg']].to_numpy()
+    true_rotation[:, 1] *= -1
+    true_translation = pose_log[['x_used', 'z_used', 'y_used']].to_numpy()
+    true_translation[:, 1] *= -1
+
+    # -- Load video frames as grayscale float in [0, 1] --
+    frames = {}
+    for side in ('left', 'right'):
+        cap = cv2.VideoCapture(str(data_dir / f'{side}.mp4'))
+        buf = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            buf.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32))
+        cap.release()
+        frames[side] = np.stack(buf) / 255.0
+
+    _, image_height, image_width = frames['right'].shape
+
+    phi_right_lim = np.array(phi_right_deg) * np.pi / 180
+    phi_left_lim = np.array(phi_left_deg) * np.pi / 180
+    theta_lim = np.array(theta_deg) * np.pi / 180
+
+    W_right = build_ommatidium_sampling_matrix(
+        (image_height, image_width), phi_right_lim, theta_lim,
+        sample_phi, sample_theta, filter_std=filter_std,
+    )
+    W_left = build_ommatidium_sampling_matrix(
+        (image_height, image_width), phi_left_lim, theta_lim,
+        -sample_phi, sample_theta, filter_std=filter_std,
+    )
+
+    T = frames['right'].shape[0]
+    sampled_right = np.asarray(W_right.dot(frames['right'].reshape(T, -1).T)).T
+    sampled_left = np.asarray(W_left.dot(frames['left'].reshape(T, -1).T)).T
+
+    # Out-of-FOV ommatidia (zero row in W) get 0 from matmul; fill with middle gray
+    in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
+    in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
+    sampled_right[:, ~in_fov_right] = 0.5
+    sampled_left[:, ~in_fov_left] = 0.5
+
+    # -- Temporal interpolation from video_dt to model_dt --
+    sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
+    sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
+
+    # Interpolate pose to model timesteps
+    pose_times = pose_log['t_video_s'].to_numpy()
+    n_video_frames = frames['right'].shape[0]
+    video_times = np.arange(n_video_frames) * video_dt
+    model_times = np.arange(video_times[0], video_times[-1], model_dt)
+    true_rotation = np.column_stack([
+        np.interp(model_times, pose_times, true_rotation[:, i]) for i in range(3)
+    ])
+    true_translation = np.column_stack([
+        np.interp(model_times, pose_times, true_translation[:, i]) for i in range(3)
+    ])
+
+    # -- Slice to requested time range --
+    sampled_right = sampled_right[frame_start:frame_end]
+    sampled_left = sampled_left[frame_start:frame_end]
+    true_rotation = true_rotation[frame_start:frame_end]
+    true_translation = true_translation[frame_start:frame_end]
+
+    return sampled_right, sampled_left, true_rotation, true_translation
+
+
 def loadmat_v73(path):
     out = {}
     with h5py.File(path, "r") as f:
@@ -742,7 +854,7 @@ def consolidate_stim(stim_dict, optic_flow_dict):
 
     return stimulus, optic_flow
 
-def get_stimulus(
+def get_stimulus_one_eye(
     stimulus_type: str,
     config,
     column_phi_theta=None,
@@ -982,7 +1094,8 @@ def get_stimulus(
     else:
         raise ValueError(
             f"Unknown stimulus_type '{stimulus_type}'. "
-            "Expected one of: static_sine, directional_sine, random_pano, random_sine, sine_const_rand, flow_360, sintel."
+            "Expected one of: static_sine, directional_sine, random_pano, random_sine, "
+            "sine_const_rand, flow_360, sintel, flyview."
         )
 
     # --- plot the stimuli ---
@@ -1009,6 +1122,131 @@ def get_stimulus(
         optic_flow = torch.cat([pre_flow, optic_flow], dim=1)
 
     return stimulus, optic_flow
+
+
+def get_stimulus_two_eye(
+    stimulus_type: str,
+    config,
+    column_phi_theta=None,
+    *,
+    pre_stim_time_override: float | None = None,
+):
+    """
+    Load a two-eye stimulus and return sampled images, optic flow,
+    and observer ego-motion.
+
+    Args:
+        stimulus_type: type of stimulus ('copter_view', ...).
+        config: configuration dict.
+        column_phi_theta: (N, 2) right-eye (phi, theta) in radians.
+            Left eye is sampled at (-phi, theta).
+        pre_stim_time_override: override pre-stim time from config.
+
+    Returns:
+        stimulus_right: (examples, time, ommatidia) right-eye stimulus.
+        stimulus_left: (examples, time, ommatidia) left-eye stimulus.
+        optic_flow: (examples, time, ommatidia, 2) optic flow (NaN if unavailable).
+        observer_rotation: (examples, time, 3) rotation in degrees.
+        observer_translation: (examples, time, 3) translation.
+    """
+    device = torch.device(config['model']['device'])
+    dtype = getattr(torch, config['model']['dtype'])
+    middle_gray = 0.5
+
+    model_dt = config['model']['dt']
+    pre_stim_time = config['stimulus']['pre_stim_time']
+    if pre_stim_time_override is not None:
+        pre_stim_time = float(pre_stim_time_override)
+
+    if stimulus_type == 'random_pano':
+        if column_phi_theta is None:
+            raise Exception('random_pano requires column_phi_theta input')
+
+        stim_time = config['stimulus']['stim_time']
+        stimulus_seed = config['stimulus'].get('seed', None)
+        N = column_phi_theta.shape[0]
+
+        # Concatenate right and left eye viewing directions so both eyes
+        # see the same panorama from the same rotation in a single call.
+        both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
+        both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
+
+        stimulus_both, optic_flow_both, rotation_vectors = get_random_velocity_pano(
+            both_phi, both_theta,
+            velocity_amp=config['stimulus']['velocity_amp'],
+            velocity_time_scale=config['stimulus']['velocity_time_scale'],
+            num_repeats=config['stimulus']['num_repeats'],
+            dt=model_dt, stim_time=stim_time, seed=stimulus_seed,
+        )
+
+        stimulus_right = torch.tensor(stimulus_both[:, :, :N], device=device, dtype=dtype)
+        stimulus_left = torch.tensor(stimulus_both[:, :, N:], device=device, dtype=dtype)
+        optic_flow = torch.tensor(optic_flow_both[:, :, :N, :], device=device, dtype=dtype)
+        # rotation_vectors is body-frame angular velocity (rad/s) → cumulative rotation (deg)
+        observer_rotation = torch.tensor(
+            np.cumsum(rotation_vectors, axis=1) * model_dt * 180 / np.pi,
+            device=device, dtype=dtype,
+        )
+        observer_translation = torch.zeros_like(observer_rotation)
+
+    elif stimulus_type == 'copter_view':
+        if column_phi_theta is None:
+            raise Exception('copter_view requires column_phi_theta input')
+
+        copter_data_dir = Path(config['data']['connectome_folder']) / 'copter_videos'
+        stim_right, stim_left, true_rotation, true_translation = get_copter_stimulus(
+            column_phi_theta[:, 0], column_phi_theta[:, 1],
+            model_dt, data_dir=str(copter_data_dir),
+        )
+        stimulus_right = torch.tensor(stim_right[None], device=device, dtype=dtype)
+        stimulus_left = torch.tensor(stim_left[None], device=device, dtype=dtype)
+        optic_flow = torch.full((*stimulus_right.shape, 2), float('nan'), device=device, dtype=dtype)
+        observer_rotation = torch.tensor(true_rotation[None], device=device, dtype=dtype)
+        observer_translation = torch.tensor(true_translation[None], device=device, dtype=dtype)
+
+    else:
+        raise ValueError(
+            f"Unknown stimulus_type '{stimulus_type}' for two-eye stimulus. "
+            "Expected one of: random_pano, copter_view."
+        )
+
+    num_time = stimulus_right.shape[1]
+    num_cells = stimulus_right.shape[2]
+
+    # Add blank stimuli (3 examples: intensity 0, 0.5, 1.0)
+    blank_right = torch.zeros((3, num_time, num_cells), device=device, dtype=dtype)
+    blank_right[0] = 0.0
+    blank_right[1] = 0.5
+    blank_right[2] = 1.0
+    blank_left = blank_right.clone()
+    blank_flow = torch.zeros((3, num_time, num_cells, 2), device=device, dtype=dtype)
+    blank_rot = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
+    blank_trans = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
+
+    stimulus_right = torch.cat([blank_right, stimulus_right], dim=0)
+    stimulus_left = torch.cat([blank_left, stimulus_left], dim=0)
+    optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
+    observer_rotation = torch.cat([blank_rot, observer_rotation], dim=0)
+    observer_translation = torch.cat([blank_trans, observer_translation], dim=0)
+
+    # Add pre-stimulus interval (stationary observer, middle-gray stimulus)
+    pre_stim_points = int(pre_stim_time / model_dt)
+    if pre_stim_points > 0:
+        n_examples = stimulus_right.shape[0]
+        pre_right = torch.full((n_examples, pre_stim_points, num_cells), middle_gray, device=device, dtype=dtype)
+        pre_left = pre_right.clone()
+        pre_flow = torch.zeros((n_examples, pre_stim_points, num_cells, 2), device=device, dtype=dtype)
+        pre_rot = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
+        pre_trans = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
+
+        stimulus_right = torch.cat([pre_right, stimulus_right], dim=1)
+        stimulus_left = torch.cat([pre_left, stimulus_left], dim=1)
+        optic_flow = torch.cat([pre_flow, optic_flow], dim=1)
+        observer_rotation = torch.cat([pre_rot, observer_rotation], dim=1)
+        observer_translation = torch.cat([pre_trans, observer_translation], dim=1)
+
+    return stimulus_right, stimulus_left, optic_flow, observer_rotation, observer_translation
+
 
 def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     """

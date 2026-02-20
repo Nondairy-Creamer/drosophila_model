@@ -20,6 +20,38 @@ from loss_functions import (
 )
 
 
+def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):
+    """Combined rate + position loss for ego-motion estimation.
+
+    Rate loss: MSE between predicted rates and finite-differenced target positions.
+    Position loss: MSE between cumsum-integrated predicted rates and target positions.
+
+    Args:
+        pred_rot: (batch, T, 3) predicted rotation rate (deg/s).
+        pred_trans: (batch, T, 3) predicted translation rate.
+        target_rot: (batch, T, 3) target rotation position (deg).
+        target_trans: (batch, T, 3) target translation position.
+        dt: time step (seconds).
+    """
+    import torch.nn.functional as F
+
+    # Rate loss: finite-difference target to get rates, skip first pred frame
+    target_rot_rate = torch.diff(target_rot, dim=1) / dt
+    target_trans_rate = torch.diff(target_trans, dim=1) / dt
+    loss_rate = (F.mse_loss(pred_rot[:, 1:], target_rot_rate) +
+                 F.mse_loss(pred_trans[:, 1:], target_trans_rate))
+
+    # Position loss: integrate predicted rates, compare against zero-centered target
+    pred_rot_pos = torch.cumsum(pred_rot * dt, dim=1)
+    pred_trans_pos = torch.cumsum(pred_trans * dt, dim=1)
+    target_rot_delta = target_rot[:, 1:] - target_rot[:, :1, :]
+    target_trans_delta = target_trans[:, 1:] - target_trans[:, :1, :]
+    loss_pos = (F.mse_loss(pred_rot_pos[:, :-1], target_rot_delta) +
+                F.mse_loss(pred_trans_pos[:, :-1], target_trans_delta))
+
+    return loss_rate + loss_pos
+
+
 class StimulusDataset(Dataset):
     """Dataset that pairs inputs with targets (tensor or dict of tensors)."""
     def __init__(self, inputs, target):
@@ -40,7 +72,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
                 sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
-                batch_size=None, pre_stim_time=0.0):
+                batch_size=None, pre_stim_time=0.0, fit_odometry=False):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
@@ -129,27 +161,41 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
         start = time.time()
         opt.zero_grad()
-        pred, step_state, cached_mappings = model.predict(inputs_batch, init_state=batch_init_state, init_filter_state=batch_filter_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
-        # Only carry forward hidden state when using full batch (states match stimuli)
-        if not use_batching:
-            last_state = step_state
-            last_filter_state = cached_mappings.get('filter_state')
 
-        if model.has_decoder:
-            pred_loss = pred['decoder'][:, loss_start_step:]
-            target_loss = target_batch[:, loss_start_step:]
-            loss = loss_fn(target_loss, pred_loss)
+        if fit_odometry:
+            # inputs shape: (batch, 2, time, ommatidia) — right eye at [:,0], left at [:,1]
+            right_batch = inputs_batch[:, 0]
+            left_batch = inputs_batch[:, 1]
+            pred_rot, pred_trans, _, _ = model.estimate_ego_motion_from_image(right_batch, left_batch)
+
+            target_rot = target_batch['rotation'][:, loss_start_step:]
+            target_trans = target_batch['translation'][:, loss_start_step:]
+            loss = odometry_loss(
+                pred_rot[:, loss_start_step:], pred_trans[:, loss_start_step:],
+                target_rot, target_trans, model.dt,
+            )
         else:
-            pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
-            target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
-            loss = calc_loss_dict(loss_fn, pred_loss, target_loss)
+            pred, step_state, cached_mappings = model.predict(inputs_batch, init_state=batch_init_state, init_filter_state=batch_filter_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+            # Only carry forward hidden state when using full batch (states match stimuli)
+            if not use_batching:
+                last_state = step_state
+                last_filter_state = cached_mappings.get('filter_state')
+
+            if model.has_decoder:
+                pred_loss = pred['decoder'][:, loss_start_step:]
+                target_loss = target_batch[:, loss_start_step:]
+                loss = loss_fn(target_loss, pred_loss)
+            else:
+                pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
+                target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
+                loss = calc_loss_dict(loss_fn, pred_loss, target_loss)
 
         if sigma_lambda > 0:
             # add a regularizer based on the operator norm of the model
             max_sigma_penalty = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
             loss = loss + sigma_lambda * max_sigma_penalty
 
-        if peak_lambda > 0:
+        if peak_lambda > 0 and not fit_odometry:
             # add a regularizer to penalize high values (logmeanexp)
             peak_val = torch.stack([
                 log_nanmean_exp(v)
