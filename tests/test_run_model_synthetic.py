@@ -81,4 +81,4 @@ def test_run_model_synthetic_learns(tmp_path):
     final_loss = _calc_loss(trained_model, stimulus, target, input_neurons, output_neurons, loss_fn)
 
     assert initial_loss > 0.0
-    assert final_loss < initial_loss
+    assert final_loss < 0.1 * initial_loss

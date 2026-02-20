@@ -87,8 +87,9 @@ class NeuralModelConv(torch.nn.Module):
     """
 
     def __init__(self, in_features, out_features, conv_size, column_p_q,
-                 device=None, dtype=None):
+                 device=None, dtype=None, positive_weights=False, use_bias=True):
         super().__init__()
+        self.positive_weights = positive_weights
         nearest_column_indices = self.compute_nearest_columns(conv_size, column_p_q)
         self.register_buffer(
             'nearest_column_indices',
@@ -99,21 +100,30 @@ class NeuralModelConv(torch.nn.Module):
             torch.zeros(out_features, num_nearest, in_features,
                         device=device, dtype=dtype)
         )
-        self.bias = torch.nn.Parameter(
-            torch.zeros(out_features, device=device, dtype=dtype)
-        )
+        if use_bias:
+            self.bias = torch.nn.Parameter(
+                torch.zeros(out_features, device=device, dtype=dtype)
+            )
+        else:
+            self.bias = None
 
     def forward(self, x):
         """Apply hex-grid convolution.
 
         Args:
-            x: ``(..., num_columns, in_features)``.  Arbitrary leading
-               dimensions are preserved.  May contain ``NaN`` for missing
-               features (they are replaced with 0).
+            x: ``(..., num_columns, in_features)`` or ``(..., num_columns)``
+               when ``in_features == 1``.  Arbitrary leading dimensions are
+               preserved.  May contain ``NaN`` for missing features (they
+               are replaced with 0).
 
         Returns:
-            ``(..., num_columns, out_features)``
+            ``(..., num_columns, out_features)`` or ``(..., num_columns)``
+            when ``out_features == 1`` and the input had no feature dim.
         """
+        squeeze_features = x.dim() >= 1 and x.shape[-1] != self.weight.shape[-1]
+        if squeeze_features:
+            x = x.unsqueeze(-1)
+
         leading = x.shape[:-2]
         x_flat = x.reshape(-1, x.shape[-2], x.shape[-1])
 
@@ -125,9 +135,19 @@ class NeuralModelConv(torch.nn.Module):
         gathered = torch.where(torch.isnan(gathered),
                                torch.zeros_like(gathered), gathered)
 
-        out = torch.einsum('scnf,knf->sck', gathered, self.weight)
-        out = out + self.bias.view(1, 1, -1)
-        return out.reshape(*leading, out.shape[-2], out.shape[-1])
+        if self.positive_weights:
+            w = self.weight.exp()
+            # Per-column normalization: divide by sum of valid weights so they sum to 1
+            w_sum = torch.einsum('cn,knf->ck', valid_mask.float(), w).clamp(min=1e-8)
+            out = torch.einsum('scnf,knf->sck', gathered, w) / w_sum.unsqueeze(0)
+        else:
+            out = torch.einsum('scnf,knf->sck', gathered, self.weight)
+        if self.bias is not None:
+            out = out + self.bias.view(1, 1, -1)
+        out = out.reshape(*leading, out.shape[-2], out.shape[-1])
+        if squeeze_features:
+            out = out.squeeze(-1)
+        return out
 
     # ------------------------------------------------------------------
     # Hex-grid geometry helpers (static, shared by all conv users)
@@ -529,15 +549,16 @@ class NeuralModel(torch.nn.Module, ABC):
         self.input_spatial_conv = NeuralModelConv(
             in_features=1, out_features=1, conv_size=conv_size_x,
             column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
+            positive_weights=True, use_bias=False,
         )
 
-        # Initialize spatial kernel: 1.0 for inner hex ring, ~0 elsewhere.
-        # apply_input_conv normalizes by the effective weight sum per column.
+        # Initialize in log space: 0.0 (exp=1) for inner hex ring, -10.0 (exp≈0) elsewhere.
         pq_offsets = NeuralModelConv.hex_grid_pq_offsets(conv_size_x)
         with torch.no_grad():
+            self.input_spatial_conv.weight.fill_(-10.0)
             for i, (dp, dq) in enumerate(pq_offsets):
                 if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
-                    self.input_spatial_conv.weight[0, i, 0] = 1.0
+                    self.input_spatial_conv.weight[0, i, 0] = 0.0
 
         self.input_conv_size_t = conv_size_t
         temporal_init = np.zeros(conv_size_t)
@@ -603,16 +624,9 @@ class NeuralModel(torch.nn.Module, ABC):
         else:
             raise ValueError("inputs must have shape (time, columns) or (stimuli, time, columns).")
 
-        def _normalized_spatial(x):
-            raw = self.input_spatial_conv(x.unsqueeze(-1)).squeeze(-1)
-            w = self.input_spatial_conv.weight[0, :, 0]
-            valid = self.input_spatial_conv.nearest_column_indices >= 0
-            eff_sum = (w.unsqueeze(0) * valid.float()).sum(dim=1).clamp(min=1e-8)
-            return raw / eff_sum
-
-        local_mean = _normalized_spatial(inputs)
+        local_mean = self.input_spatial_conv(inputs)
         centered = inputs - local_mean
-        local_var = _normalized_spatial(centered ** 2)
+        local_var = self.input_spatial_conv(centered ** 2)
         normed = -centered / torch.sqrt(local_var + 1e-3)
 
         # Causal temporal convolution
@@ -625,10 +639,6 @@ class NeuralModel(torch.nn.Module, ABC):
         if squeeze:
             result = result.squeeze(0)
         return result
-
-    def decode_motion(self, v):
-        """Decode motion from firing rates via the decoder created in ``_initialize_decoder``."""
-        return self.decoder(v)
 
     @abstractmethod
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
@@ -747,7 +757,7 @@ class NeuralModel(torch.nn.Module, ABC):
             fr = self.firing_rate(v)
 
             if self.has_decoder:
-                outputs['decoder'][:, t, :, :] = self.decode_motion(fr)
+                outputs['decoder'][:, t, :, :] = self.decoder(fr)
 
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
