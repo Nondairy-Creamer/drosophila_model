@@ -9,6 +9,80 @@ import torch
 
 import h5py
 import numpy as np
+from scipy.sparse import csr_matrix
+
+
+def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim,
+                                     sample_phi, sample_theta, filter_std=2.5):
+    """
+    Build a sparse matrix that samples a flattened image through Gaussian
+    ommatidium filters via a single matrix-vector multiply.
+
+    Treats (phi, theta) as flat Euclidean coordinates (no spherical correction).
+
+    Args:
+        image_shape: (H, W) of the image.
+        image_phi_lim: (2,) phi limits [start, end] in radians.
+        image_theta_lim: (2,) theta limits [start, end] in radians.
+        sample_phi: (N,) azimuthal angles of ommatidia (radians).
+        sample_theta: (N,) polar angles of ommatidia (radians).
+        filter_std: Gaussian filter std in degrees (default 2.5).
+
+    Returns:
+        W: scipy.sparse.csr_matrix of shape (N, H*W).
+           Usage: sampled = W @ image.ravel()
+    """
+    filter_std_rad = filter_std * np.pi / 180
+    cutoff_rad = 2 * filter_std_rad
+
+    H, W_img = image_shape
+    N = len(sample_phi)
+
+    theta_pixels = np.linspace(image_theta_lim[0], image_theta_lim[1], H)
+    phi_pixels = np.linspace(image_phi_lim[0], image_phi_lim[1], W_img)
+
+    d_theta_per_pixel = (image_theta_lim[1] - image_theta_lim[0]) / (H - 1)
+    d_phi_per_pixel = (image_phi_lim[1] - image_phi_lim[0]) / (W_img - 1)
+
+    cutoff_pixels_theta = int(np.ceil(cutoff_rad / np.abs(d_theta_per_pixel))) + 1
+    cutoff_pixels_phi = int(np.ceil(cutoff_rad / np.abs(d_phi_per_pixel))) + 1
+
+    rows = []
+    cols = []
+    vals = []
+
+    for i in range(N):
+        center_j = (sample_theta[i] - image_theta_lim[0]) / d_theta_per_pixel
+        center_k = (sample_phi[i] - image_phi_lim[0]) / d_phi_per_pixel
+
+        j_lo = max(0, int(np.floor(center_j)) - cutoff_pixels_theta)
+        j_hi = min(H - 1, int(np.ceil(center_j)) + cutoff_pixels_theta)
+        k_lo = max(0, int(np.floor(center_k)) - cutoff_pixels_phi)
+        k_hi = min(W_img - 1, int(np.ceil(center_k)) + cutoff_pixels_phi)
+
+        theta_patch = theta_pixels[j_lo:j_hi + 1]
+        phi_patch = phi_pixels[k_lo:k_hi + 1]
+        phi_grid, theta_grid = np.meshgrid(phi_patch, theta_patch)
+
+        d_sq = (phi_grid - sample_phi[i]) ** 2 + (theta_grid - sample_theta[i]) ** 2
+        weights = np.exp(-d_sq / (2 * filter_std_rad ** 2))
+        weights[d_sq > cutoff_rad ** 2] = 0
+
+        weight_sum = weights.sum()
+        if weight_sum > 0:
+            weights /= weight_sum
+
+        nz_mask = weights > 0
+        local_rows, local_cols = np.where(nz_mask)
+        flat_indices = (local_rows + j_lo) * W_img + (local_cols + k_lo)
+
+        n_nz = flat_indices.size
+        rows.extend([i] * n_nz)
+        cols.extend(flat_indices.tolist())
+        vals.extend(weights[nz_mask].tolist())
+
+    return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
+
 
 def loadmat_v73(path):
     out = {}
