@@ -3,7 +3,7 @@ Plot input convolution filter parameters.
 
 Generates:
   - input_conv_xy (spatial kernel scatter on hex grid)
-  - input_conv_t (temporal kernel line plot)
+  - input_conv_t (temporal LRU impulse response)
 """
 import argparse
 import sys
@@ -18,9 +18,18 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
+import torch
 import neural_models as nm
 
 from analysis_utilities import resolve_model_folder, centered_norm, hex_grid_points
+
+
+def compute_lru_impulse_response(lru, num_steps=100, dt=0.01):
+    """Compute the impulse response of a TemporalLRU analytically."""
+    with torch.no_grad():
+        h = lru.impulse_response(num_t=num_steps).cpu().numpy()
+    t = np.arange(num_steps) * dt
+    return h, t
 
 
 def main() -> None:
@@ -38,6 +47,12 @@ def main() -> None:
         default=None,
         help="Optional output file path (default: <model_folder>/figures/input_conv_filters.png)",
     )
+    parser.add_argument(
+        "--impulse-steps",
+        type=int,
+        default=100,
+        help="Number of time steps for impulse response plot (default: 100)",
+    )
     args = parser.parse_args()
 
     model_path = Path(args.model_path)
@@ -47,7 +62,6 @@ def main() -> None:
         raise ValueError("Model does not have input convolution enabled.")
 
     conv_xy = model.input_spatial_conv.weight[0, :, 0].detach().cpu().numpy()
-    conv_t = model.input_conv_temporal.detach().cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 
@@ -78,10 +92,11 @@ def main() -> None:
     axes[0].set_ylim(y_min - pad, y_max + pad)
     fig.colorbar(scatter, ax=axes[0], shrink=0.8, pad=0.02)
 
-    axes[1].plot(conv_t, marker="o")
-    axes[1].set_title("input_conv_t (temporal kernel)")
-    axes[1].set_xlabel("t index")
-    axes[1].set_ylabel("weight")
+    h, t = compute_lru_impulse_response(model.temporal_lru, num_steps=args.impulse_steps, dt=model.dt)
+    axes[1].plot(t, h)
+    axes[1].set_title("temporal LRU impulse response")
+    axes[1].set_xlabel("time (s)")
+    axes[1].set_ylabel("amplitude")
     axes[1].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
 
     fig.tight_layout()

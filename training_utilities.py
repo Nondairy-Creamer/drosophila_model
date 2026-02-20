@@ -50,8 +50,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
+    cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons, 'filter_state': None}
     last_state = None
+    last_filter_state = None
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -95,6 +96,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
     for step in range(num_steps):
         if (step % reset_init_every) == 0:
             last_state = None
+            last_filter_state = None
 
         # --- mini-batch: draw next batch from DataLoader ---
         if use_batching:
@@ -105,10 +107,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                 inputs_batch, target_batch = next(batch_iter)
             inputs_batch = inputs_batch.clone()
             batch_init_state = None
+            batch_filter_state = None
         else:
             inputs_batch = inputs.clone()
             target_batch = target
             batch_init_state = last_state
+            batch_filter_state = last_filter_state
 
         # --- data augmentation (applied only to the batch) ---
         if luminance_std > 0:
@@ -125,10 +129,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
         start = time.time()
         opt.zero_grad()
-        pred, step_state, cached_mappings = model.predict(inputs_batch, init_state=batch_init_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+        pred, step_state, cached_mappings = model.predict(inputs_batch, init_state=batch_init_state, init_filter_state=batch_filter_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
         # Only carry forward hidden state when using full batch (states match stimuli)
         if not use_batching:
             last_state = step_state
+            last_filter_state = cached_mappings.get('filter_state')
 
         if model.has_decoder:
             pred_loss = pred['decoder'][:, loss_start_step:]

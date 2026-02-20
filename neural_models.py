@@ -225,6 +225,113 @@ class NeuralModelConv(torch.nn.Module):
         return result
 
 
+class TemporalLRU(torch.nn.Module):
+    """Temporal filter via complex diagonal linear recurrence.
+
+    Each of the *N* modes is a damped oscillator whose frequency and
+    damping are independently learnable, providing natural bandpass
+    behaviour.  The per-timestep update is::
+
+        z_k(t) = a_k * z_k(t-1) + b_k * u(t)      (complex state)
+        y(t)   = sum_k Re(c_k * z_k(t))  + d * u(t) (real output)
+
+    where ``a_k = exp(-gamma_k + i*omega_k)`` with ``gamma_k > 0`` for
+    stability.
+
+    Parameters are learned in constrained spaces:
+      - ``gamma = softplus(log_gamma)``  -- positive damping
+      - ``omega = sigmoid(logit_omega) * pi``  -- frequency in ``[0, pi]``
+    """
+
+    _COMPLEX_DTYPE = {torch.float32: torch.complex64, torch.float64: torch.complex128}
+
+    def __init__(self, num_modes=4, device='cpu', dtype='float32'):
+        super().__init__()
+        self.num_modes = num_modes
+        pt_dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+
+        self.log_gamma = torch.nn.Parameter(
+            torch.zeros(num_modes, device=device, dtype=pt_dtype)
+        )
+        self.logit_omega = torch.nn.Parameter(
+            torch.zeros(num_modes, device=device, dtype=pt_dtype)
+        )
+        self.b_re = torch.nn.Parameter(
+            torch.randn(num_modes, device=device, dtype=pt_dtype) * 0.1
+        )
+        self.b_im = torch.nn.Parameter(
+            torch.zeros(num_modes, device=device, dtype=pt_dtype)
+        )
+        self.c_re = torch.nn.Parameter(
+            torch.randn(num_modes, device=device, dtype=pt_dtype) * 0.1
+        )
+        self.c_im = torch.nn.Parameter(
+            torch.zeros(num_modes, device=device, dtype=pt_dtype)
+        )
+        self.log_d = torch.nn.Parameter(
+            torch.zeros(1, device=device, dtype=pt_dtype)
+        )
+
+    @property
+    def gamma(self):
+        """Damping coefficients (positive)."""
+        return self.log_gamma.exp()
+
+    @property
+    def omega(self):
+        """Angular frequencies in [0, pi]."""
+        return torch.sigmoid(self.logit_omega) * np.pi
+
+    def poles(self):
+        """Complex poles ``a_k = exp(-gamma_k + i*omega_k)``."""
+        return torch.exp(torch.complex(-self.gamma, self.omega))
+
+    def step(self, u_t, state=None):
+        """Single-timestep update.
+
+        Args:
+            u_t: ``(batch, columns)`` real input.
+            state: ``(batch, num_modes, columns)`` complex, or *None*.
+
+        Returns:
+            y_t: ``(batch, columns)`` real output.
+            new_state: ``(batch, num_modes, columns)`` complex.
+        """
+        cdtype = self._COMPLEX_DTYPE[u_t.dtype]
+        a = self.poles()
+        b = torch.complex(self.b_re, self.b_im)
+        c = torch.complex(self.c_re, self.c_im)
+
+        if state is None:
+            state = torch.zeros(
+                u_t.shape[0], self.num_modes, u_t.shape[1],
+                dtype=cdtype, device=u_t.device,
+            )
+
+        u_cx = u_t.to(cdtype)
+        new_state = a[None, :, None] * state + b[None, :, None] * u_cx[:, None, :]
+        y_t = (c[None, :, None] * state).real.sum(dim=1) + self.log_d.exp() * u_t
+        return y_t, new_state
+
+    def impulse_response(self, num_t=20):
+        """Analytically compute the impulse response h[0..num_t-1].
+
+        Strictly causal: modes contribute starting at t=1, feedthrough at t=0.
+
+        Returns:
+            ``(num_t,)`` real tensor.
+        """
+        a = self.poles()
+        cb = torch.complex(self.c_re, self.c_im) * torch.complex(self.b_re, self.b_im)
+        h = torch.zeros(num_t, device=a.device, dtype=a.real.dtype)
+        h[0] = self.log_d.exp()
+        if num_t > 1:
+            n = torch.arange(num_t - 1, device=a.device, dtype=a.real.dtype)
+            a_n = a[:, None] ** n[None, :]
+            h[1:] = (cb[:, None] * a_n).real.sum(dim=0)
+        return h
+
+
 class MotionDecoder(torch.nn.Module):
     """N-layer hex-grid convolutional decoder: firing rates -> optic flow.
 
@@ -369,7 +476,7 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 decoder_type='none', use_input_conv=True, conv_size_x=5, conv_size_t=20, use_layer_norm=True):
+                 decoder_type='none', use_input_conv=True, conv_size_x=5, num_temporal_modes=4, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
@@ -466,7 +573,7 @@ class NeuralModel(torch.nn.Module, ABC):
             self._initialize_decoder()
         if self.use_input_conv:
             # Initialize input convolution layer
-            self._initialize_input_conv(conv_size_x=conv_size_x, conv_size_t=conv_size_t)
+            self._initialize_input_conv(conv_size_x=conv_size_x, num_temporal_modes=num_temporal_modes)
 
     @property
     def has_decoder(self):
@@ -536,14 +643,14 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return root_ids, cell_types, neurotransmitters, column_indices, synapse_counts_coo
 
-    def _initialize_input_conv(self, conv_size_x=5, conv_size_t=20):
+    def _initialize_input_conv(self, conv_size_x=5, num_temporal_modes=4):
         """Set up input convolution using a ``NeuralModelConv`` for the spatial
-        part and a learned 1-D causal kernel for the temporal part.
+        part and a ``TemporalLRU`` for the temporal part.
         """
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
-        if conv_size_t < 1:
-            raise ValueError("conv_size_t must be >= 1 for temporal convolution.")
+        if num_temporal_modes < 1:
+            raise ValueError("num_temporal_modes must be >= 1.")
 
         self.input_conv_size_x = conv_size_x
         self.input_spatial_conv = NeuralModelConv(
@@ -560,11 +667,8 @@ class NeuralModel(torch.nn.Module, ABC):
                 if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
                     self.input_spatial_conv.weight[0, i, 0] = 0.0
 
-        self.input_conv_size_t = conv_size_t
-        temporal_init = np.zeros(conv_size_t)
-        temporal_init[0] = 1.0
-        self.input_conv_temporal = torch.nn.Parameter(
-            torch.tensor(temporal_init, device=self.device, dtype=self.dtype)
+        self.temporal_lru = TemporalLRU(
+            num_modes=num_temporal_modes, device=self.device, dtype=self.dtype,
         )
 
     def _initialize_decoder(self, num_channels=None, conv_sizes=None):
@@ -604,41 +708,24 @@ class NeuralModel(torch.nn.Module, ABC):
             dtype=self.dtype,
         )
 
-    def apply_input_conv(self, inputs):
-        """Apply local contrast normalization (spatial) then temporal filtering.
+    def apply_input_conv(self, u_t, filter_state=None):
+        """Apply spatial contrast normalization then one step of temporal LRU.
 
-        Spatial: ``self.input_spatial_conv`` (a ``NeuralModelConv``) computes a
-        local weighted sum used for mean and variance estimation.
-        Temporal: a learned 1-D causal kernel (``self.input_conv_temporal``).
+        Args:
+            u_t: ``(batch, columns)`` raw input for a single timestep.
+            filter_state: complex tensor from a previous call, or *None*.
 
-        Returns *inputs* unchanged when ``use_input_conv`` is ``False``.
+        Returns:
+            y_t: ``(batch, columns)`` filtered output.
+            new_filter_state: updated complex state for the next timestep.
         """
-        if not self.use_input_conv:
-            return inputs
-
-        if inputs.dim() == 2:
-            inputs = inputs.unsqueeze(0)
-            squeeze = True
-        elif inputs.dim() == 3:
-            squeeze = False
-        else:
-            raise ValueError("inputs must have shape (time, columns) or (stimuli, time, columns).")
-
-        local_mean = self.input_spatial_conv(inputs)
-        centered = inputs - local_mean
+        local_mean = self.input_spatial_conv(u_t)
+        centered = u_t - local_mean
         local_var = self.input_spatial_conv(centered ** 2)
         normed = -centered / torch.sqrt(local_var + 1e-3)
 
-        # Causal temporal convolution
-        pad = self.input_conv_size_t - 1
-        padded = torch.nn.functional.pad(normed, (0, 0, pad, 0))
-        windows = padded.unfold(1, self.input_conv_size_t, 1)
-        kernel = torch.flip(self.input_conv_temporal, dims=(0,))
-        result = torch.einsum('stcq,q->stc', windows, kernel)
-
-        if squeeze:
-            result = result.squeeze(0)
-        return result
+        y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
+        return y_t, new_filter_state
 
     @abstractmethod
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
@@ -691,12 +778,11 @@ class NeuralModel(torch.nn.Module, ABC):
                 param.add_(noise)
 
     def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'],  output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], 
-                init_state=None):
+                init_state=None, init_filter_state=None):
         # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
-        if self.use_input_conv:
-            inputs = self.apply_input_conv(inputs)
+        filter_state = init_filter_state
 
         # Handle input mapping (either compute from names list, or reuse provided indices)
         if isinstance(input_neurons, list):
@@ -751,7 +837,10 @@ class NeuralModel(torch.nn.Module, ABC):
             outputs['decoder'] = torch.full((num_batches, num_time, self.num_columns, 2), float('nan'), device=self.device, dtype=self.dtype)
 
         for t in range(num_time):
-            v = self(v, inputs[:, t, :], stim_to_cell_mapping)
+            u_t = inputs[:, t, :]
+            if self.use_input_conv:
+                u_t, filter_state = self.apply_input_conv(u_t, filter_state)
+            v = self(v, u_t, stim_to_cell_mapping)
             if self.use_layer_norm:
                 v = self.layer_norm(v)
             fr = self.firing_rate(v)
@@ -778,7 +867,7 @@ class NeuralModel(torch.nn.Module, ABC):
         if total_elements > 0 and nan_elements / total_elements > 0.5:
             print(f'Warning: >50% of predictions are NaN ({nan_elements}/{total_elements}), potentially unstable dynamics')
 
-        return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict}
+        return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict, 'filter_state': filter_state}
 
     def find_steady_state(self, run_time=100, max_iter=25):
         print("Finding steady state ...")

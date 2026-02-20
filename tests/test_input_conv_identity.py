@@ -5,35 +5,41 @@ from test_model_factory import build_model_from_test_config
 
 
 def _set_identity_filter(model):
-    """Set spatial and temporal filters to identity (center=1, rest=0)."""
+    """Set spatial filter to center-only and temporal LRU to passthrough (d=1, modes off).
+
+    The spatial conv uses ``positive_weights=True`` (log-space), so we need
+    large negative values for non-center weights to make ``exp(w) ≈ 0``.
+    """
     with torch.no_grad():
-        model.input_spatial_conv.weight.zero_()
-        model.input_spatial_conv.bias.zero_()
+        model.input_spatial_conv.weight.fill_(-100.0)
         pq_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.input_conv_size_x)
         for i, (dp, dq) in enumerate(pq_offsets):
             if dp == 0 and dq == 0:
-                model.input_spatial_conv.weight[0, i, 0] = 1.0
+                model.input_spatial_conv.weight[0, i, 0] = 0.0
                 break
-        model.input_conv_temporal.zero_()
-        model.input_conv_temporal[0] = 1.0
+        model.temporal_lru.log_d.fill_(0.0)
+        model.temporal_lru.b_re.zero_()
+        model.temporal_lru.b_im.zero_()
+        model.temporal_lru.c_re.zero_()
+        model.temporal_lru.c_im.zero_()
 
 
-def test_uniform_input_gives_zero_output():
-    """A spatially uniform input has no local contrast, so output should be ~0."""
+def test_uniform_input_gives_zero_conv_output():
+    """A spatially uniform input has no local contrast, so conv output should be ~0."""
     model, _, _, _ = build_model_from_test_config(decoder_type='none', use_input_conv=True)
     model.eval()
     _set_identity_filter(model)
 
-    num_time = 10
-    inputs = torch.full(
-        (num_time, model.num_columns), 5.0,
+    batch = 2
+    u_t = torch.full(
+        (batch, model.num_columns), 5.0,
         dtype=model.dtype, device=model.device,
     )
 
     with torch.no_grad():
-        outputs = model.apply_input_conv(inputs)
+        y_t, _ = model.apply_input_conv(u_t)
 
-    assert torch.allclose(outputs, torch.zeros_like(outputs), atol=1e-3, rtol=0.0)
+    assert torch.allclose(y_t, torch.zeros_like(y_t), atol=1e-3, rtol=0.0)
 
 
 def test_spatial_identity_gives_zero_output():
@@ -42,50 +48,36 @@ def test_spatial_identity_gives_zero_output():
     model.eval()
     _set_identity_filter(model)
 
-    num_time = 10
+    batch = 2
     inputs = torch.randn(
-        (num_time, model.num_columns),
+        (batch, 1, model.num_columns),
         dtype=model.dtype, device=model.device,
     )
 
     with torch.no_grad():
-        outputs = model.apply_input_conv(inputs)
+        u_t = inputs[:, 0, :]
+        y_t, _ = model.apply_input_conv(u_t)
 
-    assert torch.allclose(outputs, torch.zeros_like(outputs), atol=1e-3, rtol=0.0)
+    assert torch.allclose(y_t, torch.zeros_like(y_t), atol=1e-3, rtol=0.0)
 
 
-def test_full_pipeline_spatial_norm_negate_temporal():
-    """Verify the full pipeline: spatial contrast norm -> negate -> temporal filter."""
+def test_lru_step_shapes():
+    """Verify the LRU step returns correct shapes and state."""
     model, _, _, _ = build_model_from_test_config(decoder_type='none', use_input_conv=True)
     model.eval()
 
-    num_time = 10
-    torch.manual_seed(42)
-    inputs = torch.randn(
-        (1, num_time, model.num_columns),
-        dtype=model.dtype, device=model.device,
-    )
+    batch = 3
+    u_t = torch.randn(batch, model.num_columns, dtype=model.dtype, device=model.device)
 
     with torch.no_grad():
-        w = model.input_spatial_conv.weight[0, :, 0]
-        valid = model.input_spatial_conv.nearest_column_indices >= 0
-        eff_sum = (w.unsqueeze(0) * valid.float()).sum(dim=1).clamp(min=1e-8)
+        y_t, state = model.temporal_lru.step(u_t)
 
-        raw_mean = model.input_spatial_conv(inputs.unsqueeze(-1)).squeeze(-1)
-        local_mean = raw_mean / eff_sum
-        centered = inputs - local_mean
-        raw_var = model.input_spatial_conv((centered ** 2).unsqueeze(-1)).squeeze(-1)
-        local_var = raw_var / eff_sum
-        normed = -centered / torch.sqrt(local_var + 1e-3)
+    assert y_t.shape == (batch, model.num_columns)
+    assert state.shape == (batch, model.temporal_lru.num_modes, model.num_columns)
+    assert state.is_complex()
 
-        pad = model.input_conv_size_t - 1
-        padded = torch.nn.functional.pad(normed, (0, 0, pad, 0))
-        windows = padded.unfold(1, model.input_conv_size_t, 1)
-        kernel = torch.flip(model.input_conv_temporal, dims=(0,))
-        expected = torch.einsum('stcq,q->stc', windows, kernel)
+    with torch.no_grad():
+        y_t2, state2 = model.temporal_lru.step(u_t, state=state)
 
-        outputs = model.apply_input_conv(inputs)
-
-    nan_mask = torch.isnan(outputs) | torch.isnan(expected)
-    assert (torch.isnan(outputs) == torch.isnan(expected)).all(), "NaN positions differ"
-    assert torch.allclose(outputs[~nan_mask], expected[~nan_mask], atol=1e-6, rtol=0.0)
+    assert y_t2.shape == y_t.shape
+    assert state2.shape == state.shape

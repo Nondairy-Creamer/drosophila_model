@@ -30,12 +30,13 @@ from analysis_utilities import (
 )
 
 
-def _load_conv_params(model_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+def _load_conv_params(model_path: Path, impulse_steps: int = 100) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    from plot_input_conv_filters import compute_lru_impulse_response
     model = nm.NeuralModel.load(model_path, device="cpu")
     if not model.use_input_conv:
         raise ValueError(f"Model at {model_path} does not have input convolution enabled.")
     conv_xy = model.input_spatial_conv.weight[0, :, 0].detach().cpu().numpy()
-    conv_t = model.input_conv_temporal.detach().cpu().numpy()
+    conv_t, _ = compute_lru_impulse_response(model.temporal_lru, num_steps=impulse_steps, dt=model.dt)
     axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(model.input_conv_size_x)
     conv_size_x = model.input_conv_size_x
     return conv_xy, conv_t, axial_coords, conv_size_x
