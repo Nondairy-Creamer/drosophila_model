@@ -1102,11 +1102,10 @@ def get_stimulus_two_eye(
         pre_stim_time_override: override pre-stim time from config.
 
     Returns:
-        stimulus_right: (examples, time, ommatidia) right-eye stimulus.
-        stimulus_left: (examples, time, ommatidia) left-eye stimulus.
-        optic_flow: (examples, time, ommatidia, 2) optic flow (NaN if unavailable).
-        observer_rotation: (examples, time, 3) rotation in degrees.
-        observer_translation: (examples, time, 3) translation.
+        stimulus: (examples, time, 2*N) right then left eye stimulus.
+        optic_flow: (examples, time, 2*N, 2) right then left optic flow (NaN if unavailable).
+        observer_rotation: (examples, time, 3) rotation rate (deg/s).
+        observer_translation: (examples, time, 3) translation rate.
     """
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])
@@ -1118,7 +1117,7 @@ def get_stimulus_two_eye(
         pre_stim_time = float(pre_stim_time_override)
 
     stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type
-    right_list, left_list, flow_list, rot_list, trans_list = [], [], [], [], []
+    stim_list, flow_list, rot_list, trans_list = [], [], [], []
 
     for stim_type in stimulus_types:
         if stim_type == 'random_pano':
@@ -1140,8 +1139,7 @@ def get_stimulus_two_eye(
                 dt=model_dt, stim_time=stim_time, seed=stimulus_seed,
             )
 
-            stimulus_right = torch.tensor(stimulus_both[:, :, :N], device=device, dtype=dtype)
-            stimulus_left = torch.tensor(stimulus_both[:, :, N:], device=device, dtype=dtype)
+            stimulus = torch.tensor(stimulus_both, device=device, dtype=dtype)
             optic_flow = torch.tensor(optic_flow_both, device=device, dtype=dtype)
             observer_rotation = torch.tensor(
                 rotation_vectors * 180 / np.pi,  # rad/s → deg/s
@@ -1188,10 +1186,10 @@ def get_stimulus_two_eye(
             true_rotation = np.concatenate(seg_rots, axis=0)
             true_translation = np.concatenate(seg_trans, axis=0)
 
-            stimulus_right = torch.tensor(stim_right, device=device, dtype=dtype)
-            stimulus_left = torch.tensor(stim_left, device=device, dtype=dtype)
-            N_both = stimulus_right.shape[-1] * 2
-            optic_flow = torch.full((*stimulus_right.shape[:-1], N_both, 2), float('nan'), device=device, dtype=dtype)
+            stimulus = torch.tensor(
+                np.concatenate([stim_right, stim_left], axis=-1), device=device, dtype=dtype,
+            )
+            optic_flow = torch.full((*stimulus.shape, 2), float('nan'), device=device, dtype=dtype)
             observer_rotation = torch.tensor(true_rotation, device=device, dtype=dtype)
             observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
 
@@ -1201,34 +1199,30 @@ def get_stimulus_two_eye(
                 "Expected one of: random_pano, copter_view."
             )
 
-        right_list.append(stimulus_right)
-        left_list.append(stimulus_left)
+        stim_list.append(stimulus)
         flow_list.append(optic_flow)
         rot_list.append(observer_rotation)
         trans_list.append(observer_translation)
 
-    stimulus_right = torch.cat(right_list, dim=0)
-    stimulus_left = torch.cat(left_list, dim=0)
+    stimulus = torch.cat(stim_list, dim=0)
     optic_flow = torch.cat(flow_list, dim=0)
     observer_rotation = torch.cat(rot_list, dim=0)
     observer_translation = torch.cat(trans_list, dim=0)
 
-    num_time = stimulus_right.shape[1]
-    num_cells = stimulus_right.shape[2]
+    num_time = stimulus.shape[1]
+    num_cols = stimulus.shape[2]   # 2*N
     num_flow_cols = optic_flow.shape[2]
 
     # Add blank stimuli (constant luminance: 0, 0.5, 1.0) with zero optic flow
-    blank_right = torch.zeros((3, num_time, num_cells), device=device, dtype=dtype)
-    blank_right[0] = 0.0
-    blank_right[1] = 0.5
-    blank_right[2] = 1.0
-    blank_left = blank_right.clone()
+    blank_stim = torch.zeros((3, num_time, num_cols), device=device, dtype=dtype)
+    blank_stim[0] = 0.0
+    blank_stim[1] = 0.5
+    blank_stim[2] = 1.0
     blank_flow = torch.zeros((3, num_time, num_flow_cols, 2), device=device, dtype=dtype)
     blank_rot = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
     blank_trans = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
 
-    stimulus_right = torch.cat([blank_right, stimulus_right], dim=0)
-    stimulus_left = torch.cat([blank_left, stimulus_left], dim=0)
+    stimulus = torch.cat([blank_stim, stimulus], dim=0)
     optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
     observer_rotation = torch.cat([blank_rot, observer_rotation], dim=0)
     observer_translation = torch.cat([blank_trans, observer_translation], dim=0)
@@ -1236,20 +1230,18 @@ def get_stimulus_two_eye(
     # Add pre-stimulus interval (stationary observer, middle-gray stimulus)
     pre_stim_points = int(pre_stim_time / model_dt)
     if pre_stim_points > 0:
-        n_examples = stimulus_right.shape[0]
-        pre_right = torch.full((n_examples, pre_stim_points, num_cells), middle_gray, device=device, dtype=dtype)
-        pre_left = pre_right.clone()
+        n_examples = stimulus.shape[0]
+        pre_stim = torch.full((n_examples, pre_stim_points, num_cols), middle_gray, device=device, dtype=dtype)
         pre_flow = torch.zeros((n_examples, pre_stim_points, num_flow_cols, 2), device=device, dtype=dtype)
         pre_rot = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
         pre_trans = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
 
-        stimulus_right = torch.cat([pre_right, stimulus_right], dim=1)
-        stimulus_left = torch.cat([pre_left, stimulus_left], dim=1)
+        stimulus = torch.cat([pre_stim, stimulus], dim=1)
         optic_flow = torch.cat([pre_flow, optic_flow], dim=1)
         observer_rotation = torch.cat([pre_rot, observer_rotation], dim=1)
         observer_translation = torch.cat([pre_trans, observer_translation], dim=1)
 
-    return stimulus_right, stimulus_left, optic_flow, observer_rotation, observer_translation
+    return stimulus, optic_flow, observer_rotation, observer_translation
 
 
 def interpolate_to_model_dt(data, stimulus_dt, model_dt):

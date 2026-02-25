@@ -180,9 +180,10 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         opt.zero_grad()
 
         if fit_odometry:
-            # inputs shape: (batch, 2, time, ommatidia) — right eye at [:,0], left at [:,1]
-            right_batch = inputs_batch[:, 0]
-            left_batch = inputs_batch[:, 1]
+            # inputs shape: (batch, time, 2*N) — first N right eye, last N left eye
+            N = inputs_batch.shape[2] // 2
+            right_batch = inputs_batch[:, :, :N]
+            left_batch = inputs_batch[:, :, N:]
             pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(right_batch, left_batch)
 
             target_rot = target_batch['rotation'][:, loss_start_step:]

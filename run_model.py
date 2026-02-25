@@ -109,9 +109,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     fit_odometry = config['training'].get('fit_odometry', False)
 
     if fit_odometry:
-        stim_right, stim_left, optic_flow, target_rotation, target_translation = \
+        stimulus, optic_flow, target_rotation, target_translation = \
             su.get_stimulus_two_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
-        stimulus = torch.stack([stim_right, stim_left], dim=1)
         target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
     else:
         stimulus, optic_flow = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
