@@ -17,3 +17,4 @@ debugpy
 scipy
 pytest
 h5py
+opencv-python
