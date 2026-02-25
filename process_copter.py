@@ -2,7 +2,8 @@
 
 Loads each pair of left/right stereo videos and corresponding pose log CSV,
 converts frames to grayscale float [0, 1], applies coordinate transformation,
-trims the initial zero-pose period, and saves each clip as a .pt file.
+trims the initial zero-pose period, and saves all clips as a single .pt file
+containing a list of dicts.
 
 Usage:
     python process_copter.py
@@ -85,8 +86,8 @@ def main():
     parser = argparse.ArgumentParser(description='Process copter stereo videos into tensors')
     parser.add_argument('--data-dir', type=str, default='../connectome_data/copter_videos',
                         help='Directory containing left_N.mp4, right_N.mp4, apriltag_pose_log_N.csv')
-    parser.add_argument('--output-dir', type=str, default='../connectome_data/copter_processed',
-                        help='Output directory for processed .pt files')
+    parser.add_argument('--output-dir', type=str, default='../connectome_data',
+                        help='Output directory for processed copter_data.pt')
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -99,28 +100,25 @@ def main():
     )
     print(f'Found {len(clip_ids)} clips: {clip_ids}')
 
-    summary = []
+    clips = []
     for clip_id in clip_ids:
         print(f'Processing clip {clip_id}...')
         clip = process_clip(clip_id, data_dir)
         if clip is None:
             continue
+        clips.append(clip)
 
-        out_path = output_dir / f'clip_{clip_id}.pt'
-        torch.save(clip, out_path)
-        size_mb = out_path.stat().st_size / 1e6
-        T, H, W = clip['left'].shape
-        summary.append((clip_id, T, H, W, clip['video_dt'], size_mb))
-        print(f'    Saved {out_path.name} ({size_mb:.0f} MB)')
+    out_path = output_dir / 'copter_data.pt'
+    torch.save(clips, out_path)
+    size_mb = out_path.stat().st_size / 1e6
 
     print(f'\n{"="*60}')
-    print(f'Processed {len(summary)} clips to {output_dir}')
-    print(f'{"Clip":>6} {"Frames":>8} {"Resolution":>12} {"Duration":>10} {"Size MB":>10}')
-    total_mb = 0
-    for clip_id, T, H, W, dt, mb in summary:
-        total_mb += mb
-        print(f'{clip_id:>6} {T:>8} {H}x{W:>12} {T*dt:>9.1f}s {mb:>9.0f}')
-    print(f'{"Total":>39} {total_mb:>9.0f} MB')
+    print(f'Saved {len(clips)} clips to {out_path} ({size_mb:.0f} MB)')
+    print(f'{"Clip":>6} {"Frames":>8} {"Resolution":>12} {"Duration":>10}')
+    for clip in clips:
+        T, H, W = clip['left'].shape
+        dt = clip['video_dt']
+        print(f'{clip["clip_id"]:>6} {T:>8} {H}x{W:>12} {T*dt:>9.1f}s')
 
 
 if __name__ == '__main__':

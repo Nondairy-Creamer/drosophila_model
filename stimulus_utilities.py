@@ -85,14 +85,14 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
 
 
 def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
-                        data_dir='../connectome_data/copter_processed',
+                        data_path='../connectome_data/copter_data.pt',
                         frame_start=0, frame_end=None,
                         phi_right_deg=(-30, -150), phi_left_deg=(150, 30),
                         theta_deg=(45, 135)):
     """
     Load preprocessed stereo copter clips and sample at ommatidia locations.
 
-    Loads uint8 frames from processed .pt files (output of process_copter.py),
+    Loads uint8 frames from copter_data.pt (output of process_copter.py),
     samples via Gaussian ommatidium filters, and converts to float32 [0, 1].
     Temporal upsampling to model_dt is done after spatial sampling.
 
@@ -101,7 +101,7 @@ def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
         sample_theta: (N,) polar angles of ommatidia (radians).
         model_dt: model time step for temporal interpolation (seconds).
         filter_std: Gaussian filter std in degrees (default 2.5).
-        data_dir: directory containing clip_*.pt files from process_copter.py.
+        data_path: path to copter_data.pt from process_copter.py.
         frame_start: first model time step to include (after interpolation).
         frame_end: last model time step to include (None = end of clip).
         phi_right_deg: (start, end) phi limits of right camera in degrees.
@@ -117,12 +117,11 @@ def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
     """
     import torch as _torch
 
-    data_dir = Path(data_dir)
-    clip_files = sorted(data_dir.glob('clip_*.pt'))
-    if not clip_files:
-        raise FileNotFoundError(f"No clip_*.pt files found in {data_dir}")
+    data_path = Path(data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Copter data file not found: {data_path}")
 
-    clips = [_torch.load(f, weights_only=False) for f in clip_files]
+    clips = _torch.load(data_path, weights_only=False)
 
     # Build sampling matrices once (all clips share the same resolution)
     _, image_height, image_width = clips[0]['right'].shape
@@ -1152,10 +1151,10 @@ def get_stimulus_two_eye(
                 raise Exception('copter_view requires column_phi_theta input')
 
             stim_time = config['stimulus']['stim_time']
-            copter_data_dir = Path(config['data']['connectome_folder']) / 'copter_processed'
+            copter_data_path = Path(config['data']['connectome_folder']) / 'copter_data.pt'
             copter_clips = get_copter_stimulus(
                 column_phi_theta[:, 0], column_phi_theta[:, 1],
-                model_dt, data_dir=str(copter_data_dir),
+                model_dt, data_path=str(copter_data_path),
             )
 
             seg_len = int(round(stim_time / model_dt))
