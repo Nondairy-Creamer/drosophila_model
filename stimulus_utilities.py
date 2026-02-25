@@ -677,9 +677,9 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
 
     # --- time / velocity parameters (shared across panoramas) ---
     num_repeats_total = num_repeats * 2  # double for symmetrization
-    time_vect = np.arange(0, stim_time * num_repeats_total, step=dt)
-    num_time = len(time_vect)
-    time_per_stim = num_time // num_repeats_total
+    time_per_stim = int(round(stim_time / dt))
+    num_time = time_per_stim * num_repeats_total
+    time_vect = np.arange(num_time) * dt
 
     # Gaussian smoothing filter (circular convolution)
     vel_filter = (1 / np.sqrt(2 * np.pi * velocity_time_scale**2)
