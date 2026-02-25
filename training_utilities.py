@@ -20,36 +20,53 @@ from loss_functions import (
 )
 
 
+def _normalized_mse(pred, target, eps=1e-8):
+    """MSE normalized by target variance (fraction of variance unexplained)."""
+    return torch.nn.functional.mse_loss(pred, target) / (target.var() + eps)
+
+
+def _cosine_loss(pred, target, eps=1e-8):
+    """Mean cosine distance, masking out near-zero target vectors."""
+    pred_flat = pred.reshape(-1, pred.shape[-1])
+    target_flat = target.reshape(-1, target.shape[-1])
+    mag = target_flat.norm(dim=-1)
+    valid = mag > eps
+    if not valid.any():
+        return pred.new_tensor(0.0)
+    cos_sim = torch.nn.functional.cosine_similarity(
+        pred_flat[valid], target_flat[valid], dim=-1,
+    )
+    return 1.0 - cos_sim.mean()
+
+
 def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):
     """Combined rate + position loss for ego-motion estimation.
 
-    Rate loss: MSE between predicted rates and finite-differenced target positions.
-    Position loss: MSE between cumsum-integrated predicted rates and target positions.
+    Rotation uses normalized MSE (MSE / var(target)), giving a unitless
+    fraction-of-variance-unexplained in the ~0-1 range.  Translation uses
+    cosine distance (direction only, since amplitude is unrecoverable),
+    also in the 0-1 range.  Both are computed on rates and on integrated
+    positions, and the four terms are averaged.
 
     Args:
         pred_rot: (batch, T, 3) predicted rotation rate (deg/s).
         pred_trans: (batch, T, 3) predicted translation rate.
-        target_rot: (batch, T, 3) target rotation position (deg).
-        target_trans: (batch, T, 3) target translation position.
+        target_rot: (batch, T, 3) target rotation rate (deg/s).
+        target_trans: (batch, T, 3) target translation rate.
         dt: time step (seconds).
     """
-    import torch.nn.functional as F
+    loss_rot_rate = _normalized_mse(pred_rot, target_rot)
+    loss_trans_rate = _cosine_loss(pred_trans, target_trans)
 
-    # Rate loss: finite-difference target to get rates, skip first pred frame
-    target_rot_rate = torch.diff(target_rot, dim=1) / dt
-    target_trans_rate = torch.diff(target_trans, dim=1) / dt
-    loss_rate = (F.mse_loss(pred_rot[:, 1:], target_rot_rate) +
-                 F.mse_loss(pred_trans[:, 1:], target_trans_rate))
-
-    # Position loss: integrate predicted rates, compare against zero-centered target
     pred_rot_pos = torch.cumsum(pred_rot * dt, dim=1)
-    pred_trans_pos = torch.cumsum(pred_trans * dt, dim=1)
-    target_rot_delta = target_rot[:, 1:] - target_rot[:, :1, :]
-    target_trans_delta = target_trans[:, 1:] - target_trans[:, :1, :]
-    loss_pos = (F.mse_loss(pred_rot_pos[:, :-1], target_rot_delta) +
-                F.mse_loss(pred_trans_pos[:, :-1], target_trans_delta))
+    target_rot_pos = torch.cumsum(target_rot * dt, dim=1)
+    loss_rot_pos = _normalized_mse(pred_rot_pos, target_rot_pos)
 
-    return loss_rate + loss_pos
+    pred_trans_pos = torch.cumsum(pred_trans * dt, dim=1)
+    target_trans_pos = torch.cumsum(target_trans * dt, dim=1)
+    loss_trans_pos = _cosine_loss(pred_trans_pos, target_trans_pos)
+
+    return (loss_rot_rate + loss_trans_rate + loss_rot_pos + loss_trans_pos) / 4
 
 
 class StimulusDataset(Dataset):
@@ -166,14 +183,25 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             # inputs shape: (batch, 2, time, ommatidia) — right eye at [:,0], left at [:,1]
             right_batch = inputs_batch[:, 0]
             left_batch = inputs_batch[:, 1]
-            pred_rot, pred_trans, _, _ = model.estimate_ego_motion_from_image(right_batch, left_batch)
+            pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(right_batch, left_batch)
 
             target_rot = target_batch['rotation'][:, loss_start_step:]
             target_trans = target_batch['translation'][:, loss_start_step:]
-            loss = odometry_loss(
+            odom_loss = odometry_loss(
                 pred_rot[:, loss_start_step:], pred_trans[:, loss_start_step:],
                 target_rot, target_trans, model.dt,
             )
+
+            # NaN-safe normalized flow loss: copter_view targets are all NaN, random_pano has valid flow
+            target_flow = target_batch['optic_flow'][:, loss_start_step:]
+            pred_flow = pred_flow[:, loss_start_step:]
+            valid_flow = ~torch.isnan(target_flow)
+            if valid_flow.any():
+                flow_loss = _normalized_mse(pred_flow[valid_flow], target_flow[valid_flow])
+            else:
+                flow_loss = pred_flow.new_tensor(0.0)
+
+            loss = odom_loss + flow_loss
         else:
             pred, step_state, cached_mappings = model.predict(inputs_batch, init_state=batch_init_state, init_filter_state=batch_filter_state, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
             # Only carry forward hidden state when using full batch (states match stimuli)

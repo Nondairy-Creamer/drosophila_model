@@ -1024,25 +1024,28 @@ class NeuralModel(torch.nn.Module, ABC):
         return model
 
     def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs, initial_state_right=None, initial_state_left=None):
-        # right_eye_inputs: (stimuli, time, columns) where columns correspond to
-        # ommatidia at the locations in self.column_phi_theta
-        # left_eye_inputs: (stimuli, time, columns) where columns correspond to
-        # ommatidia at the locations in self.column_phi_theta but with phi = -phi (flipped over the mid point of the fly)
-        # initial_state: None or tuple (right_state, left_state) from a previous call
+        # right_eye_inputs: (S, time, columns)
+        # left_eye_inputs: (S, time, columns)
+        S = right_eye_inputs.shape[0]
 
-        # Run predictions for each eye to get decoder optic flow and final states
-        outputs_right, final_state_right = self.predict(right_eye_inputs, init_state=initial_state_right)[0:2]
-        outputs_left, final_state_left = self.predict(left_eye_inputs, init_state=initial_state_left)[0:2]
+        # Batch both eyes into a single forward pass (2S, time, columns)
+        both_inputs = torch.cat([right_eye_inputs, left_eye_inputs], dim=0)
+        init_state = None
+        if initial_state_right is not None and initial_state_left is not None:
+            init_state = torch.cat([initial_state_right, initial_state_left], dim=0)
+        outputs_both, final_state_both = self.predict(both_inputs, init_state=init_state)[0:2]
 
-        # Get decoder outputs: (stimuli, time, columns, 2) where last dim is (d_right, d_up)
-        # Flip horizontal (d_right) for left eye to put it in a consistent coordinate frame
-        optic_flow_right = outputs_right['decoder']
-        lr_flip = torch.tensor([-1.0, 1.0], device=optic_flow_right.device, dtype=optic_flow_right.dtype)
-        optic_flow_left = outputs_left['decoder'] * lr_flip
+        decoder_both = outputs_both['decoder']  # (2S, time, columns, 2)
+        decoder_right = decoder_both[:S]
+        decoder_left = decoder_both[S:]
+        final_state_right = final_state_both[:S]
+        final_state_left = final_state_both[S:]
 
-        # Concatenate along column dimension
+        # Flip horizontal (d_right) for left eye to put in consistent coordinate frame
+        lr_flip = torch.tensor([-1.0, 1.0], device=decoder_right.device, dtype=decoder_right.dtype)
+        optic_flow_right = decoder_right
+        optic_flow_left = decoder_left * lr_flip
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
-        # optic_flow shape: (stimuli, time, columns*2, 2)
 
         # Generate column locations for both eyes
         left_column_locations = self.column_phi_theta.copy()
@@ -1052,29 +1055,22 @@ class NeuralModel(torch.nn.Module, ABC):
         phi_tensor = torch.tensor(column_locations[:, 0], device=optic_flow.device, dtype=optic_flow.dtype)
         theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
 
-        # Decoder NaN columns are constant across time, so one mask suffices.
         valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
         phi_valid = phi_tensor[valid_mask]
         theta_valid = theta_tensor[valid_mask]
 
-        num_stimuli = optic_flow.shape[0]
-        rotations = []
-        translations = []
+        T_len = optic_flow.shape[1]
+        d_right = optic_flow[:, :, valid_mask, 0].reshape(S * T_len, -1)
+        d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
 
-        for s in range(num_stimuli):
-            d_right = optic_flow[s, :, valid_mask, 0]  # (time, valid_columns)
-            d_up = optic_flow[s, :, valid_mask, 1]
+        rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
+            phi_valid, theta_valid, d_right, d_up
+        )
+        rotations = rot_flat.reshape(S, T_len, 3)
+        translations = trans_flat.reshape(S, T_len, 3)
 
-            rotation, translation, _ = self.estimate_ego_motion_from_flow(
-                phi_valid, theta_valid, d_right, d_up
-            )
-            rotations.append(rotation)       # (time, 3)
-            translations.append(translation) # (time, 3)
-
-        rotations = torch.stack(rotations)       # (stimuli, time, 3)
-        translations = torch.stack(translations)  # (stimuli, time, 3)
-
-        return rotations, translations, final_state_right, final_state_left
+        pred_flow_both = torch.cat([decoder_right, decoder_left], dim=2)
+        return rotations, translations, final_state_right, final_state_left, pred_flow_both
 
     @staticmethod
     def estimate_ego_motion_from_flow(phi, theta, d_right, d_up):

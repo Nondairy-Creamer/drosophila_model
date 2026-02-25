@@ -85,69 +85,47 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
 
 
 def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
-                        data_dir='../connectome_data/copter_videos',
-                        frame_start=500, frame_end=1500,
+                        data_dir='../connectome_data/copter_processed',
+                        frame_start=0, frame_end=None,
                         phi_right_deg=(-30, -150), phi_left_deg=(150, 30),
                         theta_deg=(45, 135)):
     """
-    Load stereo copter video and sample at ommatidia locations using
-    precomputed Gaussian ommatidium filters.
+    Load preprocessed stereo copter clips and sample at ommatidia locations.
 
-    The right eye uses sample_phi/sample_theta directly. The left eye
-    mirrors phi (uses -sample_phi) to sample from the left camera.
+    Loads uint8 frames from processed .pt files (output of process_copter.py),
+    samples via Gaussian ommatidium filters, and converts to float32 [0, 1].
+    Temporal upsampling to model_dt is done after spatial sampling.
 
     Args:
         sample_phi: (N,) azimuthal angles of right-eye ommatidia (radians).
         sample_theta: (N,) polar angles of ommatidia (radians).
         model_dt: model time step for temporal interpolation (seconds).
         filter_std: Gaussian filter std in degrees (default 2.5).
-        data_dir: directory containing left.mp4, right.mp4, and pose CSV.
+        data_dir: directory containing clip_*.pt files from process_copter.py.
         frame_start: first model time step to include (after interpolation).
-        frame_end: last model time step to include (after interpolation).
+        frame_end: last model time step to include (None = end of clip).
         phi_right_deg: (start, end) phi limits of right camera in degrees.
         phi_left_deg: (start, end) phi limits of left camera in degrees.
         theta_deg: (start, end) theta limits of both cameras in degrees.
 
     Returns:
-        stimulus_right: (time, N) right-eye stimulus in [0, 1].
-        stimulus_left: (time, N) left-eye stimulus in [0, 1].
-        true_rotation: (time, 3) rotation in degrees (model coords: x=roll, y=pitch, z=yaw).
-        true_translation: (time, 3) translation (model coords: +x forward, +y left, +z up).
+        List of dicts, one per clip, each with keys:
+            'right': (time_i, N) array, right-eye stimulus in [0, 1].
+            'left': (time_i, N) array, left-eye stimulus in [0, 1].
+            'rotation': (time_i, 3) array, rotation in degrees.
+            'translation': (time_i, 3) array, translation.
     """
-    import cv2
-    import pandas as pd
+    import torch as _torch
 
     data_dir = Path(data_dir)
+    clip_files = sorted(data_dir.glob('clip_*.pt'))
+    if not clip_files:
+        raise FileNotFoundError(f"No clip_*.pt files found in {data_dir}")
 
-    pose_logs = sorted(data_dir.glob('apriltag_pose_log_*.csv'))
-    if not pose_logs:
-        raise FileNotFoundError(f"No pose log CSV found in {data_dir}")
-    pose_log = pd.read_csv(pose_logs[0])
-    video_dt = float(pose_log['t_video_s'].iloc[1])
+    clips = [_torch.load(f, weights_only=False) for f in clip_files]
 
-    # -- Ground truth pose (CSV → model coordinate convention) --
-    # CSV axes: +x forward, +y up, +z right
-    # Model axes: +x forward, +y left, +z up
-    true_rotation = pose_log[['roll_used_deg', 'yaw_used_deg', 'pitch_used_deg']].to_numpy()
-    true_rotation[:, 1] *= -1
-    true_translation = pose_log[['x_used', 'z_used', 'y_used']].to_numpy()
-    true_translation[:, 1] *= -1
-
-    # -- Load video frames as grayscale float in [0, 1] --
-    frames = {}
-    for side in ('left', 'right'):
-        cap = cv2.VideoCapture(str(data_dir / f'{side}.mp4'))
-        buf = []
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            buf.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32))
-        cap.release()
-        frames[side] = np.stack(buf) / 255.0
-
-    _, image_height, image_width = frames['right'].shape
-
+    # Build sampling matrices once (all clips share the same resolution)
+    _, image_height, image_width = clips[0]['right'].shape
     phi_right_lim = np.array(phi_right_deg) * np.pi / 180
     phi_left_lim = np.array(phi_left_deg) * np.pi / 180
     theta_lim = np.array(theta_deg) * np.pi / 180
@@ -160,40 +138,48 @@ def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
         (image_height, image_width), phi_left_lim, theta_lim,
         -sample_phi, sample_theta, filter_std=filter_std,
     )
-
-    T = frames['right'].shape[0]
-    sampled_right = np.asarray(W_right.dot(frames['right'].reshape(T, -1).T)).T
-    sampled_left = np.asarray(W_left.dot(frames['left'].reshape(T, -1).T)).T
-
-    # Out-of-FOV ommatidia (zero row in W) get 0 from matmul; fill with middle gray
     in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
     in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
-    sampled_right[:, ~in_fov_right] = 0.5
-    sampled_left[:, ~in_fov_left] = 0.5
 
-    # -- Temporal interpolation from video_dt to model_dt --
-    sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
-    sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
+    results = []
 
-    # Interpolate pose to model timesteps
-    pose_times = pose_log['t_video_s'].to_numpy()
-    n_video_frames = frames['right'].shape[0]
-    video_times = np.arange(n_video_frames) * video_dt
-    model_times = np.arange(video_times[0], video_times[-1], model_dt)
-    true_rotation = np.column_stack([
-        np.interp(model_times, pose_times, true_rotation[:, i]) for i in range(3)
-    ])
-    true_translation = np.column_stack([
-        np.interp(model_times, pose_times, true_translation[:, i]) for i in range(3)
-    ])
+    for clip in clips:
+        video_dt = clip['video_dt']
+        T = clip['right'].shape[0]
 
-    # -- Slice to requested time range --
-    sampled_right = sampled_right[frame_start:frame_end]
-    sampled_left = sampled_left[frame_start:frame_end]
-    true_rotation = true_rotation[frame_start:frame_end]
-    true_translation = true_translation[frame_start:frame_end]
+        right_flat = clip['right'].numpy().reshape(T, -1).T.astype(np.float32)
+        sampled_right = np.asarray(W_right.dot(right_flat)).T / 255.0
 
-    return sampled_right, sampled_left, true_rotation, true_translation
+        left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
+        sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
+
+        del right_flat, left_flat
+
+        sampled_right[:, ~in_fov_right] = 0.5
+        sampled_left[:, ~in_fov_left] = 0.5
+
+        sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
+        sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
+
+        video_times = np.arange(T) * video_dt
+        model_times = np.arange(video_times[0], video_times[-1], model_dt)
+        rotation = clip['rotation'].numpy()
+        translation = clip['translation'].numpy()
+        rotation_interp = np.column_stack([
+            np.interp(model_times, video_times, rotation[:, i]) for i in range(3)
+        ])
+        translation_interp = np.column_stack([
+            np.interp(model_times, video_times, translation[:, i]) for i in range(3)
+        ])
+
+        results.append({
+            'right': sampled_right[frame_start:frame_end],
+            'left': sampled_left[frame_start:frame_end],
+            'rotation': rotation_interp[frame_start:frame_end],
+            'translation': translation_interp[frame_start:frame_end],
+        })
+
+    return results
 
 
 def loadmat_v73(path):
@@ -855,7 +841,7 @@ def consolidate_stim(stim_dict, optic_flow_dict):
     return stimulus, optic_flow
 
 def get_stimulus_one_eye(
-    stimulus_type: str,
+    stimulus_type: str | list[str],
     config,
     column_phi_theta=None,
     *,
@@ -871,9 +857,9 @@ def get_stimulus_one_eye(
     middle_gray = 0.5
 
     model_dt = config['model']['dt']
-    stim_time = config['stimulus']['stim_time']  # seconds the sine is moving
-    pre_stim_time = config['stimulus']['pre_stim_time']  # seconds sine is stationary before the sine wave starts moving
-    post_stim_time = config['stimulus']['post_stim_time']  # seconds sine is stationary after the sine wave finishes moving
+    stim_time = config['stimulus']['stim_time']
+    pre_stim_time = config['stimulus']['pre_stim_time']
+    post_stim_time = config['stimulus']['post_stim_time']
     temporal_frequencies = config['stimulus']['temporal_frequencies']
     stimulus_seed = config['stimulus']['seed']
     if pre_stim_time_override is not None:
@@ -881,228 +867,203 @@ def get_stimulus_one_eye(
     sine_pre_stim_time = pre_stim_time
     sine_post_stim_time = post_stim_time
 
-    if stimulus_type == 'static_sine':
-        if column_phi_theta is None:
-            raise Exception('sine waves require column_phi_theta input')
-        # --- get a sign wave stimulus ---
-        # generate a sine wave on a cylinder around the fly
-        stimulus, optic_flow = create_balanced_sine_wave(
-            column_phi_theta[:, 0], column_phi_theta[:, 1],
-            temporal_frequency=temporal_frequencies, dt=model_dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
+    stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type
+    stim_list, flow_list = [], []
 
-        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+    for stim_type in stimulus_types:
+        if stim_type == 'static_sine':
+            if column_phi_theta is None:
+                raise Exception('sine waves require column_phi_theta input')
+            stimulus, optic_flow = create_balanced_sine_wave(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                temporal_frequency=temporal_frequencies, dt=model_dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
+            )
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
-    elif stimulus_type == 'directional_sine':
-        if column_phi_theta is None:
-            raise Exception('sine waves require column_phi_theta input')
-        if sine_direction is None:
-            raise ValueError('directional_sine requires sine_direction input')
+        elif stim_type == 'directional_sine':
+            if column_phi_theta is None:
+                raise Exception('sine waves require column_phi_theta input')
+            if sine_direction is None:
+                raise ValueError('directional_sine requires sine_direction input')
+            tf = float(sine_temporal_frequency) if sine_temporal_frequency is not None else 4.0
+            sine_pre_stim_time = 0.0
+            sine_post_stim_time = 0.0
+            stimulus, optic_flow = create_directional_sine_wave(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                direction=sine_direction,
+                temporal_frequency=tf,
+                dt=model_dt,
+                stim_time=stim_time,
+                pre_stim_time=sine_pre_stim_time,
+                post_stim_time=sine_post_stim_time,
+            )
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
-        tf = float(sine_temporal_frequency) if sine_temporal_frequency is not None else 4.0
-        sine_pre_stim_time = 0.0
-        sine_post_stim_time = 0.0
-        stimulus, optic_flow = create_directional_sine_wave(
-            column_phi_theta[:, 0], column_phi_theta[:, 1],
-            direction=sine_direction,
-            temporal_frequency=tf,
-            dt=model_dt,
-            stim_time=stim_time,
-            pre_stim_time=sine_pre_stim_time,
-            post_stim_time=sine_post_stim_time,
-        )
-        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+        elif stim_type == 'random_pano':
+            if column_phi_theta is None:
+                raise Exception('panoramic require column_phi_theta input')
+            stimulus, optic_flow, _ = get_random_velocity_pano(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
+                num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
+            )
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
-    elif stimulus_type == 'random_pano':
-        if column_phi_theta is None:
-            raise Exception('panoramic require column_phi_theta input')
+        elif stim_type == 'random_sine':
+            if column_phi_theta is None:
+                raise Exception('sine waves require column_phi_theta input')
+            random_sine_stim_time = stim_time
+            random_sine_num_repeats = config['stimulus']['num_repeats']
+            if random_sine_duration_s is not None:
+                if random_sine_duration_s <= 0:
+                    raise ValueError("random_sine_duration_s must be positive")
+                random_sine_stim_time = float(random_sine_duration_s) / 2.0
+                random_sine_num_repeats = 1
+            stimulus, optic_flow = create_random_tf_sine_wave(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
+                num_repeats=random_sine_num_repeats, dt=model_dt, stim_time=random_sine_stim_time, seed=stimulus_seed
+            )
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
-        # get pano stimulus with random velocity
-        stimulus, optic_flow, _ = get_random_velocity_pano(
-            column_phi_theta[:, 0], column_phi_theta[:, 1],
-            velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
-            num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
-        )
+        elif stim_type == 'flow_360':
+            default_length = 98
+            stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
+            with open(stimulus_path, 'rb') as f:
+                stimulus_in = pickle.load(f)
 
-        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+            expected_length = 99
+            stimulus_dt = 1 / stimulus_in['framerate']
+            for i in reversed(range(len(stimulus_in['responses']))):
+                if stimulus_in['responses'][i].shape[0] > expected_length:
+                    long_run = stimulus_in['responses'].pop(i)
+                    stimulus_in['responses'].append(long_run[:expected_length])
+                    stimulus_in['responses'].append(long_run[expected_length:2*expected_length])
 
-    elif stimulus_type == 'random_sine':
-        if column_phi_theta is None:
-            raise Exception('sine waves require column_phi_theta input')
+                    long_run_vect = stimulus_in['forward_flows'].pop(i)
+                    stimulus_in['forward_flows'].append(long_run_vect[:expected_length])
+                    stimulus_in['forward_flows'].append(long_run_vect[expected_length:2*expected_length])
 
-        # --- generate a sine wave with random tf over time
-        random_sine_stim_time = stim_time
-        random_sine_num_repeats = config['stimulus']['num_repeats']
-        if random_sine_duration_s is not None:
-            if random_sine_duration_s <= 0:
-                raise ValueError("random_sine_duration_s must be positive")
-            random_sine_stim_time = float(random_sine_duration_s) / 2.0
-            random_sine_num_repeats = 1
-        stimulus, optic_flow = create_random_tf_sine_wave(
-            column_phi_theta[:, 0], column_phi_theta[:, 1],
-            velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
-            num_repeats=random_sine_num_repeats, dt=model_dt, stim_time=random_sine_stim_time, seed=stimulus_seed
-        )
+            stimulus = np.stack(stimulus_in['responses'])
+            optic_flow = np.stack(stimulus_in['forward_flows'])
+            stimulus /= 255.0
 
-        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
 
-    elif stimulus_type == 'flow_360':
-        default_length = 98
-        # --- grab the natural movie stimulus ---
-        stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
-        with open(stimulus_path, 'rb') as f:
-            stimulus_in = pickle.load(f)
+            stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
+            optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
 
-        # most stimuli are 99 points long. some are 199. shorten so they're all the same
-        expected_length = 99
-        stimulus_dt = 1 / stimulus_in['framerate']
-        for i in reversed(range(len(stimulus_in['responses']))):
-            if stimulus_in['responses'][i].shape[0] > expected_length:
-                long_run = stimulus_in['responses'].pop(i)
-                stimulus_in['responses'].append(long_run[:expected_length])
-                stimulus_in['responses'].append(long_run[expected_length:2*expected_length])
-
-                long_run_vect = stimulus_in['forward_flows'].pop(i)
-                stimulus_in['forward_flows'].append(long_run_vect[:expected_length])
-                stimulus_in['forward_flows'].append(long_run_vect[expected_length:2*expected_length])
-
-        stimulus = np.stack(stimulus_in['responses'])
-        optic_flow = np.stack(stimulus_in['forward_flows'])
-        stimulus /= 255.0
-
-        stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-        
-        # Interpolate to model timestep
-        stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
-        
-        # Resolve desired segment length after interpolation
-        _, time_length, _ = stimulus.shape
-        if use_full_length:
-            final_length = time_length
-        elif max_duration_s is not None:
-            if max_duration_s <= 0:
+            _, time_length, _ = stimulus.shape
+            if use_full_length:
                 final_length = time_length
+            elif max_duration_s is not None:
+                if max_duration_s <= 0:
+                    final_length = time_length
+                else:
+                    final_length = min(time_length, int(round(max_duration_s / model_dt)))
             else:
-                final_length = min(time_length, int(round(max_duration_s / model_dt)))
-        else:
-            final_length = min(time_length, default_length)
-        final_length = max(1, int(final_length))
+                final_length = min(time_length, default_length)
+            final_length = max(1, int(final_length))
 
-        # Split into non-overlapping segments of final_length
-        num_stimuli, time_length, num_neurons = stimulus.shape
-        num_segments = time_length // final_length
-        if num_segments > 0:
-            # Reshape to split time dimension: (stimuli, segments*final_length, neurons) -> (stimuli*segments, final_length, neurons)
-            stimulus = stimulus[:, :num_segments*final_length, :].reshape(num_stimuli * num_segments, final_length, num_neurons)
-            # Same for optic_flow: (stimuli, segments*final_length, neurons, 2) -> (stimuli*segments, final_length, neurons, 2)
-            optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
+            num_stimuli, time_length, num_neurons = stimulus.shape
+            num_segments = time_length // final_length
+            if num_segments > 0:
+                stimulus = stimulus[:, :num_segments*final_length, :].reshape(num_stimuli * num_segments, final_length, num_neurons)
+                optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
 
-    elif stimulus_type == 'sintel':
-        default_length = 100
-        sintel_path = Path('../connectome_data/sintel_data.pkl')
-        with open(sintel_path, 'rb') as f:
-            stimulus_in = pickle.load(f)
+        elif stim_type == 'sintel':
+            default_length = 100
+            sintel_path = Path('../connectome_data/sintel_data.pkl')
+            with open(sintel_path, 'rb') as f:
+                stimulus_in = pickle.load(f)
 
-        expected_length = 49
-        stimulus_dt = 1 / stimulus_in['framerate']
-        # Filter jointly to keep stimulus-flow pairs aligned
-        stimulus_list = []
-        optic_flow_list = []
-        for resp, flow in zip(stimulus_in['responses'], stimulus_in['forward_flows']):
-            if resp.shape[0] == expected_length and flow.shape[0] == expected_length:
-                stimulus_list.append(torch.tensor(resp, device=device, dtype=dtype))
-                optic_flow_list.append(torch.tensor(flow, device=device, dtype=dtype))
+            expected_length = 49
+            stimulus_dt = 1 / stimulus_in['framerate']
+            stimulus_list = []
+            optic_flow_list = []
+            for resp, flow in zip(stimulus_in['responses'], stimulus_in['forward_flows']):
+                if resp.shape[0] == expected_length and flow.shape[0] == expected_length:
+                    stimulus_list.append(torch.tensor(resp, device=device, dtype=dtype))
+                    optic_flow_list.append(torch.tensor(flow, device=device, dtype=dtype))
 
-        stimulus = torch.stack(stimulus_list, axis=0)
-        optic_flow = torch.stack(optic_flow_list, axis=0)
-        optic_flow[:, :, :, 1] *= -1
-        stimulus /= 255.0
+            stimulus = torch.stack(stimulus_list, axis=0)
+            optic_flow = torch.stack(optic_flow_list, axis=0)
+            optic_flow[:, :, :, 1] *= -1
+            stimulus /= 255.0
 
-        # Interpolate to model timestep
-        stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
-        
-        # Resolve desired segment length after interpolation
-        _, time_length, _ = stimulus.shape
-        if use_full_length:
-            final_length = time_length
-        elif max_duration_s is not None:
-            if max_duration_s <= 0:
+            stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
+            optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
+
+            _, time_length, _ = stimulus.shape
+            if use_full_length:
                 final_length = time_length
+            elif max_duration_s is not None:
+                if max_duration_s <= 0:
+                    final_length = time_length
+                else:
+                    final_length = min(time_length, int(round(max_duration_s / model_dt)))
             else:
-                final_length = min(time_length, int(round(max_duration_s / model_dt)))
+                final_length = min(time_length, default_length)
+            final_length = max(1, int(final_length))
+
+            num_stimuli, time_length, num_neurons = stimulus.shape
+            num_segments = time_length // final_length
+            if num_segments > 0:
+                stimulus = stimulus[:, :num_segments*final_length, :].reshape(num_stimuli * num_segments, final_length, num_neurons)
+                optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
+
+        elif stim_type == 'flyview':
+            required_length = 80
+            sintel_path = Path('../connectome_data/rendered_fly_view_dataset.pkl')
+            with open(sintel_path, 'rb') as f:
+                stimulus_in = pickle.load(f)
+
+            stimulus_dt = 1 / stimulus_in['fps']
+            stimulus_list = []
+            optic_flow_list = []
+            for resp, flow in zip(stimulus_in['responses'], stimulus_in['forward_flows']):
+                stim = torch.tensor(resp[1:], device=device, dtype=dtype)
+                of = torch.tensor(flow, device=device, dtype=dtype)
+                num_segments = stim.shape[0] // required_length
+                if num_segments == 0:
+                    continue
+                for seg_idx in range(num_segments):
+                    start = seg_idx * required_length
+                    end = start + required_length
+                    stimulus_list.append(stim[start:end])
+                    optic_flow_list.append(of[start:end])
+
+            stimulus = torch.stack(stimulus_list, axis=0)
+            optic_flow = torch.stack(optic_flow_list, axis=0)
+            optic_flow[:, :, :, 0] *= -1
+
+            flow_magnitude = torch.sqrt(optic_flow[:, :, :, 0] ** 2 + optic_flow[:, :, :, 1] ** 2)
+            bad_mask = flow_magnitude > 1
+            optic_flow[bad_mask] = 0
+            stimulus[bad_mask] = 0
+
+            stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
+            optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt) * 180 / np.pi / model_dt
+
         else:
-            final_length = min(time_length, default_length)
-        final_length = max(1, int(final_length))
+            raise ValueError(
+                f"Unknown stimulus_type '{stim_type}'. "
+                "Expected one of: static_sine, directional_sine, random_pano, random_sine, "
+                "sine_const_rand, flow_360, sintel, flyview."
+            )
 
-        # Split into non-overlapping segments of final_length
-        num_stimuli, time_length, num_neurons = stimulus.shape
-        num_segments = time_length // final_length
-        if num_segments > 0:
-            # Reshape to split time dimension: (stimuli, segments*final_length, neurons) -> (stimuli*segments, final_length, neurons)
-            stimulus = stimulus[:, :num_segments*final_length, :].reshape(num_stimuli * num_segments, final_length, num_neurons)
-            # Same for optic_flow: (stimuli, segments*final_length, neurons, 2) -> (stimuli*segments, final_length, neurons, 2)
-            optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
-    
-    elif stimulus_type == 'flyview':
-        required_length = 80
-        sintel_path = Path('../connectome_data/rendered_fly_view_dataset.pkl')
-        with open(sintel_path, 'rb') as f:
-            stimulus_in = pickle.load(f)
+        stim_list.append(stimulus)
+        flow_list.append(optic_flow)
 
-        stimulus_dt = 1 / stimulus_in['fps']
-        # Split each entry into non-overlapping segments of required_length, discarding remainders.
-        # Remove first time point from responses so lengths match forward_flows.
-        stimulus_list = []
-        optic_flow_list = []
-        for resp, flow in zip(stimulus_in['responses'], stimulus_in['forward_flows']):
-            stim = torch.tensor(resp[1:], device=device, dtype=dtype)
-            of = torch.tensor(flow, device=device, dtype=dtype)
-            num_segments = stim.shape[0] // required_length
-            if num_segments == 0:
-                continue
-            for seg_idx in range(num_segments):
-                start = seg_idx * required_length
-                end = start + required_length
-                stimulus_list.append(stim[start:end])
-                optic_flow_list.append(of[start:end])
+    stimulus = torch.cat(stim_list, dim=0)
+    optic_flow = torch.cat(flow_list, dim=0)
 
-        stimulus = torch.stack(stimulus_list, axis=0)
-        optic_flow = torch.stack(optic_flow_list, axis=0)
-        optic_flow[:, :, :, 0] *= -1
-        # # TODO remove this once this division error is fixed
-        # optic_flow[torch.isnan(stimulus)] = 0
-        # stimulus[torch.isnan(stimulus)] = 0
-        # stimulus /= torch.max(stimulus)
-
-        # Zero out entries where optic flow magnitude exceeds 1
-        flow_magnitude = torch.sqrt(optic_flow[:, :, :, 0] ** 2 + optic_flow[:, :, :, 1] ** 2)
-        bad_mask = flow_magnitude > 1
-        optic_flow[bad_mask] = 0
-        stimulus[bad_mask] = 0
-
-        # Interpolate to model timestep
-        stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt) * 180 / np.pi / model_dt
-        
-    else:
-        raise ValueError(
-            f"Unknown stimulus_type '{stimulus_type}'. "
-            "Expected one of: static_sine, directional_sine, random_pano, random_sine, "
-            "sine_const_rand, flow_360, sintel, flyview."
-        )
-
-    # --- plot the stimuli ---
-    # if column_phi_theta is not None:
-    #     pu.xt_plot(column_phi_theta[:, 0], column_phi_theta[:, 1], optic_flow=optic_flow.detach().cpu().numpy(), save_folder='figures/stimulus', run_tag=seed)
-
-    # Add a blank stimulus (all zeros) with zero optic flow
+    # Add blank stimuli (constant luminance: 0, 0.5, 1.0) with zero optic flow
     blank_stim = torch.zeros((3, stimulus.shape[1], stimulus.shape[2]), device=device, dtype=dtype)
     blank_stim[0, :, :] = 0.0
     blank_stim[1, :, :] = 0.5
@@ -1111,9 +1072,7 @@ def get_stimulus_one_eye(
     stimulus = torch.cat([blank_stim, stimulus], dim=0)
     optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
 
-    # Add pre-stimulus interval (mean-gray stimulus with zero optic flow) to the beginning of each stimulus.
-    # Using 0.5 (mean of the [0,1] sine wave range) keeps the per-sample mean consistent with
-    # training, so the invert_input transformation in predict() maps to the same value range.
+    # Add pre-stimulus interval (mean-gray stimulus with zero optic flow)
     pre_stim_points = int(pre_stim_time / model_dt)
     if pre_stim_points > 0:
         pre_stim = torch.full((stimulus.shape[0], pre_stim_points, stimulus.shape[2]), middle_gray, device=device, dtype=dtype)
@@ -1125,7 +1084,7 @@ def get_stimulus_one_eye(
 
 
 def get_stimulus_two_eye(
-    stimulus_type: str,
+    stimulus_type: str | list[str],
     config,
     column_phi_theta=None,
     *,
@@ -1136,7 +1095,7 @@ def get_stimulus_two_eye(
     and observer ego-motion.
 
     Args:
-        stimulus_type: type of stimulus ('copter_view', ...).
+        stimulus_type: type of stimulus, or list of types to concatenate.
         config: configuration dict.
         column_phi_theta: (N, 2) right-eye (phi, theta) in radians.
             Left eye is sampled at (-phi, theta).
@@ -1158,68 +1117,113 @@ def get_stimulus_two_eye(
     if pre_stim_time_override is not None:
         pre_stim_time = float(pre_stim_time_override)
 
-    if stimulus_type == 'random_pano':
-        if column_phi_theta is None:
-            raise Exception('random_pano requires column_phi_theta input')
+    stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type
+    right_list, left_list, flow_list, rot_list, trans_list = [], [], [], [], []
 
-        stim_time = config['stimulus']['stim_time']
-        stimulus_seed = config['stimulus'].get('seed', None)
-        N = column_phi_theta.shape[0]
+    for stim_type in stimulus_types:
+        if stim_type == 'random_pano':
+            if column_phi_theta is None:
+                raise Exception('random_pano requires column_phi_theta input')
 
-        # Concatenate right and left eye viewing directions so both eyes
-        # see the same panorama from the same rotation in a single call.
-        both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
-        both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
+            stim_time = config['stimulus']['stim_time']
+            stimulus_seed = config['stimulus'].get('seed', None)
+            N = column_phi_theta.shape[0]
 
-        stimulus_both, optic_flow_both, rotation_vectors = get_random_velocity_pano(
-            both_phi, both_theta,
-            velocity_amp=config['stimulus']['velocity_amp'],
-            velocity_time_scale=config['stimulus']['velocity_time_scale'],
-            num_repeats=config['stimulus']['num_repeats'],
-            dt=model_dt, stim_time=stim_time, seed=stimulus_seed,
-        )
+            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
+            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
 
-        stimulus_right = torch.tensor(stimulus_both[:, :, :N], device=device, dtype=dtype)
-        stimulus_left = torch.tensor(stimulus_both[:, :, N:], device=device, dtype=dtype)
-        optic_flow = torch.tensor(optic_flow_both[:, :, :N, :], device=device, dtype=dtype)
-        # rotation_vectors is body-frame angular velocity (rad/s) → cumulative rotation (deg)
-        observer_rotation = torch.tensor(
-            np.cumsum(rotation_vectors, axis=1) * model_dt * 180 / np.pi,
-            device=device, dtype=dtype,
-        )
-        observer_translation = torch.zeros_like(observer_rotation)
+            stimulus_both, optic_flow_both, rotation_vectors = get_random_velocity_pano(
+                both_phi, both_theta,
+                velocity_amp=config['stimulus']['velocity_amp'],
+                velocity_time_scale=config['stimulus']['velocity_time_scale'],
+                num_repeats=config['stimulus']['num_repeats'],
+                dt=model_dt, stim_time=stim_time, seed=stimulus_seed,
+            )
 
-    elif stimulus_type == 'copter_view':
-        if column_phi_theta is None:
-            raise Exception('copter_view requires column_phi_theta input')
+            stimulus_right = torch.tensor(stimulus_both[:, :, :N], device=device, dtype=dtype)
+            stimulus_left = torch.tensor(stimulus_both[:, :, N:], device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow_both, device=device, dtype=dtype)
+            observer_rotation = torch.tensor(
+                rotation_vectors * 180 / np.pi,  # rad/s → deg/s
+                device=device, dtype=dtype,
+            )
+            observer_translation = torch.zeros_like(observer_rotation)
 
-        copter_data_dir = Path(config['data']['connectome_folder']) / 'copter_videos'
-        stim_right, stim_left, true_rotation, true_translation = get_copter_stimulus(
-            column_phi_theta[:, 0], column_phi_theta[:, 1],
-            model_dt, data_dir=str(copter_data_dir),
-        )
-        stimulus_right = torch.tensor(stim_right[None], device=device, dtype=dtype)
-        stimulus_left = torch.tensor(stim_left[None], device=device, dtype=dtype)
-        optic_flow = torch.full((*stimulus_right.shape, 2), float('nan'), device=device, dtype=dtype)
-        observer_rotation = torch.tensor(true_rotation[None], device=device, dtype=dtype)
-        observer_translation = torch.tensor(true_translation[None], device=device, dtype=dtype)
+        elif stim_type == 'copter_view':
+            if column_phi_theta is None:
+                raise Exception('copter_view requires column_phi_theta input')
 
-    else:
-        raise ValueError(
-            f"Unknown stimulus_type '{stimulus_type}' for two-eye stimulus. "
-            "Expected one of: random_pano, copter_view."
-        )
+            stim_time = config['stimulus']['stim_time']
+            copter_data_dir = Path(config['data']['connectome_folder']) / 'copter_processed'
+            copter_clips = get_copter_stimulus(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                model_dt, data_dir=str(copter_data_dir),
+            )
+
+            seg_len = int(round(stim_time / model_dt))
+            seg_rights, seg_lefts, seg_rots, seg_trans = [], [], [], []
+            for clip in copter_clips:
+                T_clip = clip['right'].shape[0]
+                num_segments = T_clip // seg_len
+                if num_segments == 0:
+                    continue
+                usable = num_segments * seg_len
+
+                rot = clip['rotation'][:usable]
+                trans = clip['translation'][:usable]
+                rot_rate = np.empty_like(rot)
+                rot_rate[0] = 0.0
+                rot_rate[1:] = np.diff(rot, axis=0) / model_dt
+                trans_rate = np.empty_like(trans)
+                trans_rate[0] = 0.0
+                trans_rate[1:] = np.diff(trans, axis=0) / model_dt
+
+                seg_rights.append(clip['right'][:usable].reshape(num_segments, seg_len, -1))
+                seg_lefts.append(clip['left'][:usable].reshape(num_segments, seg_len, -1))
+                seg_rots.append(rot_rate.reshape(num_segments, seg_len, 3))
+                seg_trans.append(trans_rate.reshape(num_segments, seg_len, 3))
+
+            stim_right = np.concatenate(seg_rights, axis=0)
+            stim_left = np.concatenate(seg_lefts, axis=0)
+            true_rotation = np.concatenate(seg_rots, axis=0)
+            true_translation = np.concatenate(seg_trans, axis=0)
+
+            stimulus_right = torch.tensor(stim_right, device=device, dtype=dtype)
+            stimulus_left = torch.tensor(stim_left, device=device, dtype=dtype)
+            N_both = stimulus_right.shape[-1] * 2
+            optic_flow = torch.full((*stimulus_right.shape[:-1], N_both, 2), float('nan'), device=device, dtype=dtype)
+            observer_rotation = torch.tensor(true_rotation, device=device, dtype=dtype)
+            observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
+
+        else:
+            raise ValueError(
+                f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
+                "Expected one of: random_pano, copter_view."
+            )
+
+        right_list.append(stimulus_right)
+        left_list.append(stimulus_left)
+        flow_list.append(optic_flow)
+        rot_list.append(observer_rotation)
+        trans_list.append(observer_translation)
+
+    stimulus_right = torch.cat(right_list, dim=0)
+    stimulus_left = torch.cat(left_list, dim=0)
+    optic_flow = torch.cat(flow_list, dim=0)
+    observer_rotation = torch.cat(rot_list, dim=0)
+    observer_translation = torch.cat(trans_list, dim=0)
 
     num_time = stimulus_right.shape[1]
     num_cells = stimulus_right.shape[2]
+    num_flow_cols = optic_flow.shape[2]
 
-    # Add blank stimuli (3 examples: intensity 0, 0.5, 1.0)
+    # Add blank stimuli (constant luminance: 0, 0.5, 1.0) with zero optic flow
     blank_right = torch.zeros((3, num_time, num_cells), device=device, dtype=dtype)
     blank_right[0] = 0.0
     blank_right[1] = 0.5
     blank_right[2] = 1.0
     blank_left = blank_right.clone()
-    blank_flow = torch.zeros((3, num_time, num_cells, 2), device=device, dtype=dtype)
+    blank_flow = torch.zeros((3, num_time, num_flow_cols, 2), device=device, dtype=dtype)
     blank_rot = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
     blank_trans = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
 
@@ -1235,7 +1239,7 @@ def get_stimulus_two_eye(
         n_examples = stimulus_right.shape[0]
         pre_right = torch.full((n_examples, pre_stim_points, num_cells), middle_gray, device=device, dtype=dtype)
         pre_left = pre_right.clone()
-        pre_flow = torch.zeros((n_examples, pre_stim_points, num_cells, 2), device=device, dtype=dtype)
+        pre_flow = torch.zeros((n_examples, pre_stim_points, num_flow_cols, 2), device=device, dtype=dtype)
         pre_rot = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
         pre_trans = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
 
