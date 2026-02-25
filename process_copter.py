@@ -1,13 +1,13 @@
 """Process copter stereo video data into preprocessed tensors.
 
 Loads each pair of left/right stereo videos and corresponding pose log CSV,
-converts frames to grayscale float [0, 1], applies coordinate transformation,
-trims the initial zero-pose period, and saves all clips as a single .pt file
-containing a list of dicts.
+converts frames to grayscale, applies coordinate transformation, trims the
+initial zero-pose period, samples at ommatidium locations using column_info,
+and saves all clips as a single .pt file containing a list of dicts.
 
 Usage:
     python process_copter.py
-    python process_copter.py --data-dir ../connectome_data/copter_videos --output-dir ../connectome_data/copter_processed
+    python process_copter.py --data-dir ../connectome_data/copter_videos --output-dir ../connectome_data
 """
 
 import numpy as np
@@ -16,6 +16,8 @@ import cv2
 import pandas as pd
 from pathlib import Path
 import argparse
+
+from stimulus_utilities import build_ommatidium_sampling_matrix
 
 
 def load_video_grayscale(path):
@@ -82,17 +84,59 @@ def process_clip(clip_id, data_dir):
     }
 
 
+def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
+    """Spatially sample a raw clip at ommatidium locations.
+
+    Returns a new dict with 'right' and 'left' as (T, N) float32 arrays
+    in [0, 1], plus rotation/translation/video_dt/clip_id unchanged.
+    """
+    T = clip['right'].shape[0]
+
+    right_flat = clip['right'].numpy().reshape(T, -1).T.astype(np.float32)
+    sampled_right = np.asarray(W_right.dot(right_flat)).T / 255.0
+
+    left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
+    sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
+
+    sampled_right[:, ~in_fov_right] = 0.5
+    sampled_left[:, ~in_fov_left] = 0.5
+
+    return {
+        'right': torch.from_numpy(sampled_right),
+        'left': torch.from_numpy(sampled_left),
+        'rotation': clip['rotation'],
+        'translation': clip['translation'],
+        'video_dt': clip['video_dt'],
+        'clip_id': clip['clip_id'],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='Process copter stereo videos into tensors')
     parser.add_argument('--data-dir', type=str, default='../connectome_data/copter_videos',
                         help='Directory containing left_N.mp4, right_N.mp4, apriltag_pose_log_N.csv')
     parser.add_argument('--output-dir', type=str, default='../connectome_data',
                         help='Output directory for processed copter_data.pt')
+    parser.add_argument('--column-info', type=str, default='../connectome_data/optic_lobes_column_info.parquet',
+                        help='Path to column_info parquet with phi/theta')
+    parser.add_argument('--filter-std', type=float, default=2.5,
+                        help='Gaussian filter std in degrees for ommatidium sampling')
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Camera field-of-view limits (degrees)
+    phi_right_deg = (-30, -150)
+    phi_left_deg = (150, 30)
+    theta_deg = (45, 135)
+
+    # Load ommatidium positions
+    column_info_df = pd.read_parquet(args.column_info)
+    sample_phi = column_info_df['phi'].to_numpy()
+    sample_theta = column_info_df['theta'].to_numpy()
+    print(f'Loaded {len(sample_phi)} ommatidium positions from {args.column_info}')
 
     clip_ids = sorted(
         int(p.stem.split('_')[-1])
@@ -100,13 +144,41 @@ def main():
     )
     print(f'Found {len(clip_ids)} clips: {clip_ids}')
 
-    clips = []
+    # Load all raw clips first so we can build sampling matrices from image size
+    raw_clips = []
     for clip_id in clip_ids:
-        print(f'Processing clip {clip_id}...')
+        print(f'Loading clip {clip_id}...')
         clip = process_clip(clip_id, data_dir)
-        if clip is None:
-            continue
-        clips.append(clip)
+        if clip is not None:
+            raw_clips.append(clip)
+
+    if not raw_clips:
+        print('No valid clips found.')
+        return
+
+    # Build sampling matrices (all clips share the same resolution)
+    _, image_height, image_width = raw_clips[0]['right'].shape
+    phi_right_lim = np.array(phi_right_deg) * np.pi / 180
+    phi_left_lim = np.array(phi_left_deg) * np.pi / 180
+    theta_lim = np.array(theta_deg) * np.pi / 180
+
+    print(f'Building sampling matrices for {image_height}x{image_width} frames...')
+    W_right = build_ommatidium_sampling_matrix(
+        (image_height, image_width), phi_right_lim, theta_lim,
+        sample_phi, sample_theta, filter_std=args.filter_std,
+    )
+    W_left = build_ommatidium_sampling_matrix(
+        (image_height, image_width), phi_left_lim, theta_lim,
+        -sample_phi, sample_theta, filter_std=args.filter_std,
+    )
+    in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
+    in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
+
+    # Sample each clip
+    clips = []
+    for raw_clip in raw_clips:
+        print(f'Sampling clip {raw_clip["clip_id"]}...')
+        clips.append(sample_clip(raw_clip, W_right, W_left, in_fov_right, in_fov_left))
 
     out_path = output_dir / 'copter_data.pt'
     torch.save(clips, out_path)
@@ -114,11 +186,12 @@ def main():
 
     print(f'\n{"="*60}')
     print(f'Saved {len(clips)} clips to {out_path} ({size_mb:.0f} MB)')
-    print(f'{"Clip":>6} {"Frames":>8} {"Resolution":>12} {"Duration":>10}')
+    N = clips[0]['right'].shape[1]
+    print(f'{"Clip":>6} {"Frames":>8} {"Ommatidia":>10} {"Duration":>10}')
     for clip in clips:
-        T, H, W = clip['left'].shape
+        T = clip['right'].shape[0]
         dt = clip['video_dt']
-        print(f'{clip["clip_id"]:>6} {T:>8} {H}x{W:>12} {T*dt:>9.1f}s')
+        print(f'{clip["clip_id"]:>6} {T:>8} {N:>10} {T*dt:>9.1f}s')
 
 
 if __name__ == '__main__':

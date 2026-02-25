@@ -42,21 +42,17 @@ def main() -> None:
     column_phi_theta = column_info_df[["phi", "theta"]].to_numpy()
 
     model_dt = config["model"]["dt"]
-    copter_data_dir = Path(config["data"]["connectome_folder"]) / "copter_processed"
+    copter_data_path = connectome_folder / "copter_data.pt"
+    copter_video_dir = connectome_folder / "copter_videos"
 
-    print("Loading copter clips and sampling ommatidia...")
+    print("Loading preprocessed copter clips...")
     copter_clips = su.get_copter_stimulus(
-        column_phi_theta[:, 0], column_phi_theta[:, 1],
-        model_dt, data_dir=str(copter_data_dir),
+        model_dt, data_path=str(copter_data_path),
     )
     print(f"Found {len(copter_clips)} clips")
 
-    raw_clips = sorted(copter_data_dir.glob("clip_*.pt"))
-    raw_clip_data = [torch.load(f, weights_only=False) for f in raw_clips]
-
     phi = column_phi_theta[:, 0]  # negative for right eye
     theta = column_phi_theta[:, 1]
-    # cos is even so cell_x is the same for both eyes; only intensities differ
     cell_x = np.sin(theta) * np.cos(phi)
     cell_z = np.cos(theta)
 
@@ -66,8 +62,14 @@ def main() -> None:
             continue
 
         sampled = copter_clips[clip_idx]
-        raw = raw_clip_data[clip_idx]
-        video_dt = raw["video_dt"]
+        clip_id = sampled["clip_id"]
+        video_dt = sampled["video_dt"]
+
+        from process_copter import process_clip
+        raw = process_clip(clip_id, copter_video_dir)
+        if raw is None:
+            print(f"Skipping clip {clip_idx}: could not load raw video")
+            continue
 
         num_frames_raw = raw["left"].shape[0]
         num_frames_sampled = sampled["right"].shape[0]
@@ -75,7 +77,6 @@ def main() -> None:
         if args.max_frames is not None:
             num_frames = min(num_frames, args.max_frames)
 
-        # Map sampled time indices to raw video indices
         sampled_times = np.arange(num_frames_sampled) * model_dt
         raw_times = np.arange(num_frames_raw) * video_dt
 

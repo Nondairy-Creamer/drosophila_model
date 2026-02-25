@@ -84,29 +84,17 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
     return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
 
 
-def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
-                        data_path='../connectome_data/copter_data.pt',
-                        frame_start=0, frame_end=None,
-                        phi_right_deg=(-30, -150), phi_left_deg=(150, 30),
-                        theta_deg=(45, 135)):
+def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
+                        frame_start=0, frame_end=None):
     """
-    Load preprocessed stereo copter clips and sample at ommatidia locations.
-
-    Loads uint8 frames from copter_data.pt (output of process_copter.py),
-    samples via Gaussian ommatidium filters, and converts to float32 [0, 1].
-    Temporal upsampling to model_dt is done after spatial sampling.
+    Load preprocessed copter clips (already sampled at ommatidium locations)
+    and temporally interpolate to model_dt.
 
     Args:
-        sample_phi: (N,) azimuthal angles of right-eye ommatidia (radians).
-        sample_theta: (N,) polar angles of ommatidia (radians).
         model_dt: model time step for temporal interpolation (seconds).
-        filter_std: Gaussian filter std in degrees (default 2.5).
         data_path: path to copter_data.pt from process_copter.py.
         frame_start: first model time step to include (after interpolation).
         frame_end: last model time step to include (None = end of clip).
-        phi_right_deg: (start, end) phi limits of right camera in degrees.
-        phi_left_deg: (start, end) phi limits of left camera in degrees.
-        theta_deg: (start, end) theta limits of both cameras in degrees.
 
     Returns:
         List of dicts, one per clip, each with keys:
@@ -114,6 +102,8 @@ def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
             'left': (time_i, N) array, left-eye stimulus in [0, 1].
             'rotation': (time_i, 3) array, rotation in degrees.
             'translation': (time_i, 3) array, translation.
+            'video_dt': original video time step (seconds).
+            'clip_id': integer clip identifier.
     """
     import torch as _torch
 
@@ -122,40 +112,14 @@ def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
         raise FileNotFoundError(f"Copter data file not found: {data_path}")
 
     clips = _torch.load(data_path, weights_only=False)
-
-    # Build sampling matrices once (all clips share the same resolution)
-    _, image_height, image_width = clips[0]['right'].shape
-    phi_right_lim = np.array(phi_right_deg) * np.pi / 180
-    phi_left_lim = np.array(phi_left_deg) * np.pi / 180
-    theta_lim = np.array(theta_deg) * np.pi / 180
-
-    W_right = build_ommatidium_sampling_matrix(
-        (image_height, image_width), phi_right_lim, theta_lim,
-        sample_phi, sample_theta, filter_std=filter_std,
-    )
-    W_left = build_ommatidium_sampling_matrix(
-        (image_height, image_width), phi_left_lim, theta_lim,
-        -sample_phi, sample_theta, filter_std=filter_std,
-    )
-    in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
-    in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
-
     results = []
 
     for clip in clips:
         video_dt = clip['video_dt']
         T = clip['right'].shape[0]
 
-        right_flat = clip['right'].numpy().reshape(T, -1).T.astype(np.float32)
-        sampled_right = np.asarray(W_right.dot(right_flat)).T / 255.0
-
-        left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
-        sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
-
-        del right_flat, left_flat
-
-        sampled_right[:, ~in_fov_right] = 0.5
-        sampled_left[:, ~in_fov_left] = 0.5
+        sampled_right = clip['right'].numpy()
+        sampled_left = clip['left'].numpy()
 
         sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
         sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
@@ -176,6 +140,8 @@ def get_copter_stimulus(sample_phi, sample_theta, model_dt, filter_std=2.5,
             'left': sampled_left[frame_start:frame_end],
             'rotation': rotation_interp[frame_start:frame_end],
             'translation': translation_interp[frame_start:frame_end],
+            'video_dt': video_dt,
+            'clip_id': clip['clip_id'],
         })
 
     return results
@@ -1153,7 +1119,6 @@ def get_stimulus_two_eye(
             stim_time = config['stimulus']['stim_time']
             copter_data_path = Path(config['data']['connectome_folder']) / 'copter_data.pt'
             copter_clips = get_copter_stimulus(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
                 model_dt, data_path=str(copter_data_path),
             )
 
