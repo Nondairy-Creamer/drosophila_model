@@ -646,12 +646,6 @@ class NeuralModel(torch.nn.Module, ABC):
     def _initialize_input_conv(self, conv_size_x=5, num_temporal_modes=4):
         """Set up input convolution using a ``NeuralModelConv`` for the spatial
         part and a ``TemporalLRU`` for the temporal part.
-
-        A learnable gate (``local_contrast_logit``) blends between the raw
-        input and the local-contrast-normalized signal.  ``sigmoid(logit)=1``
-        gives full contrast normalization (current default); ``0`` passes the
-        raw input through unchanged.  Initialized to ``5.0`` so the gate
-        starts near 1.
         """
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
@@ -672,10 +666,6 @@ class NeuralModel(torch.nn.Module, ABC):
             for i, (dp, dq) in enumerate(pq_offsets):
                 if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
                     self.input_spatial_conv.weight[0, i, 0] = 0.0
-
-        self.local_contrast_logit = torch.nn.Parameter(
-            torch.tensor(0.0, device=self.device, dtype=self.dtype)
-        )
 
         self.temporal_lru = TemporalLRU(
             num_modes=num_temporal_modes, device=self.device, dtype=self.dtype,
@@ -719,11 +709,7 @@ class NeuralModel(torch.nn.Module, ABC):
         )
 
     def apply_input_conv(self, u_t, filter_state=None):
-        """Apply (optionally gated) spatial contrast normalization then one step of temporal LRU.
-
-        A learnable gate ``alpha = sigmoid(local_contrast_logit)`` blends
-        between the raw input (``alpha=0``) and the local-contrast-normalized
-        signal (``alpha=1``).
+        """Apply spatial contrast normalization then one step of temporal LRU.
 
         Args:
             u_t: ``(batch, columns)`` raw input for a single timestep.
@@ -738,10 +724,7 @@ class NeuralModel(torch.nn.Module, ABC):
         local_var = self.input_spatial_conv(centered ** 2)
         normed = -centered / torch.sqrt(local_var + 1e-3)
 
-        alpha = self.local_contrast_logit.sigmoid()
-        blended = alpha * normed + (1.0 - alpha) * local_mean
-
-        y_t, new_filter_state = self.temporal_lru.step(blended, state=filter_state)
+        y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
         return y_t, new_filter_state
 
     @abstractmethod
