@@ -48,13 +48,13 @@ def process_clip(clip_id, data_dir):
 
     # CSV axes: +x forward, +y up, +z right (left-handed)
     # Model axes: +x forward, +y left, +z up (right-handed)
-    # Mapping: model_x = csv_x, model_y = -csv_z, model_z = csv_y
-    # Roll about csv_x (fwd) → col 0, pitch about csv_z (right) → col 1 negated, yaw about csv_y (up) → col 2
-    rotation = pose[['roll_used_deg', 'pitch_used_deg', 'yaw_used_deg']].to_numpy(dtype=np.float32)
-    rotation[:, 1] *= -1
+    # Mapping: model_x = csv_x, model_y = csv_z, model_z = csv_y
+    # CSV pitch_used_deg → roll (about x/fwd), CSV yaw_used_deg → pitch (about y/left), CSV roll_used_deg → yaw (about z/up)
+    rotation = pose[['pitch_used_deg', 'yaw_used_deg', 'roll_used_deg']].to_numpy(dtype=np.float32)
+    rotation[:, 0] *= -1
+    rotation[:, 2] *= -1
 
     translation = pose[['x_used', 'z_used', 'y_used']].to_numpy(dtype=np.float32)
-    translation[:, 1] *= -1
 
     # Align to shortest (video and CSV may differ by a frame)
     min_len = min(len(left), len(right), len(pose))

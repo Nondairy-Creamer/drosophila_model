@@ -1,9 +1,10 @@
 """
 Visualize two-eye stimuli (e.g. copter_view) as a movie.
 
-Layout (2x2):
+Layout (3x2):
   Top:    raw left camera frame  |  raw right camera frame
-  Bottom: left eye ommatidia     |  right eye ommatidia
+  Mid:    left eye ommatidia     |  right eye ommatidia
+  Bot:    rotation (trailing)    |  translation (trailing)
 """
 import argparse
 import sys
@@ -89,6 +90,8 @@ def main() -> None:
             raw_right=raw["right"].numpy(),
             sampled_left=sampled["left"],
             sampled_right=sampled["right"],
+            rotation=sampled["rotation"],
+            translation=sampled["translation"],
             cell_x=cell_x,
             cell_z=cell_z,
             output_path=out_path,
@@ -104,6 +107,8 @@ def _make_two_eye_movie(
     raw_right: np.ndarray,
     sampled_left: np.ndarray,
     sampled_right: np.ndarray,
+    rotation: np.ndarray,
+    translation: np.ndarray,
     cell_x: np.ndarray,
     cell_z: np.ndarray,
     output_path: Path,
@@ -111,6 +116,7 @@ def _make_two_eye_movie(
     num_frames: int,
     video_dt: float,
     model_dt: float,
+    trail_frames: int = 60,
 ) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -124,9 +130,11 @@ def _make_two_eye_movie(
     vmax = max(np.nanmax(sampled_left), np.nanmax(sampled_right))
     scatter_norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
+    fig, axes = plt.subplots(3, 2, figsize=(12.8, 13), dpi=100,
+                             gridspec_kw={"height_ratios": [3, 3, 2]})
     ax_raw_l, ax_raw_r = axes[0, 0], axes[0, 1]
     ax_sam_l, ax_sam_r = axes[1, 0], axes[1, 1]
+    ax_rot, ax_trans = axes[2, 0], axes[2, 1]
 
     # Raw video panels
     im_l = ax_raw_l.imshow(raw_left[0], cmap="gray", vmin=0, vmax=255, aspect="auto")
@@ -139,12 +147,10 @@ def _make_two_eye_movie(
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
 
-    # Left eye: anterior (high cell_x) on the right, pointing toward center
     ax_sam_l.set_xlim(cell_x.min() - x_margin, cell_x.max() + x_margin)
     ax_sam_l.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
     ax_sam_l.set_aspect("equal")
 
-    # Right eye: flip x-axis so anterior points left, toward center
     ax_sam_r.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
     ax_sam_r.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
     ax_sam_r.set_aspect("equal")
@@ -156,15 +162,40 @@ def _make_two_eye_movie(
     ax_sam_l.set_title("Left Eye (sampled)")
     ax_sam_r.set_title("Right Eye (sampled)")
 
+    # Odometry panels — initialize with empty data
+    rot_labels = ["roll", "pitch", "yaw"]
+    trans_labels = ["x", "y", "z"]
+    rot_colors = ["#e41a1c", "#377eb8", "#4daf4a"]
+    trans_colors = ["#e41a1c", "#377eb8", "#4daf4a"]
+
+    rot_lines = []
+    for i, (label, color) in enumerate(zip(rot_labels, rot_colors)):
+        line, = ax_rot.plot([], [], color=color, label=label, linewidth=1.5)
+        rot_lines.append(line)
+    ax_rot.legend(loc="upper left", fontsize=8)
+    ax_rot.set_ylabel("deg")
+    ax_rot.set_xlabel("time (s)")
+    ax_rot.set_title("Rotation")
+
+    trans_lines = []
+    for i, (label, color) in enumerate(zip(trans_labels, trans_colors)):
+        line, = ax_trans.plot([], [], color=color, label=label, linewidth=1.5)
+        trans_lines.append(line)
+    ax_trans.legend(loc="upper left", fontsize=8)
+    ax_trans.set_ylabel("position")
+    ax_trans.set_xlabel("time (s)")
+    ax_trans.set_title("Translation")
+
     plt.tight_layout()
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Writing {num_frames} frames to {output_path}...")
 
+    times = np.arange(num_frames) * model_dt
+
     with iio.get_writer(str(output_path), codec="libx264", fps=frame_rate) as writer:
         for t in range(num_frames):
-            # Find corresponding raw frame for this sampled frame
             raw_t = min(int(round(t * model_dt / video_dt)), raw_left.shape[0] - 1)
 
             im_l.set_data(raw_left[raw_t])
@@ -177,6 +208,29 @@ def _make_two_eye_movie(
             ax_raw_r.set_title(f"Right Camera (t={time_s:.2f}s)")
             ax_sam_l.set_title(f"Left Eye (frame {t+1}/{num_frames})")
             ax_sam_r.set_title(f"Right Eye (frame {t+1}/{num_frames})")
+
+            # Update odometry trailing window
+            t_start = max(0, t - trail_frames + 1)
+            t_slice = slice(t_start, t + 1)
+            t_times = times[t_slice]
+
+            for i, line in enumerate(rot_lines):
+                line.set_data(t_times, rotation[t_slice, i])
+            ax_rot.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+            rot_window = rotation[t_start:t + 1]
+            if rot_window.size > 0:
+                ymin, ymax = rot_window.min(), rot_window.max()
+                margin = max(0.1 * (ymax - ymin), 1.0)
+                ax_rot.set_ylim(ymin - margin, ymax + margin)
+
+            for i, line in enumerate(trans_lines):
+                line.set_data(t_times, translation[t_slice, i])
+            ax_trans.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+            trans_window = translation[t_start:t + 1]
+            if trans_window.size > 0:
+                ymin, ymax = trans_window.min(), trans_window.max()
+                margin = max(0.1 * (ymax - ymin), 0.01)
+                ax_trans.set_ylim(ymin - margin, ymax + margin)
 
             writer.append_data(fig_to_rgb(fig))
             if (t + 1) % 50 == 0:
