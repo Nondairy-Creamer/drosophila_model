@@ -61,7 +61,10 @@ def main() -> None:
     if not model.use_input_conv:
         raise ValueError("Model does not have input convolution enabled.")
 
-    conv_xy = model.input_spatial_conv.weight[0, :, 0].detach().cpu().numpy()
+    raw_weight = model.input_spatial_conv.weight[0, :, 0].detach()
+    if model.input_spatial_conv.positive_weights:
+        raw_weight = raw_weight.exp()
+    conv_xy = raw_weight.cpu().numpy()
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 
