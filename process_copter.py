@@ -46,9 +46,11 @@ def process_clip(clip_id, data_dir):
     pose = pd.read_csv(data_dir / f'apriltag_pose_log_{clip_id}.csv')
     video_dt = float(pose['t_video_s'].iloc[1] - pose['t_video_s'].iloc[0])
 
-    # CSV axes: +x forward, +y up, +z right
-    # Model axes: +x forward, +y left, +z up
-    rotation = pose[['roll_used_deg', 'yaw_used_deg', 'pitch_used_deg']].to_numpy(dtype=np.float32)
+    # CSV axes: +x forward, +y up, +z right (left-handed)
+    # Model axes: +x forward, +y left, +z up (right-handed)
+    # Mapping: model_x = csv_x, model_y = -csv_z, model_z = csv_y
+    # Roll about csv_x (fwd) → col 0, pitch about csv_z (right) → col 1 negated, yaw about csv_y (up) → col 2
+    rotation = pose[['roll_used_deg', 'pitch_used_deg', 'yaw_used_deg']].to_numpy(dtype=np.float32)
     rotation[:, 1] *= -1
 
     translation = pose[['x_used', 'z_used', 'y_used']].to_numpy(dtype=np.float32)
