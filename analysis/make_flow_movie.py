@@ -102,7 +102,12 @@ def main() -> None:
     # Compute filtered stimulus (after model's input convolution)
     with torch.no_grad():
         if model.use_input_conv:
-            filtered_input = model.apply_input_conv(stim_input)[0]
+            filter_state = None
+            filtered_frames = []
+            for t in range(stim_input.shape[1]):
+                y_t, filter_state = model.apply_input_conv(stim_input[:, t, :], filter_state)
+                filtered_frames.append(y_t[0])
+            filtered_input = torch.stack(filtered_frames, dim=0)
         else:
             filtered_input = stim_input[0]
 
