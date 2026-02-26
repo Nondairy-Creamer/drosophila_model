@@ -1069,7 +1069,7 @@ class NeuralModel(torch.nn.Module, ABC):
         rotations = rot_flat.reshape(S, T_len, 3)
         translations = trans_flat.reshape(S, T_len, 3)
 
-        pred_flow_both = torch.cat([decoder_right, decoder_left], dim=2)
+        pred_flow_both = torch.cat([optic_flow_right, optic_flow_left], dim=2)
         return rotations, translations, final_state_right, final_state_left, pred_flow_both
 
     @staticmethod
