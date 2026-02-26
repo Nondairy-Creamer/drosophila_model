@@ -85,6 +85,10 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         print(f"Loading existing model from {model_file}")
         model = nm.NeuralModel.load(model_file, device=config['model']['device'], freeze_params=False)
         model.add_noise_to_parameters(model.init_std)
+        if model.dt != dt:
+            print(f"Using model dt={model.dt} (config had dt={dt})")
+            dt = model.dt
+            config['model']['dt'] = dt
     else:
         model = ModelClass(
             synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),

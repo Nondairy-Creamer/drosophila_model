@@ -311,33 +311,39 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
             if (time_since_best > patience) or (loss_is_nan):
-                # Load the best model state into the existing model
-                checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
-                model.load_state_dict(checkpoint['state_dict'])
+                opt_path = model_save_folder / 'model_opt.pt'
+                if not opt_path.exists():
+                    # No best checkpoint saved yet (e.g. NaN on step 1) — skip reload
+                    time_since_best = 0
+                    print(f'Warning: NaN loss but no checkpoint to reload (step {step + 1}), continuing.')
+                else:
+                    # Load the best model state into the existing model
+                    checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
+                    model.load_state_dict(checkpoint['state_dict'])
 
-                # Load the best optimizer state and reduce learning rate
-                opt_state = torch.load(model_save_folder / 'model_opt.pt', map_location='cpu', weights_only=False)
-                opt.load_state_dict(opt_state['optimizer_state_dict'])
-                last_reload_state = {k: v.detach().cpu().clone() for k, v in checkpoint['state_dict'].items()}
-                last_reload_opt_state = opt_state['optimizer_state_dict']
+                    # Load the best optimizer state and reduce learning rate
+                    opt_state = torch.load(opt_path, map_location='cpu', weights_only=False)
+                    opt.load_state_dict(opt_state['optimizer_state_dict'])
+                    last_reload_state = {k: v.detach().cpu().clone() for k, v in checkpoint['state_dict'].items()}
+                    last_reload_opt_state = opt_state['optimizer_state_dict']
 
-                # Move optimizer state tensors to model device (load_state_dict keeps them on CPU)
-                for state in opt.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor):
-                            state[k] = v.to(model.device)
+                    # Move optimizer state tensors to model device (load_state_dict keeps them on CPU)
+                    for state in opt.state.values():
+                        for k, v in state.items():
+                            if isinstance(v, torch.Tensor):
+                                state[k] = v.to(model.device)
 
-                alpha = alpha * alpha_factor
-                for param_group in opt.param_groups:
-                    param_group['lr'] = alpha
+                    alpha = alpha * alpha_factor
+                    for param_group in opt.param_groups:
+                        param_group['lr'] = alpha
 
-                # Reset hidden state to avoid mismatch with reloaded weights
-                last_state = None
+                    # Reset hidden state to avoid mismatch with reloaded weights
+                    last_state = None
 
-                time_since_best = 0
-                print(' -------------------------------- ')
-                print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')
-                print(' -------------------------------- ')
+                    time_since_best = 0
+                    print(' -------------------------------- ')
+                    print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')
+                    print(' -------------------------------- ')
 
         if (step % save_every == 0) | (step == num_steps - 1):
             with torch.no_grad():
