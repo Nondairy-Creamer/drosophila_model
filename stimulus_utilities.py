@@ -973,14 +973,14 @@ def get_stimulus_one_eye(
         elif stim_type == 'random_pano':
             if column_phi_theta is None:
                 raise Exception('panoramic require column_phi_theta input')
-            stimulus, optic_flow, _, oob_mask = get_random_velocity_pano(
+            stimulus, optic_flow, _, _ = get_random_velocity_pano(
                 column_phi_theta[:, 0], column_phi_theta[:, 1],
                 velocity_amp=config['stimulus']['velocity_amp'], velocity_time_scale=config['stimulus']['velocity_time_scale'],
                 num_repeats=config['stimulus']['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
             )
             stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
             optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.tensor(~oob_mask, dtype=torch.bool, device=device)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
         elif stim_type == 'random_sine':
             if column_phi_theta is None:
@@ -1218,7 +1218,7 @@ def get_stimulus_two_eye(
             both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
             both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
 
-            stimulus_both, optic_flow_both, rotation_vectors, oob_mask = get_random_velocity_pano(
+            stimulus_both, optic_flow_both, rotation_vectors, _ = get_random_velocity_pano(
                 both_phi, both_theta,
                 velocity_amp=config['stimulus']['velocity_amp'],
                 velocity_time_scale=config['stimulus']['velocity_time_scale'],
@@ -1233,7 +1233,7 @@ def get_stimulus_two_eye(
                 device=device, dtype=dtype,
             )
             observer_translation = torch.zeros_like(observer_rotation)
-            train_mask = torch.tensor(~oob_mask, dtype=torch.bool, device=device)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
         elif stim_type == 'copter_view':
             if column_phi_theta is None:
