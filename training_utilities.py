@@ -21,20 +21,7 @@ from loss_functions import (
 
 
 def _normalized_mse(pred, target, eps=1e-8):
-    """Per-sample MSE normalized by target variance (fraction of variance unexplained).
-
-    Computes MSE / var independently for each sample in the batch, then
-    averages.  This prevents high-variance samples (e.g. copter data with
-    large rotation rates) from dominating the loss and hiding the
-    contribution of lower-variance samples (e.g. panoramic data).
-    """
-    if pred.dim() >= 2:
-        batch = pred.shape[0]
-        pred_flat = pred.reshape(batch, -1)
-        target_flat = target.reshape(batch, -1)
-        per_sample_mse = (pred_flat - target_flat).pow(2).mean(dim=1)
-        per_sample_var = target_flat.var(dim=1)
-        return (per_sample_mse / (per_sample_var + eps)).mean()
+    """MSE normalized by target variance (fraction of variance unexplained)."""
     return torch.nn.functional.mse_loss(pred, target) / (target.var() + eps)
 
 
