@@ -1023,7 +1023,7 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return model
 
-    def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs, initial_state_right=None, initial_state_left=None):
+    def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs, initial_state_right=None, initial_state_left=None, oob_columns=None):
         # right_eye_inputs: (S, time, columns)
         # left_eye_inputs: (S, time, columns)
         S = right_eye_inputs.shape[0]
@@ -1056,6 +1056,8 @@ class NeuralModel(torch.nn.Module, ABC):
         theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
 
         valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
+        if oob_columns is not None:
+            valid_mask = valid_mask & ~oob_columns
         phi_valid = phi_tensor[valid_mask]
         theta_valid = theta_tensor[valid_mask]
 

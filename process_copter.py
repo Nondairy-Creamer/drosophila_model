@@ -110,6 +110,8 @@ def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
         'translation': clip['translation'],
         'video_dt': clip['video_dt'],
         'clip_id': clip['clip_id'],
+        'in_fov_right': torch.from_numpy(in_fov_right.copy()),
+        'in_fov_left': torch.from_numpy(in_fov_left.copy()),
     }
 
 

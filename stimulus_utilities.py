@@ -135,14 +135,18 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
             np.interp(model_times, video_times, translation[:, i]) for i in range(3)
         ])
 
-        results.append({
+        result = {
             'right': sampled_right[frame_start:frame_end],
             'left': sampled_left[frame_start:frame_end],
             'rotation': rotation_interp[frame_start:frame_end],
             'translation': translation_interp[frame_start:frame_end],
             'video_dt': video_dt,
             'clip_id': clip['clip_id'],
-        })
+        }
+        if 'in_fov_right' in clip:
+            result['in_fov_right'] = clip['in_fov_right']
+            result['in_fov_left'] = clip['in_fov_left']
+        results.append(result)
 
     return results
 
@@ -1148,7 +1152,7 @@ def get_stimulus_two_eye(
         pre_stim_time = float(pre_stim_time_override)
 
     stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type
-    stim_list, flow_list, rot_list, trans_list = [], [], [], []
+    stim_list, flow_list, rot_list, trans_list, oob_list = [], [], [], [], []
 
     for stim_type in stimulus_types:
         if stim_type == 'random_pano':
@@ -1177,6 +1181,7 @@ def get_stimulus_two_eye(
                 device=device, dtype=dtype,
             )
             observer_translation = torch.zeros_like(observer_rotation)
+            oob_columns = torch.zeros(stimulus.shape[0], stimulus.shape[2], dtype=torch.bool, device=device)
 
         elif stim_type == 'copter_view':
             if column_phi_theta is None:
@@ -1188,14 +1193,23 @@ def get_stimulus_two_eye(
                 model_dt, data_path=str(copter_data_path),
             )
 
+            # Build OOB mask from the first clip's FOV masks (same for all clips)
+            copter_oob = None
+            if copter_clips and 'in_fov_right' in copter_clips[0]:
+                in_fov_right = copter_clips[0]['in_fov_right']
+                in_fov_left = copter_clips[0]['in_fov_left']
+                copter_oob = ~torch.cat([in_fov_right, in_fov_left], dim=0)  # (2*N,) True=exclude
+
             seg_len = int(round(stim_time / model_dt))
             seg_rights, seg_lefts, seg_rots, seg_trans = [], [], [], []
+            n_copter_segments = 0
             for clip in copter_clips:
                 T_clip = clip['right'].shape[0]
                 num_segments = T_clip // seg_len
                 if num_segments == 0:
                     continue
                 usable = num_segments * seg_len
+                n_copter_segments += num_segments
 
                 rot = clip['rotation'][:usable]
                 trans = clip['translation'][:usable]
@@ -1221,6 +1235,11 @@ def get_stimulus_two_eye(
             observer_rotation = torch.tensor(true_rotation, device=device, dtype=dtype)
             observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
 
+            if copter_oob is not None:
+                oob_columns = copter_oob.unsqueeze(0).expand(n_copter_segments, -1).to(device=device)
+            else:
+                oob_columns = torch.zeros(n_copter_segments, stimulus.shape[2], dtype=torch.bool, device=device)
+
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
@@ -1231,11 +1250,13 @@ def get_stimulus_two_eye(
         flow_list.append(optic_flow)
         rot_list.append(observer_rotation)
         trans_list.append(observer_translation)
+        oob_list.append(oob_columns)
 
     stimulus = torch.cat(stim_list, dim=0)
     optic_flow = torch.cat(flow_list, dim=0)
     observer_rotation = torch.cat(rot_list, dim=0)
     observer_translation = torch.cat(trans_list, dim=0)
+    oob_columns = torch.cat(oob_list, dim=0)
 
     num_time = stimulus.shape[1]
     num_cols = stimulus.shape[2]   # 2*N
@@ -1249,11 +1270,13 @@ def get_stimulus_two_eye(
     blank_flow = torch.zeros((3, num_time, num_flow_cols, 2), device=device, dtype=dtype)
     blank_rot = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
     blank_trans = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
+    blank_oob = torch.zeros((3, num_cols), dtype=torch.bool, device=device)
 
     stimulus = torch.cat([blank_stim, stimulus], dim=0)
     optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
     observer_rotation = torch.cat([blank_rot, observer_rotation], dim=0)
     observer_translation = torch.cat([blank_trans, observer_translation], dim=0)
+    oob_columns = torch.cat([blank_oob, oob_columns], dim=0)
 
     # Add pre-stimulus interval (stationary observer, middle-gray stimulus)
     pre_stim_points = int(pre_stim_time / model_dt)
@@ -1269,7 +1292,7 @@ def get_stimulus_two_eye(
         observer_rotation = torch.cat([pre_rot, observer_rotation], dim=1)
         observer_translation = torch.cat([pre_trans, observer_translation], dim=1)
 
-    return stimulus, optic_flow, observer_rotation, observer_translation
+    return stimulus, optic_flow, observer_rotation, observer_translation, oob_columns
 
 
 def interpolate_to_model_dt(data, stimulus_dt, model_dt):

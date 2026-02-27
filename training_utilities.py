@@ -197,7 +197,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             N = inputs_batch.shape[2] // 2
             right_batch = inputs_batch[:, :, :N]
             left_batch = inputs_batch[:, :, N:]
-            pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(right_batch, left_batch)
+            oob = target_batch.get('oob_columns')
+            if oob is not None:
+                oob = oob.any(dim=0)
+            pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(
+                right_batch, left_batch, oob_columns=oob)
 
             target_rot = target_batch['rotation'][:, loss_start_step:]
             target_trans = target_batch['translation'][:, loss_start_step:]
