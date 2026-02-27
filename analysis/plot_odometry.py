@@ -118,8 +118,11 @@ def main() -> None:
     dt = model.dt
 
     print("Loading inputs and targets...")
-    cell_inputs_all = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
-    cell_inputs_all = cell_inputs_all.to(device=device, dtype=dtype)
+    cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
+    if isinstance(cell_inputs_data, dict):
+        cell_inputs_all = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
+    else:
+        cell_inputs_all = cell_inputs_data.to(device=device, dtype=dtype)
     target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
 
     if not isinstance(target_loaded, dict) or 'rotation' not in target_loaded:

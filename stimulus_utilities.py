@@ -139,9 +139,12 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
         trans_rate_native = np.zeros_like(translation)
         trans_rate_native[1:] = np.diff(translation, axis=0) / video_dt
 
-        # Interpolate positions and rates to model_dt
+        # Interpolate positions and rates to model_dt.
+        # Use linspace with the same point count as interpolate_to_model_dt
+        # (which handles the stimulus images) so all arrays stay aligned.
         video_times = np.arange(T) * video_dt
-        model_times = np.arange(video_times[0], video_times[-1], model_dt)
+        num_model_steps = int((T - 1) * video_dt / model_dt) + 1
+        model_times = np.linspace(video_times[0], video_times[-1], num_model_steps)
 
         rotation_interp = np.column_stack([
             np.interp(model_times, video_times, rotation[:, i]) for i in range(3)
@@ -609,9 +612,13 @@ def _euler_to_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
 def _euler_angles_to_angular_velocity(euler_angles, dt):
     """Convert a time series of Euler angles (degrees) to angular velocity (deg/s).
 
-    Computes angular velocity via the relative rotation matrix between
-    consecutive frames, avoiding gimbal-lock singularities that corrupt
-    naive ``np.diff(euler) / dt`` when pitch is near ±90°.
+    Computes body-frame angular velocity via the relative rotation matrix
+    between consecutive frames, avoiding gimbal-lock singularities that
+    corrupt naive ``np.diff(euler) / dt`` when pitch is near ±90°.
+
+    Uses ``R_rel = R_prev^T @ R_curr`` so the extracted axis-angle is in
+    the body frame, consistent with ``get_random_velocity_pano`` which
+    returns ``omega_body = R^T @ omega_world``.
 
     Args:
         euler_angles: (T, 3) array of [roll, pitch, yaw] in degrees.
@@ -627,8 +634,8 @@ def _euler_angles_to_angular_velocity(euler_angles, dt):
     R_prev = _euler_to_rotation_matrix(*euler_angles[0])
     for t in range(1, T):
         R_curr = _euler_to_rotation_matrix(*euler_angles[t])
-        # Relative rotation: R_rel = R_curr @ R_prev^T
-        R_rel = R_curr @ R_prev.T
+        # Body-frame relative rotation: R_prev^T @ R_curr
+        R_rel = R_prev.T @ R_curr
         # Extract axis-angle via matrix logarithm (Rodrigues)
         cos_angle = (np.trace(R_rel) - 1.0) / 2.0
         cos_angle = np.clip(cos_angle, -1.0, 1.0)
@@ -636,7 +643,7 @@ def _euler_angles_to_angular_velocity(euler_angles, dt):
         if angle < 1e-10:
             omega[t] = 0.0
         else:
-            # Axis from skew-symmetric part of R_rel
+            # Axis from skew-symmetric part of R_rel (body frame)
             axis = np.array([
                 R_rel[2, 1] - R_rel[1, 2],
                 R_rel[0, 2] - R_rel[2, 0],
