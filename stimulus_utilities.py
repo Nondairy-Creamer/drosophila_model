@@ -557,6 +557,66 @@ def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1
     return stimulus, optic_flow
 
 
+def _euler_to_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
+    """Convert extrinsic XYZ Euler angles (degrees) to a 3x3 rotation matrix."""
+    r = np.radians(roll_deg)
+    p = np.radians(pitch_deg)
+    y = np.radians(yaw_deg)
+    cr, sr = np.cos(r), np.sin(r)
+    cp, sp = np.cos(p), np.sin(p)
+    cy, sy = np.cos(y), np.sin(y)
+
+    # R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [  -sp,           cp*sr,           cp*cr],
+    ])
+    return R
+
+
+def _euler_angles_to_angular_velocity(euler_angles, dt):
+    """Convert a time series of Euler angles (degrees) to angular velocity (deg/s).
+
+    Computes angular velocity via the relative rotation matrix between
+    consecutive frames, avoiding gimbal-lock singularities that corrupt
+    naive ``np.diff(euler) / dt`` when pitch is near ±90°.
+
+    Args:
+        euler_angles: (T, 3) array of [roll, pitch, yaw] in degrees.
+        dt: time step in seconds.
+
+    Returns:
+        omega: (T, 3) angular velocity in deg/s (body frame).
+               First frame is set to zero.
+    """
+    T = euler_angles.shape[0]
+    omega = np.zeros_like(euler_angles)
+
+    R_prev = _euler_to_rotation_matrix(*euler_angles[0])
+    for t in range(1, T):
+        R_curr = _euler_to_rotation_matrix(*euler_angles[t])
+        # Relative rotation: R_rel = R_curr @ R_prev^T
+        R_rel = R_curr @ R_prev.T
+        # Extract axis-angle via matrix logarithm (Rodrigues)
+        cos_angle = (np.trace(R_rel) - 1.0) / 2.0
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)
+        angle = np.arccos(cos_angle)
+        if angle < 1e-10:
+            omega[t] = 0.0
+        else:
+            # Axis from skew-symmetric part of R_rel
+            axis = np.array([
+                R_rel[2, 1] - R_rel[1, 2],
+                R_rel[0, 2] - R_rel[2, 0],
+                R_rel[1, 0] - R_rel[0, 1],
+            ]) / (2.0 * np.sin(angle))
+            omega[t] = axis * angle * (180.0 / np.pi) / dt
+        R_prev = R_curr
+
+    return omega
+
+
 def _random_rotation_matrix(rng):
     """Return a uniformly random 3x3 rotation matrix (Arvo 1992, fast uniform
     sampling of SO(3) via QR decomposition of a random matrix)."""
@@ -595,15 +655,14 @@ def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
 
     Blurs the raw panorama with a Gaussian kernel (ommatidia optical filtering)
     so the image can be safely sampled at the sparse column grid without
-    aliasing.  Contrast normalization is handled by the learnable input
-    convolution in the model.
+    aliasing.  Output is normalized to [0, 1].
 
     Args:
         pano: (H, W) raw panoramic image array.
         filter_std_rad: Gaussian sigma in radians (default 2.5 deg).
 
     Returns:
-        pano_out: (H, W) float64 array.
+        pano_out: (H, W) float64 array with values in [0, 1].
         pano_y_lim: (2,) theta limits of the panorama.
         pano_x_lim: (2,) phi limits of the panorama.
     """
@@ -621,6 +680,13 @@ def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
     pano_out = gaussian_filter(
         pano.astype(np.float64), sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
     )
+
+    pano_min = pano_out.min()
+    pano_max = pano_out.max()
+    if pano_max > pano_min:
+        pano_out = (pano_out - pano_min) / (pano_max - pano_min)
+    else:
+        pano_out = np.zeros_like(pano_out)
 
     return pano_out, pano_y_lim, pano_x_lim
 
@@ -1133,9 +1199,7 @@ def get_stimulus_two_eye(
 
                 rot = clip['rotation'][:usable]
                 trans = clip['translation'][:usable]
-                rot_rate = np.empty_like(rot)
-                rot_rate[0] = 0.0
-                rot_rate[1:] = np.diff(rot, axis=0) / model_dt
+                rot_rate = _euler_angles_to_angular_velocity(rot, model_dt)
                 trans_rate = np.empty_like(trans)
                 trans_rate[0] = 0.0
                 trans_rate[1:] = np.diff(trans, axis=0) / model_dt
