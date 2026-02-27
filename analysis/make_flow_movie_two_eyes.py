@@ -57,8 +57,13 @@ def main() -> None:
     stim_index = args.stim_index
 
     print("Loading inputs and targets...")
-    cell_inputs_all = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
-    cell_inputs_all = cell_inputs_all.to(device=device, dtype=dtype)
+    cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
+    if isinstance(cell_inputs_data, dict):
+        cell_inputs_all = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
+        train_mask_all = cell_inputs_data.get('train_mask', None)
+    else:
+        cell_inputs_all = cell_inputs_data.to(device=device, dtype=dtype)
+        train_mask_all = None
 
     print(f"  cell_inputs shape: {cell_inputs_all.shape}")
     print(f"  Using stimulus index {stim_index}")
@@ -68,11 +73,22 @@ def main() -> None:
     right_input = stim_input[:, :, :N]   # (1, T, N)
     left_input = stim_input[:, :, N:]    # (1, T, N)
 
+    if train_mask_all is not None:
+        stim_mask = train_mask_all[stim_index].cpu().numpy()  # (T, 2*N)
+        mask_right = stim_mask[:, :N]
+        mask_left = stim_mask[:, N:]
+    else:
+        mask_right = None
+        mask_left = None
+
     num_frames = stim_input.shape[1]
     if args.max_frames is not None:
         num_frames = min(num_frames, args.max_frames)
         right_input = right_input[:, :num_frames]
         left_input = left_input[:, :num_frames]
+        if mask_right is not None:
+            mask_right = mask_right[:num_frames]
+            mask_left = mask_left[:num_frames]
 
     print(f"Running model prediction ({num_frames} frames, N={N} columns per eye)...")
     with torch.no_grad():
@@ -114,6 +130,8 @@ def main() -> None:
         frame_rate=frame_rate,
         filtered_left=filtered_left_np[:num_frames] if filtered_left_np is not None else None,
         filtered_right=filtered_right_np[:num_frames] if filtered_right_np is not None else None,
+        mask_left=mask_left[:num_frames] if mask_left is not None else None,
+        mask_right=mask_right[:num_frames] if mask_right is not None else None,
     )
 
 
@@ -139,6 +157,8 @@ def _make_two_eye_flow_movie(
     frame_rate: int,
     filtered_left: np.ndarray | None = None,
     filtered_right: np.ndarray | None = None,
+    mask_left: np.ndarray | None = None,
+    mask_right: np.ndarray | None = None,
 ) -> None:
     """Render a two-eye flow movie.
 
@@ -148,6 +168,7 @@ def _make_two_eye_flow_movie(
     pred_flow_left, pred_flow_right : (T, N, 2) angular flow (d_right, d_up)
     cell_x, cell_y, cell_z : (N,)
     filtered_left, filtered_right : (T, N) or None
+    mask_left, mask_right : (T, N) bool or None — True = valid, False = masked (shown yellow)
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -158,6 +179,14 @@ def _make_two_eye_flow_movie(
     has_filtered = filtered_left is not None
     num_rows = 2 + (1 if has_filtered else 0)
     num_frames = stimulus_left.shape[0]
+
+    _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
+
+    def _masked_rgba(values, mask, cmap, norm):
+        rgba = cmap(norm(values))
+        if mask is not None:
+            rgba[~mask] = _MASK_COLOR
+        return rgba
 
     # --- Stimulus colour scale ---
     stim_min = min(np.nanmin(stimulus_left), np.nanmin(stimulus_right))
@@ -211,13 +240,19 @@ def _make_two_eye_flow_movie(
 
     cur_row = 0
 
+    gray_cmap = plt.cm.gray
+    mask_l_0 = mask_left[0] if mask_left is not None else None
+    mask_r_0 = mask_right[0] if mask_right is not None else None
+
     # Row 0: raw stimulus
     ax_stim_l, ax_stim_r = axes[cur_row, 0], axes[cur_row, 1]
     _setup_eye_axes(ax_stim_l, ax_stim_r)
-    sc_stim_l = ax_stim_l.scatter(cell_x, cell_z, c=stimulus_left[0], cmap="gray",
-                                   norm=stim_norm, s=90, edgecolors="none")
-    sc_stim_r = ax_stim_r.scatter(cell_x, cell_z, c=stimulus_right[0], cmap="gray",
-                                   norm=stim_norm, s=90, edgecolors="none")
+    sc_stim_l = ax_stim_l.scatter(cell_x, cell_z,
+                                   c=_masked_rgba(stimulus_left[0], mask_l_0, gray_cmap, stim_norm),
+                                   s=90, edgecolors="none")
+    sc_stim_r = ax_stim_r.scatter(cell_x, cell_z,
+                                   c=_masked_rgba(stimulus_right[0], mask_r_0, gray_cmap, stim_norm),
+                                   s=90, edgecolors="none")
     ax_stim_l.set_title("Left Eye (stimulus)")
     ax_stim_r.set_title("Right Eye (stimulus)")
     fig.colorbar(sc_stim_l, ax=ax_stim_l, label="intensity")
@@ -229,10 +264,12 @@ def _make_two_eye_flow_movie(
     if has_filtered:
         ax_filt_l, ax_filt_r = axes[cur_row, 0], axes[cur_row, 1]
         _setup_eye_axes(ax_filt_l, ax_filt_r)
-        sc_filt_l = ax_filt_l.scatter(cell_x, cell_z, c=filtered_left[0], cmap="gray",
-                                       norm=filt_norm, s=90, edgecolors="none")
-        sc_filt_r = ax_filt_r.scatter(cell_x, cell_z, c=filtered_right[0], cmap="gray",
-                                       norm=filt_norm, s=90, edgecolors="none")
+        sc_filt_l = ax_filt_l.scatter(cell_x, cell_z,
+                                       c=_masked_rgba(filtered_left[0], mask_l_0, gray_cmap, filt_norm),
+                                       s=90, edgecolors="none")
+        sc_filt_r = ax_filt_r.scatter(cell_x, cell_z,
+                                       c=_masked_rgba(filtered_right[0], mask_r_0, gray_cmap, filt_norm),
+                                       s=90, edgecolors="none")
         ax_filt_l.set_title("Left Eye (filtered)")
         ax_filt_r.set_title("Right Eye (filtered)")
         fig.colorbar(sc_filt_l, ax=ax_filt_l, label="intensity")
@@ -261,12 +298,15 @@ def _make_two_eye_flow_movie(
 
     with iio.get_writer(str(output_path), codec="libx264", fps=frame_rate) as writer:
         for t in range(num_frames):
-            sc_stim_l.set_array(stimulus_left[t])
-            sc_stim_r.set_array(stimulus_right[t])
+            mask_l_t = mask_left[t] if mask_left is not None else None
+            mask_r_t = mask_right[t] if mask_right is not None else None
+
+            sc_stim_l.set_facecolors(_masked_rgba(stimulus_left[t], mask_l_t, gray_cmap, stim_norm))
+            sc_stim_r.set_facecolors(_masked_rgba(stimulus_right[t], mask_r_t, gray_cmap, stim_norm))
 
             if sc_filt_l is not None:
-                sc_filt_l.set_array(filtered_left[t])
-                sc_filt_r.set_array(filtered_right[t])
+                sc_filt_l.set_facecolors(_masked_rgba(filtered_left[t], mask_l_t, gray_cmap, filt_norm))
+                sc_filt_r.set_facecolors(_masked_rgba(filtered_right[t], mask_r_t, gray_cmap, filt_norm))
 
             q_left.set_UVC(flow_vx_l[t], flow_vz_l[t], mag_l[t])
             q_right.set_UVC(flow_vx_r[t], flow_vz_r[t], mag_r[t])

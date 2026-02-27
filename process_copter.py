@@ -1,8 +1,8 @@
 """Process copter stereo video data into preprocessed tensors.
 
 Loads each pair of left/right stereo videos and corresponding pose log CSV,
-converts frames to grayscale, applies coordinate transformation, trims the
-initial zero-pose period, samples at ommatidium locations using column_info,
+converts frames to grayscale, applies coordinate transformation, trims
+leading and trailing zero-pose periods, samples at ommatidium locations using column_info,
 and saves all clips as a single .pt file containing a list of dicts.
 
 Usage:
@@ -34,7 +34,7 @@ def load_video_grayscale(path):
 
 
 def process_clip(clip_id, data_dir):
-    """Process a single stereo clip: load videos + pose, trim zero-pose prefix.
+    """Process a single stereo clip: load videos + pose, trim zero-pose prefix and suffix.
 
     Returns a dict with tensors or None if the clip has no valid pose data.
     """
@@ -72,15 +72,18 @@ def process_clip(clip_id, data_dir):
         return None
 
     start = nonzero[0]
-    remaining = min_len - start
-    print(f'  Clip {clip_id}: trimmed {start} zero-pose frames, {remaining} frames remaining '
-          f'({remaining * video_dt:.1f}s)')
+    end = nonzero[-1] + 1
+    trimmed_start = start
+    trimmed_end = min_len - end
+    remaining = end - start
+    print(f'  Clip {clip_id}: trimmed {trimmed_start} leading + {trimmed_end} trailing zero-pose frames, '
+          f'{remaining} frames remaining ({remaining * video_dt:.1f}s)')
 
     return {
-        'left': torch.from_numpy(left[start:]),
-        'right': torch.from_numpy(right[start:]),
-        'rotation': torch.from_numpy(rotation[start:]),
-        'translation': torch.from_numpy(translation[start:]),
+        'left': torch.from_numpy(left[start:end]),
+        'right': torch.from_numpy(right[start:end]),
+        'rotation': torch.from_numpy(rotation[start:end]),
+        'translation': torch.from_numpy(translation[start:end]),
         'video_dt': video_dt,
         'clip_id': clip_id,
     }

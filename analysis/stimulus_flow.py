@@ -59,9 +59,10 @@ def main() -> None:
 
     # --- Load stimulus and optic flow ---
     print("Loading stimulus and optic flow...")
-    stimulus, optic_flow, _ = su.get_stimulus_one_eye(stimulus_type, config, column_phi_theta)
+    stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(stimulus_type, config, column_phi_theta)
     stimulus = stimulus.numpy()
     optic_flow = optic_flow.numpy()
+    train_mask = train_mask.numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"Optic flow shape: {optic_flow.shape}")
@@ -84,6 +85,7 @@ def main() -> None:
             out_path,
             frame_rate,
             cell_y=cell_y,
+            mask=train_mask[stim_index],
         )
 
 

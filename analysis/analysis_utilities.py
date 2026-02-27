@@ -327,6 +327,7 @@ def make_flow_comparison_movie(
     frame_rate: int = 30,
     stim_name: str = "",
     filtered_stimulus: np.ndarray | None = None,
+    mask: np.ndarray | None = None,
 ) -> None:
     """Create a flow comparison movie.
 
@@ -347,6 +348,8 @@ def make_flow_comparison_movie(
     stim_name : label shown in the stimulus panel title
     filtered_stimulus : (time, columns) or None — stimulus after the model's
         input filter.  Shown in the bottom-left panel when provided.
+    mask : (time, columns) bool or None — True = valid, False = masked
+        (shown yellow).
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -357,6 +360,15 @@ def make_flow_comparison_movie(
     num_time, _ = stimulus.shape
     stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
+
+    _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
+    gray_cmap = plt.cm.gray
+
+    def _masked_rgba(values, mask_t, cmap, norm):
+        rgba = cmap(norm(values))
+        if mask_t is not None:
+            rgba[~mask_t] = _MASK_COLOR
+        return rgba
 
     # Project angular flow (u_right, u_up) to Cartesian (v_x, v_z) for the x-z plotting plane
     true_flow_vx, true_flow_vz = angular_flow_to_cartesian_xz(
@@ -416,12 +428,11 @@ def make_flow_comparison_movie(
         ax.set_xlabel("x (anterior ← → posterior)")
         ax.set_ylabel("z (ventral ↔ dorsal)")
 
+    mask_0 = mask[0] if mask is not None else None
     sc_stim = ax_stim.scatter(
         cell_x,
         cell_z,
-        c=stimulus[0, :],
-        cmap="gray",
-        norm=stim_norm,
+        c=_masked_rgba(stimulus[0, :], mask_0, gray_cmap, stim_norm),
         s=90,
         edgecolors="none",
     )
@@ -435,9 +446,7 @@ def make_flow_comparison_movie(
         sc_filt = ax_bottom_left.scatter(
             cell_x,
             cell_z,
-            c=filtered_stimulus[0, :],
-            cmap="gray",
-            norm=filt_norm,
+            c=_masked_rgba(filtered_stimulus[0, :], mask_0, gray_cmap, filt_norm),
             s=90,
             edgecolors="none",
         )
@@ -498,9 +507,10 @@ def make_flow_comparison_movie(
         str(output_path), codec="libx264", fps=frame_rate
     ) as writer:
         for t in range(num_time):
-            sc_stim.set_array(stimulus[t, :])
+            mask_t = mask[t] if mask is not None else None
+            sc_stim.set_facecolors(_masked_rgba(stimulus[t, :], mask_t, gray_cmap, stim_norm))
             if sc_filt is not None:
-                sc_filt.set_array(filtered_stimulus[t, :])
+                sc_filt.set_facecolors(_masked_rgba(filtered_stimulus[t, :], mask_t, gray_cmap, filt_norm))
 
             vx_true_t = true_flow_vx[t, :]
             vz_true_t = true_flow_vz[t, :]
@@ -536,6 +546,7 @@ def make_stimulus_flow_movie(
     output_path: Path,
     frame_rate: int,
     cell_y: np.ndarray = None,
+    mask: np.ndarray | None = None,
 ) -> None:
     """Create a 1x2 movie: stimulus intensity + true optic flow.
 
@@ -551,6 +562,7 @@ def make_stimulus_flow_movie(
         cell_z=cell_z,
         output_path=output_path,
         frame_rate=frame_rate,
+        mask=mask,
     )
 
 

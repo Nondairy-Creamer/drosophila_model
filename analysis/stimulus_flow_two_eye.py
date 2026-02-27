@@ -85,6 +85,9 @@ def main() -> None:
         print(f"\nClip {clip_idx}: {num_frames_raw} raw frames, "
               f"{num_frames_sampled} sampled frames -> {out_path}")
 
+        in_fov_right = sampled["in_fov_right"].numpy()
+        in_fov_left = sampled["in_fov_left"].numpy()
+
         _make_two_eye_movie(
             raw_left=raw["left"].numpy(),
             raw_right=raw["right"].numpy(),
@@ -99,6 +102,8 @@ def main() -> None:
             num_frames=num_frames,
             video_dt=video_dt,
             model_dt=model_dt,
+            in_fov_left=in_fov_left,
+            in_fov_right=in_fov_right,
         )
 
 
@@ -117,6 +122,8 @@ def _make_two_eye_movie(
     video_dt: float,
     model_dt: float,
     trail_frames: int = 60,
+    in_fov_left: np.ndarray | None = None,
+    in_fov_right: np.ndarray | None = None,
 ) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -129,6 +136,14 @@ def _make_two_eye_movie(
     vmin = min(np.nanmin(sampled_left), np.nanmin(sampled_right))
     vmax = max(np.nanmax(sampled_left), np.nanmax(sampled_right))
     scatter_norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    gray_cmap = plt.cm.gray
+    _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
+
+    def _masked_rgba(values, mask):
+        rgba = gray_cmap(scatter_norm(values))
+        if mask is not None:
+            rgba[~mask] = _MASK_COLOR
+        return rgba
 
     fig, axes = plt.subplots(3, 2, figsize=(12.8, 13), dpi=100,
                              gridspec_kw={"height_ratios": [3, 3, 2]})
@@ -155,10 +170,10 @@ def _make_two_eye_movie(
     ax_sam_r.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
     ax_sam_r.set_aspect("equal")
 
-    sc_l = ax_sam_l.scatter(cell_x, cell_z, c=sampled_left[0], cmap="gray",
-                            norm=scatter_norm, s=90, edgecolors="none")
-    sc_r = ax_sam_r.scatter(cell_x, cell_z, c=sampled_right[0], cmap="gray",
-                            norm=scatter_norm, s=90, edgecolors="none")
+    sc_l = ax_sam_l.scatter(cell_x, cell_z, c=_masked_rgba(sampled_left[0], in_fov_left),
+                            s=90, edgecolors="none")
+    sc_r = ax_sam_r.scatter(cell_x, cell_z, c=_masked_rgba(sampled_right[0], in_fov_right),
+                            s=90, edgecolors="none")
     ax_sam_l.set_title("Left Eye (sampled)")
     ax_sam_r.set_title("Right Eye (sampled)")
 
@@ -200,8 +215,8 @@ def _make_two_eye_movie(
 
             im_l.set_data(raw_left[raw_t])
             im_r.set_data(raw_right[raw_t])
-            sc_l.set_array(sampled_left[t])
-            sc_r.set_array(sampled_right[t])
+            sc_l.set_facecolors(_masked_rgba(sampled_left[t], in_fov_left))
+            sc_r.set_facecolors(_masked_rgba(sampled_right[t], in_fov_right))
 
             time_s = t * model_dt
             ax_raw_l.set_title(f"Left Camera (t={time_s:.2f}s)")
