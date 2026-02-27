@@ -21,16 +21,24 @@ from loss_functions import (
 
 
 def _normalized_mse(pred, target, eps=1e-8):
-    """MSE normalized by target variance (fraction of variance unexplained)."""
-    return torch.nn.functional.mse_loss(pred, target) / (target.var() + eps)
+    """MSE normalized by target variance (fraction of variance unexplained).
+
+    NaN entries in *target* are excluded from both MSE and variance.
+    """
+    valid = ~torch.isnan(target)
+    if not valid.any():
+        return pred.new_tensor(0.0)
+    p, t = pred[valid], target[valid]
+    return (p - t).pow(2).mean() / (t.var() + eps)
 
 
 def _cosine_loss(pred, target, eps=1e-8):
-    """Mean cosine distance, masking out near-zero target vectors."""
+    """Mean cosine distance, masking out near-zero and NaN target vectors."""
     pred_flat = pred.reshape(-1, pred.shape[-1])
     target_flat = target.reshape(-1, target.shape[-1])
+    has_nan = torch.isnan(target_flat).any(dim=-1)
     mag = target_flat.norm(dim=-1)
-    valid = mag > eps
+    valid = (mag > eps) & ~has_nan
     if not valid.any():
         return pred.new_tensor(0.0)
     cos_sim = torch.nn.functional.cosine_similarity(

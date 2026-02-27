@@ -16,8 +16,11 @@ import cv2
 import pandas as pd
 from pathlib import Path
 import argparse
+from scipy.ndimage import gaussian_filter1d
 
 from stimulus_utilities import build_ommatidium_sampling_matrix
+
+SMOOTH_TIME_S = 0.2
 
 
 def load_video_grayscale(path):
@@ -79,11 +82,20 @@ def process_clip(clip_id, data_dir):
     print(f'  Clip {clip_id}: trimmed {trimmed_start} leading + {trimmed_end} trailing zero-pose frames, '
           f'{remaining} frames remaining ({remaining * video_dt:.1f}s)')
 
+    left = left[start:end]
+    right = right[start:end]
+    rotation = rotation[start:end]
+    translation = translation[start:end]
+
+    smooth_sigma = SMOOTH_TIME_S / video_dt
+    rotation = gaussian_filter1d(rotation, sigma=smooth_sigma, axis=0).astype(np.float32)
+    translation = gaussian_filter1d(translation, sigma=smooth_sigma, axis=0).astype(np.float32)
+
     return {
-        'left': torch.from_numpy(left[start:end]),
-        'right': torch.from_numpy(right[start:end]),
-        'rotation': torch.from_numpy(rotation[start:end]),
-        'translation': torch.from_numpy(translation[start:end]),
+        'left': torch.from_numpy(left),
+        'right': torch.from_numpy(right),
+        'rotation': torch.from_numpy(rotation),
+        'translation': torch.from_numpy(translation),
         'video_dt': video_dt,
         'clip_id': clip_id,
     }

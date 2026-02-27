@@ -1,10 +1,11 @@
 """
 Visualize two-eye stimuli (e.g. copter_view) as a movie.
 
-Layout (3x2):
-  Top:    raw left camera frame  |  raw right camera frame
-  Mid:    left eye ommatidia     |  right eye ommatidia
-  Bot:    rotation (trailing)    |  translation (trailing)
+Layout (4x2):
+  Row 0:  raw left camera frame  |  raw right camera frame
+  Row 1:  left eye ommatidia     |  right eye ommatidia
+  Row 2:  rotation position      |  translation position
+  Row 3:  rotation rate          |  translation rate
 """
 import argparse
 import sys
@@ -88,13 +89,23 @@ def main() -> None:
         in_fov_right = sampled["in_fov_right"].numpy()
         in_fov_left = sampled["in_fov_left"].numpy()
 
+        def _to_numpy(x):
+            return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+
+        rot_pos = _to_numpy(sampled["rotation"])
+        trans_pos = _to_numpy(sampled["translation"])
+        rot_rate = _to_numpy(sampled["rotation_rate"])
+        trans_rate = _to_numpy(sampled["translation_rate"])
+
         _make_two_eye_movie(
             raw_left=raw["left"].numpy(),
             raw_right=raw["right"].numpy(),
             sampled_left=sampled["left"],
             sampled_right=sampled["right"],
-            rotation=sampled["rotation"],
-            translation=sampled["translation"],
+            rotation=rot_pos,
+            translation=trans_pos,
+            rotation_rate=rot_rate,
+            translation_rate=trans_rate,
             cell_x=cell_x,
             cell_z=cell_z,
             output_path=out_path,
@@ -114,6 +125,8 @@ def _make_two_eye_movie(
     sampled_right: np.ndarray,
     rotation: np.ndarray,
     translation: np.ndarray,
+    rotation_rate: np.ndarray,
+    translation_rate: np.ndarray,
     cell_x: np.ndarray,
     cell_z: np.ndarray,
     output_path: Path,
@@ -145,11 +158,12 @@ def _make_two_eye_movie(
             rgba[~mask] = _MASK_COLOR
         return rgba
 
-    fig, axes = plt.subplots(3, 2, figsize=(12.8, 13), dpi=100,
-                             gridspec_kw={"height_ratios": [3, 3, 2]})
+    fig, axes = plt.subplots(4, 2, figsize=(12.8, 16), dpi=100,
+                             gridspec_kw={"height_ratios": [3, 3, 2, 2]})
     ax_raw_l, ax_raw_r = axes[0, 0], axes[0, 1]
     ax_sam_l, ax_sam_r = axes[1, 0], axes[1, 1]
     ax_rot, ax_trans = axes[2, 0], axes[2, 1]
+    ax_rot_rate, ax_trans_rate = axes[3, 0], axes[3, 1]
 
     # Raw video panels
     im_l = ax_raw_l.imshow(raw_left[0], cmap="gray", vmin=0, vmax=255, aspect="auto")
@@ -201,6 +215,37 @@ def _make_two_eye_movie(
     ax_trans.set_xlabel("time (s)")
     ax_trans.set_title("Translation")
 
+    rot_rate_lines = []
+    for i, (label, color) in enumerate(zip(rot_labels, rot_colors)):
+        line, = ax_rot_rate.plot([], [], color=color, label=label, linewidth=1.5)
+        rot_rate_lines.append(line)
+    ax_rot_rate.legend(loc="upper left", fontsize=8)
+    ax_rot_rate.set_ylabel("deg/s")
+    ax_rot_rate.set_xlabel("time (s)")
+    ax_rot_rate.set_title("Rotation Rate")
+
+    trans_rate_lines = []
+    for i, (label, color) in enumerate(zip(trans_labels, trans_colors)):
+        line, = ax_trans_rate.plot([], [], color=color, label=label, linewidth=1.5)
+        trans_rate_lines.append(line)
+    ax_trans_rate.legend(loc="upper left", fontsize=8)
+    ax_trans_rate.set_ylabel("velocity")
+    ax_trans_rate.set_xlabel("time (s)")
+    ax_trans_rate.set_title("Translation Rate")
+
+    def _fixed_ylim(data, margin_frac=0.1, min_margin=0.01):
+        finite = data[np.isfinite(data)] if np.issubdtype(data.dtype, np.floating) else data.ravel()
+        if finite.size == 0:
+            return -1, 1
+        lo, hi = finite.min(), finite.max()
+        margin = max(margin_frac * (hi - lo), min_margin)
+        return lo - margin, hi + margin
+
+    ax_rot.set_ylim(*_fixed_ylim(rotation[:num_frames], min_margin=1.0))
+    ax_trans.set_ylim(*_fixed_ylim(translation[:num_frames], min_margin=0.01))
+    ax_rot_rate.set_ylim(*_fixed_ylim(rotation_rate[:num_frames], min_margin=1.0))
+    ax_trans_rate.set_ylim(*_fixed_ylim(translation_rate[:num_frames], min_margin=0.01))
+
     plt.tight_layout()
 
     output_path = Path(output_path)
@@ -232,20 +277,18 @@ def _make_two_eye_movie(
             for i, line in enumerate(rot_lines):
                 line.set_data(t_times, rotation[t_slice, i])
             ax_rot.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
-            rot_window = rotation[t_start:t + 1]
-            if rot_window.size > 0:
-                ymin, ymax = rot_window.min(), rot_window.max()
-                margin = max(0.1 * (ymax - ymin), 1.0)
-                ax_rot.set_ylim(ymin - margin, ymax + margin)
 
             for i, line in enumerate(trans_lines):
                 line.set_data(t_times, translation[t_slice, i])
             ax_trans.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
-            trans_window = translation[t_start:t + 1]
-            if trans_window.size > 0:
-                ymin, ymax = trans_window.min(), trans_window.max()
-                margin = max(0.1 * (ymax - ymin), 0.01)
-                ax_trans.set_ylim(ymin - margin, ymax + margin)
+
+            for i, line in enumerate(rot_rate_lines):
+                line.set_data(t_times, rotation_rate[t_slice, i])
+            ax_rot_rate.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+
+            for i, line in enumerate(trans_rate_lines):
+                line.set_data(t_times, translation_rate[t_slice, i])
+            ax_trans_rate.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
 
             writer.append_data(fig_to_rgb(fig))
             if (t + 1) % 50 == 0:

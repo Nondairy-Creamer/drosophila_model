@@ -90,6 +90,10 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
     Load preprocessed copter clips (already sampled at ommatidium locations)
     and temporally interpolate to model_dt.
 
+    Rates are computed at the native video frame rate and then interpolated
+    to model_dt, avoiding step-function artifacts from differentiating
+    interpolated positions.
+
     Args:
         model_dt: model time step for temporal interpolation (seconds).
         data_path: path to copter_data.pt from process_copter.py.
@@ -100,8 +104,10 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
         List of dicts, one per clip, each with keys:
             'right': (time_i, N) array, right-eye stimulus in [0, 1].
             'left': (time_i, N) array, left-eye stimulus in [0, 1].
-            'rotation': (time_i, 3) array, rotation in degrees.
-            'translation': (time_i, 3) array, translation.
+            'rotation': (time_i, 3) array, rotation position in degrees.
+            'translation': (time_i, 3) array, translation position.
+            'rotation_rate': (time_i, 3) array, rotation rate in deg/s.
+            'translation_rate': (time_i, 3) array, translation rate.
             'video_dt': original video time step (seconds).
             'clip_id': integer clip identifier.
     """
@@ -124,15 +130,30 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
         sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
         sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
 
-        video_times = np.arange(T) * video_dt
-        model_times = np.arange(video_times[0], video_times[-1], model_dt)
         rotation = clip['rotation'].numpy()
         translation = clip['translation'].numpy()
+
+        # Compute rates at native video frame rate
+        rot_rate_native = _euler_angles_to_angular_velocity(rotation, video_dt)
+        rot_rate_native[:, 2] = np.nan  # yaw rate is unreliable
+        trans_rate_native = np.zeros_like(translation)
+        trans_rate_native[1:] = np.diff(translation, axis=0) / video_dt
+
+        # Interpolate positions and rates to model_dt
+        video_times = np.arange(T) * video_dt
+        model_times = np.arange(video_times[0], video_times[-1], model_dt)
+
         rotation_interp = np.column_stack([
             np.interp(model_times, video_times, rotation[:, i]) for i in range(3)
         ])
         translation_interp = np.column_stack([
             np.interp(model_times, video_times, translation[:, i]) for i in range(3)
+        ])
+        rot_rate_interp = np.column_stack([
+            np.interp(model_times, video_times, rot_rate_native[:, i]) for i in range(3)
+        ])
+        trans_rate_interp = np.column_stack([
+            np.interp(model_times, video_times, trans_rate_native[:, i]) for i in range(3)
         ])
 
         if 'in_fov_right' not in clip:
@@ -145,6 +166,8 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
             'left': sampled_left[frame_start:frame_end],
             'rotation': rotation_interp[frame_start:frame_end],
             'translation': translation_interp[frame_start:frame_end],
+            'rotation_rate': rot_rate_interp[frame_start:frame_end],
+            'translation_rate': trans_rate_interp[frame_start:frame_end],
             'video_dt': video_dt,
             'clip_id': clip['clip_id'],
             'in_fov_right': clip['in_fov_right'],
@@ -1239,17 +1262,10 @@ def get_stimulus_two_eye(
                 usable = num_segments * seg_len
                 n_copter_segments += num_segments
 
-                rot = clip['rotation'][:usable]
-                trans = clip['translation'][:usable]
-                rot_rate = _euler_angles_to_angular_velocity(rot, model_dt)
-                trans_rate = np.empty_like(trans)
-                trans_rate[0] = 0.0
-                trans_rate[1:] = np.diff(trans, axis=0) / model_dt
-
                 seg_rights.append(clip['right'][:usable].reshape(num_segments, seg_len, -1))
                 seg_lefts.append(clip['left'][:usable].reshape(num_segments, seg_len, -1))
-                seg_rots.append(rot_rate.reshape(num_segments, seg_len, 3))
-                seg_trans.append(trans_rate.reshape(num_segments, seg_len, 3))
+                seg_rots.append(clip['rotation_rate'][:usable].reshape(num_segments, seg_len, 3))
+                seg_trans.append(clip['translation_rate'][:usable].reshape(num_segments, seg_len, 3))
 
             stim_right = np.concatenate(seg_rights, axis=0)
             stim_left = np.concatenate(seg_lefts, axis=0)
