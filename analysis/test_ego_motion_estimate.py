@@ -72,7 +72,7 @@ def main() -> None:
 
     # Generate stimuli with ground-truth rotation vectors
     print("Generating panoramic stimuli ...")
-    stimulus, optic_flow_true, rotation_vectors = su.get_random_velocity_pano(
+    stimulus, optic_flow_true, rotation_vectors, _ = su.get_random_velocity_pano(
         both_phi, both_theta,
         velocity_amp=100, velocity_time_scale=0.5,
         seed=args.seed, dt=model.dt, stim_time=1.0,

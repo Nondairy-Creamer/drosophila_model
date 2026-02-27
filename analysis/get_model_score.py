@@ -49,7 +49,7 @@ def main() -> None:
 
     # --- Create stimulus ---
     print(f"Generating stimulus (type: {stimulus_type})...")
-    stimulus, optic_flow = su.get_stimulus_one_eye(
+    stimulus, optic_flow, _ = su.get_stimulus_one_eye(
         stimulus_type,
         local_config,
         column_phi_theta,

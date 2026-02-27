@@ -59,7 +59,7 @@ def main() -> None:
 
     # --- Load stimulus and optic flow ---
     print("Loading stimulus and optic flow...")
-    stimulus, optic_flow = su.get_stimulus_one_eye(stimulus_type, config, column_phi_theta)
+    stimulus, optic_flow, _ = su.get_stimulus_one_eye(stimulus_type, config, column_phi_theta)
     stimulus = stimulus.numpy()
     optic_flow = optic_flow.numpy()
 

@@ -28,7 +28,13 @@ local_device = local_config['model']['device']
 
 config = du.load_config(model_folder / 'config.toml')
 model = nm.NeuralModel.load(model_folder / 'model.pt', freeze_params=False, device=local_device)
-stimulus = torch.load(model_folder / 'cell_inputs.pt').to(device=model.device)
+_stim_loaded = torch.load(model_folder / 'cell_inputs.pt')
+if isinstance(_stim_loaded, dict):
+    stimulus = _stim_loaded['cell_inputs'].to(device=model.device)
+    train_mask = _stim_loaded['train_mask'].to(device=model.device)
+else:
+    stimulus = _stim_loaded.to(device=model.device)
+    train_mask = None
 # target is now a dict of tensors; load and move entries to the right device/dtype
 _target_loaded = torch.load(model_folder / 'target.pt')
 target = {k: (v.to(device=model.device, dtype=model.dtype) if torch.is_tensor(v) else v)
@@ -68,7 +74,7 @@ tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     sigma_lambda=config['training']['sigma_lambda'],
     peak_lambda=config['training']['peak_lambda'],    
     reset_init_every=config['training']['reset_init_every'],
-    pre_stim_time=config['stimulus']['pre_stim_time'],
+    train_mask=train_mask,
     )
 
                

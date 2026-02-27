@@ -113,12 +113,11 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     fit_odometry = config['training'].get('fit_odometry', False)
 
     if fit_odometry:
-        stimulus, optic_flow, target_rotation, target_translation, oob_columns = \
+        stimulus, optic_flow, target_rotation, target_translation, train_mask = \
             su.get_stimulus_two_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
-        target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow,
-                  'oob_columns': oob_columns}
+        target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
     else:
-        stimulus, optic_flow = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
+        stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
 
         if config['training']['use_synthetic_data']:
             target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
@@ -142,7 +141,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     run_info = {'seed': seed, 'device': str(device), 'run_id': run_id}
     config['run_info'] = {k: v for k, v in run_info.items() if v is not None}
     du.save_config(config, model_save_folder / 'config.toml')
-    torch.save(stimulus.detach().cpu(), model_save_folder / "cell_inputs.pt")
+    torch.save({'cell_inputs': stimulus.detach().cpu(), 'train_mask': train_mask.detach().cpu()},
+               model_save_folder / "cell_inputs.pt")
     if type(target) is dict:
         torch.save({k: (v.detach().cpu() if torch.is_tensor(v) else v) for k, v in target.items()}, model_save_folder / "target.pt")
     else:
@@ -170,7 +170,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         contrast_std=config['training']['contrast_std'],
         luminance_std=config['training']['luminance_std'],
         batch_size=config['training']['batch_size'],
-        pre_stim_time=config['stimulus']['pre_stim_time'],
+        train_mask=train_mask,
         fit_odometry=fit_odometry,
     )
 

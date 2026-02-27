@@ -70,10 +70,11 @@ def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):
 
 
 class StimulusDataset(Dataset):
-    """Dataset that pairs inputs with targets (tensor or dict of tensors)."""
-    def __init__(self, inputs, target):
+    """Dataset that pairs inputs with targets (tensor or dict of tensors) and a train mask."""
+    def __init__(self, inputs, target, train_mask):
         self.inputs = inputs
         self.target = target
+        self.train_mask = train_mask
         self._target_is_dict = isinstance(target, dict)
 
     def __len__(self):
@@ -81,21 +82,21 @@ class StimulusDataset(Dataset):
 
     def __getitem__(self, idx):
         if self._target_is_dict:
-            return self.inputs[idx], {k: v[idx] for k, v in self.target.items()}
-        return self.inputs[idx], self.target[idx]
+            return self.inputs[idx], {k: v[idx] for k, v in self.target.items()}, self.train_mask[idx]
+        return self.inputs[idx], self.target[idx], self.train_mask[idx]
 
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
                 sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
-                batch_size=None, pre_stim_time=0.0, fit_odometry=False):
+                batch_size=None, train_mask=None, fit_odometry=False):
 
     assert sigma_lambda >= 0, 'lambdas must be positive'
     assert peak_lambda >= 0, 'lambdas must be positive'
 
-    # Number of initial time steps to exclude from loss (pre-stimulus period)
-    loss_start_step = int(round(pre_stim_time / model.dt)) if pre_stim_time > 0 else 0
+    if train_mask is None:
+        train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
 
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
@@ -135,7 +136,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
     use_batching = batch_size is not None and batch_size < num_stimuli
     if use_batching:
         dataloader = DataLoader(
-            StimulusDataset(inputs, target),
+            StimulusDataset(inputs, target, train_mask),
             batch_size=batch_size,
             shuffle=True,
             drop_last=True,
@@ -150,16 +151,17 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         # --- mini-batch: draw next batch from DataLoader ---
         if use_batching:
             try:
-                inputs_batch, target_batch = next(batch_iter)
+                inputs_batch, target_batch, train_mask_batch = next(batch_iter)
             except StopIteration:
                 batch_iter = iter(dataloader)
-                inputs_batch, target_batch = next(batch_iter)
+                inputs_batch, target_batch, train_mask_batch = next(batch_iter)
             inputs_batch = inputs_batch.clone()
             batch_init_state = None
             batch_filter_state = None
         else:
             inputs_batch = inputs.clone()
             target_batch = target
+            train_mask_batch = train_mask
             batch_init_state = last_state
             batch_filter_state = last_filter_state
 
@@ -179,14 +181,20 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         start = time.time()
         opt.zero_grad()
 
+        # Derive time mask from train_mask (True if any column is valid at that time step)
+        time_mask = train_mask_batch.any(dim=-1)  # (batch, time)
+        # Find first valid time step for slicing (pre-stim is contiguous at start)
+        loss_start_step = 0
+        if not time_mask[:, 0].all():
+            loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
+
         if fit_odometry:
             # inputs shape: (batch, time, 2*N) — first N right eye, last N left eye
             N = inputs_batch.shape[2] // 2
             right_batch = inputs_batch[:, :, :N]
             left_batch = inputs_batch[:, :, N:]
-            oob = target_batch.get('oob_columns')
-            if oob is not None:
-                oob = oob.any(dim=0)
+            # Columns that are never valid in this batch → structurally OOB for the decoder
+            oob = ~train_mask_batch.any(dim=1).any(dim=0)  # (2*N,)
             pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(
                 right_batch, left_batch, oob_columns=oob)
 
@@ -197,12 +205,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                 target_rot, target_trans, model.dt,
             )
 
-            # NaN-safe normalized flow loss: copter_view targets are all NaN, random_pano has valid flow
+            # Flow loss: use train_mask and NaN to select valid elements
             target_flow = target_batch['optic_flow'][:, loss_start_step:]
-            pred_flow = pred_flow[:, loss_start_step:]
-            valid_flow = ~torch.isnan(target_flow)
+            pred_flow_valid = pred_flow[:, loss_start_step:]
+            flow_mask = train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(target_flow)
+            valid_flow = flow_mask & ~torch.isnan(target_flow)
             if valid_flow.any():
-                flow_loss = _normalized_mse(pred_flow[valid_flow], target_flow[valid_flow])
+                flow_loss = _normalized_mse(pred_flow_valid[valid_flow], target_flow[valid_flow])
             else:
                 flow_loss = pred_flow.new_tensor(0.0)
 
@@ -215,9 +224,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                 last_filter_state = cached_mappings.get('filter_state')
 
             if model.has_decoder:
-                pred_loss = pred['decoder'][:, loss_start_step:]
-                target_loss = target_batch[:, loss_start_step:]
-                loss = loss_fn(target_loss, pred_loss)
+                pred_dec = pred['decoder'][:, loss_start_step:].clone()
+                target_dec = target_batch[:, loss_start_step:].clone()
+                invalid = ~train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(pred_dec)
+                pred_dec[invalid] = float('nan')
+                target_dec[invalid] = float('nan')
+                loss = loss_fn(target_dec, pred_dec)
             else:
                 pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
                 target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
