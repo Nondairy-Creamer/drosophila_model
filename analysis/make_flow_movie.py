@@ -60,16 +60,15 @@ def _extract_pred_flow(pred_output: object) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Make optic flow movie for a model.")
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
-        nargs="?",
         default="models/best_model",
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_path))
+    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
     local_config = du.load_config()
     device = local_config['model'].get('device', 'cpu')
     batch_size = local_config['training'].get('batch_size', 1)

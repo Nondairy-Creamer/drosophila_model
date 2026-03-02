@@ -362,9 +362,8 @@ def _plot_pathway(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot XT signal propagation for light/dark pathways.")
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
-        nargs="?",
         default=None,
         help="Path to model folder (or any file inside it). If omitted, a fresh model is initialized from config.",
     )
@@ -405,8 +404,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.model_path is not None:
-        model_folder = resolve_model_folder(Path(args.model_path))
+    if args.model_folder is not None:
+        model_folder = resolve_model_folder(Path(args.model_folder))
         model_path = model_folder / ("model_init.pt" if args.use_init else "model.pt")
 
         if not model_path.exists():

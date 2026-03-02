@@ -67,13 +67,14 @@ def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity,
 def main():
     parser = argparse.ArgumentParser(description="Sine wave velocity sweep analysis.")
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
+        required=True,
         help="Path to model folder (containing model.pt and config.toml)",
     )
     args = parser.parse_args()
 
-    model_folder = Path(args.model_path)
+    model_folder = Path(args.model_folder)
     model_config = du.load_config(model_folder / "config.toml")
     computer_config = du.load_config()
     device = torch.device(computer_config["model"]["device"])

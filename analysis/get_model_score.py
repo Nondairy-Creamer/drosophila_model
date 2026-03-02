@@ -24,9 +24,8 @@ def main() -> None:
         description="Compute MSE and cosine loss for a trained model."
     )
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
-        nargs="?",
         default="models/best_model",
         help="Path to model folder or model.pt (default: models/best_model)",
     )
@@ -39,7 +38,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # --- Load model and config ---
-    model_pt, model_folder = resolve_model_paths(Path(args.model_path))
+    model_pt, model_folder = resolve_model_paths(Path(args.model_folder))
     local_config = du.load_config()
     device = torch.device(local_config["model"]["device"])
     model = nm.NeuralModel.load(model_pt, device=device)

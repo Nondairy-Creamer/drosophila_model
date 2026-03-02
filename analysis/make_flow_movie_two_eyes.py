@@ -9,8 +9,8 @@ folder, splits into right and left eye, runs the model, and renders:
   Row 2: Left eye predicted flow |  Right eye predicted flow
 
 Usage:
-    python analysis/make_flow_movie_two_eyes.py models/20260226_190611_gpu8_run0/
-    python analysis/make_flow_movie_two_eyes.py models/best_model --stim-index 5
+    python analysis/make_flow_movie_two_eyes.py --model-folder models/20260226_190611_gpu8_run0/
+    python analysis/make_flow_movie_two_eyes.py --model-folder models/best_model --stim-index 5
 """
 import argparse
 import sys
@@ -34,7 +34,7 @@ from analysis_utilities import (
 def main() -> None:
     parser = argparse.ArgumentParser(description="Make two-eye optic flow movie for a model.")
     parser.add_argument(
-        "model_path", type=str, nargs="?", default="models/best_model",
+        "--model-folder", type=str, default="models/best_model",
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5,
@@ -45,7 +45,7 @@ def main() -> None:
                         help="Maximum frames to render")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_path))
+    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
     local_config = du.load_config()
     device = local_config['model'].get('device', 'cpu')
     print(f"Loading model from {model_file} on {device}...")
@@ -115,7 +115,7 @@ def main() -> None:
     cell_z = column_xyz[:, 2]
 
     output_folder = model_folder / 'optic_flow_movie'
-    out_path = output_folder / f'two_eye_flow_stim_{stim_index}.mp4'
+    out_path = output_folder / f'two_eyes_flow_stim_{stim_index}.mp4'
 
     print(f"Creating movie -> {out_path}")
     _make_two_eyes_flow_movie(

@@ -35,9 +35,8 @@ def compute_lru_impulse_response(lru, num_steps=100, dt=0.01):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot input convolution filter parameters.")
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
-        nargs="?",
         default="models/best_model",
         help="Path to model folder or model.pt (default: models/best_model)",
     )
@@ -55,7 +54,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_path = Path(args.model_path)
+    model_path = Path(args.model_folder)
     model_pt = model_path / "model.pt" if model_path.is_dir() else model_path
     model = nm.NeuralModel.load(model_pt, device="cpu")
     if not model.use_input_conv:

@@ -31,7 +31,7 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=30, help="Output movie frame rate")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to render (default: all)")
-    parser.add_argument("--output-dir", type=str, default="figures/two_eye",
+    parser.add_argument("--output-dir", type=str, default="figures/two_eyes",
                         help="Output directory for the movie")
     args = parser.parse_args()
 
@@ -82,7 +82,7 @@ def main() -> None:
         sampled_times = np.arange(num_frames_sampled) * model_dt
         raw_times = np.arange(num_frames_raw) * video_dt
 
-        out_path = output_folder / f"two_eye_clip_{clip_idx}.mp4"
+        out_path = output_folder / f"two_eyes_clip_{clip_idx}.mp4"
         print(f"\nClip {clip_idx}: {num_frames_raw} raw frames, "
               f"{num_frames_sampled} sampled frames -> {out_path}")
 

@@ -28,9 +28,8 @@ def main() -> None:
         description="Analyze decoder convolution weights."
     )
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
-        nargs="?",
         default="models/best_sine",
         help="Path to model folder or model.pt (default: models/best_sine)",
     )
@@ -48,7 +47,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_pt, model_folder = resolve_model_paths(Path(args.model_path))
+    model_pt, model_folder = resolve_model_paths(Path(args.model_folder))
     model = nm.NeuralModel.load(model_pt, device=args.device)
 
     if not model.has_decoder:

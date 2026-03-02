@@ -26,8 +26,9 @@ def main() -> None:
         description="Test ego motion estimation against ground truth."
     )
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
+        required=True,
         help="Path to model folder or model.pt file",
     )
     parser.add_argument(
@@ -56,8 +57,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print(f"Loading model from {args.model_path} ...")
-    model = nm.NeuralModel.load(args.model_path, device=args.device)
+    print(f"Loading model from {args.model_folder} ...")
+    model = nm.NeuralModel.load(args.model_folder, device=args.device)
     model.eval()
 
     # Column locations for right eye and left eye

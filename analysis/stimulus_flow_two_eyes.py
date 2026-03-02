@@ -47,7 +47,7 @@ def main() -> None:
         help="Stimulus type (default: drone_view)"
     )
     parser.add_argument(
-        "--output-dir", type=str, default="figures/two_eye",
+        "--output-dir", type=str, default="figures/two_eyes",
         help="Output directory for the movie"
     )
     args = parser.parse_args()
@@ -100,7 +100,7 @@ def main() -> None:
             print(f"Skipping stim {stim_index}: only {stimulus.shape[0]} examples available")
             continue
 
-        out_path = output_folder / f"two_eye_stim_{stim_index}.mp4"
+        out_path = output_folder / f"two_eyes_stim_{stim_index}.mp4"
         print(f"\nCreating movie for stimulus {stim_index} -> {out_path}")
 
         stim_right = stimulus[stim_index, :, :N]

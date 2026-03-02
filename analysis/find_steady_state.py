@@ -22,13 +22,14 @@ def main() -> None:
         description="Find steady state for a trained model and save it."
     )
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
+        required=True,
         help="Path to model folder or model.pt file",
     )
     args = parser.parse_args()
 
-    model_pt, model_folder = resolve_model_paths(Path(args.model_path))
+    model_pt, model_folder = resolve_model_paths(Path(args.model_folder))
     local_config = du.load_config()
     device = torch.device(local_config["model"]["device"])
 

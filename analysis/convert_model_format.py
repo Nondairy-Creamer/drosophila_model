@@ -49,9 +49,8 @@ def convert_model_file(path: Path, use_input_conv: bool, device: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert model checkpoints to current format.")
     parser.add_argument(
-        "model_dir",
+        "--model-folder",
         type=Path,
-        nargs="?",
         default=Path("models/best_model"),
         help="Model folder containing model_init.pt and model.pt",
     )
@@ -62,7 +61,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_dir = args.model_dir
+    model_dir = args.model_folder
     # Use local config (repo config.toml) for device placement
     config = du.load_config()
     device = config["model"]["device"]

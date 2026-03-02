@@ -66,9 +66,8 @@ def _make_movie_for_stim(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Make optic flow movies for all stimuli.")
     parser.add_argument(
-        "model_path",
+        "--model-folder",
         type=str,
-        nargs="?",
         default="models/best_model",
         help="Path to model folder or model.pt (default: models/best_model)",
     )
@@ -194,7 +193,7 @@ def main() -> None:
     ]
 
 
-    model_folder = resolve_model_folder(Path(args.model_path))
+    model_folder = resolve_model_folder(Path(args.model_folder))
     output_folder = Path(args.output_folder) if args.output_folder else model_folder / "optic_flow_movie_stimuli"
 
     cosine_sims: dict[str, float] = {}
@@ -204,7 +203,7 @@ def main() -> None:
         stim_name = spec["name"]
         print(f"\n--- Processing {stim_name} ---")
         responses = run_model_on_stimuli(
-            args.model_path, stimulus_specs=[spec]
+            args.model_folder, stimulus_specs=[spec]
         )
         response = responses[stim_name]
 

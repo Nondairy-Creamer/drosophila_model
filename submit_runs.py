@@ -91,7 +91,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     if timestamp is not None:
         cmd.extend(['--timestamp', timestamp])
     if model_path is not None:
-        cmd.extend(['--model-path', model_path])
+        cmd.extend(['--model-folder', model_path])
     
     print(f"Starting run: seed={seed}, device={device}, run_id={run_id}")
     print(f"Command: {' '.join(cmd)}")
@@ -240,7 +240,7 @@ def main():
     )
     
     parser.add_argument(
-        '--model-path',
+        '--model-folder',
         type=str,
         default=None,
         help='Path to existing model folder to load (e.g., models/best_model)'
@@ -281,8 +281,8 @@ def main():
     
     # Validate model path if provided
     model_path = None
-    if args.model_path is not None:
-        model_path = Path(args.model_path)
+    if args.model_folder is not None:
+        model_path = Path(args.model_folder)
         model_file = model_path / 'model.pt'
         if not model_file.exists():
             print(f"Error: Model file not found at {model_file}")
