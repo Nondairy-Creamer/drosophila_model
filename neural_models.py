@@ -1558,7 +1558,7 @@ class ConductanceModel(NeuralModel):
         for ri in range(self.num_transmitters):
             # Fan-in per neuron for this transmitter (sum over presynaptic, i.e., columns)
             # synapse_counts[ri] is (post, pre), so sum(dim=1) gives fan-in per post-synaptic neuron
-            synapses_in_per_neuron = self.synapse_counts[ri].pow(2).sum(dim=1).to_dense()
+            synapses_in_per_neuron = self.synapse_counts[ri].abs().sum(dim=1).to_dense()
             
             for cti, ct in enumerate(self.unique_cell_types):
                 ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
@@ -1578,7 +1578,7 @@ class ConductanceModel(NeuralModel):
             
             # Fan-out per neuron for this transmitter (sum over postsynaptic, i.e., rows)
             # synapse_counts[ri] is (post, pre), so sum(dim=0) gives fan-out per pre-synaptic neuron
-            synapses_out_per_neuron = self.synapse_counts[ri].pow(2).sum(dim=0).to_dense()
+            synapses_out_per_neuron = self.synapse_counts[ri].abs().sum(dim=0).to_dense()
             fan_out = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
             self.output_strength_log[cti] = -0.5 * torch.log(fan_out)
         
