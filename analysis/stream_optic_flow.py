@@ -43,5 +43,5 @@ while True:
     # figure out the drone command based on optic flow
     done_command = get_drone_command_from_flow(ego_rotation, ego_translation)
 
-    # interact with the quad copter
+    # interact with the drone
     take_drone_action(done_command)

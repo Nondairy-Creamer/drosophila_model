@@ -118,7 +118,7 @@ def main() -> None:
     out_path = output_folder / f'two_eye_flow_stim_{stim_index}.mp4'
 
     print(f"Creating movie -> {out_path}")
-    _make_two_eye_flow_movie(
+    _make_two_eyes_flow_movie(
         stimulus_left=stimulus_left[:num_frames],
         stimulus_right=stimulus_right[:num_frames],
         pred_flow_left=pred_flow_left[:num_frames],
@@ -145,7 +145,7 @@ def _compute_filtered(model, input_batch):
     return torch.stack(frames, dim=0).cpu().numpy()
 
 
-def _make_two_eye_flow_movie(
+def _make_two_eyes_flow_movie(
     stimulus_left: np.ndarray,
     stimulus_right: np.ndarray,
     pred_flow_left: np.ndarray,

@@ -1,5 +1,5 @@
 """
-Visualize two-eye stimuli (e.g. copter_view) as a movie.
+Visualize two-eyes stimuli (e.g. drone_view) as a movie.
 
 Layout (4x2):
   Row 0:  raw left camera frame  |  raw right camera frame
@@ -44,14 +44,14 @@ def main() -> None:
     column_phi_theta = column_info_df[["phi", "theta"]].to_numpy()
 
     model_dt = config["model"]["dt"]
-    copter_data_path = connectome_folder / "copter_data.pt"
-    copter_video_dir = connectome_folder / "copter_videos"
+    drone_data_path = connectome_folder / "drone_data.pt"
+    drone_video_dir = connectome_folder / "drone_videos"
 
-    print("Loading preprocessed copter clips...")
-    copter_clips = su.get_copter_stimulus(
-        model_dt, data_path=str(copter_data_path),
+    print("Loading preprocessed drone clips...")
+    drone_clips = su.get_drone_stimulus(
+        model_dt, data_path=str(drone_data_path),
     )
-    print(f"Found {len(copter_clips)} clips")
+    print(f"Found {len(drone_clips)} clips")
 
     phi = column_phi_theta[:, 0]  # negative for right eye
     theta = column_phi_theta[:, 1]
@@ -59,16 +59,16 @@ def main() -> None:
     cell_z = np.cos(theta)
 
     for clip_idx in args.stim_index:
-        if clip_idx >= len(copter_clips):
-            print(f"Skipping clip {clip_idx}: only {len(copter_clips)} clips available")
+        if clip_idx >= len(drone_clips):
+            print(f"Skipping clip {clip_idx}: only {len(drone_clips)} clips available")
             continue
 
-        sampled = copter_clips[clip_idx]
+        sampled = drone_clips[clip_idx]
         clip_id = sampled["clip_id"]
         video_dt = sampled["video_dt"]
 
-        from process_copter import process_clip
-        raw = process_clip(clip_id, copter_video_dir)
+        from process_drone import process_clip
+        raw = process_clip(clip_id, drone_video_dir)
         if raw is None:
             print(f"Skipping clip {clip_idx}: could not load raw video")
             continue
@@ -97,7 +97,7 @@ def main() -> None:
         rot_rate = _to_numpy(sampled["rotation_rate"])
         trans_rate = _to_numpy(sampled["translation_rate"])
 
-        _make_two_eye_movie(
+        _make_two_eyes_movie(
             raw_left=raw["left"].numpy(),
             raw_right=raw["right"].numpy(),
             sampled_left=sampled["left"],
@@ -118,7 +118,7 @@ def main() -> None:
         )
 
 
-def _make_two_eye_movie(
+def _make_two_eyes_movie(
     raw_left: np.ndarray,
     raw_right: np.ndarray,
     sampled_left: np.ndarray,

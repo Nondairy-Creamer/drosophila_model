@@ -192,7 +192,7 @@ def main() -> None:
         help="Transfer direction: 'pull' (download, default) or 'push' (upload).",
     )
     parser.add_argument(
-        '--folder',
+        '--model-path',
         default=None,
         help='Name of a specific model folder to transfer. If omitted, transfers all.',
     )
@@ -201,7 +201,7 @@ def main() -> None:
     scp_transfer(
         server=args.server,
         transfer_type=args.transfer_type,
-        folder=args.folder,
+        folder=args.model_path,
     )
 
 

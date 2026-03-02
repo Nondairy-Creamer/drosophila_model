@@ -114,7 +114,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     if fit_odometry:
         stimulus, optic_flow, target_rotation, target_translation, train_mask = \
-            su.get_stimulus_two_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
+            su.get_stimulus_two_eyes(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
         target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
     else:
         stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)

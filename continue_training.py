@@ -7,7 +7,7 @@ import data_utilities as du
 import training_utilities as tu
 
 parser = argparse.ArgumentParser(description='Continue training a model from checkpoint')
-parser.add_argument('model_folder', nargs='?', default='models/20260114_205655_gpu9_run1',
+parser.add_argument('--model-path', default='models/20260114_205655_gpu9_run1',
                     help='Path to model folder')
 parser.add_argument('--new-session', action='store_true', default=False,
                     help='Start a new training session (do not carry over loss history)')

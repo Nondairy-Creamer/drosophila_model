@@ -1,4 +1,4 @@
-"""Process copter stereo video data into preprocessed tensors.
+"""Process drone stereo video data into preprocessed tensors.
 
 Loads each pair of left/right stereo videos and corresponding pose log CSV,
 converts frames to grayscale, applies coordinate transformation, trims
@@ -6,8 +6,8 @@ leading and trailing zero-pose periods, samples at ommatidium locations using co
 and saves all clips as a single .pt file containing a list of dicts.
 
 Usage:
-    python process_copter.py
-    python process_copter.py --data-dir ../connectome_data/copter_videos --output-dir ../connectome_data
+    python process_drone.py
+    python process_drone.py --data-dir ../connectome_data/drone_videos --output-dir ../connectome_data
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from stimulus_utilities import build_ommatidium_sampling_matrix
 
-SMOOTH_TIME_S = 0.2
+SMOOTH_TIME_S = 0.1
 
 
 def load_video_grayscale(path):
@@ -131,11 +131,11 @@ def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Process copter stereo videos into tensors')
-    parser.add_argument('--data-dir', type=str, default='../connectome_data/copter_videos',
+    parser = argparse.ArgumentParser(description='Process drone stereo videos into tensors')
+    parser.add_argument('--data-dir', type=str, default='../connectome_data/drone_videos',
                         help='Directory containing left_N.mp4, right_N.mp4, apriltag_pose_log_N.csv')
     parser.add_argument('--output-dir', type=str, default='../connectome_data',
-                        help='Output directory for processed copter_data.pt')
+                        help='Output directory for processed drone_data.pt')
     parser.add_argument('--column-info', type=str, default='../connectome_data/optic_lobes_column_info.parquet',
                         help='Path to column_info parquet with phi/theta')
     parser.add_argument('--filter-std', type=float, default=2.5,
@@ -199,7 +199,7 @@ def main():
         print(f'Sampling clip {raw_clip["clip_id"]}...')
         clips.append(sample_clip(raw_clip, W_right, W_left, in_fov_right, in_fov_left))
 
-    out_path = output_dir / 'copter_data.pt'
+    out_path = output_dir / 'drone_data.pt'
     torch.save(clips, out_path)
     size_mb = out_path.stat().st_size / 1e6
 

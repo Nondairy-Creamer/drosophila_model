@@ -84,10 +84,10 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
     return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
 
 
-def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
+def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
                         frame_start=0, frame_end=None):
     """
-    Load preprocessed copter clips (already sampled at ommatidium locations)
+    Load preprocessed drone clips (already sampled at ommatidium locations)
     and temporally interpolate to model_dt.
 
     Rates are computed at the native video frame rate and then interpolated
@@ -96,7 +96,7 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
 
     Args:
         model_dt: model time step for temporal interpolation (seconds).
-        data_path: path to copter_data.pt from process_copter.py.
+        data_path: path to drone_data.pt from process_drone.py.
         frame_start: first model time step to include (after interpolation).
         frame_end: last model time step to include (None = end of clip).
 
@@ -115,7 +115,7 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
 
     data_path = Path(data_path)
     if not data_path.exists():
-        raise FileNotFoundError(f"Copter data file not found: {data_path}")
+        raise FileNotFoundError(f"Drone data file not found: {data_path}")
 
     clips = _torch.load(data_path, weights_only=False)
     results = []
@@ -135,7 +135,7 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
 
         # Compute rates at native video frame rate
         rot_rate_native = _euler_angles_to_angular_velocity(rotation, video_dt)
-        rot_rate_native[:, 2] = np.nan  # yaw rate is unreliable
+        rot_rate_native[:, 2] = 0.0  # yaw rate is unreliable, zeroed for now
         trans_rate_native = np.zeros_like(translation)
         trans_rate_native[1:] = np.diff(translation, axis=0) / video_dt
 
@@ -162,7 +162,7 @@ def get_copter_stimulus(model_dt, data_path='../connectome_data/copter_data.pt',
         if 'in_fov_right' not in clip:
             raise KeyError(
                 f"Clip {clip['clip_id']} missing 'in_fov_right'/'in_fov_left'. "
-                "Re-run process_copter.py to regenerate copter_data.pt."
+                "Re-run process_drone.py to regenerate drone_data.pt."
             )
         result = {
             'right': sampled_right[frame_start:frame_end],
@@ -1174,7 +1174,7 @@ def get_stimulus_one_eye(
     return stimulus, optic_flow, train_mask
 
 
-def get_stimulus_two_eye(
+def get_stimulus_two_eyes(
     stimulus_type: str | list[str],
     config,
     column_phi_theta=None,
@@ -1235,6 +1235,7 @@ def get_stimulus_two_eye(
 
             stimulus = torch.tensor(stimulus_both, device=device, dtype=dtype)
             optic_flow = torch.tensor(optic_flow_both, device=device, dtype=dtype)
+            optic_flow[:, :, N:, 0] *= -1  # flip u_right for left eye (e_phi reverses with negated phi)
             observer_rotation = torch.tensor(
                 rotation_vectors * 180 / np.pi,  # rad/s → deg/s
                 device=device, dtype=dtype,
@@ -1242,32 +1243,42 @@ def get_stimulus_two_eye(
             observer_translation = torch.zeros_like(observer_rotation)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
-        elif stim_type == 'copter_view':
+        elif stim_type == 'drone_view':
             if column_phi_theta is None:
-                raise Exception('copter_view requires column_phi_theta input')
+                raise Exception('drone_view requires column_phi_theta input')
 
             stim_time = config['stimulus']['stim_time']
-            copter_data_path = Path(config['data']['connectome_folder']) / 'copter_data.pt'
-            copter_clips = get_copter_stimulus(
-                model_dt, data_path=str(copter_data_path),
+            drone_data_path = Path(config['data']['connectome_folder']) / 'drone_data.pt'
+            drone_clips = get_drone_stimulus(
+                model_dt, data_path=str(drone_data_path),
             )
 
             # FOV mask from the first clip (same geometry for all clips)
             in_fov = torch.cat([
-                copter_clips[0]['in_fov_right'],
-                copter_clips[0]['in_fov_left'],
+                drone_clips[0]['in_fov_right'],
+                drone_clips[0]['in_fov_left'],
             ], dim=0)  # (2*N,) True = in field of view
 
             seg_len = int(round(stim_time / model_dt))
+            max_clip_len = max(clip['right'].shape[0] for clip in drone_clips)
+            if seg_len > max_clip_len:
+                import warnings
+                warnings.warn(
+                    f"stim_time={stim_time}s ({seg_len} steps) exceeds longest "
+                    f"drone clip ({max_clip_len} steps = {max_clip_len * model_dt:.1f}s). "
+                    f"Capping to {max_clip_len * model_dt:.1f}s."
+                )
+                seg_len = max_clip_len
+
             seg_rights, seg_lefts, seg_rots, seg_trans = [], [], [], []
-            n_copter_segments = 0
-            for clip in copter_clips:
+            n_drone_segments = 0
+            for clip in drone_clips:
                 T_clip = clip['right'].shape[0]
                 num_segments = T_clip // seg_len
                 if num_segments == 0:
                     continue
                 usable = num_segments * seg_len
-                n_copter_segments += num_segments
+                n_drone_segments += num_segments
 
                 seg_rights.append(clip['right'][:usable].reshape(num_segments, seg_len, -1))
                 seg_lefts.append(clip['left'][:usable].reshape(num_segments, seg_len, -1))
@@ -1287,12 +1298,12 @@ def get_stimulus_two_eye(
             observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
 
             train_mask = in_fov.unsqueeze(0).unsqueeze(0).expand(
-                n_copter_segments, seg_len, -1).to(device=device)
+                n_drone_segments, seg_len, -1).to(device=device)
 
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
-                "Expected one of: random_pano, copter_view."
+                "Expected one of: random_pano, drone_view."
             )
 
         stim_list.append(stimulus)
