@@ -1481,13 +1481,10 @@ class ConductanceModel(NeuralModel):
         # Map from neuron index to cell type index (needed for tracking which cell types receive each transmitter)
         neuron_to_type_idx = self.neuron_to_type_index.cpu().numpy()
         
-        # Build a sparse matrix for each neurotransmitter and track which cell types receive each
+        # Build a sparse matrix for each neurotransmitter
         self.synapse_counts = []
-        # Track which cell types receive input from each transmitter: (num_transmitters, num_cell_types)
-        receives_transmitter = torch.zeros((self.num_transmitters, self.num_cell_types), dtype=torch.bool, device=self.device)
         
         for ri, r in enumerate(self.unique_transmitters):
-            # Filter to synapses where presynaptic neuron expresses this transmitter
             mask = (pre_transmitters == r)
             coo_r = synapse_counts_coo_filtered[mask]
             
@@ -1500,12 +1497,6 @@ class ConductanceModel(NeuralModel):
                                                   size=(self.num_neurons, self.num_neurons), 
                                                   dtype=dtype_torch, device=self.device).coalesce()
             self.synapse_counts.append(sparse_mat)
-            
-            # Determine which cell types receive this transmitter (have non-zero post-synaptic input)
-            post_neuron_indices = coo_r[:, 1].astype(np.int64)
-            post_cell_type_indices = neuron_to_type_idx[post_neuron_indices]
-            unique_receiving_types = np.unique(post_cell_type_indices)
-            receives_transmitter[ri, unique_receiving_types] = True
         
         print(f"ConductanceModel: {self.num_transmitters} transmitters, {self.num_cell_types} cell types, {self.num_neurons} neurons")
         print(f"  Output params: {self.num_cell_types} (one per cell type)")
