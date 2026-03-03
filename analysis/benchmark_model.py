@@ -17,10 +17,9 @@ from analysis_utilities import run_model_on_stimuli
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark model optic flow predictions.")
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        default="models/best_model",
-        help="Path to model folder or model.pt (default: models/best_model)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--device",

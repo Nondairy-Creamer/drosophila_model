@@ -26,9 +26,8 @@ def main() -> None:
         description="Test ego motion estimation against ground truth."
     )
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        required=True,
         help="Path to model folder or model.pt file",
     )
     parser.add_argument(

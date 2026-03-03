@@ -60,9 +60,8 @@ def _extract_pred_flow(pred_output: object) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Make optic flow movie for a model.")
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        default="models/best_model",
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")

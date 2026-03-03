@@ -98,7 +98,7 @@ def plot_odometry_single(model, cell_inputs_all, true_rot_all, true_trans_all,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot predicted vs true odometry.")
     parser.add_argument(
-        "--model-folder", type=str, default="models/best_model",
+        "model_folder", type=str,
         help="Path to model folder or model.pt",
     )
     group = parser.add_mutually_exclusive_group()

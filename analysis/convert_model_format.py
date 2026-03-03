@@ -49,9 +49,8 @@ def convert_model_file(path: Path, use_input_conv: bool, device: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert model checkpoints to current format.")
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=Path,
-        default=Path("models/best_model"),
         help="Model folder containing model_init.pt and model.pt",
     )
     parser.add_argument(

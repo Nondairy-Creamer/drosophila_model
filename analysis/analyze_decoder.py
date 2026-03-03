@@ -28,10 +28,9 @@ def main() -> None:
         description="Analyze decoder convolution weights."
     )
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        default="models/best_sine",
-        help="Path to model folder or model.pt (default: models/best_sine)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--device",

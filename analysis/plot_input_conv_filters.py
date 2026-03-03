@@ -35,10 +35,9 @@ def compute_lru_impulse_response(lru, num_steps=100, dt=0.01):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot input convolution filter parameters.")
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        default="models/best_model",
-        help="Path to model folder or model.pt (default: models/best_model)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--output-path",

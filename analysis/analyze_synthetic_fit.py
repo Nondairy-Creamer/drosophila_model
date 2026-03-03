@@ -70,9 +70,8 @@ def _predict_decoder(model, stimulus, input_neurons, output_neurons) -> np.ndarr
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze synthetic fit input convolution filters.")
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        required=True,
         help="Path to model folder (containing model.pt, model_init.pt, target_model.pt)",
     )
     parser.add_argument(

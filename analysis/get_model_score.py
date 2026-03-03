@@ -24,10 +24,9 @@ def main() -> None:
         description="Compute MSE and cosine loss for a trained model."
     )
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        default="models/best_model",
-        help="Path to model folder or model.pt (default: models/best_model)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--stim-type",

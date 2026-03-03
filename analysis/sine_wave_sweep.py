@@ -67,9 +67,8 @@ def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity,
 def main():
     parser = argparse.ArgumentParser(description="Sine wave velocity sweep analysis.")
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        required=True,
         help="Path to model folder (containing model.pt and config.toml)",
     )
     args = parser.parse_args()

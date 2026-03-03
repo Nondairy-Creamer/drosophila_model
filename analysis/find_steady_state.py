@@ -22,9 +22,8 @@ def main() -> None:
         description="Find steady state for a trained model and save it."
     )
     parser.add_argument(
-        "--model-folder",
+        "model_folder",
         type=str,
-        required=True,
         help="Path to model folder or model.pt file",
     )
     args = parser.parse_args()

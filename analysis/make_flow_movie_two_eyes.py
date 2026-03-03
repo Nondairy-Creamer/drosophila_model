@@ -9,8 +9,8 @@ folder, splits into right and left eye, runs the model, and renders:
   Row 2: Left eye predicted flow |  Right eye predicted flow
 
 Usage:
-    python analysis/make_flow_movie_two_eyes.py --model-folder models/20260226_190611_gpu8_run0/
-    python analysis/make_flow_movie_two_eyes.py --model-folder models/best_model --stim-index 5
+    python analysis/make_flow_movie_two_eyes.py models/20260226_190611_gpu8_run0/
+    python analysis/make_flow_movie_two_eyes.py models/best_model --stim-index 5
 """
 import argparse
 import sys
@@ -34,7 +34,7 @@ from analysis_utilities import (
 def main() -> None:
     parser = argparse.ArgumentParser(description="Make two-eye optic flow movie for a model.")
     parser.add_argument(
-        "--model-folder", type=str, default="models/best_model",
+        "model_folder", type=str,
         help="Path to model folder or model.pt",
     )
     parser.add_argument("--stim-index", type=int, default=5,
