@@ -54,22 +54,23 @@ Flow is represented in local spherical coordinates at each column:
 
 `generate_optic_flow` (in `analysis/estimate_self_motion.py`) computes flow
 by projecting the 3D velocity onto the local `e_phi` and `e_theta` basis
-vectors. These basis vectors depend on phi, so the raw projection gives
-**opposite** `u_right` signs for symmetric left/right-eye columns (the
-physical flow is the same, but the local "rightward" direction is
-mirror-flipped).
+vectors.  The projection `u_right = -(u · e_phi)` already yields the
+**same** `u_right` sign for symmetric left/right-eye columns — both the
+physical 3D flow and the `e_phi` basis vector mirror together, so the
+angular flow component is consistent across eyes without any correction.
 
 ### Two-Eye Flow Pipeline
 
 1. `get_stimulus_two_eyes` computes flow for both eyes by concatenating
    right-eye columns (phi) with left-eye columns (-phi) and calling
-   `generate_optic_flow` on all columns at once.
-2. After generation, `u_right` for the left-eye columns is **negated** to
-   put both eyes into a consistent physical coordinate frame.
-3. The model processes left-eye input by feeding it through the right-eye
-   model (which sees it as mirrored right-eye data).
-4. The model's left-eye `u_right` predictions are **flipped** (multiplied
-   by -1) to undo the mirror and produce correct physical flow
-   (`neural_models.py`, `estimate_ego_motion_from_image`).
-5. Training loss compares the flipped predictions against the corrected
-   ground truth directly.
+   `generate_optic_flow` on all columns at once.  No sign correction is
+   needed on the resulting `u_right`.
+2. The model processes left-eye input by feeding it through the right-eye
+   model (which sees it as mirrored right-eye data).  The decoder outputs
+   `u_right` in the right-eye convention (horizontally flipped relative to
+   physical left-eye flow).
+3. The model's left-eye `u_right` predictions are **flipped** (multiplied
+   by -1) in `estimate_ego_motion_from_image` to undo the mirror and
+   produce correct physical flow.
+4. Training loss compares the flipped predictions against the ground truth
+   directly.

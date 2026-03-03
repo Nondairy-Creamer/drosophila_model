@@ -83,6 +83,7 @@ def main() -> None:
     cell_x = np.sin(theta) * np.cos(phi)
     cell_y = np.sin(theta) * np.sin(phi)
     cell_z = np.cos(theta)
+    cell_y_left = -cell_y  # left eye is at -phi, so sin(-phi) = -sin(phi)
 
     model_dt = config["model"]["dt"]
     pre_stim_steps = int(config["stimulus"].get("pre_stim_time", 0) / model_dt)
@@ -127,7 +128,8 @@ def main() -> None:
             pred_ur_l, pred_uu_l = generate_optic_flow(
                 phi_left_t, theta_right_t, omega_t, trans_t, 1.0
             )
-            pred_ur_l = -pred_ur_l  # flip u_right for left eye
+            # no u_right sign flip needed — generate_optic_flow already returns
+            # consistent u_right for left-eye positions
 
             flow_right = np.stack([pred_ur_r.numpy(), pred_uu_r.numpy()], axis=-1)
             flow_left = np.stack([pred_ur_l.numpy(), pred_uu_l.numpy()], axis=-1)
@@ -147,6 +149,7 @@ def main() -> None:
             flow_label=flow_label,
             cell_x=cell_x,
             cell_y=cell_y,
+            cell_y_left=cell_y_left,
             cell_z=cell_z,
             output_path=out_path,
             frame_rate=frame_rate,
@@ -165,6 +168,7 @@ def _make_two_eyes_input_movie(
     translation_rate: np.ndarray,
     cell_x: np.ndarray,
     cell_y: np.ndarray,
+    cell_y_left: np.ndarray,
     cell_z: np.ndarray,
     output_path: Path,
     frame_rate: int,
@@ -200,7 +204,7 @@ def _make_two_eyes_input_movie(
     flow_r_vx, flow_r_vz = angular_flow_to_cartesian_xz(
         flow_right[:, :, 0], flow_right[:, :, 1], cell_x, cell_y, cell_z)
     flow_l_vx, flow_l_vz = angular_flow_to_cartesian_xz(
-        flow_left[:, :, 0], flow_left[:, :, 1], cell_x, cell_y, cell_z)
+        flow_left[:, :, 0], flow_left[:, :, 1], cell_x, cell_y_left, cell_z)
     mag_r = np.hypot(flow_r_vx, flow_r_vz)
     mag_l = np.hypot(flow_l_vx, flow_l_vz)
     finite_mag = np.concatenate([mag_r[np.isfinite(mag_r)], mag_l[np.isfinite(mag_l)]])
