@@ -820,17 +820,14 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
     for pano_filtered in pano_images:
         pano_height, pano_width = pano_filtered.shape
 
-        # --- DEBUG: constant velocity around y-axis ---
+        # --- generate 3 independent smoothed angular velocity components ---
         omega = np.zeros((3, num_time))
-        omega[1, :] = velocity_amp_rad  # constant rotation around y-axis
-        # # --- generate 3 independent smoothed angular velocity components ---
-        # omega = np.zeros((3, num_time))
-        # for dim in range(3):
-        #     v = rng.standard_normal(num_time // 2)
-        #     v = np.concatenate((v, -v))  # symmetrize: second half is negated
-        #     v = np.fft.ifft(np.fft.fft(v) * np.fft.fft(vel_filter)).real
-        #     v *= component_amp / expected_std
-        #     omega[dim] = v
+        for dim in range(3):
+            v = rng.standard_normal(num_time // 2)
+            v = np.concatenate((v, -v))  # symmetrize: second half is negated
+            v = np.fft.ifft(np.fft.fft(v) * np.fft.fft(vel_filter)).real
+            v *= component_amp / expected_std
+            omega[dim] = v
 
         # Reshape into per-repeat segments: (3, num_repeats_total, time_per_stim)
         omega_per_repeat = omega.reshape(3, num_repeats_total, time_per_stim)
@@ -844,8 +841,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             # angular velocity: omega_body = R^T @ omega_world.
             # Start each repeat at a uniformly random orientation so the
             # observer samples different parts of the panorama across repeats.
-            R = np.eye(3)  # DEBUG: identity instead of random
-            # R = _random_rotation_matrix(rng)
+            R = _random_rotation_matrix(rng)
             rotated_xyz = np.zeros((time_per_stim, num_cells, 3))
             omega_body = np.zeros((time_per_stim, 3))
 
