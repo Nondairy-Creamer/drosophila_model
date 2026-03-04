@@ -476,7 +476,7 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 decoder_type='none', use_input_conv=True, conv_size_x=5, num_temporal_modes=4, use_layer_norm=True):
+                 decoder_type='none', use_input_conv=True, conv_size_x=5, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
@@ -573,7 +573,7 @@ class NeuralModel(torch.nn.Module, ABC):
             self._initialize_decoder()
         if self.use_input_conv:
             # Initialize input convolution layer
-            self._initialize_input_conv(conv_size_x=conv_size_x, num_temporal_modes=num_temporal_modes)
+            self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
     @property
     def has_decoder(self):
@@ -643,23 +643,43 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return root_ids, cell_types, neurotransmitters, column_indices, synapse_counts_coo
 
-    def _initialize_input_conv(self, conv_size_x=5, num_temporal_modes=4):
+    def _initialize_input_conv(self, conv_size_x=5, input_pre_conv_size=5, num_temporal_modes=4):
         """Set up input convolution using a ``NeuralModelConv`` for the spatial
         part and a ``TemporalLRU`` for the temporal part.
+
+        The pipeline is: pre-filter -> local contrast normalization -> temporal LRU.
+        The pre-filter is a learned spatial convolution applied before contrast
+        normalization.
         """
         if conv_size_x % 2 == 0:
             raise ValueError("conv_size_x must be odd for centered spatial convolution.")
+        if input_pre_conv_size % 2 == 0:
+            raise ValueError("input_pre_conv_size must be odd for centered spatial convolution.")
         if num_temporal_modes < 1:
             raise ValueError("num_temporal_modes must be >= 1.")
 
         self.input_conv_size_x = conv_size_x
+        self.input_pre_conv_size = input_pre_conv_size
+
+        self.input_pre_conv = NeuralModelConv(
+            in_features=1, out_features=1, conv_size=input_pre_conv_size,
+            column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
+            positive_weights=False, use_bias=False,
+        )
+
+        pq_offsets_pre = NeuralModelConv.hex_grid_pq_offsets(input_pre_conv_size)
+        with torch.no_grad():
+            self.input_pre_conv.weight.fill_(0.0)
+            for i, (dp, dq) in enumerate(pq_offsets_pre):
+                if dp == 0 and dq == 0:
+                    self.input_pre_conv.weight[0, i, 0] = 1.0
+
         self.input_spatial_conv = NeuralModelConv(
             in_features=1, out_features=1, conv_size=conv_size_x,
             column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
             positive_weights=True, use_bias=False,
         )
 
-        # Initialize in log space: 0.0 (exp=1) for inner hex ring, -10.0 (exp≈0) elsewhere.
         pq_offsets = NeuralModelConv.hex_grid_pq_offsets(conv_size_x)
         with torch.no_grad():
             self.input_spatial_conv.weight.fill_(-10.0)
@@ -709,7 +729,7 @@ class NeuralModel(torch.nn.Module, ABC):
         )
 
     def apply_input_conv(self, u_t, filter_state=None):
-        """Apply spatial contrast normalization then one step of temporal LRU.
+        """Apply spatial pre-filter, contrast normalization, then temporal LRU.
 
         Args:
             u_t: ``(batch, columns)`` raw input for a single timestep.
@@ -719,8 +739,10 @@ class NeuralModel(torch.nn.Module, ABC):
             y_t: ``(batch, columns)`` filtered output.
             new_filter_state: updated complex state for the next timestep.
         """
-        local_mean = self.input_spatial_conv(u_t)
-        centered = u_t - local_mean
+        filtered = self.input_pre_conv(u_t)
+
+        local_mean = self.input_spatial_conv(filtered)
+        centered = filtered - local_mean
         local_var = self.input_spatial_conv(centered ** 2)
         normed = -centered / torch.sqrt(local_var + 1e-12)
 

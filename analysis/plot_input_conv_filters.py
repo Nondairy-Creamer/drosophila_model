@@ -24,7 +24,7 @@ import neural_models as nm
 from analysis_utilities import resolve_model_folder, centered_norm, hex_grid_points
 
 
-def compute_lru_impulse_response(lru, num_steps=100, dt=0.01):
+def compute_lru_impulse_response(lru, num_steps=20, dt=0.01):
     """Compute the impulse response of a TemporalLRU analytically."""
     with torch.no_grad():
         h = lru.impulse_response(num_t=num_steps).cpu().numpy()
@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument(
         "--impulse-steps",
         type=int,
-        default=100,
+        default=20,
         help="Number of time steps for impulse response plot (default: 100)",
     )
     args = parser.parse_args()
@@ -64,14 +64,49 @@ def main() -> None:
         raw_weight = raw_weight.exp()
     conv_xy = raw_weight.cpu().numpy()
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
+    has_pre_conv = hasattr(model, 'input_pre_conv')
+    num_plots = 3 if has_pre_conv else 2
+    fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 4), dpi=150)
+    ax_idx = 0
+
+    if has_pre_conv:
+        pre_weight = model.input_pre_conv.weight[0, :, 0].detach()
+        if model.input_pre_conv.positive_weights:
+            pre_weight = pre_weight.exp()
+        pre_xy = pre_weight.cpu().numpy()
+
+        pre_axial = nm.NeuralModelConv.hex_grid_axial_coords(model.input_pre_conv_size)
+        pre_grid = hex_grid_points(pre_axial)
+        vmin_pre, vmax_pre = centered_norm(pre_xy)
+        scatter_pre = axes[ax_idx].scatter(
+            pre_grid[:, 0],
+            pre_grid[:, 1],
+            c=pre_xy,
+            cmap="coolwarm",
+            vmin=vmin_pre,
+            vmax=vmax_pre,
+            s=760,
+            linewidths=0.6,
+            edgecolors="black",
+        )
+        axes[ax_idx].set_title("pre-filter (spatial)")
+        axes[ax_idx].set_xlabel("hex x")
+        axes[ax_idx].set_ylabel("hex y")
+        axes[ax_idx].set_aspect("equal", adjustable="box")
+        x_min, x_max = float(pre_grid[:, 0].min()), float(pre_grid[:, 0].max())
+        y_min, y_max = float(pre_grid[:, 1].min()), float(pre_grid[:, 1].max())
+        pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
+        axes[ax_idx].set_xlim(x_min - pad, x_max + pad)
+        axes[ax_idx].set_ylim(y_min - pad, y_max + pad)
+        fig.colorbar(scatter_pre, ax=axes[ax_idx], shrink=0.8, pad=0.02)
+        ax_idx += 1
 
     axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(model.input_conv_size_x)
     spatial_weights = conv_xy
     grid_points = hex_grid_points(axial_coords)
 
     vmin_xy, vmax_xy = centered_norm(spatial_weights)
-    scatter = axes[0].scatter(
+    scatter = axes[ax_idx].scatter(
         grid_points[:, 0],
         grid_points[:, 1],
         c=spatial_weights,
@@ -82,23 +117,24 @@ def main() -> None:
         linewidths=0.6,
         edgecolors="black",
     )
-    axes[0].set_title("input_conv_xy (spatial kernel)")
-    axes[0].set_xlabel("hex x")
-    axes[0].set_ylabel("hex y")
-    axes[0].set_aspect("equal", adjustable="box")
+    axes[ax_idx].set_title("local mean (spatial kernel)")
+    axes[ax_idx].set_xlabel("hex x")
+    axes[ax_idx].set_ylabel("hex y")
+    axes[ax_idx].set_aspect("equal", adjustable="box")
     x_min, x_max = float(grid_points[:, 0].min()), float(grid_points[:, 0].max())
     y_min, y_max = float(grid_points[:, 1].min()), float(grid_points[:, 1].max())
     pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
-    axes[0].set_xlim(x_min - pad, x_max + pad)
-    axes[0].set_ylim(y_min - pad, y_max + pad)
-    fig.colorbar(scatter, ax=axes[0], shrink=0.8, pad=0.02)
+    axes[ax_idx].set_xlim(x_min - pad, x_max + pad)
+    axes[ax_idx].set_ylim(y_min - pad, y_max + pad)
+    fig.colorbar(scatter, ax=axes[ax_idx], shrink=0.8, pad=0.02)
+    ax_idx += 1
 
     h, t = compute_lru_impulse_response(model.temporal_lru, num_steps=args.impulse_steps, dt=model.dt)
-    axes[1].plot(t, h)
-    axes[1].set_title("temporal LRU impulse response")
-    axes[1].set_xlabel("time (s)")
-    axes[1].set_ylabel("amplitude")
-    axes[1].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    axes[ax_idx].plot(t, h)
+    axes[ax_idx].set_title("temporal LRU impulse response")
+    axes[ax_idx].set_xlabel("time (s)")
+    axes[ax_idx].set_ylabel("amplitude")
+    axes[ax_idx].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
 
     fig.tight_layout()
 
