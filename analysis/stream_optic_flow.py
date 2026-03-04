@@ -32,13 +32,16 @@ while True:
     # optic flow has shape [stimuli, time, ommatidia, (d_right, d_up)] in units of approximately degrees per second
 
     # --- If you only have a single camera or if you just want flow you can get the optic flow with the following ---
-    # outputs, initial_state = model.predict(visual_stimulus_right, init_state=initial_state)[0:2]
-    # optic_flow = outputs['decoder']
+    # result = model.predict(visual_stimulus_right, init_state=initial_state)
+    # optic_flow = result['outputs']['decoder']
+    # initial_state = result['model_state']['v']
 
     # --- with two inputs, you can get the model's self motion directly with ---
     # ego rotation is rotating around [x, y, z]
     # ego translation is along [x, y, z]
-    ego_rotation, ego_translation, initial_state_right, initial_state_left = model.estimate_ego_motion_from_image(visual_stimulus_right, visual_stimulus_left, initial_state_right=initial_state_right, initial_state_left=initial_state_left)
+    ego_rotation, ego_translation, right_res, left_res = model.estimate_ego_motion_from_image(visual_stimulus_right, visual_stimulus_left, initial_state_right=initial_state_right, initial_state_left=initial_state_left)
+    initial_state_right = right_res['model_state']['v']
+    initial_state_left = left_res['model_state']['v']
 
     # figure out the drone command based on optic flow
     done_command = get_drone_command_from_flow(ego_rotation, ego_translation)

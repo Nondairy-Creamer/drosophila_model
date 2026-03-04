@@ -180,7 +180,7 @@ def predict_optic_flow(
     """Run the model and return predicted optic flow."""
     with torch.no_grad():
         if model.has_decoder:
-            outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])[0]
+            outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']
             return outputs["decoder"]
         raise ValueError("Model has no decoder (decoder_type='none'). Cannot predict optic flow.")
 

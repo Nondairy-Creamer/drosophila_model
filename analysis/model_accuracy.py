@@ -53,9 +53,10 @@ def compute_loss_components(model, cell_inputs, target_rot, target_trans,
     oob = ~train_mask.any(dim=1).any(dim=0)
 
     with torch.no_grad():
-        pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(
+        pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
             right_input, left_input, oob_columns=oob,
         )
+        pred_flow = torch.cat([right_res['outputs']['decoder'], left_res['outputs']['decoder']], dim=2)
 
     num_stimuli = cell_inputs.shape[0]
     results = {k: [] for k in [

@@ -108,7 +108,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
     # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons, 'filter_state': None}
+    cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -193,8 +193,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             left_batch = inputs_batch[:, :, N:]
             # Columns that are never valid in this batch → structurally OOB for the decoder
             oob = ~train_mask_batch.any(dim=1).any(dim=0)  # (2*N,)
-            pred_rot, pred_trans, _, _, pred_flow = model.estimate_ego_motion_from_image(
+            pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
                 right_batch, left_batch, oob_columns=oob)
+            pred_flow = torch.cat([right_res['outputs']['decoder'], left_res['outputs']['decoder']], dim=2)
 
             target_rot = target_batch['rotation'][:, loss_start_step:]
             target_trans = target_batch['translation'][:, loss_start_step:]
@@ -215,7 +216,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
 
             loss = odom_loss + flow_loss
         else:
-            pred, _, cached_mappings = model.predict(inputs_batch, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+            result = model.predict(inputs_batch, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+            pred = result['outputs']
+            cached_mappings = result['mappings']
 
             if model.has_decoder:
                 pred_dec = pred['decoder'][:, loss_start_step:].clone()

@@ -13,7 +13,7 @@ def test_model_gradients():
 
     torch.manual_seed(42)
     inputs = torch.randn((1, 20, model.num_columns), dtype=model.dtype, device=model.device)
-    outputs, _, _ = model.predict(inputs, input_neurons=input_neurons, output_neurons=model.unique_cell_types.tolist())
+    outputs = model.predict(inputs, input_neurons=input_neurons, output_neurons=model.unique_cell_types.tolist())['outputs']
     target = torch.zeros_like(outputs["decoder"]) + 1
 
     loss = lf.mse_loss(target, outputs["decoder"])

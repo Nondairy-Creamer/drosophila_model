@@ -106,8 +106,8 @@ def main() -> None:
 
     print("\nRunning per-eye model predictions for optic flow debug ...")
     with torch.no_grad():
-        outputs_right = model.predict(right_stim, init_state=None)[0]
-        outputs_left = model.predict(left_stim, init_state=None)[0]
+        outputs_right = model.predict(right_stim, init_state=None)['outputs']
+        outputs_left = model.predict(left_stim, init_state=None)['outputs']
 
     of_pred_right = outputs_right['decoder']   # (stimuli, time, N, 2)
     of_pred_left = outputs_left['decoder']     # (stimuli, time, N, 2)

@@ -22,7 +22,7 @@ if not model.has_decoder:
 
 # Run model to get decoder optic flow: [stimuli, time, ommatidia, (horizontal, vertical flow)]
 with torch.no_grad():
-    outputs = model.predict(stimulus, input_neurons=['L1', 'L2', 'L3'])[0]
+    outputs = model.predict(stimulus, input_neurons=['L1', 'L2', 'L3'])['outputs']
     optic_flow = outputs['decoder']
 
 # Plot XT plots with optic flow

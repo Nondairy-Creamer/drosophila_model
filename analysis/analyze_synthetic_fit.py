@@ -54,12 +54,12 @@ def _get_io_neurons(config: dict) -> tuple[list[str], list[str]]:
 
 def _predict_decoder(model, stimulus, input_neurons, output_neurons) -> np.ndarray:
     with torch.no_grad():
-        pred, _, _ = model.predict(
+        pred = model.predict(
             stimulus,
             input_neurons=input_neurons,
             output_neurons=output_neurons,
             init_state=None,
-        )
+        )['outputs']
     if "decoder" not in pred:
         raise ValueError("Decoder output not found. Ensure model.decoder_type is not 'none'.")
     return pred["decoder"].detach().cpu().numpy()

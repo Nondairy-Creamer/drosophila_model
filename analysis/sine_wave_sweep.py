@@ -131,7 +131,7 @@ def main():
 
     with torch.no_grad():
         pred = model.predict(all_stim_tensor, input_neurons=["L1", "L2", "L3"],
-                             output_neurons=output_neurons)[0]
+                             output_neurons=output_neurons)['outputs']
         decoder_out = pred["decoder"]  # (N, time, columns, 2)
 
     # --- extract mean responses ---

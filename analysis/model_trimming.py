@@ -68,7 +68,7 @@ print("\nCalculating initial loss...")
 input_neurons = ['L1', 'L2', 'L3']
 
 with torch.no_grad():
-    pred = model.predict(stimulus, input_neurons=input_neurons)[0]
+    pred = model.predict(stimulus, input_neurons=input_neurons)['outputs']
     initial_loss = mse_loss(target, pred['decoder']).item()
 
 print(f"Initial loss: {initial_loss:.6f}")
@@ -88,7 +88,7 @@ def evaluate_silencing(count):
     model_copy = nm.NeuralModel.load(model_path, device=device)
     model_copy.silence_neurons(silenced, invert_silencing=False)
     with torch.no_grad():
-        pred = model_copy.predict(stimulus, input_neurons=input_neurons)[0]
+        pred = model_copy.predict(stimulus, input_neurons=input_neurons)['outputs']
         loss = mse_loss(target, pred['decoder']).item()
     return loss / initial_loss
 

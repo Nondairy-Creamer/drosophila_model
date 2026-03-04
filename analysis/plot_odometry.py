@@ -47,7 +47,7 @@ def plot_odometry_single(model, cell_inputs_all, true_rot_all, true_trans_all,
 
     print(f"  Stimulus {stim_index} ({stim_input.shape[1]} frames)...")
     with torch.no_grad():
-        pred_rot, pred_trans, _, _, _ = model.estimate_ego_motion_from_image(right_input, left_input)
+        pred_rot, pred_trans, _, _ = model.estimate_ego_motion_from_image(right_input, left_input)
 
     pred_rot = pred_rot[0].cpu().numpy()
     pred_trans = pred_trans[0].cpu().numpy()

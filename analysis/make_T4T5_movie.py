@@ -80,7 +80,7 @@ input_neurons = ['L1', 'L2', 'L3']
 output_neurons = ['L1', 'Mi1', 'Mi9', 'C3', 'L2', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 with torch.no_grad():
-    pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)[0]
+    pred = model.predict(stimulus, input_neurons=input_neurons, output_neurons=output_neurons)['outputs']
     pred = pred['firing_rate']
 shutil.rmtree(fig_folder, ignore_errors=True)
 fig_folder.mkdir(parents=True, exist_ok=True)

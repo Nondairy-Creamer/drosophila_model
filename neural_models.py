@@ -889,7 +889,72 @@ class NeuralModel(torch.nn.Module, ABC):
         if total_elements > 0 and nan_elements / total_elements > 0.5:
             print(f'Warning: >50% of predictions are NaN ({nan_elements}/{total_elements}), potentially unstable dynamics')
 
-        return outputs, v.detach(), {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict, 'filter_state': filter_state}
+        return {
+            'outputs': outputs,
+            'model_state': {'v': v.detach(), 'filter_state': filter_state},
+            'mappings': {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict},
+        }
+
+    def predict_two_eyes(self, inputs_right, inputs_left,
+                         init_state_right=None, init_state_left=None,
+                         init_filter_state_right=None, init_filter_state_left=None,
+                         **kwargs):
+        """Run predict with both eyes batched into a single forward pass.
+
+        Concatenates right and left inputs along the batch dimension, runs
+        ``predict`` once, then splits and returns separate result dicts.  The
+        left eye decoder output has its horizontal flow component flipped so
+        both eyes share a consistent coordinate frame.
+
+        Returns:
+            (right_result, left_result): each a dict with keys ``outputs``,
+            ``model_state``, and ``mappings`` (same structure as ``predict``).
+        """
+        S = inputs_right.shape[0]
+        both = torch.cat([inputs_right, inputs_left], dim=0)
+
+        init_state = None
+        if init_state_right is not None and init_state_left is not None:
+            init_state = torch.cat([init_state_right, init_state_left], dim=0)
+
+        init_filter_state = None
+        if init_filter_state_right is not None and init_filter_state_left is not None:
+            init_filter_state = torch.cat([init_filter_state_right, init_filter_state_left], dim=0)
+
+        result = self.predict(both, init_state=init_state,
+                              init_filter_state=init_filter_state, **kwargs)
+
+        outputs = result['outputs']
+        right_outputs = {}
+        left_outputs = {}
+
+        for key in ('voltage', 'firing_rate'):
+            if key in outputs:
+                right_outputs[key] = {k: v[:S] for k, v in outputs[key].items()}
+                left_outputs[key] = {k: v[S:] for k, v in outputs[key].items()}
+
+        if 'decoder' in outputs:
+            right_outputs['decoder'] = outputs['decoder'][:S]
+            left_decoder = outputs['decoder'][S:].clone()
+            left_decoder[..., 0] *= -1
+            left_outputs['decoder'] = left_decoder
+
+        filter_state = result['model_state']['filter_state']
+        right_filter = filter_state[:S] if filter_state is not None else None
+        left_filter = filter_state[S:] if filter_state is not None else None
+
+        right_result = {
+            'outputs': right_outputs,
+            'model_state': {'v': result['model_state']['v'][:S], 'filter_state': right_filter},
+            'mappings': result['mappings'],
+        }
+        left_result = {
+            'outputs': left_outputs,
+            'model_state': {'v': result['model_state']['v'][S:], 'filter_state': left_filter},
+            'mappings': result['mappings'],
+        }
+
+        return right_result, left_result
 
     def find_steady_state(self, run_time=100, max_iter=25):
         print("Finding steady state ...")
@@ -899,7 +964,7 @@ class NeuralModel(torch.nn.Module, ABC):
         initial_ave = initial_state.abs().mean()
 
         for i in range(max_iter):
-            final_state = self.predict(inputs, init_state=initial_state)[1]
+            final_state = self.predict(inputs, init_state=initial_state)['model_state']['v']
 
             # Check if state converged (didn't change from input to output)
             if torch.allclose(final_state, initial_state, atol=1e-3):
@@ -1046,27 +1111,21 @@ class NeuralModel(torch.nn.Module, ABC):
         return model
 
     def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs, initial_state_right=None, initial_state_left=None, oob_columns=None):
-        # right_eye_inputs: (S, time, columns)
-        # left_eye_inputs: (S, time, columns)
+        """Two-eye ego-motion pipeline.
+
+        Returns:
+            (rotations, translations, right_result, left_result) where the
+            result dicts have the same structure as ``predict`` / ``predict_two_eyes``.
+        """
         S = right_eye_inputs.shape[0]
 
-        # Batch both eyes into a single forward pass (2S, time, columns)
-        both_inputs = torch.cat([right_eye_inputs, left_eye_inputs], dim=0)
-        init_state = None
-        if initial_state_right is not None and initial_state_left is not None:
-            init_state = torch.cat([initial_state_right, initial_state_left], dim=0)
-        outputs_both, final_state_both = self.predict(both_inputs, init_state=init_state)[0:2]
+        right_result, left_result = self.predict_two_eyes(
+            right_eye_inputs, left_eye_inputs,
+            init_state_right=initial_state_right, init_state_left=initial_state_left,
+        )
 
-        decoder_both = outputs_both['decoder']  # (2S, time, columns, 2)
-        decoder_right = decoder_both[:S]
-        decoder_left = decoder_both[S:]
-        final_state_right = final_state_both[:S]
-        final_state_left = final_state_both[S:]
-
-        # Flip horizontal (d_right) for left eye to put in consistent coordinate frame
-        lr_flip = torch.tensor([-1.0, 1.0], device=decoder_right.device, dtype=decoder_right.dtype)
-        optic_flow_right = decoder_right
-        optic_flow_left = decoder_left * lr_flip
+        optic_flow_right = right_result['outputs']['decoder']
+        optic_flow_left = left_result['outputs']['decoder']
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
         # Generate column locations for both eyes
@@ -1093,8 +1152,7 @@ class NeuralModel(torch.nn.Module, ABC):
         rotations = rot_flat.reshape(S, T_len, 3)
         translations = trans_flat.reshape(S, T_len, 3)
 
-        pred_flow_both = torch.cat([optic_flow_right, optic_flow_left], dim=2)
-        return rotations, translations, final_state_right, final_state_left, pred_flow_both
+        return rotations, translations, right_result, left_result
 
     @staticmethod
     def estimate_ego_motion_from_flow(phi, theta, d_right, d_up):

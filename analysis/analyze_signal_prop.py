@@ -123,12 +123,12 @@ def _run_model(
         raise ValueError("No input neurons (L1/L2/L3) available in model.")
 
     with torch.no_grad():
-        outputs, _, _ = model.predict(
+        outputs = model.predict(
             stimulus,
             input_neurons=input_neurons,
             output_neurons=output_neurons,
             init_state=None,
-        )
+        )['outputs']
     return outputs
 
 

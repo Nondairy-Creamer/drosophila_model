@@ -46,10 +46,9 @@ def _extract_pred_flow(pred_output: object) -> torch.Tensor:
     if torch.is_tensor(pred_output):
         return pred_output
 
-    if isinstance(pred_output, tuple):
-        pred_output = pred_output[0]
-
     if isinstance(pred_output, dict):
+        if 'outputs' in pred_output:
+            pred_output = pred_output['outputs']
         if 'decoder' in pred_output:
             return pred_output['decoder']
         raise ValueError("Predict output dict missing 'decoder' key.")

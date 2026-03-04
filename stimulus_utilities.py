@@ -1454,12 +1454,12 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
     
     # Run the stimulus through the perturbed model
     with torch.no_grad():
-        pred, _, _ = perturbed_model.predict(
+        pred = perturbed_model.predict(
             stimulus,
             input_neurons=input_neurons,
             output_neurons=output_neurons,
             init_state=None
-        )
+        )['outputs']
     
     if perturbed_model.has_decoder:
         target = pred['decoder'].clone()

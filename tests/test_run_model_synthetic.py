@@ -37,12 +37,12 @@ def _get_io_neurons(config: dict) -> tuple[list[str], list[str]]:
 
 def _calc_loss(model, stimulus, target, input_neurons, output_neurons, loss_fn):
     with torch.no_grad():
-        pred, _, _ = model.predict(
+        pred = model.predict(
             stimulus,
             input_neurons=input_neurons,
             output_neurons=output_neurons,
             init_state=None,
-        )
+        )['outputs']
         if model.has_decoder:
             return loss_fn(target, pred["decoder"]).item()
         return tu.calc_loss_dict(loss_fn, pred["firing_rate"], target).item()
