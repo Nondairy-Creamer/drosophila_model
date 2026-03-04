@@ -95,7 +95,7 @@ class StimulusDataset(Dataset):
 
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None, reset_init_every=1, 
+                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None,
                 sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
                 batch_size=None, train_mask=None, fit_odometry=False):
@@ -152,10 +152,6 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         batch_iter = iter(dataloader)
 
     for step in range(num_steps):
-        if (step % reset_init_every) == 0:
-            last_state = None
-            last_filter_state = None
-
         # --- mini-batch: draw next batch from DataLoader ---
         if use_batching:
             try:

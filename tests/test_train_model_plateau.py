@@ -33,7 +33,6 @@ def test_train_model_plateau_reload(capsys, tmp_path):
         alpha_factor=0.5,
         input_noise_std=0.0,
         contrast_std=0.0,
-        reset_init_every=1,
     )
 
     stdout = capsys.readouterr().out

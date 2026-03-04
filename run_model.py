@@ -161,7 +161,6 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         save_every=config['training']['save_every'],
         alpha=config['training']['alpha'],
         clip_grad_norm=config['training'].get('clip_norm', None),
-        reset_init_every=config['training'].get('reset_init_every', 1),
         sigma_lambda=config['training'].get('sigma_lambda', 0),
         peak_lambda=config['training'].get('peak_lambda', 0),
         l1_lambda=config['training'].get('l1_lambda', 0),

@@ -73,7 +73,6 @@ tu.train_model(model, stimulus, target, output_neurons, input_neurons,
     loss_history=loss_history,
     sigma_lambda=config['training']['sigma_lambda'],
     peak_lambda=config['training']['peak_lambda'],    
-    reset_init_every=config['training']['reset_init_every'],
     train_mask=train_mask,
     )
 
