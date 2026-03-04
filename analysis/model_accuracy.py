@@ -180,6 +180,7 @@ def main() -> None:
     print(f"Loading model from {model_file} on {device}...")
     model = nm.NeuralModel.load(model_file, device=device)
     model.eval()
+    print('git hash', model.commit_hash)
     dtype = model.dtype
 
     print("Loading inputs and targets...")

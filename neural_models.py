@@ -722,7 +722,7 @@ class NeuralModel(torch.nn.Module, ABC):
         local_mean = self.input_spatial_conv(u_t)
         centered = u_t - local_mean
         local_var = self.input_spatial_conv(centered ** 2)
-        normed = -centered / torch.sqrt(local_var + 1e-3)
+        normed = -centered / torch.sqrt(local_var + 1e-12)
 
         y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
         return y_t, new_filter_state
