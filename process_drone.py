@@ -111,32 +111,52 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
     d_up = torch.tensor(
         np.stack([d_up_L, d_up_R], axis=1), dtype=torch.float32)
 
-    # Y translation rate from z columns (CSV z maps to model Y)
-    # Average right tag's z with negated left tag's z (opposite direction)
-    R_z = uniform_filter1d(
-        pose['R_z_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-    L_z = uniform_filter1d(
-        pose['L_z_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-    dR_z = np.gradient(R_z, video_dt)
-    dL_z = np.gradient(L_z, video_dt)
-    T_y_corr = np.corrcoef(dR_z, -dL_z)[0, 1]
-    print(f'    T_y correlation (R_z vs -L_z): {T_y_corr:.4f}')
-    T_y_known = torch.tensor(
-        0.5 * (dR_z + (-dL_z)), dtype=torch.float32)
+    # L vs R correlations for all pose dimensions
+    print('    Translation correlations (dL vs dR):')
+    for dim in ('x', 'y', 'z'):
+        R_val = uniform_filter1d(
+            pose[f'R_{dim}_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+        L_val = uniform_filter1d(
+            pose[f'L_{dim}_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+        dR = np.gradient(R_val, video_dt)
+        dL = np.gradient(L_val, video_dt)
+        corr = np.corrcoef(dL, dR)[0, 1]
+        print(f'      {dim}: corr={corr:.4f}  '
+              f'dL std={dL.std():.6f}  dR std={dR.std():.6f}')
 
-    # Pitch rate from CSV yaw: left eye positive, right eye negative
-    R_yaw_rad = uniform_filter1d(
-        pose['R_yaw_used_deg'].values.astype(np.float64),
+    print('    Rotation correlations (dL vs dR):')
+    for dim in ('roll', 'pitch', 'yaw'):
+        R_val = uniform_filter1d(
+            pose[f'R_{dim}_used_deg'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+        L_val = uniform_filter1d(
+            pose[f'L_{dim}_used_deg'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+        dR = np.gradient(R_val, video_dt)
+        dL = np.gradient(L_val, video_dt)
+        corr = np.corrcoef(dL, dR)[0, 1]
+        print(f'      {dim}: corr={corr:.4f}  '
+              f'dL std={dL.std():.6f}  dR std={dR.std():.6f}')
+
+    # Y translation rate: average left and right y derivatives
+    R_y = uniform_filter1d(
+        pose['R_y_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+    L_y = uniform_filter1d(
+        pose['L_y_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+    dR_y = np.gradient(R_y, video_dt)
+    dL_y = np.gradient(L_y, video_dt)
+    T_y_known = torch.tensor(
+        0.5 * (dR_y + dL_y), dtype=torch.float32)
+
+    # Pitch rate: average left and right pitch derivatives
+    R_pitch_rad = uniform_filter1d(
+        pose['R_pitch_used_deg'].values.astype(np.float64),
         size=BOX_FILTER_SIZE) * (np.pi / 180)
-    L_yaw_rad = uniform_filter1d(
-        pose['L_yaw_used_deg'].values.astype(np.float64),
+    L_pitch_rad = uniform_filter1d(
+        pose['L_pitch_used_deg'].values.astype(np.float64),
         size=BOX_FILTER_SIZE) * (np.pi / 180)
-    dR_yaw = np.gradient(R_yaw_rad, video_dt)
-    dL_yaw = np.gradient(L_yaw_rad, video_dt)
-    yaw_corr = np.corrcoef(dL_yaw, -dR_yaw)[0, 1]
-    print(f'    omega_y correlation (L_yaw vs -R_yaw): {yaw_corr:.4f}')
+    dR_pitch = np.gradient(R_pitch_rad, video_dt)
+    dL_pitch = np.gradient(L_pitch_rad, video_dt)
     omega_y_known = torch.tensor(
-        0.5 * (dR_yaw + (-dL_yaw)), dtype=torch.float32)
+        0.5 * (dR_pitch + dL_pitch), dtype=torch.float32)
 
     rotation, translation, _ = extract_odometry(
         phi, theta, d_right, d_up, omega_y_known, T_y_known)
@@ -151,10 +171,11 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
     # to match the random_pano convention used in training.
     rotation = rotation * (180.0 / np.pi)
 
-    # Trim leading/trailing frames where all pose values are near-zero
+    # Trim leading/trailing frames where derivatives are near-zero
     # (tag not yet detected or lost at clip boundaries)
     all_vals = np.column_stack([rotation.numpy(), translation.numpy()])
-    active = np.any(np.abs(all_vals) > 1e-9, axis=1)
+    d_vals = np.abs(np.gradient(all_vals, axis=0))
+    active = np.any(d_vals > 1e-9, axis=1)
     if active.any():
         first = int(np.argmax(active))
         last = int(len(active) - 1 - np.argmax(active[::-1]))
