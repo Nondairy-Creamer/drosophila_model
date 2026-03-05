@@ -347,6 +347,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                                 state[k] = v.to(model.device)
 
                     alpha = alpha * alpha_factor
+                    patience = int(patience * np.sqrt(1 / alpha_factor))
                     for param_group in opt.param_groups:
                         param_group['lr'] = alpha
 
