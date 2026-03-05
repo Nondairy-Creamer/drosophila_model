@@ -9,7 +9,7 @@ Loads drone_data.pt, runs the model on the sampled stimulus, and renders:
 
 Usage:
     python analysis/run_model_on_drone.py models/my_model/
-    python analysis/run_model_on_drone.py models/my_model/ --clip-index 1
+    python analysis/run_model_on_drone.py models/my_model/ --stim-index 1
 """
 import argparse
 import sys
@@ -36,8 +36,8 @@ def main() -> None:
         description="Run model on drone data and visualize flow + odometry."
     )
     parser.add_argument("model_folder", type=str, help="Path to model folder or model.pt")
-    parser.add_argument("--clip-index", type=int, nargs="+", default=[0],
-                        help="Clip indices to visualize (default: 0)")
+    parser.add_argument("--stim-index", type=int, nargs="+", default=[0],
+                        help="Stimulus indices to visualize (default: 0)")
     parser.add_argument("--fps", type=float, default=None,
                         help="Output movie frame rate (default: native video rate)")
     parser.add_argument("--max-frames", type=int, default=None,
@@ -68,7 +68,7 @@ def main() -> None:
     output_dir = Path(args.output_dir) if args.output_dir else model_folder / "drone_flow_movie"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for clip_idx in args.clip_index:
+    for clip_idx in args.stim_index:
         if clip_idx >= len(drone_clips):
             print(f"Skipping clip {clip_idx}: only {len(drone_clips)} clips available")
             continue

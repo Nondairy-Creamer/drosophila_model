@@ -116,13 +116,13 @@ def main() -> None:
             model, model_config, stim_type, args.num_stimuli, device,
         )
 
-        mean_rot = np.mean(rot_cosines)
-        mean_trans = np.mean(trans_cosines)
+        median_rot = np.median(rot_cosines)
+        median_trans = np.median(trans_cosines)
         print(f"\n  Summary ({stim_type}):")
-        print(f"    Rotation  cos sim: mean={mean_rot:+.4f}  "
+        print(f"    Rotation  cos sim: median={median_rot:+.4f}  "
               f"std={np.std(rot_cosines):.4f}  "
               f"min={np.min(rot_cosines):+.4f}  max={np.max(rot_cosines):+.4f}")
-        print(f"    Translation cos sim: mean={mean_trans:+.4f}  "
+        print(f"    Translation cos sim: median={median_trans:+.4f}  "
               f"std={np.std(trans_cosines):.4f}  "
               f"min={np.min(trans_cosines):+.4f}  max={np.max(trans_cosines):+.4f}")
 
