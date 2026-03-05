@@ -1,9 +1,10 @@
 """
 Benchmark a two-eye model on random_pano and drone_view stimuli.
 
-Loads a trained model, generates 20 stimuli of each type via
-get_stimulus_two_eyes, runs estimate_ego_motion_from_image, and prints
-per-stimulus cosine similarity between true and predicted odometry.
+Loads a trained model, randomly selects 100 stimuli of each type via
+get_stimulus_two_eyes, runs estimate_ego_motion_from_image on the full
+batch simultaneously, and prints per-stimulus cosine similarity between
+true and predicted odometry.
 
 Usage:
     python analysis/benchmark_model_two_eyes.py models/best_pano/
@@ -34,7 +35,7 @@ def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def run_benchmark(model, config, stimulus_type: str, num_stimuli: int, device: str):
-    """Generate stimuli, run the model, and return per-stimulus cosine similarities."""
+    """Generate stimuli, run the model in one batch, return per-stimulus cosine sims."""
     column_phi_theta = model.column_phi_theta
     N = column_phi_theta.shape[0]
 
@@ -47,34 +48,40 @@ def run_benchmark(model, config, stimulus_type: str, num_stimuli: int, device: s
     if n_use < num_stimuli:
         print(f"  Warning: only {n_available} stimuli available, using {n_use}")
 
-    indices = list(range(n_use))
+    rng = np.random.default_rng()
+    indices = rng.choice(n_available, size=n_use, replace=False)
+
+    # Find first valid time step (pre-stim is a contiguous block at the start)
+    time_mask = train_mask.any(dim=-1)  # (examples, time)
+    loss_start_step = 0
+    if not time_mask[:, 0].all():
+        loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
+    oob = ~train_mask.any(dim=1).any(dim=0).to(device=device)  # (2*N,)
+
+    # Run all selected stimuli through the model in a single batched call
+    right_input = stimulus[indices, :, :N].to(device=device, dtype=model.dtype)
+    left_input = stimulus[indices, :, N:].to(device=device, dtype=model.dtype)
+
+    with torch.no_grad():
+        pred_rot, pred_trans, _, _ = model.estimate_ego_motion_from_image(
+            right_input, left_input, oob_columns=oob,
+        )
+
     rot_cosines = []
     trans_cosines = []
 
-    for i in indices:
-        right_input = stimulus[i:i+1, :, :N].to(device=device, dtype=model.dtype)
-        left_input = stimulus[i:i+1, :, N:].to(device=device, dtype=model.dtype)
-
-        oob_right = torch.isnan(stimulus[i, 0, :N])
-        oob_left = torch.isnan(stimulus[i, 0, N:])
-        oob = torch.cat([oob_right, oob_left]).to(device=device)
-
-        with torch.no_grad():
-            pred_rot, pred_trans, _, _ = model.estimate_ego_motion_from_image(
-                right_input, left_input, oob_columns=oob,
-            )
-
-        pred_rot_np = pred_rot[0].cpu().numpy()
-        pred_trans_np = pred_trans[0].cpu().numpy()
-        true_rot_np = true_rot[i].cpu().numpy()
-        true_trans_np = true_trans[i].cpu().numpy()
+    for batch_idx, orig_idx in enumerate(indices):
+        pred_rot_np = pred_rot[batch_idx, loss_start_step:].cpu().numpy()
+        pred_trans_np = pred_trans[batch_idx, loss_start_step:].cpu().numpy()
+        true_rot_np = true_rot[orig_idx, loss_start_step:].cpu().numpy()
+        true_trans_np = true_trans[orig_idx, loss_start_step:].cpu().numpy()
 
         rot_cos = _cos_sim(true_rot_np, pred_rot_np)
         trans_cos = _cos_sim(true_trans_np, pred_trans_np)
         rot_cosines.append(rot_cos)
         trans_cosines.append(trans_cos)
 
-        print(f"  [{i:3d}] rot cos={rot_cos:+.4f}  trans cos={trans_cos:+.4f}")
+        print(f"  [{orig_idx:3d}] rot cos={rot_cos:+.4f}  trans cos={trans_cos:+.4f}")
 
     return rot_cosines, trans_cosines
 
@@ -84,13 +91,15 @@ def main() -> None:
         description="Benchmark two-eye model on random_pano and drone_view stimuli."
     )
     parser.add_argument("model_folder", type=str, help="Path to model folder or model.pt")
-    parser.add_argument("--num-stimuli", type=int, default=10,
-                        help="Number of stimuli per type (default: 10)")
+    parser.add_argument("--num-stimuli", type=int, default=100,
+                        help="Number of stimuli per type (default: 100)")
     args = parser.parse_args()
 
     model_file, model_folder = resolve_model_paths(Path(args.model_folder))
-    local_config = du.load_config()
-    device = local_config["model"].get("device", "cpu")
+    computer_config = du.load_config()
+    model_config = du.load_config(model_folder / 'config.toml')
+    device = computer_config["model"].get("device", "cpu")
+    model_config["model"]["device"] = device
 
     print(f"Loading model from {model_file} on {device}...")
     model = nm.NeuralModel.load(model_file, device=device)
@@ -104,7 +113,7 @@ def main() -> None:
         print(f"{'='*60}")
 
         rot_cosines, trans_cosines = run_benchmark(
-            model, local_config, stim_type, args.num_stimuli, device,
+            model, model_config, stim_type, args.num_stimuli, device,
         )
 
         mean_rot = np.mean(rot_cosines)
