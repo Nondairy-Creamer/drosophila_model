@@ -130,18 +130,15 @@ def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
         sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
         sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
 
-        rotation = clip['rotation'].numpy()
-        translation = clip['translation'].numpy()
+        # Stored rotation/translation are already rates from extract_odometry
+        rot_rate_native = clip['rotation'].numpy()
+        trans_rate_native = clip['translation'].numpy()
 
-        # Compute rates at native video frame rate
-        rot_rate_native = _euler_angles_to_angular_velocity(rotation, video_dt)
-        rot_rate_native[:, 2] = 0.0  # yaw rate is unreliable, zeroed for now
-        trans_rate_native = np.zeros_like(translation)
-        trans_rate_native[1:] = np.diff(translation, axis=0) / video_dt
+        # Integrate rates to get cumulative positions
+        rotation = np.cumsum(rot_rate_native * video_dt, axis=0)
+        translation = np.cumsum(trans_rate_native * video_dt, axis=0)
 
         # Interpolate positions and rates to model_dt.
-        # Use linspace with the same point count as interpolate_to_model_dt
-        # (which handles the stimulus images) so all arrays stay aligned.
         video_times = np.arange(T) * video_dt
         num_model_steps = int((T - 1) * video_dt / model_dt) + 1
         model_times = np.linspace(video_times[0], video_times[-1], num_model_steps)

@@ -71,6 +71,8 @@ def test_run_model_synthetic_learns(tmp_path):
     trained_model = nm.NeuralModel.load(model_dir / "model.pt", device="cpu", freeze_params=False)
 
     device = init_model.device
+    if isinstance(stimulus, dict):
+        stimulus = stimulus['cell_inputs']
     stimulus = stimulus.to(device=device, dtype=init_model.dtype)
     if isinstance(target, dict):
         target = {k: v.to(device=device, dtype=init_model.dtype) for k, v in target.items()}

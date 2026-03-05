@@ -1178,10 +1178,11 @@ class NeuralModel(torch.nn.Module, ABC):
             d_up: (N,) or (T, N) angular flow in theta direction (positive = upward on retina)
         
         Returns:
-            omega_star: (3,) or (T, 3) estimated rotation vector [roll, pitch, yaw]
-                Positive omega_z = leftward rotation (world moves right on retina)
-            T_star: (3,) or (T, 3) estimated translation direction (up to sign ambiguity)
-            Z_star: (N,) or (T, N) estimated depths (positive when T_star sign is correct)
+            omega_star: (3,) or (T, 3) estimated rotation rate [roll, pitch, yaw]
+                in physical observer convention (positive omega_z = leftward rotation)
+            T_star: (3,) or (T, 3) estimated observer velocity direction, scaled by
+                RMS of translational flow
+            Z_star: (N,) or (T, N) estimated depths (positive = in front of observer)
         """
 
         def cross_matrix(a):
@@ -1273,11 +1274,10 @@ class NeuralModel(torch.nn.Module, ABC):
             _, _, Vh = torch.linalg.svd(C_valid, full_matrices=False)  # Vh: (T_valid, 3, 3)
             T_dir_valid = Vh[:, -1]                              # (T_valid, 3)
 
-            # === Disambiguate sign using physical constraint ===
-            # Convention: progressive flow (expansion) = positive T_x (forward motion)
-            # For expansion at point x: flow v points away from focus of expansion
-            # w = Π @ T points toward focus, so v · w < 0 for expansion with correct T
-            # We flip T if v · w > 0 (wrong sign), keeping v · w < 0
+            # === Disambiguate sign using depth positivity constraint ===
+            # Physical flow: v = -(1/Z) P T_scene where T_scene = -V_observer
+            # w = P @ T_dir. For positive depth: v·w > 0 ↔ T_dir ∝ T_scene
+            # Flip T_dir if v·w < 0 (negative depths) to ensure v·w > 0
             w_i_valid = torch.einsum('nij,tj->tni', P, T_dir_valid)  # (T_valid, N, 3)
             v_dot_w_valid = (v[has_translation] * w_i_valid).sum(dim=-1)  # (T_valid, N)
 
@@ -1285,7 +1285,7 @@ class NeuralModel(torch.nn.Module, ABC):
             w_norm_sq_valid = (w_i_valid * w_i_valid).sum(dim=-1)  # (T_valid, N)
             weighted_sign = (v_dot_w_valid * w_norm_sq_valid).sum(dim=-1)  # (T_valid,)
 
-            # Flip T where weighted_sign < 0 so that expansion gives positive T
+            # Flip T_dir where weighted_sign < 0 to ensure positive depths
             sign_flip = torch.where(weighted_sign < 0, torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
                                     torch.tensor(1.0, device=x.device, dtype=d_right.dtype))
             T_dir_valid = T_dir_valid * sign_flip[:, None]
@@ -1295,8 +1295,9 @@ class NeuralModel(torch.nn.Module, ABC):
             v_dot_w[has_translation] = v_dot_w_valid
             w_norm_sq[has_translation] = w_norm_sq_valid
 
-        # Scale T by translation magnitude
-        T_star = T_dir * translation_magnitude[:, None]  # (T, 3)
+        # Scale T by translation magnitude and negate to convert from the SVD's
+        # -V_observer convention to physical observer velocity convention.
+        T_star = -T_dir * translation_magnitude[:, None]  # (T, 3)
 
         # Depth: Z = ||w||² / (v · w) with v · w > 0 after disambiguation
         Z_star = w_norm_sq / (v_dot_w + 1e-12)  # (T, N)

@@ -85,95 +85,95 @@ def main() -> None:
     args = parser.parse_args()
 
     stimulus_specs = [
-        {
-            "name": "sine_right_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 10.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "right",
-                "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 1.0,
-            },
-        },
-        {
-            "name": "sine_left_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 10.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "left",
-                "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 2.0,
-            },
-        },
-        {
-            "name": "sine_up_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 10.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "up",
-                "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 2.0,
-            },
-        },
-        {
-            "name": "sine_down_4hz",
-            "stimulus_type": "directional_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "stim_time": 10.0,
-                },
-            },
-            "stimulus_kwargs": {
-                "sine_direction": "down",
-                "sine_temporal_frequency": 4.0,
-                "pre_stim_time_override": 2.0,
-            },
-        },
-        {
-            "name": "random_sine_4s_warmup",
-            "stimulus_type": "random_sine",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "seed": 100,
-                },
-            },
-            "stimulus_kwargs": {
-                "random_sine_duration_s": 4.0,
-                "pre_stim_time_override": 2.0,
-            },
-        },
-        {
-            "name": "random_pano_4s_warmup",
-            "stimulus_type": "random_pano",
-            "column_info": "column_phi_theta",
-            "config_overrides": {
-                "stimulus": {
-                    "seed": 100,
-                    "stim_time": 10.0,
-                    "num_repeats": 1,
-                },
-            },
-            "stimulus_kwargs": {
-                "pre_stim_time_override": 2.0,
-            },
-        },
+        # {
+        #     "name": "sine_right_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 10.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "right",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 1.0,
+        #     },
+        # },
+        # {
+        #     "name": "sine_left_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 10.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "left",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 2.0,
+        #     },
+        # },
+        # {
+        #     "name": "sine_up_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 10.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "up",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 2.0,
+        #     },
+        # },
+        # {
+        #     "name": "sine_down_4hz",
+        #     "stimulus_type": "directional_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "stim_time": 10.0,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "sine_direction": "down",
+        #         "sine_temporal_frequency": 4.0,
+        #         "pre_stim_time_override": 2.0,
+        #     },
+        # },
+        # {
+        #     "name": "random_sine_4s_warmup",
+        #     "stimulus_type": "random_sine",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "seed": 100,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "random_sine_duration_s": 4.0,
+        #         "pre_stim_time_override": 2.0,
+        #     },
+        # },
+        # {
+        #     "name": "random_pano_4s_warmup",
+        #     "stimulus_type": "random_pano",
+        #     "column_info": "column_phi_theta",
+        #     "config_overrides": {
+        #         "stimulus": {
+        #             "seed": 100,
+        #             "stim_time": 10.0,
+        #             "num_repeats": 1,
+        #         },
+        #     },
+        #     "stimulus_kwargs": {
+        #         "pre_stim_time_override": 2.0,
+        #     },
+        # },
         {
             "name": "sintel_max",
             "stimulus_type": "sintel",
