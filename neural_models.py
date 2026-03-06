@@ -568,7 +568,7 @@ class NeuralModel(torch.nn.Module, ABC):
             )
 
         if self.decoder_type == 'conv_1':
-            pass  # placeholder for future conv_1 decoder
+            self._initialize_decoder(num_channels=[3], conv_sizes=[5])
         if self.decoder_type == 'conv_2':
             self._initialize_decoder()
         if self.use_input_conv:
