@@ -239,15 +239,16 @@ class TemporalLRU(torch.nn.Module):
     stability.
 
     Parameters are learned in constrained spaces:
-      - ``gamma = softplus(log_gamma)``  -- positive damping
-      - ``omega = sigmoid(logit_omega) * pi``  -- frequency in ``[0, pi]``
+      - ``gamma = exp(log_gamma)``  -- positive damping rate (1/s)
+      - ``omega = sigmoid(logit_omega) * pi``  -- frequency in ``[0, pi]`` rad/step
     """
 
     _COMPLEX_DTYPE = {torch.float32: torch.complex64, torch.float64: torch.complex128}
 
-    def __init__(self, num_modes=4, device='cpu', dtype='float32'):
+    def __init__(self, num_modes=4, dt=0.01, device='cpu', dtype='float32'):
         super().__init__()
         self.num_modes = num_modes
+        self.dt = dt
         pt_dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
 
         self.log_gamma = torch.nn.Parameter(
@@ -283,8 +284,8 @@ class TemporalLRU(torch.nn.Module):
         return torch.sigmoid(self.logit_omega) * np.pi
 
     def poles(self):
-        """Complex poles ``a_k = exp(-gamma_k + i*omega_k)``."""
-        return torch.exp(torch.complex(-self.gamma, self.omega))
+        """Complex poles ``a_k = exp(-gamma_k * dt + i*omega_k)``."""
+        return torch.exp(torch.complex(-self.gamma * self.dt, self.omega))
 
     def step(self, u_t, state=None):
         """Single-timestep update.
@@ -310,13 +311,13 @@ class TemporalLRU(torch.nn.Module):
 
         u_cx = u_t.to(cdtype)
         new_state = a[None, :, None] * state + b[None, :, None] * u_cx[:, None, :]
-        y_t = (c[None, :, None] * state).real.sum(dim=1) + self.log_d.exp() * u_t
+        y_t = (c[None, :, None] * new_state).real.sum(dim=1) + self.log_d.exp() * u_t
         return y_t, new_state
 
     def impulse_response(self, num_t=20):
         """Analytically compute the impulse response h[0..num_t-1].
 
-        Strictly causal: modes contribute starting at t=1, feedthrough at t=0.
+        Modes contribute from t=0 (using updated state), feedthrough at t=0.
 
         Returns:
             ``(num_t,)`` real tensor.
@@ -324,11 +325,10 @@ class TemporalLRU(torch.nn.Module):
         a = self.poles()
         cb = torch.complex(self.c_re, self.c_im) * torch.complex(self.b_re, self.b_im)
         h = torch.zeros(num_t, device=a.device, dtype=a.real.dtype)
-        h[0] = self.log_d.exp()
-        if num_t > 1:
-            n = torch.arange(num_t - 1, device=a.device, dtype=a.real.dtype)
-            a_n = a[:, None] ** n[None, :]
-            h[1:] = (cb[:, None] * a_n).real.sum(dim=0)
+        n = torch.arange(num_t, device=a.device, dtype=a.real.dtype)
+        a_n = a[:, None] ** n[None, :]
+        h[:] = (cb[:, None] * a_n).real.sum(dim=0)
+        h[0] = h[0] + self.log_d.exp()
         return h
 
 
@@ -572,7 +572,6 @@ class NeuralModel(torch.nn.Module, ABC):
         if self.decoder_type == 'conv_2':
             self._initialize_decoder()
         if self.use_input_conv:
-            # Initialize input convolution layer
             self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
     @property
@@ -664,15 +663,15 @@ class NeuralModel(torch.nn.Module, ABC):
         self.input_pre_conv = NeuralModelConv(
             in_features=1, out_features=1, conv_size=input_pre_conv_size,
             column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
-            positive_weights=False, use_bias=False,
+            positive_weights=True, use_bias=False,
         )
 
         pq_offsets_pre = NeuralModelConv.hex_grid_pq_offsets(input_pre_conv_size)
         with torch.no_grad():
-            self.input_pre_conv.weight.fill_(0.0)
+            self.input_pre_conv.weight.fill_(-10.0)
             for i, (dp, dq) in enumerate(pq_offsets_pre):
                 if dp == 0 and dq == 0:
-                    self.input_pre_conv.weight[0, i, 0] = 1.0
+                    self.input_pre_conv.weight[0, i, 0] = 0.0
 
         self.input_spatial_conv = NeuralModelConv(
             in_features=1, out_features=1, conv_size=conv_size_x,
@@ -688,7 +687,7 @@ class NeuralModel(torch.nn.Module, ABC):
                     self.input_spatial_conv.weight[0, i, 0] = 0.0
 
         self.temporal_lru = TemporalLRU(
-            num_modes=num_temporal_modes, device=self.device, dtype=self.dtype,
+            num_modes=num_temporal_modes, dt=self.dt, device=self.device, dtype=self.dtype,
         )
 
     def _initialize_decoder(self, num_channels=None, conv_sizes=None):

@@ -62,6 +62,7 @@ def main() -> None:
     raw_weight = model.input_spatial_conv.weight[0, :, 0].detach()
     if model.input_spatial_conv.positive_weights:
         raw_weight = raw_weight.exp()
+        raw_weight = raw_weight / raw_weight.sum()
     conv_xy = raw_weight.cpu().numpy()
 
     has_pre_conv = hasattr(model, 'input_pre_conv')
@@ -73,6 +74,7 @@ def main() -> None:
         pre_weight = model.input_pre_conv.weight[0, :, 0].detach()
         if model.input_pre_conv.positive_weights:
             pre_weight = pre_weight.exp()
+            pre_weight = pre_weight / pre_weight.sum()
         pre_xy = pre_weight.cpu().numpy()
 
         pre_axial = nm.NeuralModelConv.hex_grid_axial_coords(model.input_pre_conv_size)

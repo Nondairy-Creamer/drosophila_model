@@ -364,6 +364,7 @@ def main() -> None:
     parser.add_argument(
         "--model-folder",
         type=str,
+        nargs="?",
         default=None,
         help="Path to model folder (or any file inside it). If omitted, a fresh model is initialized from config.",
     )
