@@ -46,5 +46,20 @@ def test_train_model_plateau_reload(capsys, tmp_path):
     assert info["last_reload_state"] is not None
     for key in initial_state:
         torch.testing.assert_close(info["last_reload_state"][key], initial_state[key])
-    assert info["last_reload_opt_state"] == saved_opt["optimizer_state_dict"]
+    def _assert_state_dicts_equal(a, b):
+        """Recursively compare state dicts that may contain tensors."""
+        assert type(a) == type(b), f"Type mismatch: {type(a)} vs {type(b)}"
+        if isinstance(a, dict):
+            assert a.keys() == b.keys()
+            for k in a:
+                _assert_state_dicts_equal(a[k], b[k])
+        elif isinstance(a, (list, tuple)):
+            assert len(a) == len(b)
+            for x, y in zip(a, b):
+                _assert_state_dicts_equal(x, y)
+        elif isinstance(a, torch.Tensor):
+            torch.testing.assert_close(a, b)
+        else:
+            assert a == b
+    _assert_state_dicts_equal(info["last_reload_opt_state"], saved_opt["optimizer_state_dict"])
     assert len(loss_history) > 0

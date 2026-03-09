@@ -585,7 +585,7 @@ class NeuralModel(torch.nn.Module, ABC):
             with torch.no_grad():
                 self.ego_motion_conv.weight.fill_(-10.0)
                 for i, (dp, dq) in enumerate(pq_offsets_ego):
-                    if dp == 0 and dq == 0:
+                    if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
                         self.ego_motion_conv.weight[0, i, 0] = 0.0
 
     @property

@@ -98,6 +98,35 @@ class StimulusDataset(Dataset):
             return self.inputs[idx], {k: v[idx] for k, v in self.target.items()}, self.train_mask[idx]
         return self.inputs[idx], self.target[idx], self.train_mask[idx]
 
+def _compute_odometry_loss(model, inputs_batch, target_batch, train_mask_batch, loss_start_step):
+    """Combined ego-motion + flow reconstruction loss."""
+    N = inputs_batch.shape[2] // 2
+    right_batch = inputs_batch[:, :, :N]
+    left_batch = inputs_batch[:, :, N:]
+    oob = ~train_mask_batch.any(dim=1).any(dim=0)
+    pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
+        right_batch, left_batch, oob_columns=oob)
+    pred_flow = torch.cat([right_res['outputs']['decoder'], left_res['outputs']['decoder']], dim=2)
+
+    target_rot = target_batch['rotation'][:, loss_start_step:]
+    target_trans = target_batch['translation'][:, loss_start_step:]
+    odom_loss = odometry_loss(
+        pred_rot[:, loss_start_step:], pred_trans[:, loss_start_step:],
+        target_rot, target_trans, model.dt,
+    )
+
+    target_flow = target_batch['optic_flow'][:, loss_start_step:]
+    pred_flow_valid = pred_flow[:, loss_start_step:]
+    flow_mask = train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(target_flow)
+    valid_flow = flow_mask & ~torch.isnan(target_flow)
+    if valid_flow.any():
+        flow_loss = _normalized_mse(pred_flow_valid[valid_flow], target_flow[valid_flow])
+    else:
+        flow_loss = pred_flow.new_tensor(0.0)
+
+    return odom_loss + flow_loss
+
+
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
                 patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None,
@@ -111,241 +140,171 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
     if train_mask is None:
         train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
 
-    # --- train the model ---
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
     cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
-        # Move optimizer state tensors to model device (state dict may have been loaded to CPU)
         for state in opt.state.values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(model.device)
 
-    if loss_history is None:
-        loss_plot = []
-    else:
-        # Preserve prior CPU loss history for plotting/checkpointing
-        loss_plot = list(loss_history)
+    loss_plot = list(loss_history) if loss_history else []
 
-    # GPU-side loss history; append detached scalars each step
-    loss_list = []
-
-    # Track best loss entirely on GPU to avoid syncs; seed from prior CPU history if available
-    best_seed = min(loss_plot) if len(loss_plot) > 0 else float('inf')
-    best_loss = torch.tensor(best_seed, device=model.device, dtype=model.dtype)
-
+    best_loss = torch.tensor(float('inf'), device=model.device, dtype=model.dtype)
     time_since_best = 0
     last_reload_state = None
     last_reload_opt_state = None
-    # Index of last GPU loss converted to CPU for plotting
-    last_saved_idx = -1
 
-    # --- set up DataLoader for mini-batching ---
     num_stimuli = inputs.shape[0]
-    use_batching = batch_size is not None and batch_size < num_stimuli
-    if use_batching:
-        dataloader = DataLoader(
-            StimulusDataset(inputs, target, train_mask),
-            batch_size=batch_size,
-            shuffle=True,
-            drop_last=True,
-        )
-        batch_iter = iter(dataloader)
+    if batch_size is None or batch_size > num_stimuli:
+        batch_size = num_stimuli
+    dataloader = DataLoader(
+        StimulusDataset(inputs, target, train_mask),
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=True,
+    )
 
-    for step in range(num_steps):
-        # --- mini-batch: draw next batch from DataLoader ---
-        if use_batching:
-            try:
-                inputs_batch, target_batch, train_mask_batch = next(batch_iter)
-            except StopIteration:
-                batch_iter = iter(dataloader)
-                inputs_batch, target_batch, train_mask_batch = next(batch_iter)
+    step = 0
+    epoch = 0
+    while step < num_steps:
+        epoch_start = time.time()
+        epoch_losses = []
+
+        for inputs_batch, target_batch, train_mask_batch in dataloader:
+            if step >= num_steps:
+                break
+
             inputs_batch = inputs_batch.clone()
-        else:
-            inputs_batch = inputs.clone()
-            target_batch = target
-            train_mask_batch = train_mask
 
-        # --- data augmentation (applied only to the batch) ---
-        if luminance_std > 0:
-            luminance = torch.tensor(rng.standard_normal(1) * luminance_std, device=inputs.device, dtype=inputs.dtype)
-            inputs_batch = inputs_batch + luminance
+            if luminance_std > 0:
+                luminance = torch.tensor(rng.standard_normal(1) * luminance_std, device=inputs.device, dtype=inputs.dtype)
+                inputs_batch = inputs_batch + luminance
 
-        if contrast_std > 0:
-            contrast = torch.tensor(np.exp(rng.standard_normal(1) * contrast_std), device=inputs.device, dtype=inputs.dtype)
-            inputs_batch = (inputs_batch - torch.mean(inputs_batch)) * contrast + torch.mean(inputs_batch)
+            if contrast_std > 0:
+                contrast = torch.tensor(np.exp(rng.standard_normal(1) * contrast_std), device=inputs.device, dtype=inputs.dtype)
+                inputs_batch = (inputs_batch - torch.mean(inputs_batch)) * contrast + torch.mean(inputs_batch)
 
-        if input_noise_std > 0:
-            noise = torch.tensor(rng.standard_normal(inputs_batch.shape) * input_noise_std, device=inputs.device, dtype=inputs.dtype)
-            inputs_batch = inputs_batch + noise
+            if input_noise_std > 0:
+                noise = torch.tensor(rng.standard_normal(inputs_batch.shape) * input_noise_std, device=inputs.device, dtype=inputs.dtype)
+                inputs_batch = inputs_batch + noise
 
-        start = time.time()
-        opt.zero_grad()
+            opt.zero_grad()
 
-        # Derive time mask from train_mask (True if any column is valid at that time step)
-        time_mask = train_mask_batch.any(dim=-1)  # (batch, time)
-        # Find first valid time step for slicing (pre-stim is contiguous at start)
-        loss_start_step = 0
-        if not time_mask[:, 0].all():
-            loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
+            time_mask = train_mask_batch.any(dim=-1)
+            loss_start_step = 0
+            if not time_mask[:, 0].all():
+                loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
 
-        if fit_odometry:
-            # inputs shape: (batch, time, 2*N) — first N right eye, last N left eye
-            N = inputs_batch.shape[2] // 2
-            right_batch = inputs_batch[:, :, :N]
-            left_batch = inputs_batch[:, :, N:]
-            # Columns that are never valid in this batch → structurally OOB for the decoder
-            oob = ~train_mask_batch.any(dim=1).any(dim=0)  # (2*N,)
-            pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
-                right_batch, left_batch, oob_columns=oob)
-            pred_flow = torch.cat([right_res['outputs']['decoder'], left_res['outputs']['decoder']], dim=2)
-
-            target_rot = target_batch['rotation'][:, loss_start_step:]
-            target_trans = target_batch['translation'][:, loss_start_step:]
-            odom_loss = odometry_loss(
-                pred_rot[:, loss_start_step:], pred_trans[:, loss_start_step:],
-                target_rot, target_trans, model.dt,
-            )
-
-            # Flow loss: use train_mask and NaN to select valid elements
-            target_flow = target_batch['optic_flow'][:, loss_start_step:]
-            pred_flow_valid = pred_flow[:, loss_start_step:]
-            flow_mask = train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(target_flow)
-            valid_flow = flow_mask & ~torch.isnan(target_flow)
-            if valid_flow.any():
-                flow_loss = _normalized_mse(pred_flow_valid[valid_flow], target_flow[valid_flow])
+            if fit_odometry:
+                loss = _compute_odometry_loss(model, inputs_batch, target_batch, train_mask_batch, loss_start_step)
+                pred = None
             else:
-                flow_loss = pred_flow.new_tensor(0.0)
+                result = model.predict(inputs_batch, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
+                pred = result['outputs']
+                cached_mappings = result['mappings']
 
-            loss = odom_loss + flow_loss
-        else:
-            result = model.predict(inputs_batch, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
-            pred = result['outputs']
-            cached_mappings = result['mappings']
+                if model.has_decoder:
+                    pred_dec = pred['decoder'][:, loss_start_step:].clone()
+                    target_dec = target_batch[:, loss_start_step:].clone()
+                    invalid = ~train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(pred_dec)
+                    pred_dec[invalid] = float('nan')
+                    target_dec[invalid] = float('nan')
+                    loss = loss_fn(target_dec, pred_dec)
+                else:
+                    pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
+                    target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
+                    loss = calc_loss_dict(loss_fn, pred_loss, target_loss)
 
-            if model.has_decoder:
-                pred_dec = pred['decoder'][:, loss_start_step:].clone()
-                target_dec = target_batch[:, loss_start_step:].clone()
-                invalid = ~train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(pred_dec)
-                pred_dec[invalid] = float('nan')
-                target_dec[invalid] = float('nan')
-                loss = loss_fn(target_dec, pred_dec)
+            if sigma_lambda > 0:
+                max_sigma_penalty = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
+                loss = loss + sigma_lambda * max_sigma_penalty
+
+            if peak_lambda > 0 and not fit_odometry:
+                peak_val = torch.stack([
+                    log_nanmean_exp(v)
+                    for v in pred['firing_rate'].values()
+                ]).mean()
+                loss = loss + peak_lambda * peak_val
+
+            if l1_lambda > 0:
+                input_l1 = model.input_strength_log.exp().mean()
+                output_l1 = model.output_strength_log.exp().mean()
+                loss = loss + l1_lambda * (input_l1 + output_l1) / 2
+                if model.has_decoder:
+                    decoder_l1 = torch.stack([p.abs().mean() for p in model.decoder.conv_layers.parameters()]).mean()
+                    loss = loss + l1_lambda * decoder_l1
+
+            if torch.isnan(loss):
+                print(f'Warning: NaN loss at step {step + 1}, skipping gradient update')
             else:
-                pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
-                target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
-                loss = calc_loss_dict(loss_fn, pred_loss, target_loss)
+                loss.backward()
+                if clip_grad_norm is not None:
+                    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
+                    if total_norm > clip_grad_norm:
+                        print(f'Gradient clipped at step {step + 1}: norm {total_norm:.2f} > max_norm {clip_grad_norm}')
+                elif clip_grad_value is not None:
+                    torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
+                opt.step()
+                epoch_losses.append(loss.detach())
 
-        if sigma_lambda > 0:
-            # add a regularizer based on the operator norm of the model
-            max_sigma_penalty = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
-            loss = loss + sigma_lambda * max_sigma_penalty
+            step += 1
 
-        if peak_lambda > 0 and not fit_odometry:
-            # add a regularizer to penalize high values (logmeanexp)
-            peak_val = torch.stack([
-                log_nanmean_exp(v)
-                for v in pred['firing_rate'].values()
-            ]).mean()
-            loss = loss + peak_lambda * peak_val
+        # --- End of epoch ---
+        epoch += 1
 
-        if l1_lambda > 0:
-            # L1 regularizer to sparsify strength weights (encourage smaller magnitudes)
-            input_l1 = model.input_strength_log.exp().mean()
-            output_l1 = model.output_strength_log.exp().mean()
+        for l in epoch_losses:
+            loss_plot.append(l.item())
 
-            loss = loss + l1_lambda * (input_l1 + output_l1) / 2
-
-            if model.has_decoder:
-                decoder_l1 = torch.stack([p.abs().mean() for p in model.decoder.conv_layers.parameters()]).mean()
-                loss = loss + l1_lambda * decoder_l1
-
-        # Record GPU-side loss scalar without sync (must happen before best-loss check
-        # so the current loss is included when syncing to loss_plot for checkpoints)
-        loss_is_nan = torch.isnan(loss)
-        loss_list.append(loss.detach())
-
-        # Detect if you've found the best loss so far BEFORE updating weights (no sync)
-        # NaN < anything is False, so NaN losses won't overwrite best_loss
-        if loss < best_loss:
-            best_loss = loss.detach()
-            time_since_best = 0
-
-            # track and save the best checkpoint for easy rollback
-            # Save BEFORE opt.step() so we save the weights that achieved this loss
-            if model_save_folder:
-                # Sync GPU losses to loss_plot before saving so checkpoint has up-to-date history
-                for i in range(last_saved_idx + 1, len(loss_list)):
-                    loss_plot.append(loss_list[i].item())
-                last_saved_idx = len(loss_list) - 1
-
-                model.save(model_save_folder / 'model.pt')
-                # Use atomic write for optimizer state to prevent corruption on network filesystems
-                # Ensures all-or-nothing writes and prevents partial/corrupted files
-                opt_path = Path(model_save_folder / 'model_opt.pt')
-                opt_payload = {
-                    'optimizer_state_dict': opt.state_dict(),
-                    'loss': loss_plot,
-                    'step': step
-                }
-                try:
-                    with tempfile.NamedTemporaryFile('wb', delete=False, dir=str(opt_path.parent), suffix='.tmp') as tmp:
-                        tmp_path = tmp.name
-                        torch.save(opt_payload, tmp_path)
-                        tmp.flush()
-                        os.fsync(tmp.fileno())
-                    # Atomically replace target file
-                    # Note: Removed os.fsync(dir_fd) to prevent deadlock on network filesystems
-                    # when multiple processes sync the same directory simultaneously
-                    os.replace(tmp_path, str(opt_path))
-                except Exception:
-                    # Clean up temp file on error
+        if epoch_losses:
+            epoch_avg = torch.stack(epoch_losses).mean()
+            if epoch_avg < best_loss:
+                best_loss = epoch_avg.detach()
+                time_since_best = 0
+                if model_save_folder:
+                    model.save(model_save_folder / 'model.pt')
+                    opt_path = Path(model_save_folder / 'model_opt.pt')
+                    opt_payload = {
+                        'optimizer_state_dict': opt.state_dict(),
+                        'loss': loss_plot,
+                        'step': step
+                    }
                     try:
-                        if os.path.exists(tmp_path):
-                            os.unlink(tmp_path)
+                        with tempfile.NamedTemporaryFile('wb', delete=False, dir=str(opt_path.parent), suffix='.tmp') as tmp:
+                            tmp_path = tmp.name
+                            torch.save(opt_payload, tmp_path)
+                            tmp.flush()
+                            os.fsync(tmp.fileno())
+                        os.replace(tmp_path, str(opt_path))
                     except Exception:
-                        pass
-                    raise
+                        try:
+                            if os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                        raise
+            else:
+                time_since_best += 1
         else:
             time_since_best += 1
 
-        # Skip gradient update if loss is NaN to avoid corrupting weights
-        # The patience mechanism will still trigger a reload of the best model
-        if loss_is_nan:
-            print(f'Warning: NaN loss detected at step {step + 1}, skipping gradient update')
-        else:
-            # Update weights AFTER checking/saving best model
-            loss.backward()
-
-            # Optional gradient clipping (prefer norm if both provided)
-            if clip_grad_norm is not None:
-                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad_norm)
-                if total_norm > clip_grad_norm:
-                    print(f'Gradient clipped at step {step + 1}: norm {total_norm:.2f} > max_norm {clip_grad_norm}')
-            elif clip_grad_value is not None:
-                torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
-            opt.step()
-
         if reload_best_on_loss_jump and (model_save_folder is not None):
-            if (time_since_best > patience) or (loss_is_nan):
+            if time_since_best > patience:
                 opt_path = model_save_folder / 'model_opt.pt'
                 if not opt_path.exists():
-                    # No best checkpoint saved yet (e.g. NaN on step 1) — skip reload
                     time_since_best = 0
-                    print(f'Warning: NaN loss but no checkpoint to reload (step {step + 1}), continuing.')
+                    print(f'Warning: no checkpoint to reload (epoch {epoch}), continuing.')
                 else:
-                    # Load the best model state into the existing model
                     checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
                     model.load_state_dict(checkpoint['state_dict'])
 
-                    # Load the best optimizer state and reduce learning rate
                     opt_state = torch.load(opt_path, map_location='cpu', weights_only=False)
                     opt.load_state_dict(opt_state['optimizer_state_dict'])
                     last_reload_state = {k: v.detach().cpu().clone() for k, v in checkpoint['state_dict'].items()}
                     last_reload_opt_state = opt_state['optimizer_state_dict']
 
-                    # Move optimizer state tensors to model device (load_state_dict keeps them on CPU)
                     for state in opt.state.values():
                         for k, v in state.items():
                             if isinstance(v, torch.Tensor):
@@ -357,31 +316,16 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                         param_group['lr'] = alpha
 
                     time_since_best = 0
+                    best_loss = torch.tensor(float('inf'), device=model.device, dtype=model.dtype)
                     print(' -------------------------------- ')
                     print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')
                     print(' -------------------------------- ')
 
-        if (step % save_every == 0) | (step == num_steps - 1):
-            with torch.no_grad():
-                # Find the model's new steady state should be close ish to the previous one
-                # so only do it every save_every steps
-                # model.find_steady_state()  # done post-training via analysis/find_steady_state.py
+        if (epoch % save_every == 0) or (step >= num_steps):
+            pu.plot_loss(loss_plot, save_folder=model_save_folder)
 
-                # Convert only new GPU losses to CPU floats for plotting/logging
-                for i in range(last_saved_idx + 1, len(loss_list)):
-                    loss_plot.append(loss_list[i].item())
-                last_saved_idx = len(loss_list) - 1
-
-                # Print last CPU loss value only at save cadence
-                # pu.plot_readout_target(pred, target, save_folder=model_save_folder)
-                pu.plot_loss(loss_plot, save_folder=model_save_folder)
-
-        print(f'step {step + 1} / {num_steps} | dt = {(time.time()-start):.3g} | lr = {alpha:.2e} | path = {model_save_folder}')
-
-    # Ensure final GPU losses are synced to CPU history
-    if len(loss_list) > 0 and last_saved_idx < len(loss_list) - 1:
-        for i in range(last_saved_idx + 1, len(loss_list)):
-            loss_plot.append(loss_list[i].item())
+        epoch_loss_str = f'{epoch_avg.item():.4f}' if epoch_losses else 'NaN'
+        print(f'epoch {epoch} | steps {step}/{num_steps} | loss = {epoch_loss_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
 
     return model, loss_plot, opt.state_dict(), {
         "best_loss": float(best_loss.item()),
@@ -390,6 +334,4 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         "last_reload_state": last_reload_state,
         "last_reload_opt_state": last_reload_opt_state,
     }
-
-
 
