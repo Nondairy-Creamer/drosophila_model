@@ -574,6 +574,19 @@ class NeuralModel(torch.nn.Module, ABC):
         if self.use_input_conv:
             self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
+        if self.column_p_q is not None:
+            self.ego_motion_conv = NeuralModelConv(
+                in_features=1, out_features=1, conv_size=5,
+                column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
+                positive_weights=True, use_bias=False,
+            )
+            pq_offsets_ego = NeuralModelConv.hex_grid_pq_offsets(5)
+            with torch.no_grad():
+                self.ego_motion_conv.weight.fill_(-10.0)
+                for i, (dp, dq) in enumerate(pq_offsets_ego):
+                    if dp == 0 and dq == 0:
+                        self.ego_motion_conv.weight[0, i, 0] = 0.0
+
     @property
     def has_decoder(self):
         """Whether the model has a trained decoder (any type other than 'none')."""
@@ -1162,15 +1175,14 @@ class NeuralModel(torch.nn.Module, ABC):
         d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
 
         rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
-            phi_valid, theta_valid, d_right, d_up
+            phi_valid, theta_valid, d_right, d_up, valid_mask=valid_mask
         )
         rotations = rot_flat.reshape(S, T_len, 3)
         translations = trans_flat.reshape(S, T_len, 3)
 
         return rotations, translations, right_result, left_result
 
-    @staticmethod
-    def estimate_ego_motion_from_flow(phi, theta, d_right, d_up):
+    def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up, valid_mask=None):
         """
         Estimate ego-motion (rotation and translation) from optic flow.
         
@@ -1191,6 +1203,11 @@ class NeuralModel(torch.nn.Module, ABC):
             theta: (N,) polar angles of viewing directions
             d_right: (N,) or (T, N) angular flow in phi direction (positive = rightward on retina)
             d_up: (N,) or (T, N) angular flow in theta direction (positive = upward on retina)
+            valid_mask: Optional (total_columns,) boolean mask mapping valid
+                columns back to the full column grid. When provided and the model
+                has an ``ego_motion_conv``, the translational flow is spatially
+                convolved (per eye) before computing RMS. The translation direction
+                itself is always estimated from the unfiltered flow.
         
         Returns:
             omega_star: (3,) or (T, 3) estimated rotation rate [roll, pitch, yaw]
@@ -1261,8 +1278,25 @@ class NeuralModel(torch.nn.Module, ABC):
         v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
 
         # === Measure translation signal strength (per time step) ===
-        # RMS of de-rotated flow - if near zero, there's no translation
-        translation_magnitude = torch.sqrt((v**2).mean(dim=(-2, -1)))  # (T,)
+        # Spatially convolve the translational flow (per eye) before computing
+        # RMS for a more robust magnitude estimate.
+        nc = self.num_columns
+        total_cols = valid_mask.shape[0]
+        num_eyes = total_cols // nc
+
+        v_full = torch.zeros(T, total_cols, 3, device=v.device, dtype=v.dtype)
+        v_full[:, valid_mask, :] = v
+
+        v_filtered = torch.zeros_like(v_full)
+        for eye_idx in range(num_eyes):
+            s, e = eye_idx * nc, (eye_idx + 1) * nc
+            for comp in range(3):
+                v_filtered[:, s:e, comp] = self.ego_motion_conv(
+                    v_full[:, s:e, comp]
+                )
+
+        v_for_rms = v_filtered[:, valid_mask, :]
+        translation_magnitude = torch.sqrt((v_for_rms**2).mean(dim=(-2, -1)))
 
         # === Projection matrices Π_i = I - x_i x_iᵀ — shared across time ===
         outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
@@ -1275,40 +1309,22 @@ class NeuralModel(torch.nn.Module, ABC):
         C = C_blocks.reshape(T, 3*N, 3)        # (T, 3N, 3)
 
         # === Solve C T = 0 via smallest singular vector (batched SVD) ===
-        # For pure rotation the de-rotated flow is ~0, making C ill-conditioned.
-        # Only run SVD on time steps with meaningful translational signal.
-        trans_eps = 1e-6
-        has_translation = translation_magnitude > trans_eps  # (T,)
+        _, _, Vh = torch.linalg.svd(C, full_matrices=False)  # Vh: (T, 3, 3)
+        T_dir = Vh[:, -1]                                     # (T, 3)
 
-        T_dir = torch.zeros(T, 3, device=x.device, dtype=d_right.dtype)
-        v_dot_w = torch.zeros(T, N, device=x.device, dtype=d_right.dtype)
-        w_norm_sq = torch.zeros(T, N, device=x.device, dtype=d_right.dtype)
+        # === Disambiguate sign using depth positivity constraint ===
+        # Physical flow: v = -(1/Z) P T_scene where T_scene = -V_observer
+        # w = P @ T_dir. For positive depth: v·w > 0 ↔ T_dir ∝ T_scene
+        w_i = torch.einsum('nij,tj->tni', P, T_dir)          # (T, N, 3)
+        v_dot_w = (v * w_i).sum(dim=-1)                      # (T, N)
+        w_norm_sq = (w_i * w_i).sum(dim=-1)                   # (T, N)
+        weighted_sign = (v_dot_w * w_norm_sq).sum(dim=-1)     # (T,)
 
-        if has_translation.any():
-            C_valid = C[has_translation]                         # (T_valid, 3N, 3)
-            _, _, Vh = torch.linalg.svd(C_valid, full_matrices=False)  # Vh: (T_valid, 3, 3)
-            T_dir_valid = Vh[:, -1]                              # (T_valid, 3)
-
-            # === Disambiguate sign using depth positivity constraint ===
-            # Physical flow: v = -(1/Z) P T_scene where T_scene = -V_observer
-            # w = P @ T_dir. For positive depth: v·w > 0 ↔ T_dir ∝ T_scene
-            # Flip T_dir if v·w < 0 (negative depths) to ensure v·w > 0
-            w_i_valid = torch.einsum('nij,tj->tni', P, T_dir_valid)  # (T_valid, N, 3)
-            v_dot_w_valid = (v[has_translation] * w_i_valid).sum(dim=-1)  # (T_valid, N)
-
-            # Use weighted sum (weight by ||w||² to emphasize reliable points)
-            w_norm_sq_valid = (w_i_valid * w_i_valid).sum(dim=-1)  # (T_valid, N)
-            weighted_sign = (v_dot_w_valid * w_norm_sq_valid).sum(dim=-1)  # (T_valid,)
-
-            # Flip T_dir where weighted_sign < 0 to ensure positive depths
-            sign_flip = torch.where(weighted_sign < 0, torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
-                                    torch.tensor(1.0, device=x.device, dtype=d_right.dtype))
-            T_dir_valid = T_dir_valid * sign_flip[:, None]
-            v_dot_w_valid = v_dot_w_valid * sign_flip[:, None]
-
-            T_dir[has_translation] = T_dir_valid
-            v_dot_w[has_translation] = v_dot_w_valid
-            w_norm_sq[has_translation] = w_norm_sq_valid
+        sign_flip = torch.where(weighted_sign < 0,
+                                torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
+                                torch.tensor(1.0, device=x.device, dtype=d_right.dtype))
+        T_dir = T_dir * sign_flip[:, None]
+        v_dot_w = v_dot_w * sign_flip[:, None]
 
         # Scale T by translation magnitude and negate to convert from the SVD's
         # -V_observer convention to physical observer velocity convention.
