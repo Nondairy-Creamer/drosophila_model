@@ -575,12 +575,13 @@ class NeuralModel(torch.nn.Module, ABC):
             self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
         if self.column_p_q is not None:
+            conv_size = 7
             self.ego_motion_conv = NeuralModelConv(
-                in_features=1, out_features=1, conv_size=5,
+                in_features=1, out_features=1, conv_size=conv_size,
                 column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
                 positive_weights=True, use_bias=False,
             )
-            pq_offsets_ego = NeuralModelConv.hex_grid_pq_offsets(5)
+            pq_offsets_ego = NeuralModelConv.hex_grid_pq_offsets(conv_size)
             with torch.no_grad():
                 self.ego_motion_conv.weight.fill_(-10.0)
                 for i, (dp, dq) in enumerate(pq_offsets_ego):

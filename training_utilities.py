@@ -33,7 +33,12 @@ def _normalized_mse(pred, target, eps=1e-8):
 
 
 def _cosine_loss(pred, target, eps=1e-8):
-    """Mean cosine distance, masking out near-zero and NaN target vectors."""
+    """Cosine distance treating the full batch x time trajectory as one vector.
+
+    Flattens all (batch, time, 3) entries into a single vector so that
+    per-timestep magnitude variation is preserved in the loss.  NaN and
+    near-zero target rows are masked before flattening.
+    """
     pred_flat = pred.reshape(-1, pred.shape[-1])
     target_flat = target.reshape(-1, target.shape[-1])
     has_nan = torch.isnan(target_flat).any(dim=-1)
@@ -41,10 +46,10 @@ def _cosine_loss(pred, target, eps=1e-8):
     valid = (mag > eps) & ~has_nan
     if not valid.any():
         return pred.new_tensor(0.0)
-    cos_sim = torch.nn.functional.cosine_similarity(
-        pred_flat[valid], target_flat[valid], dim=-1,
-    )
-    return 1.0 - cos_sim.mean()
+    p = pred_flat[valid].reshape(-1)
+    t = target_flat[valid].reshape(-1)
+    cos_sim = torch.dot(p, t) / (p.norm() * t.norm() + eps)
+    return 1.0 - cos_sim
 
 
 def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):

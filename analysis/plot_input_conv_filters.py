@@ -66,7 +66,8 @@ def main() -> None:
     conv_xy = raw_weight.cpu().numpy()
 
     has_pre_conv = hasattr(model, 'input_pre_conv')
-    num_plots = 3 if has_pre_conv else 2
+    has_ego_conv = hasattr(model, 'ego_motion_conv')
+    num_plots = 2 + int(has_pre_conv) + int(has_ego_conv)
     fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 4), dpi=150)
     ax_idx = 0
 
@@ -137,6 +138,44 @@ def main() -> None:
     axes[ax_idx].set_xlabel("time (s)")
     axes[ax_idx].set_ylabel("amplitude")
     axes[ax_idx].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax_idx += 1
+
+    if has_ego_conv:
+        ego_raw = model.ego_motion_conv.weight[0, :, 0].detach()
+        if model.ego_motion_conv.positive_weights:
+            ego_raw = ego_raw.exp()
+            ego_raw = ego_raw / ego_raw.sum()
+        ego_xy = ego_raw.cpu().numpy()
+
+        ego_conv_size = model.ego_motion_conv.weight.shape[1]
+        for sz in range(1, 20, 2):
+            if len(nm.NeuralModelConv.hex_grid_axial_coords(sz)) == ego_conv_size:
+                ego_grid_size = sz
+                break
+        ego_axial = nm.NeuralModelConv.hex_grid_axial_coords(ego_grid_size)
+        ego_grid = hex_grid_points(ego_axial)
+        vmin_ego, vmax_ego = centered_norm(ego_xy)
+        scatter_ego = axes[ax_idx].scatter(
+            ego_grid[:, 0],
+            ego_grid[:, 1],
+            c=ego_xy,
+            cmap="coolwarm",
+            vmin=vmin_ego,
+            vmax=vmax_ego,
+            s=760,
+            linewidths=0.6,
+            edgecolors="black",
+        )
+        axes[ax_idx].set_title("ego-motion translation (spatial)")
+        axes[ax_idx].set_xlabel("hex x")
+        axes[ax_idx].set_ylabel("hex y")
+        axes[ax_idx].set_aspect("equal", adjustable="box")
+        x_min, x_max = float(ego_grid[:, 0].min()), float(ego_grid[:, 0].max())
+        y_min, y_max = float(ego_grid[:, 1].min()), float(ego_grid[:, 1].max())
+        pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
+        axes[ax_idx].set_xlim(x_min - pad, x_max + pad)
+        axes[ax_idx].set_ylim(y_min - pad, y_max + pad)
+        fig.colorbar(scatter_ego, ax=axes[ax_idx], shrink=0.8, pad=0.02)
 
     fig.tight_layout()
 
