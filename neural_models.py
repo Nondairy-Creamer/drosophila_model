@@ -699,13 +699,6 @@ class NeuralModel(torch.nn.Module, ABC):
                 if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
                     self.input_spatial_conv.weight[0, i, 0] = 0.0
 
-        self.log_w_contrast = torch.nn.Parameter(
-            torch.full((1,), np.log(0.5), device=self.device, dtype=self.dtype)
-        )
-        self.log_w_direct = torch.nn.Parameter(
-            torch.full((1,), np.log(0.5), device=self.device, dtype=self.dtype)
-        )
-
         self.temporal_lru = TemporalLRU(
             num_modes=num_temporal_modes, dt=self.dt, device=self.device, dtype=self.dtype,
         )
@@ -748,11 +741,7 @@ class NeuralModel(torch.nn.Module, ABC):
         )
 
     def apply_input_conv(self, u_t, filter_state=None):
-        """Apply spatial pre-filter, weighted contrast + direct paths, then temporal LRU.
-
-        The two paths share the same local-std denominator so they live on
-        comparable scales.  Learnable positive weights (``log_w_contrast``,
-        ``log_w_direct``) control the mix.
+        """Apply spatial pre-filter, contrast normalization, then temporal LRU.
 
         Args:
             u_t: ``(batch, columns)`` raw input for a single timestep.
@@ -767,14 +756,9 @@ class NeuralModel(torch.nn.Module, ABC):
         local_mean = self.input_spatial_conv(filtered)
         centered = filtered - local_mean
         local_var = self.input_spatial_conv(centered ** 2)
-        local_std = torch.sqrt(local_var + 1e-12)
+        normed = -centered / torch.sqrt(local_var + 1e-12)
 
-        contrast = -centered / local_std
-        direct = filtered / local_std
-
-        combined = self.log_w_contrast.exp() * contrast + self.log_w_direct.exp() * direct
-
-        y_t, new_filter_state = self.temporal_lru.step(combined, state=filter_state)
+        y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
         return y_t, new_filter_state
 
     @abstractmethod
