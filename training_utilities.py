@@ -129,7 +129,7 @@ def _compute_odometry_loss(model, inputs_batch, target_batch, train_mask_batch, 
 
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=100, alpha_factor=0.5, opt_state_dict=None, loss_history=None,
+                patience=10, alpha_factor=0.5, opt_state_dict=None, loss_history=None,
                 sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
                 batch_size=None, train_mask=None, fit_odometry=False):
@@ -255,11 +255,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         # --- End of epoch ---
         epoch += 1
 
-        for l in epoch_losses:
-            loss_plot.append(l.item())
-
         if epoch_losses:
             epoch_avg = torch.stack(epoch_losses).mean()
+            loss_plot.append(epoch_avg.item())
             if epoch_avg < best_loss:
                 best_loss = epoch_avg.detach()
                 time_since_best = 0
