@@ -583,10 +583,7 @@ class NeuralModel(torch.nn.Module, ABC):
             )
             pq_offsets_ego = NeuralModelConv.hex_grid_pq_offsets(conv_size)
             with torch.no_grad():
-                self.ego_motion_conv.weight.fill_(-10.0)
-                for i, (dp, dq) in enumerate(pq_offsets_ego):
-                    if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
-                        self.ego_motion_conv.weight[0, i, 0] = 0.0
+                self.ego_motion_conv.weight.fill_(0.0)
 
     @property
     def has_decoder(self):
