@@ -328,8 +328,7 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim, plot
         'left': torch.from_numpy(left),
         'right': torch.from_numpy(right),
         'rotation': rotation,
-        'translation': translation,
-        'trig_translation': trig_translation,
+        'translation': trig_translation,
         'video_dt': video_dt,
         'clip_id': clip_id,
     }
@@ -357,7 +356,6 @@ def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
         'left': torch.from_numpy(sampled_left),
         'rotation': clip['rotation'],
         'translation': clip['translation'],
-        'trig_translation': clip['trig_translation'],
         'video_dt': clip['video_dt'],
         'clip_id': clip['clip_id'],
         'in_fov_right': torch.from_numpy(in_fov_right.copy()),
