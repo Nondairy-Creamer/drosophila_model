@@ -16,7 +16,8 @@ import cv2
 import pandas as pd
 from pathlib import Path
 import argparse
-from scipy.ndimage import uniform_filter1d
+from scipy.integrate import cumulative_trapezoid
+from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
 from stimulus_utilities import build_ommatidium_sampling_matrix
 
@@ -54,7 +55,99 @@ def pixels_to_angles(u_px, v_px, image_width, image_height, phi_lim, theta_lim):
     return phi, theta
 
 
-def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
+def _rotation_angular_rates(phi_arr, theta_arr, omega):
+    """Compute rotation-induced angular rates at per-timestep target positions.
+
+    Args:
+        phi_arr: (T,) azimuthal angle of target at each frame
+        theta_arr: (T,) polar angle of target at each frame
+        omega: (T, 3) rotation [roll, pitch, yaw] in rad/s
+
+    Returns:
+        dphi_rot, dtheta_rot: (T,) rotation-induced angular rates
+    """
+    st, ct = np.sin(theta_arr), np.cos(theta_arr)
+    sp, cp = np.sin(phi_arr), np.cos(phi_arr)
+    x = np.column_stack([st * cp, st * sp, ct])
+    e_phi = np.column_stack([-sp, cp, np.zeros_like(phi_arr)])
+    e_theta = np.column_stack([ct * cp, ct * sp, -st])
+    u_rot = np.cross(x, omega)
+    dtheta_rot = np.sum(u_rot * e_theta, axis=1)
+    dphi_rot = np.sum(u_rot * e_phi, axis=1) / st
+    return dphi_rot, dtheta_rot
+
+
+def plot_translation_comparison(flow_trans, trig_right, trig_left,
+                                video_dt, clip_id, save_path):
+    """Compare flow-based and trigonometric translation estimates.
+
+    Creates 3 vertically stacked subplots (X, Y, Z), each showing
+    flow-based, right-eye trig, and left-eye trig translation traces.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    T = flow_trans.shape[0]
+    times = np.arange(T) * video_dt
+    dim_labels = ['X (forward)', 'Y (lateral)', 'Z (vertical)']
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    for i, (ax, label) in enumerate(zip(axes, dim_labels)):
+        ax.plot(times, flow_trans[:, i],
+                label='Flow', linewidth=1.5, color='#1f77b4')
+        ax.plot(times, trig_right[:, i],
+                label='Trig (right eye)', linewidth=1.5, linestyle='--', color='#ff7f0e')
+        ax.plot(times, trig_left[:, i],
+                label='Trig (left eye)', linewidth=1.5, linestyle=':', color='#2ca02c')
+        ax.set_ylabel(label)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel('Time (s)')
+    axes[0].set_title(f'Translation Estimates — Clip {clip_id}')
+    plt.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(save_path), dpi=150)
+    plt.close(fig)
+    print(f'  Saved translation comparison plot: {save_path}')
+
+
+def plot_translation_comparison_avg(flow_trans, trig_avg,
+                                    video_dt, clip_id, save_path):
+    """Compare flow-based translation with averaged trig estimate.
+
+    Creates 3 vertically stacked subplots (X, Y, Z), each showing
+    the flow-based and the left/right averaged trig translation traces.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    T = flow_trans.shape[0]
+    times = np.arange(T) * video_dt
+    dim_labels = ['X (forward)', 'Y (lateral)', 'Z (vertical)']
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    for i, (ax, label) in enumerate(zip(axes, dim_labels)):
+        ax.plot(times, flow_trans[:, i],
+                label='Flow', linewidth=1.5, color='#1f77b4')
+        ax.plot(times, trig_avg[:, i],
+                label='Trig (avg L+R)', linewidth=1.5, linestyle='--', color='#ff7f0e')
+        ax.set_ylabel(label)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel('Time (s)')
+    axes[0].set_title(f'Translation Estimates (averaged eyes) — Clip {clip_id}')
+    plt.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(save_path), dpi=150)
+    plt.close(fig)
+    print(f'  Saved averaged translation comparison plot: {save_path}')
+
+
+def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim, plot_dir=None):
     """Process a single drone clip with dual-tag observations.
 
     Loads left/right videos and the dual-tag pose CSV, converts tag pixel
@@ -141,6 +234,10 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
         pose['R_y_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
     L_y = uniform_filter1d(
         pose['L_y_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+    R_x = uniform_filter1d(
+        pose['R_x_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
+    L_x = uniform_filter1d(
+        pose['L_x_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
     dR_y = np.gradient(R_y, video_dt)
     dL_y = np.gradient(L_y, video_dt)
     T_y_known = torch.tensor(
@@ -167,9 +264,34 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
     translation[:, 0] *= -1
     translation[:, 2] *= -1
 
-    # extract_odometry works in rad/s internally; convert rotation to deg/s
-    # to match the random_pano convention used in training.
+    # extract_odometry returns rotation in rad/s; keep a copy for rotation subtraction
+    rotation_rad = rotation.numpy().copy()
+
+    # Convert rotation to deg/s for saving (matches random_pano training convention)
     rotation = rotation * (180.0 / np.pi)
+
+    # Subtract flow-estimated rotation from target angular trajectories so
+    # the trig estimates reflect translation-only motion.
+    dR_phi_rot, dR_theta_rot = _rotation_angular_rates(R_phi, R_theta, rotation_rad)
+    dL_phi_rot, dL_theta_rot = _rotation_angular_rates(L_phi, L_theta, rotation_rad)
+    R_theta_corr = R_theta - cumulative_trapezoid(dR_theta_rot, dx=video_dt, initial=0)
+    R_phi_corr = R_phi - cumulative_trapezoid(dR_phi_rot, dx=video_dt, initial=0)
+    L_theta_corr = L_theta - cumulative_trapezoid(dL_theta_rot, dx=video_dt, initial=0)
+    L_phi_corr = L_phi - cumulative_trapezoid(dL_phi_rot, dx=video_dt, initial=0)
+
+    # Trigonometric translation estimates from rotation-corrected angular positions.
+    # dZ = R_y * d(cot(pi - theta))/dt,  dX = R_x * d(cot(pi - |phi|))/dt
+    trig_dZ_R = np.abs(R_y) * np.gradient(1.0 / np.tan(np.pi - R_theta_corr), video_dt)
+    trig_dX_R = R_x * np.gradient(1.0 / np.tan(np.pi - np.abs(R_phi_corr)), video_dt)
+    trig_dZ_L = np.abs(L_y) * np.gradient(1.0 / np.tan(np.pi - L_theta_corr), video_dt)
+    trig_dX_L = L_x * np.gradient(1.0 / np.tan(np.pi - np.abs(L_phi_corr)), video_dt)
+    trig_trans_right = np.column_stack([trig_dX_R, dR_y, trig_dZ_R])
+    trig_trans_left = np.column_stack([trig_dX_L, dL_y, trig_dZ_L])
+
+    # Gaussian smooth trig estimates (std=0.15s, ±2 std window)
+    gauss_sigma = 0.15 / video_dt
+    trig_trans_right = gaussian_filter1d(trig_trans_right, sigma=gauss_sigma, axis=0, truncate=2.0)
+    trig_trans_left = gaussian_filter1d(trig_trans_left, sigma=gauss_sigma, axis=0, truncate=2.0)
 
     # Trim leading/trailing frames where derivatives are near-zero
     # (tag not yet detected or lost at clip boundaries)
@@ -183,6 +305,21 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
         right = right[first:last + 1]
         rotation = rotation[first:last + 1]
         translation = translation[first:last + 1]
+        trig_trans_right = trig_trans_right[first:last + 1]
+        trig_trans_left = trig_trans_left[first:last + 1]
+
+    trig_translation = torch.from_numpy(
+        (0.5 * (trig_trans_right + trig_trans_left)).astype(np.float32))
+
+    if plot_dir is not None:
+        plot_translation_comparison(
+            translation.numpy(), trig_trans_right, trig_trans_left,
+            video_dt, clip_id, Path(plot_dir) / f'translation_comparison_{clip_id}.png',
+        )
+        plot_translation_comparison_avg(
+            translation.numpy(), trig_translation.numpy(),
+            video_dt, clip_id, Path(plot_dir) / f'translation_comparison_avg_{clip_id}.png',
+        )
 
     print(f'  Clip {clip_id}: {len(left)} frames ({len(left) * video_dt:.1f}s) '
           f'(trimmed from {min_len})')
@@ -192,6 +329,7 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim):
         'right': torch.from_numpy(right),
         'rotation': rotation,
         'translation': translation,
+        'trig_translation': trig_translation,
         'video_dt': video_dt,
         'clip_id': clip_id,
     }
@@ -219,6 +357,7 @@ def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
         'left': torch.from_numpy(sampled_left),
         'rotation': clip['rotation'],
         'translation': clip['translation'],
+        'trig_translation': clip['trig_translation'],
         'video_dt': clip['video_dt'],
         'clip_id': clip['clip_id'],
         'in_fov_right': torch.from_numpy(in_fov_right.copy()),
@@ -499,7 +638,8 @@ def main():
     raw_clips = []
     for clip_id in clip_ids:
         print(f'Loading clip {clip_id}...')
-        clip = process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim)
+        clip = process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim,
+                            plot_dir='figures')
         if clip is not None:
             raw_clips.append(clip)
 

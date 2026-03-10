@@ -44,6 +44,8 @@ def main() -> None:
                         help="Maximum number of frames to render")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: <model_folder>/drone_flow_movie)")
+    parser.add_argument("--translation", action="store_true",
+                        help="Plot rotation-adjusted (translation-only) flow instead of full flow")
     args = parser.parse_args()
 
     model_file, model_folder = resolve_model_paths(Path(args.model_folder))
@@ -106,6 +108,12 @@ def main() -> None:
         pred_rot_np = pred_rot[0].cpu().numpy()
         pred_trans_np = pred_trans[0].cpu().numpy()
 
+        if args.translation:
+            pred_flow_right, pred_flow_left = _subtract_rotation_flow(
+                pred_flow_right, pred_flow_left,
+                pred_rot_np, model.column_phi_theta,
+            )
+
         true_rot_rate = clip["rotation_rate"][:num_frames]
         true_trans_rate = clip["translation_rate"][:num_frames]
 
@@ -131,6 +139,7 @@ def main() -> None:
         step = max(1, int(round(video_dt / model_dt)))
         out_path = output_dir / f"drone_model_clip_{clip_idx}.mp4"
 
+        flow_label = "translation flow" if args.translation else "predicted flow"
         print(f"  Creating movie -> {out_path}")
         _make_movie(
             stimulus_left=clip["left"][:num_frames],
@@ -147,7 +156,55 @@ def main() -> None:
             frame_rate=fps,
             step=step,
             model_dt=model_dt,
+            flow_label=flow_label,
         )
+
+
+def _subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
+    """Subtract rotation-induced flow, returning translation-only angular flow.
+
+    Uses the same decomposition as NeuralModel.estimate_ego_motion_from_flow:
+        u_rot = x × omega
+        d_right_rot = -(u_rot · e_phi),  d_up_rot = -(u_rot · e_theta)
+
+    Args:
+        pred_flow_right: (T, N, 2) predicted angular flow for right eye
+        pred_flow_left:  (T, N, 2) predicted angular flow for left eye
+        omega: (T, 3) estimated rotation [roll, pitch, yaw]
+        column_phi_theta: (N, 2) column positions [phi, theta] for the right eye
+
+    Returns:
+        trans_flow_right, trans_flow_left: same shapes, rotation subtracted
+    """
+    phi_r = column_phi_theta[:, 0]
+    theta = column_phi_theta[:, 1]
+    phi_l = -phi_r
+
+    def _rotation_angular_flow(phi, theta, omega):
+        x = np.stack([np.sin(theta) * np.cos(phi),
+                      np.sin(theta) * np.sin(phi),
+                      np.cos(theta)], axis=-1)
+        e_phi = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=-1)
+        e_theta = np.stack([np.cos(theta) * np.cos(phi),
+                            np.cos(theta) * np.sin(phi),
+                            -np.sin(theta)], axis=-1)
+        u_rot = np.cross(x[None, :, :], omega[:, None, :])
+        d_right_rot = -np.einsum('tnj,nj->tn', u_rot, e_phi)
+        d_up_rot = -np.einsum('tnj,nj->tn', u_rot, e_theta)
+        return d_right_rot, d_up_rot
+
+    dr_r, du_r = _rotation_angular_flow(phi_r, theta, omega)
+    dr_l, du_l = _rotation_angular_flow(phi_l, theta, omega)
+
+    out_right = pred_flow_right.copy()
+    out_right[:, :, 0] -= dr_r
+    out_right[:, :, 1] -= du_r
+
+    out_left = pred_flow_left.copy()
+    out_left[:, :, 0] -= dr_l
+    out_left[:, :, 1] -= du_l
+
+    return out_right, out_left
 
 
 def _make_movie(
@@ -159,6 +216,7 @@ def _make_movie(
     in_fov_left, in_fov_right,
     output_path, frame_rate, step, model_dt,
     trail_sec=5.0,
+    flow_label="predicted flow",
 ):
     import matplotlib
     matplotlib.use("Agg")
@@ -246,8 +304,8 @@ def _make_movie(
     )
     q_left = ax_flow_l.quiver(cell_x, cell_z, flow_vx_l[0], flow_vz_l[0], mag_l[0], **quiver_kw)
     q_right = ax_flow_r.quiver(cell_x, cell_z, flow_vx_r[0], flow_vz_r[0], mag_r[0], **quiver_kw)
-    ax_flow_l.set_title("Left Eye (predicted flow)")
-    ax_flow_r.set_title("Right Eye (predicted flow)")
+    ax_flow_l.set_title(f"Left Eye ({flow_label})")
+    ax_flow_r.set_title(f"Right Eye ({flow_label})")
 
     # Row 2: rotation and translation (true vs predicted)
     rot_labels = ["roll", "pitch", "yaw"]
