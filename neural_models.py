@@ -574,16 +574,6 @@ class NeuralModel(torch.nn.Module, ABC):
         if self.use_input_conv:
             self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
-        if self.column_p_q is not None:
-            conv_size = 7
-            self.ego_motion_conv = NeuralModelConv(
-                in_features=1, out_features=1, conv_size=conv_size,
-                column_p_q=self.column_p_q, device=self.device, dtype=self.dtype,
-                positive_weights=True, use_bias=False,
-            )
-            pq_offsets_ego = NeuralModelConv.hex_grid_pq_offsets(conv_size)
-            with torch.no_grad():
-                self.ego_motion_conv.weight.fill_(0.0)
 
     @property
     def has_decoder(self):
@@ -683,6 +673,7 @@ class NeuralModel(torch.nn.Module, ABC):
             for i, (dp, dq) in enumerate(pq_offsets_pre):
                 if dp == 0 and dq == 0:
                     self.input_pre_conv.weight[0, i, 0] = 0.0
+
 
         self.input_spatial_conv = NeuralModelConv(
             in_features=1, out_features=1, conv_size=conv_size_x,
@@ -1157,14 +1148,14 @@ class NeuralModel(torch.nn.Module, ABC):
         d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
 
         rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
-            phi_valid, theta_valid, d_right, d_up, valid_mask=valid_mask
+            phi_valid, theta_valid, d_right, d_up
         )
         rotations = rot_flat.reshape(S, T_len, 3)
         translations = trans_flat.reshape(S, T_len, 3)
 
         return rotations, translations, right_result, left_result
 
-    def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up, valid_mask=None):
+    def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up):
         """
         Estimate ego-motion (rotation and translation) from optic flow.
         
@@ -1185,12 +1176,6 @@ class NeuralModel(torch.nn.Module, ABC):
             theta: (N,) polar angles of viewing directions
             d_right: (N,) or (T, N) angular flow in phi direction (positive = rightward on retina)
             d_up: (N,) or (T, N) angular flow in theta direction (positive = upward on retina)
-            valid_mask: Optional (total_columns,) boolean mask mapping valid
-                columns back to the full column grid. When provided and the model
-                has an ``ego_motion_conv``, the translational flow is spatially
-                convolved (per eye) before computing RMS. The translation direction
-                itself is always estimated from the unfiltered flow.
-        
         Returns:
             omega_star: (3,) or (T, 3) estimated rotation rate [roll, pitch, yaw]
                 in physical observer convention (positive omega_z = leftward rotation)
@@ -1260,25 +1245,7 @@ class NeuralModel(torch.nn.Module, ABC):
         v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
 
         # === Measure translation signal strength (per time step) ===
-        # Spatially convolve the translational flow (per eye) before computing
-        # RMS for a more robust magnitude estimate.
-        nc = self.num_columns
-        total_cols = valid_mask.shape[0]
-        num_eyes = total_cols // nc
-
-        v_full = torch.zeros(T, total_cols, 3, device=v.device, dtype=v.dtype)
-        v_full[:, valid_mask, :] = v
-
-        v_filtered = torch.zeros_like(v_full)
-        for eye_idx in range(num_eyes):
-            s, e = eye_idx * nc, (eye_idx + 1) * nc
-            for comp in range(3):
-                v_filtered[:, s:e, comp] = self.ego_motion_conv(
-                    v_full[:, s:e, comp]
-                )
-
-        v_for_rms = v_filtered[:, valid_mask, :]
-        translation_magnitude = torch.sqrt((v_for_rms**2).mean(dim=(-2, -1)))
+        translation_magnitude = torch.sqrt((v**2).mean(dim=(-2, -1)))
 
         # === Projection matrices Π_i = I - x_i x_iᵀ — shared across time ===
         outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
