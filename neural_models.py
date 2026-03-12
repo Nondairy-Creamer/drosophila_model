@@ -1127,7 +1127,7 @@ class NeuralModel(torch.nn.Module, ABC):
             print(f"Model git commit:   {model_commit}")
 
         if current_commit is not None:
-            print(f"Current git commit: {current_commit}")
+            print(f"Local git commit: {current_commit}")
         else:
             print(f"local commit hash not detected")
 
