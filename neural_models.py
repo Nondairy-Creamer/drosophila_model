@@ -494,7 +494,7 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 decoder_type='none', use_input_conv=True, conv_size_x=5, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
+                 decoder_type='none', use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()

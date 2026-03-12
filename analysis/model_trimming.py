@@ -7,6 +7,7 @@ Neurons are ranked by importance. We binary search over the count of least-impor
 neurons to silence, finding the maximum number removable before loss exceeds a threshold.
 """
 import sys
+import argparse
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -19,8 +20,12 @@ import data_utilities as du
 import model_utilities as mu
 from loss_functions import mse_loss
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('model_folder', type=str, help='Path to the model folder')
+args = parser.parse_args()
+
 # --- Configuration ---
-model_path = 'models/20260217_172210_gpu0_run0/'
+model_path = args.model_folder
 loss_threshold = 1.10  # Stop when loss increases to 110% of starting value (10% worse)
 local_config = du.load_config()
 
@@ -34,8 +39,18 @@ dtype = model.dtype
 # --- Load training data ---
 print("Loading training data...")
 model_data_path = Path(model_path)
-stimulus = torch.load(model_data_path / 'cell_inputs.pt', map_location=device).to(dtype=dtype)
-target = torch.load(model_data_path / 'target.pt', map_location=device).to(device=device, dtype=dtype)
+cell_inputs_data = torch.load(model_data_path / 'cell_inputs.pt', map_location=device)
+if isinstance(cell_inputs_data, dict):
+    stimulus = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
+else:
+    stimulus = cell_inputs_data.to(device=device, dtype=dtype)
+
+target_loaded = torch.load(model_data_path / 'target.pt', map_location=device)
+if isinstance(target_loaded, dict):
+    target = {k: (v.to(device=device, dtype=dtype) if torch.is_tensor(v) else v)
+              for k, v in target_loaded.items()}
+else:
+    target = target_loaded.to(device=device, dtype=dtype)
 
 # --- Calculate importance score for each cell type ---
 print("Calculating cell type importance scores...")
@@ -67,9 +82,11 @@ print(f"Importance range: {importance.min():.6f} to {importance.max():.6f}")
 print("\nCalculating initial loss...")
 input_neurons = ['L1', 'L2', 'L3']
 
+target_tensor = target['optic_flow'] if isinstance(target, dict) else target
+
 with torch.no_grad():
     pred = model.predict(stimulus, input_neurons=input_neurons)['outputs']
-    initial_loss = mse_loss(target, pred['decoder']).item()
+    initial_loss = mse_loss(target_tensor, pred['decoder']).item()
 
 print(f"Initial loss: {initial_loss:.6f}")
 print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
@@ -89,7 +106,7 @@ def evaluate_silencing(count):
     model_copy.silence_neurons(silenced, invert_silencing=False)
     with torch.no_grad():
         pred = model_copy.predict(stimulus, input_neurons=input_neurons)['outputs']
-        loss = mse_loss(target, pred['decoder']).item()
+        loss = mse_loss(target_tensor, pred['decoder']).item()
     return loss / initial_loss
 
 

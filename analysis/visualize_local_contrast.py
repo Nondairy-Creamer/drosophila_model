@@ -90,15 +90,17 @@ def main() -> None:
             local_contrast_t = -centered / torch.sqrt(local_var + 1e-12)
         local_contrast = local_contrast_t[0].cpu().numpy()
 
-    # --- Crop panorama to the eye's field of view ---
+    # --- Crop raw panorama to the eye's field of view ---
+    raw_pano = raw_panos[stim_idx]
+    raw_height, raw_width = raw_pano.shape
     margin_rad = 5 * np.pi / 180
     phi_lo = column_phi.min() - margin_rad
     phi_hi = column_phi.max() + margin_rad
     theta_lo = column_theta.min() - margin_rad
     theta_hi = column_theta.max() + margin_rad
 
-    theta_axis = np.linspace(pano_y_lim[0], pano_y_lim[1], pano_height)
-    phi_axis = np.linspace(pano_x_lim[0], pano_x_lim[1], pano_width)
+    theta_axis = np.linspace(pano_y_lim[0], pano_y_lim[1], raw_height)
+    phi_axis = np.linspace(pano_x_lim[0], pano_x_lim[1], raw_width)
 
     row_mask = (theta_axis >= theta_lo) & (theta_axis <= theta_hi)
     col_mask = (phi_axis >= phi_lo) & (phi_axis <= phi_hi)
@@ -106,7 +108,7 @@ def main() -> None:
     col_idx = np.where(col_mask)[0]
 
     if len(row_idx) == 0 or len(col_idx) == 0:
-        pano_cropped = pano_filtered
+        pano_cropped = raw_pano
         elev_top = (90 - pano_y_lim[0] * 180 / np.pi)
         elev_bot = (90 - pano_y_lim[1] * 180 / np.pi)
         phi_left = phi_axis[0] * 180 / np.pi
@@ -114,7 +116,7 @@ def main() -> None:
     else:
         r0, r1 = row_idx[0], row_idx[-1] + 1
         c0, c1 = col_idx[0], col_idx[-1] + 1
-        pano_cropped = pano_filtered[r0:r1, c0:c1]
+        pano_cropped = raw_pano[r0:r1, c0:c1]
         elev_top = 90 - theta_axis[r0] * 180 / np.pi
         elev_bot = 90 - theta_axis[r1 - 1] * 180 / np.pi
         phi_left = phi_axis[c0] * 180 / np.pi
