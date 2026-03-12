@@ -643,7 +643,7 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return root_ids, cell_types, neurotransmitters, column_indices, synapse_counts_coo
 
-    def _initialize_input_conv(self, conv_size_x=5, input_pre_conv_size=5, num_temporal_modes=4):
+    def _initialize_input_conv(self, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4):
         """Set up input convolution using a ``NeuralModelConv`` for the spatial
         part and a ``TemporalLRU`` for the temporal part.
 
@@ -1111,7 +1111,10 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return model
 
-    def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs, initial_state_right=None, initial_state_left=None, oob_columns=None):
+    def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs,
+                                       initial_state_right=None, initial_state_left=None,
+                                       initial_filter_state_right=None, initial_filter_state_left=None,
+                                       oob_columns=None):
         """Two-eye ego-motion pipeline.
 
         Returns:
@@ -1123,6 +1126,8 @@ class NeuralModel(torch.nn.Module, ABC):
         right_result, left_result = self.predict_two_eyes(
             right_eye_inputs, left_eye_inputs,
             init_state_right=initial_state_right, init_state_left=initial_state_left,
+            init_filter_state_right=initial_filter_state_right,
+            init_filter_state_left=initial_filter_state_left,
         )
 
         optic_flow_right = right_result['outputs']['decoder']
