@@ -1,4 +1,6 @@
 from logging import warning
+import subprocess
+import warnings
 import torch
 import numpy as np
 from pathlib import Path
@@ -1108,6 +1110,26 @@ class NeuralModel(torch.nn.Module, ABC):
             for param in model.parameters():
                 param.requires_grad_(False)
             model.eval()
+
+        # Verify that the current codebase matches the commit the model was trained on.
+        # A mismatch may mean the model architecture or weights are incompatible with
+        # the current code, which could silently produce incorrect results.
+        model_commit = getattr(model, 'git_commit', None)
+        try:
+            current_commit = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], text=True,
+                cwd=Path(__file__).parent, stderr=subprocess.DEVNULL,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            current_commit = None
+
+        if model_commit is not None:
+            print(f"Model git commit:   {model_commit}")
+
+        if current_commit is not None:
+            print(f"Current git commit: {current_commit}")
+        else:
+            print(f"local commit hash not detected")
 
         return model
 
