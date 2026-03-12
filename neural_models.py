@@ -333,6 +333,22 @@ class TemporalLRU(torch.nn.Module):
         h[0] = h[0] + self.log_d.exp()
         return h
 
+    def impulse_response_components(self, num_t=20):
+        """Per-mode impulse response components and feedthrough.
+
+        Returns:
+            modes: ``(num_modes, num_t)`` real tensor — each mode's
+                contribution ``Re(c_k * b_k * a_k^n)``.
+            feedthrough: scalar ``d = exp(log_d)``.
+        """
+        a = self.poles()
+        cb = torch.complex(self.c_re, self.c_im) * torch.complex(self.b_re, self.b_im)
+        n = torch.arange(num_t, device=a.device, dtype=a.real.dtype)
+        a_n = a[:, None] ** n[None, :]
+        modes = (cb[:, None] * a_n).real
+        feedthrough = self.log_d.exp()
+        return modes, feedthrough
+
 
 class MotionDecoder(torch.nn.Module):
     """N-layer hex-grid convolutional decoder: firing rates -> optic flow.
@@ -1114,7 +1130,7 @@ class NeuralModel(torch.nn.Module, ABC):
         # Verify that the current codebase matches the commit the model was trained on.
         # A mismatch may mean the model architecture or weights are incompatible with
         # the current code, which could silently produce incorrect results.
-        model_commit = getattr(model, 'git_commit', None)
+        model_commit = getattr(model, 'commit_hash', None)
         try:
             current_commit = subprocess.check_output(
                 ['git', 'rev-parse', 'HEAD'], text=True,
@@ -1124,7 +1140,7 @@ class NeuralModel(torch.nn.Module, ABC):
             current_commit = None
 
         if model_commit is not None:
-            print(f"Model git commit:   {model_commit}")
+            print(f"Model git commit: {model_commit}")
 
         if current_commit is not None:
             print(f"Local git commit: {current_commit}")

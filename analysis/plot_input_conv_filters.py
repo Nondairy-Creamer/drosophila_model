@@ -2,8 +2,8 @@
 Plot input convolution filter parameters.
 
 Generates:
-  - input_conv_xy (spatial kernel scatter on hex grid)
-  - input_conv_t (temporal LRU impulse response)
+  - input_conv_filters.png  (spatial kernels on hex grid)
+  - input_conv_lru.png      (LRU mode components + full impulse response)
 """
 import argparse
 import sys
@@ -66,8 +66,10 @@ def main() -> None:
     conv_xy = raw_weight.cpu().numpy()
 
     has_pre_conv = hasattr(model, 'input_pre_conv')
-    num_plots = 2 + int(has_pre_conv)
+    num_plots = 1 + int(has_pre_conv)
     fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 4), dpi=150)
+    if num_plots == 1:
+        axes = [axes]
     ax_idx = 0
 
     if has_pre_conv:
@@ -129,23 +131,49 @@ def main() -> None:
     axes[ax_idx].set_xlim(x_min - pad, x_max + pad)
     axes[ax_idx].set_ylim(y_min - pad, y_max + pad)
     fig.colorbar(scatter, ax=axes[ax_idx], shrink=0.8, pad=0.02)
-    ax_idx += 1
-
-    h, t = compute_lru_impulse_response(model.temporal_lru, num_steps=args.impulse_steps, dt=model.dt)
-    axes[ax_idx].plot(t, h)
-    axes[ax_idx].set_title("temporal LRU impulse response")
-    axes[ax_idx].set_xlabel("time (s)")
-    axes[ax_idx].set_ylabel("amplitude")
-    axes[ax_idx].axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
-    ax_idx += 1
 
     fig.tight_layout()
 
-    output_path = Path(args.output_path) if args.output_path else resolve_model_folder(model_path) / "figures" / "input_conv_filters.png"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path)
+    figures_dir = Path(args.output_path).parent if args.output_path else resolve_model_folder(model_path) / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    spatial_path = figures_dir / "input_conv_filters.png"
+    fig.savefig(spatial_path)
     plt.close(fig)
-    print(f"Saved input convolution filters to {output_path}")
+    print(f"Saved spatial filters to {spatial_path}")
+
+    # --- LRU figure: mode components (left) + full impulse response (right) ---
+    num_steps = args.impulse_steps
+    dt = model.dt
+    t = np.arange(num_steps) * dt
+
+    with torch.no_grad():
+        modes, feedthrough = model.temporal_lru.impulse_response_components(num_t=num_steps)
+        modes = modes.cpu().numpy()
+        feedthrough_val = feedthrough.item()
+        h, _ = compute_lru_impulse_response(model.temporal_lru, num_steps=num_steps, dt=dt)
+
+    fig_lru, (ax_comp, ax_full) = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
+
+    for k in range(modes.shape[0]):
+        ax_comp.plot(t, modes[k], label=f"mode {k}")
+    ax_comp.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax_comp.set_title("LRU mode components")
+    ax_comp.set_xlabel("time (s)")
+    ax_comp.set_ylabel("amplitude")
+    ax_comp.legend(fontsize="small")
+
+    ax_full.plot(t, h)
+    ax_full.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax_full.set_title(f"full impulse response (d={feedthrough_val:.3g})")
+    ax_full.set_xlabel("time (s)")
+    ax_full.set_ylabel("amplitude")
+
+    fig_lru.tight_layout()
+    lru_path = figures_dir / "input_conv_lru.png"
+    fig_lru.savefig(lru_path)
+    plt.close(fig_lru)
+    print(f"Saved LRU impulse response to {lru_path}")
 
 
 if __name__ == "__main__":
