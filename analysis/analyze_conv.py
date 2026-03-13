@@ -26,7 +26,7 @@ import model_utilities as mu
 import neural_models as nm
 
 
-def _load_model(config: dict, device: str) -> nm.CurrentModel:
+def _load_model(config: dict, device: str) -> nm.NeuralModel:
     connectome_folder = Path(config['data']['connectome_folder'])
 
     cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
@@ -40,7 +40,10 @@ def _load_model(config: dict, device: str) -> nm.CurrentModel:
 
     commit_hash = mu.get_git_commit_hash()
 
-    model = nm.CurrentModel(
+    model_type = config['model'].get('model_type')
+    ModelClass = getattr(nm, model_type)
+
+    model = ModelClass(
         synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),
         root_ids=cell_info_df['root_id'].to_numpy(),
         cell_types=cell_info_df['type'].to_numpy(),
@@ -50,9 +53,10 @@ def _load_model(config: dict, device: str) -> nm.CurrentModel:
         column_p_q=column_info_df[['p', 'q']].to_numpy(),
         nonlinearity=config['model']['nonlinearity'],
         count_threshold=config['model']['synapse_count_threshold'],
+        use_layer_norm=config['model']['use_layer_norm'],
         device=device,
         dtype=config['model']['dtype'],
-        decoder_type='conv_2',
+        decoder_type=config['model']['decoder_type'],
         use_input_conv=config['model']['use_input_conv'],
         dt=config['model']['dt'],
         seed=None,
@@ -73,7 +77,7 @@ def _choose_center_indices(column_phi_theta: np.ndarray) -> list[int]:
     return rng.choice(num_columns, size=num_select, replace=False).tolist()
 
 
-def _plot_columns(model: nm.CurrentModel, center_indices: list[int], output_path: Path) -> None:
+def _plot_columns(model: nm.NeuralModel, center_indices: list[int], output_path: Path) -> None:
     phi = model.column_phi_theta[:, 0]
     theta = model.column_phi_theta[:, 1]
 
@@ -124,7 +128,7 @@ def _pq_to_xy(pq: np.ndarray) -> np.ndarray:
     return (basis @ pq.T).T
 
 
-def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
+def _plot_conv_grids(model: nm.NeuralModel, output_path: Path) -> None:
     decoder_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.decoder.conv_sizes[0])
     grids = [("Decoder grid", decoder_offsets)]
     if model.use_input_conv:
@@ -158,7 +162,7 @@ def _plot_conv_grids(model: nm.CurrentModel, output_path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_input_conv_columns(model: nm.CurrentModel, center_indices: list[int], output_path: Path) -> None:
+def _plot_input_conv_columns(model: nm.NeuralModel, center_indices: list[int], output_path: Path) -> None:
     phi = model.column_phi_theta[:, 0]
     theta = model.column_phi_theta[:, 1]
 
@@ -242,6 +246,11 @@ def main() -> None:
     args = parser.parse_args()
 
     config = du.load_config(Path(args.config))
+
+    if config['model']['decoder_type'] == 'none':
+        print("Error: decoder_type is 'none' in config. Nothing to analyze.")
+        sys.exit(1)
+
     model = _load_model(config, args.device)
 
     if args.center_indices is None:

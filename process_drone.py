@@ -77,6 +77,64 @@ def _rotation_angular_rates(phi_arr, theta_arr, omega):
     return dphi_rot, dtheta_rot
 
 
+def plot_translation(flow_trans, saved_trans, video_dt, clip_id, save_path):
+    """Plot flow-based translation with the final saved (trig avg) overlay."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    T = flow_trans.shape[0]
+    times = np.arange(T) * video_dt
+    dim_labels = ['X (forward)', 'Y (lateral)', 'Z (vertical)']
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    for i, (ax, label) in enumerate(zip(axes, dim_labels)):
+        ax.plot(times, flow_trans[:, i],
+                label='Flow', linewidth=1.5, color='#1f77b4')
+        ax.plot(times, saved_trans[:, i],
+                label='Saved (trig avg)', linewidth=1.5, linestyle='--', color='#ff7f0e')
+        ax.set_ylabel(label)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel('Time (s)')
+    axes[0].set_title(f'Translation — Clip {clip_id}')
+    plt.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(save_path), dpi=150)
+    plt.close(fig)
+    print(f'  Saved translation plot: {save_path}')
+
+
+def plot_rotation(tag_rot, saved_rot, video_dt, clip_id, save_path):
+    """Plot tag-based rotation rates with the saved (flow-estimated) overlay."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    T = tag_rot.shape[0]
+    times = np.arange(T) * video_dt
+    dim_labels = ['Roll', 'Pitch', 'Yaw']
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    for i, (ax, label) in enumerate(zip(axes, dim_labels)):
+        ax.plot(times, tag_rot[:, i],
+                label='Tag (avg L+R)', linewidth=1.5, color='#1f77b4')
+        ax.plot(times, saved_rot[:, i],
+                label='Saved (flow)', linewidth=1.5, linestyle='--', color='#ff7f0e')
+        ax.set_ylabel(f'{label} (deg/s)')
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel('Time (s)')
+    axes[0].set_title(f'Rotation — Clip {clip_id}')
+    plt.tight_layout()
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(str(save_path), dpi=150)
+    plt.close(fig)
+    print(f'  Saved rotation plot: {save_path}')
+
+
 def plot_translation_comparison(flow_trans, trig_right, trig_left,
                                 video_dt, clip_id, save_path):
     """Compare flow-based and trigonometric translation estimates.
@@ -218,6 +276,7 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim, plot
               f'dL std={dL.std():.6f}  dR std={dR.std():.6f}')
 
     print('    Rotation correlations (dL vs dR):')
+    tag_rot_cols = []
     for dim in ('roll', 'pitch', 'yaw'):
         R_val = uniform_filter1d(
             pose[f'R_{dim}_used_deg'].values.astype(np.float64), size=BOX_FILTER_SIZE)
@@ -225,9 +284,11 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim, plot
             pose[f'L_{dim}_used_deg'].values.astype(np.float64), size=BOX_FILTER_SIZE)
         dR = np.gradient(R_val, video_dt)
         dL = np.gradient(L_val, video_dt)
+        tag_rot_cols.append(0.5 * (dR + dL))
         corr = np.corrcoef(dL, dR)[0, 1]
         print(f'      {dim}: corr={corr:.4f}  '
               f'dL std={dL.std():.6f}  dR std={dR.std():.6f}')
+    tag_rotation = np.column_stack(tag_rot_cols)
 
     # Y translation rate: average left and right y derivatives
     R_y = uniform_filter1d(
@@ -307,11 +368,22 @@ def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim, plot
         translation = translation[first:last + 1]
         trig_trans_right = trig_trans_right[first:last + 1]
         trig_trans_left = trig_trans_left[first:last + 1]
+        tag_rotation = tag_rotation[first:last + 1]
 
     trig_translation = torch.from_numpy(
         (0.5 * (trig_trans_right + trig_trans_left)).astype(np.float32))
 
     if plot_dir is not None:
+        plot_translation(
+            translation.numpy(), trig_translation.numpy(),
+            video_dt, clip_id,
+            Path(plot_dir) / f'translation_{clip_id}.png',
+        )
+        plot_rotation(
+            tag_rotation, rotation.numpy(),
+            video_dt, clip_id,
+            Path(plot_dir) / f'rotation_{clip_id}.png',
+        )
         plot_translation_comparison(
             translation.numpy(), trig_trans_right, trig_trans_left,
             video_dt, clip_id, Path(plot_dir) / f'translation_comparison_{clip_id}.png',

@@ -257,7 +257,7 @@ def run_model_on_stimuli(
             optic_flow = optic_flow[:max_stimuli]
 
         pred_flow = predict_optic_flow(model, stimulus)
-        responses[spec["name"]] = {
+        entry: dict[str, torch.Tensor] = {
             "stimulus": stimulus,
             "optic_flow": optic_flow,
             "pred_flow": pred_flow,
@@ -266,6 +266,23 @@ def run_model_on_stimuli(
             ),
             "dt": torch.tensor(model.dt, device=model.device, dtype=model.dtype),
         }
+
+        if model.use_input_conv:
+            with torch.no_grad():
+                stim_dev = stimulus.to(device=model.device, dtype=model.dtype)
+                filtered_frames = []
+                for si in range(stim_dev.shape[0]):
+                    filter_state = None
+                    for t in range(stim_dev.shape[1]):
+                        y_t, filter_state = model.apply_input_conv(
+                            stim_dev[si : si + 1, t, :], filter_state
+                        )
+                        filtered_frames.append(y_t)
+                entry["filtered_stimulus"] = torch.stack(filtered_frames).reshape(
+                    stim_dev.shape
+                ).cpu()
+
+        responses[spec["name"]] = entry
 
     return responses
 
