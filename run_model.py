@@ -123,7 +123,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
             target_model.save(model_save_folder / 'target_model.pt')
 
-        elif config['model']['decoder_type'] != 'none':
+        elif config['model']['decoder_type'] is not None and config['model']['decoder_type'] != 'none':
             target = optic_flow
         else:
             target = {}

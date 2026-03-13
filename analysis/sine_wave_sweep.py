@@ -132,17 +132,19 @@ def main():
     with torch.no_grad():
         pred = model.predict(all_stim_tensor, input_neurons=["L1", "L2", "L3"],
                              output_neurons=output_neurons)['outputs']
+
+    # --- extract mean decoder responses (if model has a decoder) ---
+    results = None
+    if model.has_decoder:
         decoder_out = pred["decoder"]  # (N, time, columns, 2)
+        decoder_stim = decoder_out[:, pre_stim_steps:, :, :]  # (N, stim_steps, columns, 2)
+        mean_responses = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()  # (N, 2)
 
-    # --- extract mean responses ---
-    # Mean decoder output over the stimulus period (exclude warm-up) and over columns.
-    decoder_stim = decoder_out[:, pre_stim_steps:, :, :]  # (N, stim_steps, columns, 2)
-    mean_responses = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()  # (N, 2)
-
-    # Decoder results: results[direction][wavelength] = (num_sweep, 2)
-    results = {d: {w: np.zeros((num_sweep, 2)) for w in wavelengths} for d in directions}
-    for i, (direction, wavelength, si) in enumerate(index_map):
-        results[direction][wavelength][si, :] = mean_responses[i]
+        results = {d: {w: np.zeros((num_sweep, 2)) for w in wavelengths} for d in directions}
+        for i, (direction, wavelength, si) in enumerate(index_map):
+            results[direction][wavelength][si, :] = mean_responses[i]
+    else:
+        print("Model has no decoder — skipping decoder figure.")
 
     # T4/T5 results: cell_results[cell_type][direction][wavelength] = (num_sweep,)
     cell_results = {}
@@ -180,23 +182,24 @@ def main():
         ax.set_xticklabels([str(v) for v in sweep_values])
 
     # --- Decoder figure (all wavelengths together) ---
-    fig = plt.figure(figsize=(12, 10))
-    direction_axes = _make_direction_axes(fig)
+    if results is not None:
+        fig = plt.figure(figsize=(12, 10))
+        direction_axes = _make_direction_axes(fig)
 
-    for direction, ax in direction_axes.items():
-        for wavelength in wavelengths:
-            data = results[direction][wavelength]
-            ax.plot(sweep_values, data[:, 0], "o-", label=f"LR (λ={wavelength}°)")
-            ax.plot(sweep_values, data[:, 1], "s--", label=f"UD (λ={wavelength}°)")
-        _format_ax(ax, f"Direction: {direction}", "Mean decoder response")
+        for direction, ax in direction_axes.items():
+            for wavelength in wavelengths:
+                data = results[direction][wavelength]
+                ax.plot(sweep_values, data[:, 0], "o-", label=f"LR (λ={wavelength}°)")
+                ax.plot(sweep_values, data[:, 1], "s--", label=f"UD (λ={wavelength}°)")
+            _format_ax(ax, f"Direction: {direction}", "Mean decoder response")
 
-    fig.suptitle(f"Decoder — Sine Wave {title_label} Sweep", fontsize=14)
-    plt.tight_layout()
+        fig.suptitle(f"Decoder — Sine Wave {title_label} Sweep", fontsize=14)
+        plt.tight_layout()
 
-    save_path = fig_folder / "sine_wave_velocity_sweep.png"
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"Figure saved to {save_path}")
+        save_path = fig_folder / "sine_wave_velocity_sweep.png"
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+        print(f"Figure saved to {save_path}")
 
     # --- T4 and T5 figures (one per group per wavelength) ---
     # Each subplot is a cell type (a–d); lines are directions.

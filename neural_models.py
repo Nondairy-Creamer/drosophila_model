@@ -596,7 +596,7 @@ class NeuralModel(torch.nn.Module, ABC):
     @property
     def has_decoder(self):
         """Whether the model has a trained decoder (any type other than 'none')."""
-        return self.decoder_type != 'none'
+        return self.decoder_type is not None and self.decoder_type != 'none'
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""

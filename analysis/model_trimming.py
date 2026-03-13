@@ -84,9 +84,23 @@ input_neurons = ['L1', 'L2', 'L3']
 
 target_tensor = target['optic_flow'] if isinstance(target, dict) else target
 
+fit_odometry = target_tensor.shape[2] == 2 * model.num_columns
+
+
+def predict_decoder(mdl, stim):
+    """Return concatenated decoder output, handling one-eye or two-eye models."""
+    if fit_odometry:
+        N = stim.shape[2] // 2
+        right_res, left_res = mdl.predict_two_eyes(
+            stim[:, :, :N], stim[:, :, N:], input_neurons=input_neurons)
+        return torch.cat([right_res['outputs']['decoder'],
+                          left_res['outputs']['decoder']], dim=2)
+    return mdl.predict(stim, input_neurons=input_neurons)['outputs']['decoder']
+
+
 with torch.no_grad():
-    pred = model.predict(stimulus, input_neurons=input_neurons)['outputs']
-    initial_loss = mse_loss(target_tensor, pred['decoder']).item()
+    pred_decoder = predict_decoder(model, stimulus)
+    initial_loss = mse_loss(target_tensor, pred_decoder).item()
 
 print(f"Initial loss: {initial_loss:.6f}")
 print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
@@ -105,8 +119,8 @@ def evaluate_silencing(count):
     model_copy = nm.NeuralModel.load(model_path, device=device)
     model_copy.silence_neurons(silenced, invert_silencing=False)
     with torch.no_grad():
-        pred = model_copy.predict(stimulus, input_neurons=input_neurons)['outputs']
-        loss = mse_loss(target_tensor, pred['decoder']).item()
+        pred_dec = predict_decoder(model_copy, stimulus)
+        loss = mse_loss(target_tensor, pred_dec).item()
     return loss / initial_loss
 
 
