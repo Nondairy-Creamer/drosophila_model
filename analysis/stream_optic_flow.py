@@ -18,6 +18,7 @@ initial_state_right = None
 initial_state_left = None
 initial_filter_state_right = None
 initial_filter_state_left = None
+cached_mappings = None
 
 # Ommatidia locations in polar coordinates (phi, theta) for right and left eyes.
 # The model expects one input per ommatidium, so images must be sampled at these coordinates.
@@ -99,7 +100,10 @@ while True:
         visual_stimulus_right, visual_stimulus_left,
         initial_state_right=initial_state_right, initial_state_left=initial_state_left,
         initial_filter_state_right=initial_filter_state_right, initial_filter_state_left=initial_filter_state_left,
+        cached_mappings=cached_mappings,
     )
+    if cached_mappings is None:
+        cached_mappings = right_res['mappings']
     initial_state_right = right_res['model_state']['v']
     initial_state_left = left_res['model_state']['v']
     initial_filter_state_right = right_res['model_state']['filter_state']

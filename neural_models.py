@@ -766,6 +766,7 @@ class NeuralModel(torch.nn.Module, ABC):
         normed = -centered / torch.sqrt(local_var + 1e-12)
 
         y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
+
         return y_t, new_filter_state
 
     @abstractmethod
@@ -820,7 +821,6 @@ class NeuralModel(torch.nn.Module, ABC):
 
     def predict(self, inputs, input_neurons=['L1', 'L2', 'L3'],  output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'], 
                 init_state=None, init_filter_state=None):
-        # given some input, generate the outputs of the rnn
         num_batches, num_time, num_neurons = inputs.shape
 
         filter_state = init_filter_state
@@ -879,11 +879,15 @@ class NeuralModel(torch.nn.Module, ABC):
 
         for t in range(num_time):
             u_t = inputs[:, t, :]
+
             if self.use_input_conv:
                 u_t, filter_state = self.apply_input_conv(u_t, filter_state)
+
             v = self(v, u_t, stim_to_cell_mapping)
+
             if self.use_layer_norm:
                 v = self.layer_norm(v)
+
             fr = self.firing_rate(v)
 
             if self.has_decoder:
@@ -892,7 +896,6 @@ class NeuralModel(torch.nn.Module, ABC):
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
                 ni = readout_dict[i]['neuron_indices']
-                # Ensure we only write to valid column positions
                 valid = ci >= 0
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
@@ -1152,8 +1155,13 @@ class NeuralModel(torch.nn.Module, ABC):
     def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs,
                                        initial_state_right=None, initial_state_left=None,
                                        initial_filter_state_right=None, initial_filter_state_left=None,
-                                       oob_columns=None):
+                                       oob_columns=None, cached_mappings=None):
         """Two-eye ego-motion pipeline.
+
+        Args:
+            cached_mappings: optional dict with 'input_mapping' and
+                'output_mapping' from a previous call's result['mappings'].
+                Skips expensive per-call recomputation of neuron index mappings.
 
         Returns:
             (rotations, translations, right_result, left_result) where the
@@ -1161,18 +1169,23 @@ class NeuralModel(torch.nn.Module, ABC):
         """
         S = right_eye_inputs.shape[0]
 
+        predict_kwargs = {}
+        if cached_mappings is not None:
+            predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
+            predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
+
         right_result, left_result = self.predict_two_eyes(
             right_eye_inputs, left_eye_inputs,
             init_state_right=initial_state_right, init_state_left=initial_state_left,
             init_filter_state_right=initial_filter_state_right,
             init_filter_state_left=initial_filter_state_left,
+            **predict_kwargs,
         )
 
         optic_flow_right = right_result['outputs']['decoder']
         optic_flow_left = left_result['outputs']['decoder']
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
-        # Generate column locations for both eyes
         left_column_locations = self.column_phi_theta.copy()
         left_column_locations[:, 0] = -left_column_locations[:, 0]
         column_locations = np.concatenate((self.column_phi_theta, left_column_locations), axis=0)
@@ -1520,16 +1533,6 @@ class CurrentModel(NeuralModel):
         stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
         offset_all_neurons = self.offset[self.neuron_to_type_index]
 
-        # model is
-        # z = D_in @ synapse_counts @ D_out @ nonlinearity(v_prev) + stimulus * stimulus_strength
-        # where D_in scales post-synaptic (rows) and D_out scales pre-synaptic (columns)
-        # v_next = persistence * v_prev + (1 - persistence) * (z + offset)
-        # implementation is slightly more complicated to allow synapse_counts to be sparse and not run into
-        # issues with passing gradients due to pytorch's limited sparse support.
-        # we can't precompute the dynamics matrix because the broadcast operation of the input/output vectors doesn't
-        # allow for passing the gradient when synapse_counts is sparse
-        # we also have to separately apply the diagonal to x_prev to avoid converting it to a sparse diagonal which takes time
-
         v_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
         z = torch.sparse.mm(self.synapse_counts, v_scaled.transpose(0, 1)).transpose(0, 1)
         z = z * input_strength[None, :]
@@ -1537,11 +1540,8 @@ class CurrentModel(NeuralModel):
         if stim_to_cell_mapping is None:
             z = z + u_t * stimulus_strength[None, :]
         else:
-            # because stimulus can be very sparse (only stimulate 3 cell types)
-            # I added this option to include a mapping so that we dont generate an enormous stimulus matrix
-            cell_idx = stim_to_cell_mapping['neuron_index']  # neuron indices (int64)
-            stim_idx = stim_to_cell_mapping['stimulus_index']  # stimulus indices (int64)
-            # Guard against any negative indices
+            cell_idx = stim_to_cell_mapping['neuron_index']
+            stim_idx = stim_to_cell_mapping['stimulus_index']
             valid = (cell_idx >= 0) & (stim_idx >= 0)
             if torch.any(valid):
                 ci = cell_idx[valid]
