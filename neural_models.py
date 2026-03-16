@@ -728,9 +728,9 @@ class NeuralModel(torch.nn.Module, ABC):
             'T4a', 'T4b', 'T4c', 'T4d',
             'T5a', 'T5b', 'T5c', 'T5d',
             'Tm1', 'Tm2', 'Tm3', 'Tm4',
-            'Tm5Y', 'Tm5a', 'Tm5b', 'Tm5c',
+            # 'Tm5Y', 'Tm5a', 'Tm5b', 'Tm5c',
             'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
-            'TmY3', 'TmY4', 'TmY9', 'TmY10', 'TmY15', 'TmY18', 'TmY5a'
+            # 'TmY3', 'TmY4', 'TmY9', 'TmY10', 'TmY15', 'TmY18', 'TmY5a'
         ]
 
         self.decoder = MotionDecoder(
