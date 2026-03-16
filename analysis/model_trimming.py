@@ -19,6 +19,7 @@ import neural_models as nm
 import data_utilities as du
 import model_utilities as mu
 from loss_functions import mse_loss
+from training_utilities import _compute_odometry_loss
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('model_folder', type=str, help='Path to the model folder')
@@ -41,8 +42,10 @@ model_data_path = Path(model_path)
 cell_inputs_data = torch.load(model_data_path / 'cell_inputs.pt', map_location=device)
 if isinstance(cell_inputs_data, dict):
     stimulus = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
+    train_mask = cell_inputs_data['train_mask'].to(device=device)
 else:
     stimulus = cell_inputs_data.to(device=device, dtype=dtype)
+    train_mask = None
 
 target_loaded = torch.load(model_data_path / 'target.pt', map_location=device)
 if isinstance(target_loaded, dict):
@@ -85,21 +88,25 @@ target_tensor = target['optic_flow'] if isinstance(target, dict) else target
 
 fit_odometry = target_tensor.shape[2] == 2 * model.num_columns
 
+if train_mask is None:
+    train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
-def predict_decoder(mdl, stim):
-    """Return concatenated decoder output, handling one-eye or two-eye models."""
+time_mask = train_mask.any(dim=-1)
+loss_start_step = 0
+if not time_mask[:, 0].all():
+    loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
+
+
+def compute_loss(mdl, stim):
+    """Compute loss matching the training procedure."""
     if fit_odometry:
-        N = stim.shape[2] // 2
-        right_res, left_res = mdl.predict_two_eyes(
-            stim[:, :, :N], stim[:, :, N:], input_neurons=input_neurons)
-        return torch.cat([right_res['outputs']['decoder'],
-                          left_res['outputs']['decoder']], dim=2)
-    return mdl.predict(stim, input_neurons=input_neurons)['outputs']['decoder']
+        return _compute_odometry_loss(mdl, stim, target, train_mask, loss_start_step)
+    pred = mdl.predict(stim, input_neurons=input_neurons)['outputs']['decoder']
+    return mse_loss(target_tensor, pred)
 
 
 with torch.no_grad():
-    pred_decoder = predict_decoder(model, stimulus)
-    initial_loss = mse_loss(target_tensor, pred_decoder).item()
+    initial_loss = compute_loss(model, stimulus).item()
 
 print(f"Initial loss: {initial_loss:.6f}")
 print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
@@ -118,8 +125,7 @@ def evaluate_silencing(count):
     model_copy = nm.NeuralModel.load(model_path)
     model_copy.silence_neurons(silenced, invert_silencing=False)
     with torch.no_grad():
-        pred_dec = predict_decoder(model_copy, stimulus)
-        loss = mse_loss(target_tensor, pred_dec).item()
+        loss = compute_loss(model_copy, stimulus).item()
     return loss / initial_loss
 
 
