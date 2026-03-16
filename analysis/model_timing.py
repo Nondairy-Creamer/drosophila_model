@@ -10,6 +10,9 @@ Usage:
     python analysis/model_timing.py models/best_drone/ --max-frames 500
 """
 import argparse
+import os
+import platform
+import resource
 import sys
 import time
 from pathlib import Path
@@ -25,11 +28,40 @@ import neural_models as nm
 from stimulus_utilities import build_ommatidium_sampling_matrix
 
 
-def load_video_grayscale(path):
+def _fmt_bytes(n_bytes):
+    """Format byte count as a human-readable string."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n_bytes) < 1024:
+            return f"{n_bytes:.1f} {unit}"
+        n_bytes /= 1024
+    return f"{n_bytes:.1f} TB"
+
+
+def _peak_rss():
+    """Peak RSS of the current process in bytes."""
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if platform.system() == "Darwin":
+        return rss  # already bytes on macOS
+    return rss * 1024  # KB on Linux
+
+
+def _tensor_bytes(t):
+    """Total storage bytes of a single tensor."""
+    return t.nelement() * t.element_size()
+
+
+def _model_memory(model):
+    """Return (param_bytes, buffer_bytes) for a torch model."""
+    param_bytes = sum(_tensor_bytes(p) for p in model.parameters())
+    buffer_bytes = sum(_tensor_bytes(b) for b in model.buffers())
+    return param_bytes, buffer_bytes
+
+
+def load_video_grayscale(path, max_frames=None):
     """Load video as grayscale uint8 frames."""
     cap = cv2.VideoCapture(str(path))
     frames = []
-    while True:
+    while max_frames is None or len(frames) < max_frames:
         ret, frame = cap.read()
         if not ret:
             break
@@ -72,10 +104,20 @@ def main() -> None:
                         help="Gaussian filter std in degrees for ommatidium sampling")
     args = parser.parse_args()
 
+    rss_checkpoints = {}
+    rss_checkpoints["before model load"] = _peak_rss()
+
     print(f"Loading model from {args.model_folder}...")
     model = nm.NeuralModel.load(args.model_folder)
     device = model.device
     model.eval()
+    rss_checkpoints["after model load"] = _peak_rss()
+
+    param_bytes, buffer_bytes = _model_memory(model)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"  Parameters:    {n_params:,}  ({_fmt_bytes(param_bytes)})")
+    print(f"  Buffers:       {_fmt_bytes(buffer_bytes)}")
+    print(f"  Tensors only:  {_fmt_bytes(param_bytes + buffer_bytes)}")
 
     # Camera FOV limits (must match process_drone.py)
     phi_right_lim = np.array([-30, -150]) * np.pi / 180
@@ -95,19 +137,23 @@ def main() -> None:
     right_path = video_dir / f"right_{args.clip_id}.mp4"
     left_path = video_dir / f"left_{args.clip_id}.mp4"
 
+    frame_cap = args.max_time
+    if args.max_frames is not None:
+        frame_cap = min(frame_cap, args.max_frames)
+
     print(f"Loading video clip {args.clip_id} from {video_dir}...")
-    right_frames = load_video_grayscale(right_path)
-    left_frames = load_video_grayscale(left_path)
+    right_frames = load_video_grayscale(right_path, max_frames=frame_cap)
+    left_frames = load_video_grayscale(left_path, max_frames=frame_cap)
 
     num_frames = min(len(right_frames), len(left_frames))
-    if args.max_frames is not None:
-        num_frames = min(num_frames, args.max_frames)
-    num_frames = min(num_frames, args.max_time)
-    right_frames = right_frames[:num_frames]
-    left_frames = left_frames[:num_frames]
+    rss_checkpoints["after video load"] = _peak_rss()
 
     image_height, image_width = right_frames.shape[1], right_frames.shape[2]
+    raw_frame_bytes = int(right_frames[0].nbytes)
+    total_video_bytes = int(right_frames.nbytes + left_frames.nbytes)
     print(f"  {num_frames} frames at {image_height}x{image_width}")
+    print(f"  Single raw frame: {_fmt_bytes(raw_frame_bytes)} ({image_height}x{image_width}, uint8)")
+    print(f"  Total video loaded: {_fmt_bytes(total_video_bytes)} ({num_frames} frames x 2 eyes)")
 
     # Build sampling matrices (one-time cost)
     print("Building sampling matrices...")
@@ -121,6 +167,7 @@ def main() -> None:
     )
     in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
     in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
+    rss_checkpoints["after sampling matrices"] = _peak_rss()
 
     oob = torch.tensor(
         np.concatenate([~in_fov_right, ~in_fov_left]), device=device
@@ -135,6 +182,7 @@ def main() -> None:
     cached_mappings = None
     frame_times = []
     sample_times = []
+    stimulus_bytes = None
 
     with torch.no_grad():
         for fi in range(num_frames):
@@ -142,6 +190,9 @@ def main() -> None:
             right_stim = sample_image(right_frames[fi], W_right, in_fov_right).to(device=device, dtype=model.dtype)
             left_stim = sample_image(left_frames[fi], W_left, in_fov_left).to(device=device, dtype=model.dtype)
             sample_times.append(time.perf_counter() - t_sample)
+
+            if stimulus_bytes is None:
+                stimulus_bytes = _tensor_bytes(right_stim) + _tensor_bytes(left_stim)
 
             t0 = time.perf_counter()
             _, _, r_res, l_res = model.estimate_ego_motion_from_image(
@@ -165,6 +216,8 @@ def main() -> None:
             if (fi + 1) % 200 == 0:
                 print(f"  {fi + 1}/{num_frames}")
 
+    rss_checkpoints["after inference"] = _peak_rss()
+
     frame_times_ms = np.array(frame_times) * 1000
     sample_times_ms = np.array(sample_times) * 1000
     print(f"\nPer-frame timing (n={num_frames}):")
@@ -181,6 +234,31 @@ def main() -> None:
     print(f"  total (sample + inference):")
     print(f"    Mean:   {np.mean(total_ms):.4f} ms")
     print(f"    Median: {np.median(total_ms):.4f} ms")
+
+    pid = os.getpid()
+    peak_rss = _peak_rss()
+    single_frame_pair = 2 * raw_frame_bytes
+    estimated_realworld = peak_rss - total_video_bytes + single_frame_pair
+
+    print(f"\nMemory breakdown (PID {pid}, device={device}):")
+    print(f"  1) Model tensors (params + buffers): {_fmt_bytes(param_bytes + buffer_bytes)}")
+    print(f"       Parameters: {_fmt_bytes(param_bytes)}  ({n_params:,} params)")
+    print(f"       Buffers:    {_fmt_bytes(buffer_bytes)}")
+    print(f"  2) Single raw frame pair (L+R, grayscale):")
+    print(f"       {_fmt_bytes(single_frame_pair)}  (2x {image_height}x{image_width}, uint8)")
+    print(f"  3) Single stimulus (right + left, after sampling):")
+    print(f"       {_fmt_bytes(stimulus_bytes)}  (shape {tuple(right_stim.shape)}, dtype {right_stim.dtype})")
+
+    print(f"\n  Peak RSS at checkpoints:")
+    for label, rss in rss_checkpoints.items():
+        print(f"    {label:.<30s} {_fmt_bytes(rss)}")
+    print(f"    {'final':.<30s} {_fmt_bytes(peak_rss)}")
+
+    print(f"\n  Estimated real-world memory (single-frame streaming):")
+    print(f"    Peak RSS (this run):       {_fmt_bytes(peak_rss)}")
+    print(f"    - video buffer:            {_fmt_bytes(total_video_bytes)}")
+    print(f"    + single frame (L+R):      {_fmt_bytes(single_frame_pair)}")
+    print(f"    = estimated requirement:   {_fmt_bytes(estimated_realworld)}")
 
     import matplotlib
     matplotlib.use("Agg")
