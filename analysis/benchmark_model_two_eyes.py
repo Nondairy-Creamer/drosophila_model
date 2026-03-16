@@ -22,8 +22,6 @@ import data_utilities as du
 import neural_models as nm
 import stimulus_utilities as su
 
-from analysis_utilities import resolve_model_paths
-
 
 def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two flattened arrays."""
@@ -95,14 +93,13 @@ def main() -> None:
                         help="Number of stimuli per type (default: 100)")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
-    computer_config = du.load_config()
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     model_config = du.load_config(model_folder / 'config.toml')
-    device = computer_config["model"].get("device", "cpu")
-    model_config["model"]["device"] = device
 
-    print(f"Loading model from {model_file} on {device}...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model from {model_path}...")
+    model = nm.NeuralModel.load(model_path)
+    model_config["model"]["device"] = model.device
     model.eval()
 
     stimulus_types = ["random_pano", "drone_view"]

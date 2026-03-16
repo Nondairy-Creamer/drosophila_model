@@ -23,7 +23,6 @@ import data_utilities as du
 import neural_models as nm
 
 from analysis_utilities import (
-    resolve_model_folder,
     hex_grid_points,
     centered_norm,
     prepare_xt,
@@ -82,7 +81,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_folder = resolve_model_folder(Path(args.model_folder))
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     model_pt = model_folder / "model.pt"
     model_init_pt = model_folder / "model_init.pt"
     target_model_pt = model_folder / "target_model.pt"

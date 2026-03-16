@@ -19,10 +19,7 @@ import numpy as np
 import data_utilities as du
 import neural_models as nm
 
-from analysis_utilities import (
-    resolve_model_paths,
-    make_flow_comparison_movie,
-)
+from analysis_utilities import make_flow_comparison_movie
 
 
 def _extract_optic_flow(target_loaded: object) -> torch.Tensor:
@@ -66,12 +63,12 @@ def main() -> None:
     parser.add_argument("--stim-index", type=int, default=5, help="Stimulus index to visualize")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     local_config = du.load_config()
-    device = local_config['model'].get('device', 'cpu')
     batch_size = local_config['training'].get('batch_size', 1)
-    print(f"Loading model on {device} (batch_size={batch_size})...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model (batch_size={batch_size})...")
+    model = nm.NeuralModel.load(model_path)
     device = model.device
     dtype = model.dtype
     frame_rate = max(1, int((1 / model.dt) / 2))

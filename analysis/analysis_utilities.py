@@ -2,7 +2,6 @@
 Shared utilities for analysis scripts.
 
 Provides:
-  - Path resolution (resolve_model_folder, resolve_model_paths)
   - Matplotlib helpers (fig_to_rgb, centered_norm)
   - Data prep (prepare_xt, interp_nan_column)
   - Hex grid (hex_grid_points)
@@ -25,31 +24,6 @@ import neural_models as nm
 import stimulus_utilities as su
 
 
-# ---------------------------------------------------------------------------
-# Path resolution helpers
-# ---------------------------------------------------------------------------
-
-
-def resolve_model_folder(model_path: str | Path) -> Path:
-    """Return the model directory from a model path (file or folder)."""
-    model_path = Path(model_path)
-    if model_path.is_dir():
-        return model_path
-    return model_path.parent
-
-
-def resolve_model_paths(model_path: str | Path) -> tuple[Path, Path]:
-    """Return *(model_file, model_folder)* from a model path (file or folder).
-
-    Raises ``FileNotFoundError`` if *model.pt* cannot be located.
-    """
-    model_path = Path(model_path)
-    if model_path.is_file():
-        return model_path, model_path.parent
-    model_pt = model_path / "model.pt"
-    if model_pt.exists():
-        return model_pt, model_path
-    raise FileNotFoundError(f"Could not find model.pt at {model_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +161,7 @@ def predict_optic_flow(
 
 def run_model_on_stimuli(
     model_path: str | Path = "models/best_model",
-    device: str = "cpu",
+    device: str | None = None,
     stimulus_types: list[str] | None = None,
     stimulus_specs: list[dict] | None = None,
     max_stimuli: int | None = None,
@@ -202,9 +176,10 @@ def run_model_on_stimuli(
     Returns a dict keyed by stimulus name with values containing
     ``stimulus``, ``optic_flow``, ``pred_flow``, ``column_xyz``, and ``dt``.
     """
-    model_pt, model_folder = resolve_model_paths(Path(model_path))
+    model_path = Path(model_path)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     config = du.load_config(model_folder / "config.toml")
-    model = nm.NeuralModel.load(model_pt, device=device)
+    model = nm.NeuralModel.load(model_path, device=device)
 
     column_phi_theta = model.column_phi_theta
     column_xyz = model.get_column_xyz()

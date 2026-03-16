@@ -12,10 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-import data_utilities as du
 import neural_models as nm
-from analysis_utilities import resolve_model_paths
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -28,12 +25,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_pt, model_folder = resolve_model_paths(Path(args.model_folder))
-    local_config = du.load_config()
-    device = torch.device(local_config["model"]["device"])
+    model_path = Path(args.model_folder)
+    model_pt = model_path / "model.pt" if model_path.is_dir() else model_path
 
     print(f"Loading model from {model_pt} ...")
-    model = nm.NeuralModel.load(model_pt, device=device)
+    model = nm.NeuralModel.load(model_path)
 
     model.find_steady_state(max_iter=25)
 

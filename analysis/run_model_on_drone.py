@@ -25,7 +25,6 @@ import neural_models as nm
 import stimulus_utilities as su
 
 from analysis_utilities import (
-    resolve_model_paths,
     fig_to_rgb,
     angular_flow_to_cartesian_xz,
 )
@@ -48,12 +47,12 @@ def main() -> None:
                         help="Plot rotation-adjusted (translation-only) flow instead of full flow")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     local_config = du.load_config()
-    device = local_config["model"].get("device", "cpu")
 
-    print(f"Loading model from {model_file} on {device}...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model from {model_path}...")
+    model = nm.NeuralModel.load(model_path)
     model.eval()
 
     model_dt = model.dt
@@ -85,16 +84,16 @@ def main() -> None:
             num_frames = min(num_frames, args.max_frames)
 
         right_input = torch.tensor(
-            clip["right"][:num_frames], device=device, dtype=model.dtype
+            clip["right"][:num_frames], device=model.device, dtype=model.dtype
         ).unsqueeze(0)
         left_input = torch.tensor(
-            clip["left"][:num_frames], device=device, dtype=model.dtype
+            clip["left"][:num_frames], device=model.device, dtype=model.dtype
         ).unsqueeze(0)
 
         in_fov_right = clip["in_fov_right"].numpy()
         in_fov_left = clip["in_fov_left"].numpy()
         oob = torch.tensor(
-            np.concatenate([~in_fov_right, ~in_fov_left]), device=device
+            np.concatenate([~in_fov_right, ~in_fov_left]), device=model.device
         )
 
         print(f"Clip {clip_idx} (id={clip_id}): running model on {num_frames} frames, N={N}...")

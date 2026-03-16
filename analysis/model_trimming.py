@@ -27,13 +27,12 @@ args = parser.parse_args()
 # --- Configuration ---
 model_path = args.model_folder
 loss_threshold = 1.10  # Stop when loss increases to 110% of starting value (10% worse)
-local_config = du.load_config()
 
 # --- Load the model ---
 print("Loading model...")
-device = local_config['model']['device']
+model = nm.NeuralModel.load(model_path)
+device = model.device
 print('running on', device)
-model = nm.NeuralModel.load(model_path, device=device)
 dtype = model.dtype
 
 # --- Load training data ---
@@ -116,7 +115,7 @@ print(f"Eligible cell types for silencing: {len(candidates)}")
 def evaluate_silencing(count):
     """Silence the `count` least-important candidates and return the loss ratio."""
     silenced = candidates[:count]
-    model_copy = nm.NeuralModel.load(model_path, device=device)
+    model_copy = nm.NeuralModel.load(model_path)
     model_copy.silence_neurons(silenced, invert_silencing=False)
     with torch.no_grad():
         pred_dec = predict_decoder(model_copy, stimulus)

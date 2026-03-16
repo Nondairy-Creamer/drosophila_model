@@ -21,11 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import numpy as np
 
-import data_utilities as du
 import neural_models as nm
 
 from analysis_utilities import (
-    resolve_model_paths,
     fig_to_rgb,
     angular_flow_to_cartesian_xz,
 )
@@ -45,11 +43,10 @@ def main() -> None:
                         help="Maximum frames to render")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
-    local_config = du.load_config()
-    device = local_config['model'].get('device', 'cpu')
-    print(f"Loading model from {model_file} on {device}...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    print(f"Loading model from {model_path}...")
+    model = nm.NeuralModel.load(model_path)
     device = model.device
     dtype = model.dtype
     frame_rate = args.fps or max(1, int((1 / model.dt) / 2))

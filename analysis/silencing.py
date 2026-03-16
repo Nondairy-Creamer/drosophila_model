@@ -23,8 +23,6 @@ import data_utilities as du
 import neural_models as nm
 from loss_functions import calc_loss_dict, combined_loss, mse_loss, cos_loss
 from training_utilities import _compute_odometry_loss
-from analysis_utilities import resolve_model_paths
-
 
 INPUT_NEURONS = ['L1', 'L2', 'L3']
 
@@ -92,7 +90,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
 
     local_config = du.load_config()
     model_config_path = model_folder / 'config.toml'
@@ -101,14 +100,14 @@ def main() -> None:
     else:
         model_config = local_config
 
-    device = args.device or local_config['model'].get('device', 'cpu')
     dtype_str = local_config['model'].get('dtype', 'float32')
     pt_dtype = getattr(torch, dtype_str)
 
     # --- Load inputs and targets ---
-    print(f"Loading model from {model_file} ...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model from {model_path} ...")
+    model = nm.NeuralModel.load(model_path, device=args.device)
     model.eval()
+    device = model.device
 
     cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt',
                                   map_location=device, weights_only=False)

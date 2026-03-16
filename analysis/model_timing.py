@@ -24,8 +24,6 @@ import data_utilities as du
 import neural_models as nm
 from stimulus_utilities import build_ommatidium_sampling_matrix
 
-from analysis_utilities import resolve_model_paths
-
 
 def load_video_grayscale(path):
     """Load video as grayscale uint8 frames."""
@@ -68,16 +66,15 @@ def main() -> None:
                         help="Which clip to use (default: 32)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Cap the number of frames to process")
+    parser.add_argument("--max-time", type=int, default=100,
+                        help="Limit video to first N time points (default: 100)")
     parser.add_argument("--filter-std", type=float, default=2.5,
                         help="Gaussian filter std in degrees for ommatidium sampling")
     args = parser.parse_args()
 
-    model_file, _ = resolve_model_paths(Path(args.model_folder))
-    local_config = du.load_config()
-    device = local_config["model"].get("device", "cpu")
-
-    print(f"Loading model from {model_file} on {device}...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model from {args.model_folder}...")
+    model = nm.NeuralModel.load(args.model_folder)
+    device = model.device
     model.eval()
 
     # Camera FOV limits (must match process_drone.py)
@@ -86,11 +83,13 @@ def main() -> None:
     theta_lim = np.array([45, 135]) * np.pi / 180
 
     # Ommatidium sampling coordinates from model
-    sample_phi_right = model.column_phi_theta[:, 0].numpy()
-    sample_theta = model.column_phi_theta[:, 1].numpy()
+    col_phi_theta = np.asarray(model.column_phi_theta)
+    sample_phi_right = col_phi_theta[:, 0]
+    sample_theta = col_phi_theta[:, 1]
     sample_phi_left = -sample_phi_right
 
     # Load raw video
+    local_config = du.load_config()
     connectome_folder = Path(local_config["data"]["connectome_folder"])
     video_dir = Path(args.video_dir) if args.video_dir else connectome_folder / "drone_videos"
     right_path = video_dir / f"right_{args.clip_id}.mp4"
@@ -103,6 +102,7 @@ def main() -> None:
     num_frames = min(len(right_frames), len(left_frames))
     if args.max_frames is not None:
         num_frames = min(num_frames, args.max_frames)
+    num_frames = min(num_frames, args.max_time)
     right_frames = right_frames[:num_frames]
     left_frames = left_frames[:num_frames]
 
@@ -132,12 +132,16 @@ def main() -> None:
     state_left = None
     filter_state_right = None
     filter_state_left = None
+    cached_mappings = None
     frame_times = []
+    sample_times = []
 
     with torch.no_grad():
         for fi in range(num_frames):
-            right_stim = sample_image(right_frames[fi], W_right, in_fov_right).to(device)
-            left_stim = sample_image(left_frames[fi], W_left, in_fov_left).to(device)
+            t_sample = time.perf_counter()
+            right_stim = sample_image(right_frames[fi], W_right, in_fov_right).to(device=device, dtype=model.dtype)
+            left_stim = sample_image(left_frames[fi], W_left, in_fov_left).to(device=device, dtype=model.dtype)
+            sample_times.append(time.perf_counter() - t_sample)
 
             t0 = time.perf_counter()
             _, _, r_res, l_res = model.estimate_ego_motion_from_image(
@@ -146,8 +150,12 @@ def main() -> None:
                 initial_state_left=state_left,
                 initial_filter_state_right=filter_state_right,
                 initial_filter_state_left=filter_state_left,
+                cached_mappings=cached_mappings,
             )
             frame_times.append(time.perf_counter() - t0)
+
+            if cached_mappings is None:
+                cached_mappings = r_res['mappings']
 
             state_right = r_res['model_state']['v']
             state_left = l_res['model_state']['v']
@@ -158,12 +166,21 @@ def main() -> None:
                 print(f"  {fi + 1}/{num_frames}")
 
     frame_times_ms = np.array(frame_times) * 1000
+    sample_times_ms = np.array(sample_times) * 1000
     print(f"\nPer-frame timing (n={num_frames}):")
-    print(f"  Mean:   {np.mean(frame_times_ms):.4f} ms")
-    print(f"  Median: {np.median(frame_times_ms):.4f} ms")
-    print(f"  Std:    {np.std(frame_times_ms):.4f} ms")
-    print(f"  Min:    {np.min(frame_times_ms):.4f} ms")
-    print(f"  Max:    {np.max(frame_times_ms):.4f} ms")
+    print(f"  sample_image:")
+    print(f"    Mean:   {np.mean(sample_times_ms):.4f} ms")
+    print(f"    Median: {np.median(sample_times_ms):.4f} ms")
+    print(f"  model inference:")
+    print(f"    Mean:   {np.mean(frame_times_ms):.4f} ms")
+    print(f"    Median: {np.median(frame_times_ms):.4f} ms")
+    print(f"    Std:    {np.std(frame_times_ms):.4f} ms")
+    print(f"    Min:    {np.min(frame_times_ms):.4f} ms")
+    print(f"    Max:    {np.max(frame_times_ms):.4f} ms")
+    total_ms = frame_times_ms + sample_times_ms
+    print(f"  total (sample + inference):")
+    print(f"    Mean:   {np.mean(total_ms):.4f} ms")
+    print(f"    Median: {np.median(total_ms):.4f} ms")
 
     import matplotlib
     matplotlib.use("Agg")

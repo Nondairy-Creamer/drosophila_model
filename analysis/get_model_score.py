@@ -16,7 +16,7 @@ import data_utilities as du
 import neural_models as nm
 import stimulus_utilities as su
 from loss_functions import mse_loss, cos_loss
-from analysis_utilities import resolve_model_paths, predict_optic_flow
+from analysis_utilities import predict_optic_flow
 
 
 def main() -> None:
@@ -37,10 +37,10 @@ def main() -> None:
     args = parser.parse_args()
 
     # --- Load model and config ---
-    model_pt, model_folder = resolve_model_paths(Path(args.model_folder))
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     local_config = du.load_config()
-    device = torch.device(local_config["model"]["device"])
-    model = nm.NeuralModel.load(model_pt, device=device)
+    model = nm.NeuralModel.load(model_path)
 
     stimulus_type = args.stim_type if args.stim_type else local_config["stimulus"]["stimulus_type"]
     column_phi_theta = model.column_phi_theta

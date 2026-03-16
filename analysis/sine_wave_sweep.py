@@ -75,9 +75,7 @@ def main():
 
     model_folder = Path(args.model_folder)
     model_config = du.load_config(model_folder / "config.toml")
-    computer_config = du.load_config()
-    device = torch.device(computer_config["model"]["device"])
-    model = nm.NeuralModel.load(model_folder / "model.pt", device=device)
+    model = nm.NeuralModel.load(model_folder / "model.pt")
 
     dt = model_config["model"]["dt"]
     sample_phi = model.column_phi_theta[:, 0]

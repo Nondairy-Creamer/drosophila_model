@@ -26,7 +26,7 @@ import stimulus_utilities as su
 import data_utilities as du
 import model_utilities as mu
 
-from analysis_utilities import resolve_model_folder, prepare_xt
+from analysis_utilities import prepare_xt
 
 # Cell types for each pathway
 LIGHT_PATHWAY = ["L1", "Mi1", "Tm3", "Mi4", "Mi9", "T4a", "T4b"]
@@ -406,7 +406,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.model_folder is not None:
-        model_folder = resolve_model_folder(Path(args.model_folder))
+        model_arg = Path(args.model_folder)
+        model_folder = model_arg.parent if model_arg.is_file() else model_arg
         model_path = model_folder / ("model_init.pt" if args.use_init else "model.pt")
 
         if not model_path.exists():

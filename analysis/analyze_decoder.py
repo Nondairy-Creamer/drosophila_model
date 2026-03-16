@@ -20,7 +20,7 @@ from matplotlib import pyplot as plt
 
 import neural_models as nm
 
-from analysis_utilities import resolve_model_paths, hex_grid_points
+from analysis_utilities import hex_grid_points
 
 
 def main() -> None:
@@ -46,8 +46,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_pt, model_folder = resolve_model_paths(Path(args.model_folder))
-    model = nm.NeuralModel.load(model_pt, device=args.device)
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.NeuralModel.load(model_path, device=args.device)
 
     if not model.has_decoder:
         raise ValueError("Model does not have a decoder.")

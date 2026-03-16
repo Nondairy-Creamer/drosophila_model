@@ -35,12 +35,11 @@ else:
     model_folder = Path(sys.argv[1])
 
 model_config = du.load_config(model_folder / 'config.toml')
-computer_config = du.load_config()
 fig_folder = Path(model_folder / 'movie')
-device = torch.device(computer_config['model']['device'])  # what device you use depends on the computer, not how the model was run
 dtype = getattr(torch, model_config['model']['dtype'])
 connectome_folder = Path(model_config['data']['connectome_folder'])
-model = nm.NeuralModel.load(model_folder / 'model.pt', device=device)
+model = nm.NeuralModel.load(model_folder / 'model.pt')
+device = model.device
 
 frame_rate = int(1 / model_config['model']['dt'])
 color_percentile = 99

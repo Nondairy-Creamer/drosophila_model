@@ -29,11 +29,8 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-import data_utilities as du
 import neural_models as nm
 from training_utilities import _normalized_mse, _cosine_loss
-
-from analysis_utilities import resolve_model_paths
 
 
 def compute_loss_components(model, cell_inputs, target_rot, target_trans,
@@ -174,14 +171,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
-    local_config = du.load_config()
-    device = args.device or local_config['model'].get('device', 'cpu')
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
 
-    print(f"Loading model from {model_file} on {device}...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model from {model_path}...")
+    model = nm.NeuralModel.load(model_path, device=args.device)
     model.eval()
     print('git hash', model.commit_hash)
+    device = model.device
     dtype = model.dtype
 
     print("Loading inputs and targets...")

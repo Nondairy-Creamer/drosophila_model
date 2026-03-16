@@ -24,10 +24,8 @@ if new_session:
     model_folder = new_folder
 
 local_config = du.load_config()
-local_device = local_config['model']['device']
-
 config = du.load_config(model_folder / 'config.toml')
-model = nm.NeuralModel.load(model_folder / 'model.pt', freeze_params=False, device=local_device)
+model = nm.NeuralModel.load(model_folder / 'model.pt', freeze_params=False)
 _stim_loaded = torch.load(model_folder / 'cell_inputs.pt')
 if isinstance(_stim_loaded, dict):
     stimulus = _stim_loaded['cell_inputs'].to(device=model.device)

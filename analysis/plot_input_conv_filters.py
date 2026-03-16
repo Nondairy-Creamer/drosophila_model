@@ -21,7 +21,7 @@ from matplotlib import pyplot as plt
 import torch
 import neural_models as nm
 
-from analysis_utilities import resolve_model_folder, centered_norm, hex_grid_points
+from analysis_utilities import centered_norm, hex_grid_points
 
 
 def compute_lru_impulse_response(lru, num_steps=20, dt=0.01):
@@ -134,7 +134,7 @@ def main() -> None:
 
     fig.tight_layout()
 
-    figures_dir = Path(args.output_path).parent if args.output_path else resolve_model_folder(model_path) / "figures"
+    figures_dir = Path(args.output_path).parent if args.output_path else (model_path.parent if model_path.is_file() else model_path) / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     spatial_path = figures_dir / "input_conv_filters.png"

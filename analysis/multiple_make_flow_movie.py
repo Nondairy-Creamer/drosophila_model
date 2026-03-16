@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 
 from analysis_utilities import (
-    resolve_model_folder,
     run_model_on_stimuli,
     make_flow_comparison_movie,
 )
@@ -199,7 +198,8 @@ def main() -> None:
     ]
 
 
-    model_folder = resolve_model_folder(Path(args.model_folder))
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
     output_folder = Path(args.output_folder) if args.output_folder else model_folder / "optic_flow_movie_stimuli"
 
     cosine_sims: dict[str, float] = {}

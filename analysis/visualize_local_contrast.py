@@ -27,11 +27,8 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 from scipy.ndimage import map_coordinates
 
-import data_utilities as du
 import neural_models as nm
 import stimulus_utilities as su
-from analysis_utilities import resolve_model_paths
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -42,12 +39,11 @@ def main() -> None:
                         help="Index of panoramic image to use (default: 0)")
     args = parser.parse_args()
 
-    model_file, model_folder = resolve_model_paths(Path(args.model_folder))
-    local_config = du.load_config()
-    device = local_config["model"].get("device", "cpu")
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
 
-    print(f"Loading model from {model_file} on {device}...")
-    model = nm.NeuralModel.load(model_file, device=device)
+    print(f"Loading model from {model_path}...")
+    model = nm.NeuralModel.load(model_path)
     model.eval()
 
     # --- Load panoramic images and select one ---
@@ -81,7 +77,7 @@ def main() -> None:
         print("Warning: model has no input conv; showing raw sampled values for contrast panel.")
         local_contrast = sampled
     else:
-        sampled_t = torch.tensor(sampled, device=device, dtype=model.dtype).unsqueeze(0)
+        sampled_t = torch.tensor(sampled, device=model.device, dtype=model.dtype).unsqueeze(0)
         with torch.no_grad():
             filtered = model.input_pre_conv(sampled_t)
             local_mean = model.input_spatial_conv(filtered)
