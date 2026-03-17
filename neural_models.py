@@ -552,6 +552,13 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_transmitters = len(self.unique_transmitters)
         self.column_indices = column_indices
         self.column_phi_theta = column_phi_theta
+        left_phi_theta = column_phi_theta.copy()
+        left_phi_theta[:, 0] = -left_phi_theta[:, 0]
+        two_eye = np.concatenate((column_phi_theta, left_phi_theta), axis=0)
+        self.column_phi_theta_two_eyes = (
+            torch.tensor(two_eye[:, 0], device=self.device),
+            torch.tensor(two_eye[:, 1], device=self.device),
+        )
         self.column_p_q = column_p_q
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
@@ -901,16 +908,6 @@ class NeuralModel(torch.nn.Module, ABC):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
                     outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
 
-        # Check for NaN predictions indicating unstable dynamics
-        total_elements = 0
-        nan_elements = 0
-        for key in readout_keys:
-            fr_tensor = outputs['firing_rate'][key]
-            total_elements += fr_tensor.numel()
-            nan_elements += torch.isnan(fr_tensor).sum().item()
-        if total_elements > 0 and nan_elements / total_elements > 0.5:
-            print(f'Warning: >50% of predictions are NaN ({nan_elements}/{total_elements}), potentially unstable dynamics')
-
         return {
             'outputs': outputs,
             'model_state': {'v': v.detach(), 'filter_state': filter_state},
@@ -1186,12 +1183,8 @@ class NeuralModel(torch.nn.Module, ABC):
         optic_flow_left = left_result['outputs']['decoder']
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
-        left_column_locations = self.column_phi_theta.copy()
-        left_column_locations[:, 0] = -left_column_locations[:, 0]
-        column_locations = np.concatenate((self.column_phi_theta, left_column_locations), axis=0)
-
-        phi_tensor = torch.tensor(column_locations[:, 0], device=optic_flow.device, dtype=optic_flow.dtype)
-        theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
+        phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
+        theta_tensor = self.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
 
         valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
         if oob_columns is not None:
