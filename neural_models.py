@@ -1121,6 +1121,7 @@ class NeuralModel(torch.nn.Module, ABC):
         inputs['init_new_model'] = False
         model = model_cls(**inputs)
         model.load_state_dict(data['state_dict'])
+        model = model.to(device=torch.device(inputs['device']))
 
         if freeze_params:
             for param in model.parameters():
