@@ -1856,6 +1856,9 @@ class CellANN(torch.nn.Module):
         """
         batch_size = v.shape[0]
 
+        # Convert voltage to firing rate before synaptic transmission
+        fr = self.nonlinearity(v)
+
         # Positive learned magnitude × biological sign → signed per-edge weights
         edge_weights = (self.sparse_weights_log[self._edge_to_pair].exp()
                         * self._edge_sign.unsqueeze(-1))
@@ -1869,7 +1872,7 @@ class CellANN(torch.nn.Module):
                 size=(self.num_neurons, self.num_neurons),
                 dtype=v.dtype, device=v.device,
             )
-            h[:, :, n] = torch.sparse.mm(sparse_mat, v.transpose(0, 1)).transpose(0, 1)
+            h[:, :, n] = torch.sparse.mm(sparse_mat, fr.transpose(0, 1)).transpose(0, 1)
 
         h = h + self.sparse_bias[self._neuron_to_type]
         if self.cell_ann_depth > 1:
