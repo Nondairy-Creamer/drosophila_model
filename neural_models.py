@@ -1778,7 +1778,7 @@ class ConductanceModel(NeuralModel):
         return v_next
 
 
-class CellANN(torch.nn.Module):
+class CellAnn(torch.nn.Module):
     """Per-neuron multi-layer network using sparse connectivity from the connectome.
 
     Models each neuron as a small feed-forward network with layer sizes
@@ -1794,7 +1794,7 @@ class CellANN(torch.nn.Module):
     per cell type.
 
     Index buffers (``_sparse_idx``, ``_neuron_to_type``, ``_edge_to_pair``,
-    ``_edge_sign``) are computed by :class:`CellANNModel` and passed in.
+    ``_edge_sign``) are computed by :class:`CellAnnModel` and passed in.
 
     Args:
         num_neurons: Total number of neurons (X).
@@ -1819,7 +1819,7 @@ class CellANN(torch.nn.Module):
         self.cell_ann_depth = cell_ann_depth
         self.nonlinearity = nonlinearity
 
-        # Pre-computed index buffers (owned by CellANNModel)
+        # Pre-computed index buffers (owned by CellAnnModel)
         self.register_buffer('_sparse_idx', sparse_idx)
         self.register_buffer('_neuron_to_type', neuron_to_type)
         self.register_buffer('_edge_to_pair', edge_to_pair)
@@ -1890,7 +1890,7 @@ class CellANN(torch.nn.Module):
 
 
 @_register_model_class
-class CellANNModel(NeuralModel):
+class CellAnnModel(NeuralModel):
     """Neural model where each neuron is modeled as a small feed-forward ANN.
 
     Processes the connectome the same way as :class:`CurrentModel`: synapses
@@ -1929,8 +1929,8 @@ class CellANNModel(NeuralModel):
         unique_keys, edge_to_pair = torch.unique(pair_keys, return_inverse=True)
         num_type_pairs = unique_keys.shape[0]
 
-        # --- Create CellANN (initializes its own parameters) ---
-        self.cell_ann = CellANN(
+        # --- Create CellAnn (initializes its own parameters) ---
+        self.cell_ann = CellAnn(
             num_neurons=self.num_neurons,
             num_cell_types=self.num_cell_types,
             num_type_pairs=num_type_pairs,
@@ -1944,7 +1944,7 @@ class CellANNModel(NeuralModel):
             dtype=self.dtype,
         )
 
-        # --- CellANNModel-specific parameters (per cell type) ---
+        # --- CellAnnModel-specific parameters (per cell type) ---
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
             return np.log(p / (1 - p))
