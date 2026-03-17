@@ -1777,3 +1777,196 @@ class ConductanceModel(NeuralModel):
 
         return v_next
 
+
+class CellANN(torch.nn.Module):
+    """Per-neuron multi-layer network using sparse connectivity from the connectome.
+
+    Models each neuron as a small feed-forward network with layer sizes
+    N, N-1, ..., 2, 1.  The first layer uses sparse connectivity derived from
+    the connectome; subsequent layers are dense per-neuron matmuls that don't
+    mix across neurons.
+
+    All weights and biases are shared per cell type.  The sparse first layer
+    stores one weight per *connected* (post_type, pre_type) pair per hidden
+    unit — only type pairs that actually appear in the connectome get
+    parameters.  The dense layers store one weight matrix per cell type.
+    Parameters are expanded to per-edge / per-neuron at forward time via
+    index lookup.
+
+    Args:
+        num_neurons: Total number of neurons (X).
+        num_cell_types: Number of unique cell types.
+        sparse_indices: ``(2, num_edges)`` int64 tensor of (post, pre) indices
+            from the connectome sparse matrix.
+        neuron_to_type_index: ``(num_neurons,)`` int64 mapping each neuron to
+            its cell type index.
+        cell_ann_depth: N, the width of the first hidden layer.
+        nonlinearity: Activation module applied between layers.
+        device: Torch device.
+        dtype: Torch dtype.
+    """
+
+    def __init__(self, num_neurons, num_cell_types, sparse_indices,
+                 neuron_to_type_index, cell_ann_depth, nonlinearity,
+                 device=None, dtype=None):
+        super().__init__()
+        self.num_neurons = num_neurons
+        self.num_cell_types = num_cell_types
+        self.cell_ann_depth = cell_ann_depth
+        self.nonlinearity = nonlinearity
+
+        self.register_buffer('_sparse_idx', sparse_indices.to(device=device))
+        self.register_buffer('_neuron_to_type', neuron_to_type_index.to(device=device))
+
+        # Precompute edge → type-pair index (only pairs that exist in the connectome)
+        edge_post_type = neuron_to_type_index[sparse_indices[0]]
+        edge_pre_type = neuron_to_type_index[sparse_indices[1]]
+        pair_keys = edge_post_type * num_cell_types + edge_pre_type
+        _, edge_to_pair = torch.unique(pair_keys, return_inverse=True)
+        num_type_pairs = _.shape[0]
+        self.register_buffer('_edge_to_pair', edge_to_pair.to(device=device))
+
+        # Sparse layer: one weight per connected (post_type, pre_type) pair per hidden unit
+        self.sparse_weights = torch.nn.Parameter(
+            torch.zeros(num_type_pairs, cell_ann_depth, device=device, dtype=dtype)
+        )
+        self.sparse_bias = torch.nn.Parameter(
+            torch.zeros(num_cell_types, cell_ann_depth, device=device, dtype=dtype)
+        )
+
+        # Dense layers: per cell type, sizes N→N-1→…→2→1
+        self.dense_weights = torch.nn.ParameterList()
+        self.dense_biases = torch.nn.ParameterList()
+        for k in range(cell_ann_depth - 1):
+            in_size = cell_ann_depth - k
+            out_size = in_size - 1
+            self.dense_weights.append(torch.nn.Parameter(
+                torch.zeros(num_cell_types, in_size, out_size,
+                            device=device, dtype=dtype)
+            ))
+            self.dense_biases.append(torch.nn.Parameter(
+                torch.zeros(num_cell_types, out_size, device=device, dtype=dtype)
+            ))
+
+    def forward(self, v):
+        """
+        Args:
+            v: ``(batch, num_neurons)`` voltage vector.
+        Returns:
+            ``(batch, num_neurons)`` output after the per-neuron ANN.
+        """
+        batch_size = v.shape[0]
+
+        # Expand per-type-pair weights to per-edge: (num_edges, N)
+        edge_weights = self.sparse_weights[self._edge_to_pair]
+
+        # Sparse first layer: N separate sparse matmuls → (batch, X, N)
+        h = torch.zeros(batch_size, self.num_neurons, self.cell_ann_depth,
+                        device=v.device, dtype=v.dtype)
+        for n in range(self.cell_ann_depth):
+            sparse_mat = torch.sparse_coo_tensor(
+                self._sparse_idx, edge_weights[:, n],
+                size=(self.num_neurons, self.num_neurons),
+                dtype=v.dtype, device=v.device,
+            )
+            h[:, :, n] = torch.sparse.mm(sparse_mat, v.transpose(0, 1)).transpose(0, 1)
+
+        h = h + self.sparse_bias[self._neuron_to_type]
+        if self.cell_ann_depth > 1:
+            h = self.nonlinearity(h)
+
+        # Dense per-neuron layers (weights shared by cell type)
+        for k in range(len(self.dense_weights)):
+            w = self.dense_weights[k][self._neuron_to_type]
+            b = self.dense_biases[k][self._neuron_to_type]
+            h = torch.einsum('bxi,xio->bxo', h, w) + b
+            if k < len(self.dense_weights) - 1:
+                h = self.nonlinearity(h)
+
+        return h.squeeze(-1)
+
+
+@_register_model_class
+class CellANNModel(NeuralModel):
+    """Neural model where each neuron is modeled as a small feed-forward ANN.
+
+    The connectome provides only the sparsity pattern for the first layer
+    of the per-neuron network; all weights are learned from scratch.
+
+    Forward dynamics::
+
+        v_{t+1} = p * v_t + (1 - p) * (cell_ann(v_t) + b + c * u_t)
+
+    Args:
+        cell_ann_depth: N, the width of the first hidden layer in the
+            per-neuron ANN (layer sizes: N, N-1, ..., 2, 1).
+        init_new_model: Whether to run post-init setup (default True).
+        **kwargs: Forwarded to :class:`NeuralModel`.
+    """
+
+    def __init__(self, *, init_new_model=True, cell_ann_depth=3, **kwargs):
+        super().__init__(**kwargs)
+        self._save_init_inputs()
+
+        sparse_indices = self.synapse_counts.coalesce().indices()
+
+        self.cell_ann = CellANN(
+            num_neurons=self.num_neurons,
+            num_cell_types=self.num_cell_types,
+            sparse_indices=sparse_indices,
+            neuron_to_type_index=self.neuron_to_type_index,
+            cell_ann_depth=cell_ann_depth,
+            nonlinearity=self.nonlinearity,
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        def logit(p, eps=1e-6):
+            p = np.clip(p, eps, 1 - eps)
+            return np.log(p / (1 - p))
+
+        persistence_init = 0.5
+        stimulus_strength_init = 10.0
+        offset_init = 0.0
+
+        self.persistence_logit = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), logit(persistence_init),
+                       dtype=self.dtype, device=self.device)
+        )
+        self.stimulus_strength_log = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), np.log(stimulus_strength_init),
+                       dtype=self.dtype, device=self.device)
+        )
+        self.offset = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), offset_init,
+                       dtype=self.dtype, device=self.device)
+        )
+
+        self.add_noise_to_parameters(self.init_std)
+
+    def firing_rate(self, v):
+        return self.nonlinearity(v)
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
+        offset = self.offset[self.neuron_to_type_index]
+
+        z = self.cell_ann(v_prev)
+
+        stim = torch.zeros_like(v_prev)
+        if stim_to_cell_mapping is None:
+            stim = u_t * stimulus_strength[None, :]
+        else:
+            cell_idx = stim_to_cell_mapping['neuron_index']
+            stim_idx = stim_to_cell_mapping['stimulus_index']
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                stim.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
+
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset[None, :] + stim)
+
+        return v_next
+
