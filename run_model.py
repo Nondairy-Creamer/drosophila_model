@@ -83,7 +83,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     if model_path is not None:
         model_file = Path(model_path) / 'model.pt'
         print(f"Loading existing model from {model_file}")
-        model = nm.NeuralModel.load(model_file, freeze_params=False)
+        model = nm.NeuralModel.load(model_file, device=str(device), freeze_params=False)
         model.add_noise_to_parameters(model.init_std * 0.1)
         if model.dt != dt:
             print(f"Using model dt={model.dt} (config had dt={dt})")
