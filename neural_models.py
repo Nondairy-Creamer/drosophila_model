@@ -1339,6 +1339,46 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return omega_star, T_star, Z_star
 
+    def _sign_synapses(self):
+        """
+        Sign synapse counts in-place based on neurotransmitter type.
+        
+        Converts unsigned synapse counts to signed counts where:
+        - Excitatory synapses (from neurons using excitatory_nt) are positive
+        - Inhibitory synapses (from neurons using inhibitory_nt) are negative
+        
+        Modifies self.synapse_counts and self.synapse_counts_coo in-place.
+        """
+        indices = self.synapse_counts.coalesce().indices()
+        
+        pre_neuron_indices = indices[1].cpu().numpy()
+        pre_transmitters = self.transmitters[pre_neuron_indices]
+        
+        synapse_sign = np.zeros(len(pre_transmitters), dtype=np.float32)
+        for nt in self.excitatory_nt:
+            synapse_sign[pre_transmitters == nt] = 1
+        for nt in self.inhibitory_nt:
+            synapse_sign[pre_transmitters == nt] = -1
+        
+        unknown_mask = synapse_sign == 0
+        if np.any(unknown_mask):
+            unknown_nts = np.unique(pre_transmitters[unknown_mask])
+            warning(f"Unknown neurotransmitters {unknown_nts} - these synapses will be set to 0")
+        
+        synapse_sign_tensor = torch.tensor(synapse_sign, device=self.device, dtype=self.dtype)
+        signed_values = self.synapse_counts.values() * synapse_sign_tensor
+        self.synapse_counts = torch.sparse_coo_tensor(
+            indices, signed_values, size=self.synapse_counts.size(), 
+            dtype=self.dtype, device=self.device
+        ).coalesce()
+        
+        coalesced = self.synapse_counts.coalesce()
+        self.synapse_counts_coo = np.column_stack([
+            coalesced.indices()[1].cpu().numpy(),
+            coalesced.indices()[0].cpu().numpy(),
+            coalesced.values().cpu().numpy()
+        ])
+
 
 @_register_model_class
 class CurrentModel(NeuralModel):
@@ -1411,53 +1451,6 @@ class CurrentModel(NeuralModel):
             with torch.no_grad():
                 self.set_sigma_max()
                 # self.find_steady_state()
-
-    def _sign_synapses(self):
-        """
-        Sign synapse counts in-place based on neurotransmitter type.
-        
-        Converts unsigned synapse counts to signed counts where:
-        - Excitatory synapses (from neurons using excitatory_nt) are positive
-        - Inhibitory synapses (from neurons using inhibitory_nt) are negative
-        
-        Modifies self.synapse_counts and self.synapse_counts_coo in-place.
-        """
-        # Get presynaptic neuron indices from the sparse tensor (column indices = presynaptic)
-        indices = self.synapse_counts.coalesce().indices()
-        
-        # Get transmitter for each presynaptic neuron (directly from per-neuron array)
-        pre_neuron_indices = indices[1].cpu().numpy()
-        pre_transmitters = self.transmitters[pre_neuron_indices]
-        
-        # Compute sign based on transmitter type
-        synapse_sign = np.zeros(len(pre_transmitters), dtype=np.float32)
-        for nt in self.excitatory_nt:
-            synapse_sign[pre_transmitters == nt] = 1
-        for nt in self.inhibitory_nt:
-            synapse_sign[pre_transmitters == nt] = -1
-        
-        # Warn about any synapses with unknown neurotransmitter (sign = 0)
-        unknown_mask = synapse_sign == 0
-        if np.any(unknown_mask):
-            unknown_nts = np.unique(pre_transmitters[unknown_mask])
-            warning(f"Unknown neurotransmitters {unknown_nts} - these synapses will be set to 0")
-        
-        # Apply sign to the sparse tensor values
-        synapse_sign_tensor = torch.tensor(synapse_sign, device=self.device, dtype=self.dtype)
-        signed_values = self.synapse_counts.values() * synapse_sign_tensor
-        self.synapse_counts = torch.sparse_coo_tensor(
-            indices, signed_values, size=self.synapse_counts.size(), 
-            dtype=self.dtype, device=self.device
-        ).coalesce()
-        
-        # Update the COO array from the sparse tensor for consistency
-        # (coalesce may have combined duplicate entries, so sizes may differ)
-        coalesced = self.synapse_counts.coalesce()
-        self.synapse_counts_coo = np.column_stack([
-            coalesced.indices()[1].cpu().numpy(),  # pre (columns)
-            coalesced.indices()[0].cpu().numpy(),  # post (rows)
-            coalesced.values().cpu().numpy()       # signed counts
-        ])
 
     def set_sigma_max(self):
         """Iteratively scale output_strength to achieve target max sigma (spectral norm)."""
@@ -1902,7 +1895,7 @@ class CellAnnModel(NeuralModel):
         **kwargs: Forwarded to :class:`NeuralModel`.
     """
 
-    def __init__(self, *, init_new_model=True, cell_ann_depth=3, **kwargs):
+    def __init__(self, *, init_new_model=True, cell_ann_depth=1, **kwargs):
         super().__init__(**kwargs)
 
         # Sign synapse counts by neurotransmitter (same as CurrentModel)
