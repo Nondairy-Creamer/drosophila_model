@@ -1787,47 +1787,46 @@ class CellANN(torch.nn.Module):
     mix across neurons.
 
     All weights and biases are shared per cell type.  The sparse first layer
-    stores one weight per *connected* (post_type, pre_type) pair per hidden
-    unit — only type pairs that actually appear in the connectome get
-    parameters.  The dense layers store one weight matrix per cell type.
-    Parameters are expanded to per-edge / per-neuron at forward time via
-    index lookup.
+    stores one weight (in log space) per *connected* (post_type, pre_type)
+    pair per hidden unit.  At forward time these are exponentiated (ensuring
+    positivity) and multiplied by the biological sign derived from the
+    presynaptic neurotransmitter.  The dense layers store one weight matrix
+    per cell type.
+
+    Index buffers (``_sparse_idx``, ``_neuron_to_type``, ``_edge_to_pair``,
+    ``_edge_sign``) are computed by :class:`CellANNModel` and passed in.
 
     Args:
         num_neurons: Total number of neurons (X).
         num_cell_types: Number of unique cell types.
-        sparse_indices: ``(2, num_edges)`` int64 tensor of (post, pre) indices
-            from the connectome sparse matrix.
-        neuron_to_type_index: ``(num_neurons,)`` int64 mapping each neuron to
-            its cell type index.
+        num_type_pairs: Number of connected (post_type, pre_type) pairs.
         cell_ann_depth: N, the width of the first hidden layer.
         nonlinearity: Activation module applied between layers.
+        sparse_idx: ``(2, num_edges)`` int64 index tensor for the sparse layer.
+        neuron_to_type: ``(num_neurons,)`` int64 neuron → cell-type mapping.
+        edge_to_pair: ``(num_edges,)`` int64 edge → type-pair mapping.
+        edge_sign: ``(num_edges,)`` +1/−1 biological sign per edge.
         device: Torch device.
         dtype: Torch dtype.
     """
 
-    def __init__(self, num_neurons, num_cell_types, sparse_indices,
-                 neuron_to_type_index, cell_ann_depth, nonlinearity,
+    def __init__(self, num_neurons, num_cell_types, num_type_pairs,
+                 cell_ann_depth, nonlinearity,
+                 sparse_idx, neuron_to_type, edge_to_pair, edge_sign,
                  device=None, dtype=None):
         super().__init__()
         self.num_neurons = num_neurons
-        self.num_cell_types = num_cell_types
         self.cell_ann_depth = cell_ann_depth
         self.nonlinearity = nonlinearity
 
-        self.register_buffer('_sparse_idx', sparse_indices.to(device=device))
-        self.register_buffer('_neuron_to_type', neuron_to_type_index.to(device=device))
+        # Pre-computed index buffers (owned by CellANNModel)
+        self.register_buffer('_sparse_idx', sparse_idx)
+        self.register_buffer('_neuron_to_type', neuron_to_type)
+        self.register_buffer('_edge_to_pair', edge_to_pair)
+        self.register_buffer('_edge_sign', edge_sign)
 
-        # Precompute edge → type-pair index (only pairs that exist in the connectome)
-        edge_post_type = neuron_to_type_index[sparse_indices[0]]
-        edge_pre_type = neuron_to_type_index[sparse_indices[1]]
-        pair_keys = edge_post_type * num_cell_types + edge_pre_type
-        _, edge_to_pair = torch.unique(pair_keys, return_inverse=True)
-        num_type_pairs = _.shape[0]
-        self.register_buffer('_edge_to_pair', edge_to_pair.to(device=device))
-
-        # Sparse layer: one weight per connected (post_type, pre_type) pair per hidden unit
-        self.sparse_weights = torch.nn.Parameter(
+        # Sparse layer: learned in log space, one per connected type pair per hidden unit
+        self.sparse_weights_log = torch.nn.Parameter(
             torch.zeros(num_type_pairs, cell_ann_depth, device=device, dtype=dtype)
         )
         self.sparse_bias = torch.nn.Parameter(
@@ -1857,8 +1856,9 @@ class CellANN(torch.nn.Module):
         """
         batch_size = v.shape[0]
 
-        # Expand per-type-pair weights to per-edge: (num_edges, N)
-        edge_weights = self.sparse_weights[self._edge_to_pair]
+        # Positive learned magnitude × biological sign → signed per-edge weights
+        edge_weights = (self.sparse_weights_log[self._edge_to_pair].exp()
+                        * self._edge_sign.unsqueeze(-1))
 
         # Sparse first layer: N separate sparse matmuls → (batch, X, N)
         h = torch.zeros(batch_size, self.num_neurons, self.cell_ann_depth,
@@ -1890,8 +1890,10 @@ class CellANN(torch.nn.Module):
 class CellANNModel(NeuralModel):
     """Neural model where each neuron is modeled as a small feed-forward ANN.
 
-    The connectome provides only the sparsity pattern for the first layer
-    of the per-neuron network; all weights are learned from scratch.
+    Processes the connectome the same way as :class:`CurrentModel`: synapses
+    are signed by neurotransmitter type (excitatory / inhibitory).  The
+    connectome provides the sparsity pattern and biological sign for the first
+    layer of the per-neuron network; all weight magnitudes are learned.
 
     Forward dynamics::
 
@@ -1906,21 +1908,40 @@ class CellANNModel(NeuralModel):
 
     def __init__(self, *, init_new_model=True, cell_ann_depth=3, **kwargs):
         super().__init__(**kwargs)
+
+        # Sign synapse counts by neurotransmitter (same as CurrentModel)
+        self._sign_synapses()
+
         self._save_init_inputs()
 
-        sparse_indices = self.synapse_counts.coalesce().indices()
+        # --- Extract sparsity pattern and biological sign ---
+        coalesced = self.synapse_counts.coalesce()
+        sparse_indices = coalesced.indices()
+        edge_sign = torch.sign(coalesced.values())
 
+        # --- Compute type-pair mapping (only connected pairs get parameters) ---
+        edge_post_type = self.neuron_to_type_index[sparse_indices[0]]
+        edge_pre_type = self.neuron_to_type_index[sparse_indices[1]]
+        pair_keys = edge_post_type * self.num_cell_types + edge_pre_type
+        unique_keys, edge_to_pair = torch.unique(pair_keys, return_inverse=True)
+        num_type_pairs = unique_keys.shape[0]
+
+        # --- Create CellANN (initializes its own parameters) ---
         self.cell_ann = CellANN(
             num_neurons=self.num_neurons,
             num_cell_types=self.num_cell_types,
-            sparse_indices=sparse_indices,
-            neuron_to_type_index=self.neuron_to_type_index,
+            num_type_pairs=num_type_pairs,
             cell_ann_depth=cell_ann_depth,
             nonlinearity=self.nonlinearity,
+            sparse_idx=sparse_indices,
+            neuron_to_type=self.neuron_to_type_index,
+            edge_to_pair=edge_to_pair,
+            edge_sign=edge_sign,
             device=self.device,
             dtype=self.dtype,
         )
 
+        # --- CellANNModel-specific parameters (per cell type) ---
         def logit(p, eps=1e-6):
             p = np.clip(p, eps, 1 - eps)
             return np.log(p / (1 - p))
