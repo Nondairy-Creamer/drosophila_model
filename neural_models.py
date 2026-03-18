@@ -552,6 +552,13 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_transmitters = len(self.unique_transmitters)
         self.column_indices = column_indices
         self.column_phi_theta = column_phi_theta
+        left_phi_theta = column_phi_theta.copy()
+        left_phi_theta[:, 0] = -left_phi_theta[:, 0]
+        two_eye = np.concatenate((column_phi_theta, left_phi_theta), axis=0)
+        self.column_phi_theta_two_eyes = (
+            torch.tensor(two_eye[:, 0], device=self.device),
+            torch.tensor(two_eye[:, 1], device=self.device),
+        )
         self.column_p_q = column_p_q
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
@@ -901,16 +908,6 @@ class NeuralModel(torch.nn.Module, ABC):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
                     outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
 
-        # Check for NaN predictions indicating unstable dynamics
-        total_elements = 0
-        nan_elements = 0
-        for key in readout_keys:
-            fr_tensor = outputs['firing_rate'][key]
-            total_elements += fr_tensor.numel()
-            nan_elements += torch.isnan(fr_tensor).sum().item()
-        if total_elements > 0 and nan_elements / total_elements > 0.5:
-            print(f'Warning: >50% of predictions are NaN ({nan_elements}/{total_elements}), potentially unstable dynamics')
-
         return {
             'outputs': outputs,
             'model_state': {'v': v.detach(), 'filter_state': filter_state},
@@ -1186,12 +1183,8 @@ class NeuralModel(torch.nn.Module, ABC):
         optic_flow_left = left_result['outputs']['decoder']
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
-        left_column_locations = self.column_phi_theta.copy()
-        left_column_locations[:, 0] = -left_column_locations[:, 0]
-        column_locations = np.concatenate((self.column_phi_theta, left_column_locations), axis=0)
-
-        phi_tensor = torch.tensor(column_locations[:, 0], device=optic_flow.device, dtype=optic_flow.dtype)
-        theta_tensor = torch.tensor(column_locations[:, 1], device=optic_flow.device, dtype=optic_flow.dtype)
+        phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
+        theta_tensor = self.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
 
         valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
         if oob_columns is not None:
@@ -1346,6 +1339,46 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return omega_star, T_star, Z_star
 
+    def _sign_synapses(self):
+        """
+        Sign synapse counts in-place based on neurotransmitter type.
+        
+        Converts unsigned synapse counts to signed counts where:
+        - Excitatory synapses (from neurons using excitatory_nt) are positive
+        - Inhibitory synapses (from neurons using inhibitory_nt) are negative
+        
+        Modifies self.synapse_counts and self.synapse_counts_coo in-place.
+        """
+        indices = self.synapse_counts.coalesce().indices()
+        
+        pre_neuron_indices = indices[1].cpu().numpy()
+        pre_transmitters = self.transmitters[pre_neuron_indices]
+        
+        synapse_sign = np.zeros(len(pre_transmitters), dtype=np.float32)
+        for nt in self.excitatory_nt:
+            synapse_sign[pre_transmitters == nt] = 1
+        for nt in self.inhibitory_nt:
+            synapse_sign[pre_transmitters == nt] = -1
+        
+        unknown_mask = synapse_sign == 0
+        if np.any(unknown_mask):
+            unknown_nts = np.unique(pre_transmitters[unknown_mask])
+            warning(f"Unknown neurotransmitters {unknown_nts} - these synapses will be set to 0")
+        
+        synapse_sign_tensor = torch.tensor(synapse_sign, device=self.device, dtype=self.dtype)
+        signed_values = self.synapse_counts.values() * synapse_sign_tensor
+        self.synapse_counts = torch.sparse_coo_tensor(
+            indices, signed_values, size=self.synapse_counts.size(), 
+            dtype=self.dtype, device=self.device
+        ).coalesce()
+        
+        coalesced = self.synapse_counts.coalesce()
+        self.synapse_counts_coo = np.column_stack([
+            coalesced.indices()[1].cpu().numpy(),
+            coalesced.indices()[0].cpu().numpy(),
+            coalesced.values().cpu().numpy()
+        ])
+
 
 @_register_model_class
 class CurrentModel(NeuralModel):
@@ -1418,53 +1451,6 @@ class CurrentModel(NeuralModel):
             with torch.no_grad():
                 self.set_sigma_max()
                 # self.find_steady_state()
-
-    def _sign_synapses(self):
-        """
-        Sign synapse counts in-place based on neurotransmitter type.
-        
-        Converts unsigned synapse counts to signed counts where:
-        - Excitatory synapses (from neurons using excitatory_nt) are positive
-        - Inhibitory synapses (from neurons using inhibitory_nt) are negative
-        
-        Modifies self.synapse_counts and self.synapse_counts_coo in-place.
-        """
-        # Get presynaptic neuron indices from the sparse tensor (column indices = presynaptic)
-        indices = self.synapse_counts.coalesce().indices()
-        
-        # Get transmitter for each presynaptic neuron (directly from per-neuron array)
-        pre_neuron_indices = indices[1].cpu().numpy()
-        pre_transmitters = self.transmitters[pre_neuron_indices]
-        
-        # Compute sign based on transmitter type
-        synapse_sign = np.zeros(len(pre_transmitters), dtype=np.float32)
-        for nt in self.excitatory_nt:
-            synapse_sign[pre_transmitters == nt] = 1
-        for nt in self.inhibitory_nt:
-            synapse_sign[pre_transmitters == nt] = -1
-        
-        # Warn about any synapses with unknown neurotransmitter (sign = 0)
-        unknown_mask = synapse_sign == 0
-        if np.any(unknown_mask):
-            unknown_nts = np.unique(pre_transmitters[unknown_mask])
-            warning(f"Unknown neurotransmitters {unknown_nts} - these synapses will be set to 0")
-        
-        # Apply sign to the sparse tensor values
-        synapse_sign_tensor = torch.tensor(synapse_sign, device=self.device, dtype=self.dtype)
-        signed_values = self.synapse_counts.values() * synapse_sign_tensor
-        self.synapse_counts = torch.sparse_coo_tensor(
-            indices, signed_values, size=self.synapse_counts.size(), 
-            dtype=self.dtype, device=self.device
-        ).coalesce()
-        
-        # Update the COO array from the sparse tensor for consistency
-        # (coalesce may have combined duplicate entries, so sizes may differ)
-        coalesced = self.synapse_counts.coalesce()
-        self.synapse_counts_coo = np.column_stack([
-            coalesced.indices()[1].cpu().numpy(),  # pre (columns)
-            coalesced.indices()[0].cpu().numpy(),  # post (rows)
-            coalesced.values().cpu().numpy()       # signed counts
-        ])
 
     def set_sigma_max(self):
         """Iteratively scale output_strength to achieve target max sigma (spectral norm)."""
@@ -1909,7 +1895,7 @@ class CellAnnModel(NeuralModel):
         **kwargs: Forwarded to :class:`NeuralModel`.
     """
 
-    def __init__(self, *, init_new_model=True, cell_ann_depth=3, **kwargs):
+    def __init__(self, *, init_new_model=True, cell_ann_depth=1, **kwargs):
         super().__init__(**kwargs)
 
         # Sign synapse counts by neurotransmitter (same as CurrentModel)

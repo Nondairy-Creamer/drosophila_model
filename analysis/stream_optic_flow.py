@@ -117,7 +117,6 @@ def sample_image(image_gray: np.ndarray, W, in_fov: np.ndarray) -> torch.Tensor:
 def deg_pair_to_rad(values: tuple[float, float]) -> np.ndarray:
     return np.asarray(values, dtype=np.float64) * np.pi / 180.0
 
-
 def wrap_deg_180(deg: float) -> float:
     return (float(deg) + 180.0) % 360.0 - 180.0
 
