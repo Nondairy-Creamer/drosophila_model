@@ -70,12 +70,12 @@ def compute_loss_components(model, cell_inputs, target_rot, target_trans,
         rot_rate = _normalized_mse(pr, tr)
         trans_rate = _cosine_loss(pt, tt)
 
-        pr_pos = torch.cumsum(pr * dt, dim=1)
-        tr_pos = torch.cumsum(tr * dt, dim=1)
+        pr_pos = nm.integrate_angular_velocity(pr, dt)
+        tr_pos = nm.integrate_angular_velocity(tr, dt)
         rot_pos = _normalized_mse(pr_pos, tr_pos)
 
-        pt_pos = torch.cumsum(pt * dt, dim=1)
-        tt_pos = torch.cumsum(tt * dt, dim=1)
+        pt_pos = nm.integrate_translational_velocity(pt, pr, dt)
+        tt_pos = nm.integrate_translational_velocity(tt, tr, dt)
         trans_pos = _cosine_loss(pt_pos, tt_pos)
 
         pf = pred_flow[i:i+1, loss_start_step:]

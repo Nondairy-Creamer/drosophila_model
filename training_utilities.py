@@ -55,11 +55,11 @@ def _cosine_loss(pred, target, eps=1e-8):
 def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):
     """Combined rate + position loss for ego-motion estimation.
 
-    Rotation uses normalized MSE (MSE / var(target)), giving a unitless
-    fraction-of-variance-unexplained in the ~0-1 range.  Translation uses
-    cosine distance (direction only, since amplitude is unrecoverable),
-    also in the 0-1 range.  Both are computed on rates and on integrated
-    positions, and the four terms are averaged.
+    Rotation uses normalized MSE (fraction of variance unexplained, 0-1 range).
+    Translation uses cosine distance (direction only, 0-1 range).  Both are
+    computed on instantaneous rates and on integrated positions; rotational
+    position is integrated via SO(3) composition (Rodrigues).  The four terms
+    are averaged.
 
     Args:
         pred_rot: (batch, T, 3) predicted rotation rate (deg/s).
@@ -71,12 +71,12 @@ def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):
     loss_rot_rate = _normalized_mse(pred_rot, target_rot)
     loss_trans_rate = _cosine_loss(pred_trans, target_trans)
 
-    pred_rot_pos = torch.cumsum(pred_rot * dt, dim=1)
-    target_rot_pos = torch.cumsum(target_rot * dt, dim=1)
+    pred_rot_pos = nm.integrate_angular_velocity(pred_rot, dt)
+    target_rot_pos = nm.integrate_angular_velocity(target_rot, dt)
     loss_rot_pos = _normalized_mse(pred_rot_pos, target_rot_pos)
 
-    pred_trans_pos = torch.cumsum(pred_trans * dt, dim=1)
-    target_trans_pos = torch.cumsum(target_trans * dt, dim=1)
+    pred_trans_pos = nm.integrate_translational_velocity(pred_trans, pred_rot, dt)
+    target_trans_pos = nm.integrate_translational_velocity(target_trans, target_rot, dt)
     loss_trans_pos = _cosine_loss(pred_trans_pos, target_trans_pos)
 
     return (loss_rot_rate + loss_trans_rate + loss_rot_pos + loss_trans_pos) / 4
@@ -124,7 +124,7 @@ def _compute_odometry_loss(model, inputs_batch, target_batch, train_mask_batch, 
     else:
         flow_loss = pred_flow.new_tensor(0.0)
 
-    return odom_loss + flow_loss
+    return (odom_loss + flow_loss) / 2
 
 
 def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,

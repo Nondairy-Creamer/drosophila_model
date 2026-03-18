@@ -487,6 +487,125 @@ class MotionDecoder(torch.nn.Module):
         return optic_flow
 
 
+def _rodrigues(rotvec):
+    """Rotation vectors (axis * angle, radians) to rotation matrices.
+
+    Args:
+        rotvec: (..., 3) rotation vectors.
+    Returns:
+        (..., 3, 3) rotation matrices.
+    """
+    theta_sq = (rotvec * rotvec).sum(dim=-1, keepdim=True)
+    safe_sq = theta_sq.clamp(min=1e-24)
+    theta = safe_sq.sqrt()
+
+    x, y, z = rotvec[..., 0], rotvec[..., 1], rotvec[..., 2]
+    O = torch.zeros_like(x)
+    K = torch.stack([
+        torch.stack([O, -z, y], dim=-1),
+        torch.stack([z, O, -x], dim=-1),
+        torch.stack([-y, x, O], dim=-1),
+    ], dim=-2)
+
+    theta = theta.unsqueeze(-1)
+    safe_sq = safe_sq.unsqueeze(-1)
+    I = torch.eye(3, device=rotvec.device, dtype=rotvec.dtype)
+    return I + (torch.sin(theta) / theta) * K + ((1 - torch.cos(theta)) / safe_sq) * (K @ K)
+
+
+def _rotmat_to_rotvec(R):
+    """Rotation matrices to rotation vectors (axis * angle, radians).
+
+    Args:
+        R: (..., 3, 3) rotation matrices.
+    Returns:
+        (..., 3) rotation vectors.
+    """
+    trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
+    cos_a = ((trace - 1) / 2).clamp(-1 + 1e-7, 1 - 1e-7)
+    angle = torch.acos(cos_a)
+    v = torch.stack([
+        R[..., 2, 1] - R[..., 1, 2],
+        R[..., 0, 2] - R[..., 2, 0],
+        R[..., 1, 0] - R[..., 0, 1],
+    ], dim=-1)
+    denom = (2 * torch.sin(angle)).clamp(min=1e-8)
+    return v * (angle / denom).unsqueeze(-1)
+
+
+def integrate_angular_velocity(omega_deg, dt):
+    """Integrate angular velocity to cumulative orientation via SO(3) composition.
+
+    Composes incremental rotation matrices (Rodrigues) at each timestep and
+    extracts the cumulative rotation vector (axis * angle).
+
+    Args:
+        omega_deg: (batch, T, 3) or (T, 3) angular velocity in deg/s.
+            A 2-D input is treated as batch size 1 and the output is squeezed.
+        dt: timestep in seconds.
+    Returns:
+        Cumulative rotation vectors in degrees, same shape as input.
+    """
+    squeeze = omega_deg.dim() == 2
+    if squeeze:
+        omega_deg = omega_deg.unsqueeze(0)
+
+    rotvec_rad = omega_deg * (np.pi / 180) * dt
+    R_inc = _rodrigues(rotvec_rad)
+
+    B, T = omega_deg.shape[:2]
+    I = torch.eye(3, device=omega_deg.device, dtype=omega_deg.dtype)
+    R = I.unsqueeze(0).expand(B, -1, -1).clone()
+    rotvecs = []
+    for t in range(T):
+        R = R_inc[:, t] @ R
+        rotvecs.append(_rotmat_to_rotvec(R))
+    result = torch.stack(rotvecs, dim=1) * (180 / np.pi)
+
+    if squeeze:
+        result = result.squeeze(0)
+    return result
+
+
+def integrate_translational_velocity(v, omega_deg, dt):
+    """Integrate body-frame translational velocity to world-frame position.
+
+    At each timestep the cumulative rotation (from *omega_deg*) is used to
+    rotate the body-frame velocity into the world frame before accumulating.
+
+    Args:
+        v: (batch, T, 3) or (T, 3) body-frame translational velocity.
+        omega_deg: (batch, T, 3) or (T, 3) angular velocity in deg/s
+            (same shape as *v*).
+        dt: timestep in seconds.
+    Returns:
+        World-frame cumulative displacement, same shape as input.
+    """
+    squeeze = v.dim() == 2
+    if squeeze:
+        v = v.unsqueeze(0)
+        omega_deg = omega_deg.unsqueeze(0)
+
+    rotvec_rad = omega_deg * (np.pi / 180) * dt
+    R_inc = _rodrigues(rotvec_rad)
+
+    B, T = v.shape[:2]
+    I = torch.eye(3, device=v.device, dtype=v.dtype)
+    R = I.unsqueeze(0).expand(B, -1, -1).clone()
+    pos = torch.zeros(B, 3, device=v.device, dtype=v.dtype)
+    positions = []
+    for t in range(T):
+        R = R_inc[:, t] @ R
+        v_world = (R @ v[:, t, :, None]).squeeze(-1)
+        pos = pos + v_world * dt
+        positions.append(pos.clone())
+    result = torch.stack(positions, dim=1)
+
+    if squeeze:
+        result = result.squeeze(0)
+    return result
+
+
 class NeuralModel(torch.nn.Module, ABC):
     """Base class for neural models. Contains shared functionality for both current and conductance models."""
     
@@ -1203,6 +1322,39 @@ class NeuralModel(torch.nn.Module, ABC):
         translations = trans_flat.reshape(S, T_len, 3)
 
         return rotations, translations, right_result, left_result
+
+    def integrate_angular_velocity(self, omega_deg, dt=None):
+        """Integrate angular velocity to cumulative orientation via SO(3).
+
+        Convenience wrapper around the module-level ``integrate_angular_velocity``
+        that defaults *dt* to ``self.dt``.
+
+        Args:
+            omega_deg: (batch, T, 3) or (T, 3) angular velocity in deg/s.
+            dt: timestep in seconds (default: ``self.dt``).
+        Returns:
+            Cumulative rotation vectors in degrees, same shape as input.
+        """
+        if dt is None:
+            dt = self.dt
+        return integrate_angular_velocity(omega_deg, dt)
+
+    def integrate_translational_velocity(self, v, omega_deg, dt=None):
+        """Integrate body-frame translational velocity to world-frame position.
+
+        Convenience wrapper around the module-level
+        ``integrate_translational_velocity`` that defaults *dt* to ``self.dt``.
+
+        Args:
+            v: (batch, T, 3) or (T, 3) body-frame translational velocity.
+            omega_deg: (batch, T, 3) or (T, 3) angular velocity in deg/s.
+            dt: timestep in seconds (default: ``self.dt``).
+        Returns:
+            World-frame cumulative displacement, same shape as input.
+        """
+        if dt is None:
+            dt = self.dt
+        return integrate_translational_velocity(v, omega_deg, dt)
 
     def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up):
         """
