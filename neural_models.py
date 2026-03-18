@@ -490,14 +490,17 @@ class MotionDecoder(torch.nn.Module):
 def _rodrigues(rotvec):
     """Rotation vectors (axis * angle, radians) to rotation matrices.
 
+    Uses Taylor expansions for the ``sin(θ)/θ`` and ``(1-cos(θ))/θ²``
+    coefficients at small angles to avoid catastrophic cancellation in
+    the backward pass (autograd sees two large nearly-equal terms that
+    subtract to zero in float32).
+
     Args:
         rotvec: (..., 3) rotation vectors.
     Returns:
         (..., 3, 3) rotation matrices.
     """
     theta_sq = (rotvec * rotvec).sum(dim=-1, keepdim=True)
-    safe_sq = theta_sq.clamp(min=1e-24)
-    theta = safe_sq.sqrt()
 
     x, y, z = rotvec[..., 0], rotvec[..., 1], rotvec[..., 2]
     O = torch.zeros_like(x)
@@ -507,10 +510,19 @@ def _rodrigues(rotvec):
         torch.stack([-y, x, O], dim=-1),
     ], dim=-2)
 
-    theta = theta.unsqueeze(-1)
-    safe_sq = safe_sq.unsqueeze(-1)
+    # sin(θ)/θ  → 1 - θ²/6 + θ⁴/120   for small θ
+    # (1-cos(θ))/θ² → 1/2 - θ²/24 + θ⁴/720  for small θ
+    small = (theta_sq < 1e-6).squeeze(-1)
+    safe_sq = theta_sq.clamp(min=1e-24)
+    theta = safe_sq.sqrt()
+
+    sinc = torch.where(small.unsqueeze(-1), 1 - theta_sq / 6, torch.sin(theta) / theta)
+    cosc = torch.where(small.unsqueeze(-1), 0.5 - theta_sq / 24, (1 - torch.cos(theta)) / safe_sq)
+
+    sinc = sinc.unsqueeze(-1)
+    cosc = cosc.unsqueeze(-1)
     I = torch.eye(3, device=rotvec.device, dtype=rotvec.dtype)
-    return I + (torch.sin(theta) / theta) * K + ((1 - torch.cos(theta)) / safe_sq) * (K @ K)
+    return I + sinc * K + cosc * (K @ K)
 
 
 def _rotmat_to_rotvec(R):
@@ -1459,7 +1471,7 @@ class NeuralModel(torch.nn.Module, ABC):
         v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
 
         # === Measure translation signal strength (per time step) ===
-        translation_magnitude = torch.sqrt((v**2).mean(dim=(-2, -1)))
+        translation_magnitude = torch.sqrt((v**2).mean(dim=(-2, -1)).clamp(min=1e-12))
 
         # === Projection matrices Π_i = I - x_i x_iᵀ — shared across time ===
         outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
