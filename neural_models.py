@@ -516,21 +516,34 @@ def _rodrigues(rotvec):
 def _rotmat_to_rotvec(R):
     """Rotation matrices to rotation vectors (axis * angle, radians).
 
+    Uses ``atan2`` instead of ``acos`` for the angle so that gradients stay
+    bounded near the identity rotation (small angles).  The scale factor
+    ``angle / (2 sin angle)`` is replaced by its Taylor expansion when
+    ``sin angle`` is tiny, avoiding the 0/0 indeterminate form.
+
     Args:
         R: (..., 3, 3) rotation matrices.
     Returns:
         (..., 3) rotation vectors.
     """
-    trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]
-    cos_a = ((trace - 1) / 2).clamp(-1 + 1e-7, 1 - 1e-7)
-    angle = torch.acos(cos_a)
     v = torch.stack([
         R[..., 2, 1] - R[..., 1, 2],
         R[..., 0, 2] - R[..., 2, 0],
         R[..., 1, 0] - R[..., 0, 1],
     ], dim=-1)
-    denom = (2 * torch.sin(angle)).clamp(min=1e-8)
-    return v * (angle / denom).unsqueeze(-1)
+
+    sin_angle = (v * v).sum(dim=-1).clamp(min=1e-24).sqrt() / 2
+    cos_angle = (R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2] - 1) / 2
+
+    angle = torch.atan2(sin_angle, cos_angle)
+
+    # scale = angle / (2 sin_angle).  Taylor: 1/2 + angle²/12 + 7·angle⁴/720 + …
+    angle_sq = angle * angle
+    scale_small = 0.5 + angle_sq / 12
+    scale_large = angle / (2 * sin_angle)
+    scale = torch.where(sin_angle.abs() < 1e-4, scale_small, scale_large)
+
+    return v * scale.unsqueeze(-1)
 
 
 def integrate_angular_velocity(omega_deg, dt):
