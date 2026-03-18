@@ -7,9 +7,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 import torch
 import neural_models as nm
-from stimulus_utilities import build_ommatidium_sampling_matrix
+from stimulus_utilities import build_ommatidium_sampling_matrix, interpolate_to_model_dt
 
 # This script loads the model and then iteratively calculates the optic flow in sequential stimuli
+
+VIDEO_FPS = 30  # Hz — frame rate of the incoming video stream
 
 # Load the model
 model_path = 'models/best_model/model.pt'
@@ -65,14 +67,18 @@ def sample_image(image_gray, W, in_fov):
         in_fov: (N_ommatidia,) bool mask of ommatidia inside camera FOV
 
     Returns:
-        sampled: (1, 1, N_ommatidia) float32 tensor in [0, 1],
-                 shaped as [stimuli, time, ommatidia] ready for the model.
+        sampled: (N_ommatidia,) float32 tensor in [0, 1].
     """
     flat = image_gray.ravel().astype(np.float32)
     sampled = np.asarray(W.dot(flat)).ravel() / 255.0
     sampled[~in_fov] = 0.5
-    return torch.from_numpy(sampled).unsqueeze(0).unsqueeze(0)  # [1, 1, N]
+    return torch.from_numpy(sampled)
 
+
+video_dt = 1.0 / VIDEO_FPS
+
+prev_right = None
+prev_left = None
 
 # this is an example streaming loop where you load in an image and use the model to process it
 while True:
@@ -80,9 +86,24 @@ while True:
     image_right = some_load_function()  # e.g. cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     image_left  = some_load_function()
 
-    # Sample at ommatidium locations → [1, 1, N_ommatidia] float tensor in [0, 1]
-    visual_stimulus_right = sample_image(image_right, W_right, in_fov_right)
-    visual_stimulus_left  = sample_image(image_left,  W_left,  in_fov_left)
+    # Sample at ommatidium locations → (N_ommatidia,) float tensor in [0, 1]
+    curr_right = sample_image(image_right, W_right, in_fov_right)
+    curr_left  = sample_image(image_left,  W_left,  in_fov_left)
+
+    if prev_right is None:
+        # First frame: no previous frame to interpolate from, so just replicate
+        visual_stimulus_right = curr_right.unsqueeze(0).unsqueeze(0)  # [1, 1, N]
+        visual_stimulus_left  = curr_left.unsqueeze(0).unsqueeze(0)
+    else:
+        # Interpolate from previous frame to current frame at model.dt resolution.
+        # Stack as (1, 2, N), upsample, then drop the first timestep (already processed).
+        stacked_right = torch.stack([prev_right, curr_right]).unsqueeze(0)  # [1, 2, N]
+        stacked_left  = torch.stack([prev_left,  curr_left]).unsqueeze(0)
+        visual_stimulus_right = interpolate_to_model_dt(stacked_right, video_dt, model.dt)[:, 1:]
+        visual_stimulus_left  = interpolate_to_model_dt(stacked_left,  video_dt, model.dt)[:, 1:]
+
+    prev_right = curr_right
+    prev_left  = curr_left
 
     # Calculate optic flow predictions
     # set the initial state to be the last state of the model.
