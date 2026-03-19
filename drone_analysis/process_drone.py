@@ -1,13 +1,12 @@
 """Process drone stereo video data into preprocessed tensors.
 
-Loads each pair of left/right stereo videos and corresponding dual-tag pose CSV,
-converts tag pixel positions to angular flow, estimates ego-motion via
-extract_odometry, samples frames at ommatidium locations, and saves all clips
-as a single .pt file containing a list of dicts.
+Loads each pair of left/right stereo videos, loads batch-optimised pose
+estimates from drone_pose.py (running estimation if needed), samples
+frames at ommatidium locations, and saves all clips as a single .pt file.
 
 Usage:
-    python process_drone.py
-    python process_drone.py --data-dir ../connectome_data/drone_videos --output-dir ../connectome_data
+    python drone_analysis/process_drone.py
+    python drone_analysis/process_drone.py --data-dir ../connectome_data/drone_videos
 """
 
 import numpy as np
@@ -16,8 +15,12 @@ import cv2
 import pandas as pd
 from pathlib import Path
 import argparse
+import sys
 from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from stimulus_utilities import build_ommatidium_sampling_matrix
 
@@ -205,202 +208,75 @@ def plot_translation_comparison_avg(flow_trans, trig_avg,
     print(f'  Saved averaged translation comparison plot: {save_path}')
 
 
-def process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim, plot_dir=None):
-    """Process a single drone clip with dual-tag observations.
+def _load_or_estimate_pose(clip_id, data_dir, pose_dir):
+    """Load batch-optimised pose from .npz, running estimation if needed."""
+    npz_path = pose_dir / f'pose_{clip_id}.npz'
+    if npz_path.exists():
+        print(f'  Pose data found: {npz_path}')
+        return np.load(npz_path)
 
-    Loads left/right videos and the dual-tag pose CSV, converts tag pixel
-    positions to spherical angles, computes angular flow from tag motion,
-    and estimates ego-motion via extract_odometry.
+    print(f'  No pose data at {npz_path}, running estimation...')
+    from drone_pose import process_clip as estimate_clip, save_clip_result, get_image_size
+    from estimate_pose import EquirectRig
 
-    Returns a dict with video tensors and ego-motion, or None on failure.
+    image_size = get_image_size(data_dir, clip_id)
+    rig = EquirectRig.create_default(image_size)
+    result = estimate_clip(
+        clip_id, data_dir, rig,
+        tag_size=0.16, tag_family='tag36h11',
+        smoothness=0.1, world_to_m=1.0,
+    )
+    if result is None:
+        return None
+
+    pose_dir.mkdir(parents=True, exist_ok=True)
+    save_clip_result(result, pose_dir)
+    return np.load(npz_path)
+
+
+def process_clip(clip_id, data_dir, pose_dir):
+    """Process a single drone clip: load videos and batch-opt pose.
+
+    Returns a dict with video tensors, rotation/translation rates,
+    and rotation/translation locations, or None on failure.
     """
     data_dir = Path(data_dir)
+    pose_dir = Path(pose_dir)
 
     left = load_video_grayscale(data_dir / f'left_{clip_id}.mp4')
     right = load_video_grayscale(data_dir / f'right_{clip_id}.mp4')
-    pose = pd.read_csv(data_dir / f'apriltag_pose_log_{clip_id}_both.csv')
-    video_dt = float(pose['t_video_s'].iloc[1] - pose['t_video_s'].iloc[0])
 
-    min_len = min(len(left), len(right), len(pose))
-    left, right = left[:min_len], right[:min_len]
-    pose = pose.iloc[:min_len]
+    pose_data = _load_or_estimate_pose(clip_id, data_dir, pose_dir)
+    if pose_data is None:
+        return None
 
-    _, image_height, image_width = left.shape
+    fps = float(pose_data['fps'])
+    video_dt = 1.0 / fps
 
-    # Convert tag pixel positions to spherical angles
-    L_phi, L_theta = pixels_to_angles(
-        pose['L_u_used_px'].values, pose['L_v_used_px'].values,
-        image_width, image_height, phi_left_lim, theta_lim)
-    R_phi, R_theta = pixels_to_angles(
-        pose['R_u_used_px'].values, pose['R_v_used_px'].values,
-        image_width, image_height, phi_right_lim, theta_lim)
+    rotation = torch.from_numpy(pose_data['rotation_deg_s'].astype(np.float32))
+    translation = torch.from_numpy(pose_data['velocity_m_s'].astype(np.float32))
+    rotation_location = torch.from_numpy(
+        pose_data['rotation_deg'].astype(np.float32))
+    translation_location = torch.from_numpy(
+        pose_data['position_m'].astype(np.float32))
 
-    # Smooth with box filter
-    L_phi = uniform_filter1d(L_phi, size=BOX_FILTER_SIZE)
-    L_theta = uniform_filter1d(L_theta, size=BOX_FILTER_SIZE)
-    R_phi = uniform_filter1d(R_phi, size=BOX_FILTER_SIZE)
-    R_theta = uniform_filter1d(R_theta, size=BOX_FILTER_SIZE)
+    min_len = min(len(left), len(right), len(rotation))
+    left = left[:min_len]
+    right = right[:min_len]
+    rotation = rotation[:min_len]
+    translation = translation[:min_len]
+    rotation_location = rotation_location[:min_len]
+    translation_location = translation_location[:min_len]
 
-    # Differentiate to get angular flow rates
-    dL_phi = np.gradient(L_phi, video_dt)
-    dL_theta = np.gradient(L_theta, video_dt)
-    dR_phi = np.gradient(R_phi, video_dt)
-    dR_theta = np.gradient(R_theta, video_dt)
-
-    # Retinal flow: d_right (rightward), d_up (upward)
-    d_right_L = -dL_phi * np.sin(L_theta)
-    d_up_L = -dL_theta
-    d_right_R = -dR_phi * np.sin(R_theta)
-    d_up_R = -dR_theta
-
-    # Mean viewing directions (tags barely move on retina)
-    phi = torch.tensor([L_phi.mean(), R_phi.mean()], dtype=torch.float32)
-    theta = torch.tensor([L_theta.mean(), R_theta.mean()], dtype=torch.float32)
-
-    d_right = torch.tensor(
-        np.stack([d_right_L, d_right_R], axis=1), dtype=torch.float32)
-    d_up = torch.tensor(
-        np.stack([d_up_L, d_up_R], axis=1), dtype=torch.float32)
-
-    # L vs R correlations for all pose dimensions
-    print('    Translation correlations (dL vs dR):')
-    for dim in ('x', 'y', 'z'):
-        R_val = uniform_filter1d(
-            pose[f'R_{dim}_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-        L_val = uniform_filter1d(
-            pose[f'L_{dim}_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-        dR = np.gradient(R_val, video_dt)
-        dL = np.gradient(L_val, video_dt)
-        corr = np.corrcoef(dL, dR)[0, 1]
-        print(f'      {dim}: corr={corr:.4f}  '
-              f'dL std={dL.std():.6f}  dR std={dR.std():.6f}')
-
-    print('    Rotation correlations (dL vs dR):')
-    tag_rot_cols = []
-    for dim in ('roll', 'pitch', 'yaw'):
-        R_val = uniform_filter1d(
-            pose[f'R_{dim}_used_deg'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-        L_val = uniform_filter1d(
-            pose[f'L_{dim}_used_deg'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-        dR = np.gradient(R_val, video_dt)
-        dL = np.gradient(L_val, video_dt)
-        tag_rot_cols.append(0.5 * (dR + dL))
-        corr = np.corrcoef(dL, dR)[0, 1]
-        print(f'      {dim}: corr={corr:.4f}  '
-              f'dL std={dL.std():.6f}  dR std={dR.std():.6f}')
-    tag_rotation = np.column_stack(tag_rot_cols)
-
-    # Y translation rate: average left and right y derivatives
-    R_y = uniform_filter1d(
-        pose['R_y_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-    L_y = uniform_filter1d(
-        pose['L_y_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-    R_x = uniform_filter1d(
-        pose['R_x_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-    L_x = uniform_filter1d(
-        pose['L_x_used'].values.astype(np.float64), size=BOX_FILTER_SIZE)
-    dR_y = np.gradient(R_y, video_dt)
-    dL_y = np.gradient(L_y, video_dt)
-    T_y_known = torch.tensor(
-        0.5 * (dR_y + dL_y), dtype=torch.float32)
-
-    # Pitch rate: average left and right pitch derivatives
-    R_pitch_rad = uniform_filter1d(
-        pose['R_pitch_used_deg'].values.astype(np.float64),
-        size=BOX_FILTER_SIZE) * (np.pi / 180)
-    L_pitch_rad = uniform_filter1d(
-        pose['L_pitch_used_deg'].values.astype(np.float64),
-        size=BOX_FILTER_SIZE) * (np.pi / 180)
-    dR_pitch = np.gradient(R_pitch_rad, video_dt)
-    dL_pitch = np.gradient(L_pitch_rad, video_dt)
-    omega_y_known = torch.tensor(
-        0.5 * (dR_pitch + dL_pitch), dtype=torch.float32)
-
-    rotation, translation, _ = extract_odometry(
-        phi, theta, d_right, d_up, omega_y_known, T_y_known)
-
-    # The SVD sign disambiguation in extract_odometry yields T = -V_observer.
-    # Negate the SVD-estimated components (x, z) to get physical observer velocity.
-    # T_y passes through from T_y_known (already physical), omega is already physical.
-    translation[:, 0] *= -1
-    translation[:, 2] *= -1
-
-    # extract_odometry returns rotation in rad/s; keep a copy for rotation subtraction
-    rotation_rad = rotation.numpy().copy()
-
-    # Convert rotation to deg/s for saving (matches random_pano training convention)
-    rotation = rotation * (180.0 / np.pi)
-
-    # Subtract flow-estimated rotation from target angular trajectories so
-    # the trig estimates reflect translation-only motion.
-    dR_phi_rot, dR_theta_rot = _rotation_angular_rates(R_phi, R_theta, rotation_rad)
-    dL_phi_rot, dL_theta_rot = _rotation_angular_rates(L_phi, L_theta, rotation_rad)
-    R_theta_corr = R_theta - cumulative_trapezoid(dR_theta_rot, dx=video_dt, initial=0)
-    R_phi_corr = R_phi - cumulative_trapezoid(dR_phi_rot, dx=video_dt, initial=0)
-    L_theta_corr = L_theta - cumulative_trapezoid(dL_theta_rot, dx=video_dt, initial=0)
-    L_phi_corr = L_phi - cumulative_trapezoid(dL_phi_rot, dx=video_dt, initial=0)
-
-    # Trigonometric translation estimates from rotation-corrected angular positions.
-    # dZ = R_y * d(cot(pi - theta))/dt,  dX = R_x * d(cot(pi - |phi|))/dt
-    trig_dZ_R = np.abs(R_y) * np.gradient(1.0 / np.tan(np.pi - R_theta_corr), video_dt)
-    trig_dX_R = R_x * np.gradient(1.0 / np.tan(np.pi - np.abs(R_phi_corr)), video_dt)
-    trig_dZ_L = np.abs(L_y) * np.gradient(1.0 / np.tan(np.pi - L_theta_corr), video_dt)
-    trig_dX_L = L_x * np.gradient(1.0 / np.tan(np.pi - np.abs(L_phi_corr)), video_dt)
-    trig_trans_right = np.column_stack([trig_dX_R, dR_y, trig_dZ_R])
-    trig_trans_left = np.column_stack([trig_dX_L, dL_y, trig_dZ_L])
-
-    # Gaussian smooth trig estimates (std=0.15s, ±2 std window)
-    gauss_sigma = 0.15 / video_dt
-    trig_trans_right = gaussian_filter1d(trig_trans_right, sigma=gauss_sigma, axis=0, truncate=2.0)
-    trig_trans_left = gaussian_filter1d(trig_trans_left, sigma=gauss_sigma, axis=0, truncate=2.0)
-
-    # Trim leading/trailing frames where derivatives are near-zero
-    # (tag not yet detected or lost at clip boundaries)
-    all_vals = np.column_stack([rotation.numpy(), translation.numpy()])
-    d_vals = np.abs(np.gradient(all_vals, axis=0))
-    active = np.any(d_vals > 1e-9, axis=1)
-    if active.any():
-        first = int(np.argmax(active))
-        last = int(len(active) - 1 - np.argmax(active[::-1]))
-        left = left[first:last + 1]
-        right = right[first:last + 1]
-        rotation = rotation[first:last + 1]
-        translation = translation[first:last + 1]
-        trig_trans_right = trig_trans_right[first:last + 1]
-        trig_trans_left = trig_trans_left[first:last + 1]
-        tag_rotation = tag_rotation[first:last + 1]
-
-    trig_translation = torch.from_numpy(
-        (0.5 * (trig_trans_right + trig_trans_left)).astype(np.float32))
-
-    if plot_dir is not None:
-        plot_translation(
-            translation.numpy(), trig_translation.numpy(),
-            video_dt, clip_id,
-            Path(plot_dir) / f'translation_{clip_id}.png',
-        )
-        plot_rotation(
-            tag_rotation, rotation.numpy(),
-            video_dt, clip_id,
-            Path(plot_dir) / f'rotation_{clip_id}.png',
-        )
-        plot_translation_comparison(
-            translation.numpy(), trig_trans_right, trig_trans_left,
-            video_dt, clip_id, Path(plot_dir) / f'translation_comparison_{clip_id}.png',
-        )
-        plot_translation_comparison_avg(
-            translation.numpy(), trig_translation.numpy(),
-            video_dt, clip_id, Path(plot_dir) / f'translation_comparison_avg_{clip_id}.png',
-        )
-
-    print(f'  Clip {clip_id}: {len(left)} frames ({len(left) * video_dt:.1f}s) '
-          f'(trimmed from {min_len})')
+    print(f'  Clip {clip_id}: {min_len} frames ({min_len * video_dt:.1f}s)')
 
     return {
         'left': torch.from_numpy(left),
         'right': torch.from_numpy(right),
         'rotation': rotation,
-        'translation': trig_translation,
+        'translation': translation,
+        'rotation_location': rotation_location,
+        'translation_location': translation_location,
         'video_dt': video_dt,
         'clip_id': clip_id,
     }
@@ -423,7 +299,7 @@ def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
     sampled_right[:, ~in_fov_right] = 0.5
     sampled_left[:, ~in_fov_left] = 0.5
 
-    return {
+    result = {
         'right': torch.from_numpy(sampled_right),
         'left': torch.from_numpy(sampled_left),
         'rotation': clip['rotation'],
@@ -433,6 +309,11 @@ def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
         'in_fov_right': torch.from_numpy(in_fov_right.copy()),
         'in_fov_left': torch.from_numpy(in_fov_left.copy()),
     }
+    if 'rotation_location' in clip:
+        result['rotation_location'] = clip['rotation_location']
+    if 'translation_location' in clip:
+        result['translation_location'] = clip['translation_location']
+    return result
 
 
 def extract_odometry(phi, theta, d_right, d_up, omega_y_known, T_y_known):
@@ -671,7 +552,9 @@ def test_odometry():
 def main():
     parser = argparse.ArgumentParser(description='Process drone stereo videos into tensors')
     parser.add_argument('--data-dir', type=str, default='../connectome_data/drone_videos',
-                        help='Directory containing left_N.mp4, right_N.mp4, apriltag_pose_log_N_both.csv')
+                        help='Directory containing left_N.mp4, right_N.mp4')
+    parser.add_argument('--pose-dir', type=str, default='../connectome_data/drone_poses',
+                        help='Directory with batch-opt pose .npz files from drone_pose.py')
     parser.add_argument('--output-dir', type=str, default='../connectome_data',
                         help='Output directory for drone_data.pt')
     parser.add_argument('--column-info', type=str, default='../connectome_data/optic_lobes_column_info.parquet',
@@ -681,6 +564,7 @@ def main():
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
+    pose_dir = Path(args.pose_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -699,17 +583,26 @@ def main():
     sample_theta = column_info_df['theta'].to_numpy()
     print(f'Loaded {len(sample_phi)} ommatidium positions from {args.column_info}')
 
-    clip_ids = sorted(
-        int(p.stem.split('_')[-2])
-        for p in data_dir.glob('apriltag_pose_log_*_both.csv')
-    )
+    # Discover clips from video files
+    left_ids = set()
+    right_ids = set()
+    for p in data_dir.glob('left_*.mp4'):
+        try:
+            left_ids.add(int(p.stem.split('_')[1]))
+        except (ValueError, IndexError):
+            continue
+    for p in data_dir.glob('right_*.mp4'):
+        try:
+            right_ids.add(int(p.stem.split('_')[1]))
+        except (ValueError, IndexError):
+            continue
+    clip_ids = sorted(left_ids & right_ids)
     print(f'Found {len(clip_ids)} clips: {clip_ids}')
 
     raw_clips = []
     for clip_id in clip_ids:
         print(f'Loading clip {clip_id}...')
-        clip = process_clip(clip_id, data_dir, phi_right_lim, phi_left_lim, theta_lim,
-                            plot_dir='figures')
+        clip = process_clip(clip_id, data_dir, pose_dir)
         if clip is not None:
             raw_clips.append(clip)
 

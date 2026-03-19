@@ -18,3 +18,4 @@ scipy
 pytest
 h5py
 opencv-python
+pupil-apriltags

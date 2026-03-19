@@ -23,6 +23,52 @@ import torch
 
 import data_utilities as du
 import stimulus_utilities as su
+from neural_models import (
+    integrate_angular_velocity, integrate_translational_velocity,
+)
+from scipy.spatial.transform import Rotation
+
+
+def _load_new_pose(
+    npz_path: Path,
+    num_frames_sampled: int,
+    model_dt: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load velocity estimates from NPZ, resample, and integrate positions.
+
+    Velocities are resampled to the model time grid, then integrated
+    using SO(3)-aware integration from neural_models to obtain position
+    and rotation.
+
+    Returns:
+        (rotation_deg, position_m, rotation_deg_s, velocity_m_s)
+        each (num_frames_sampled, 3).
+    """
+    data = np.load(npz_path)
+    fps = float(data["fps"])
+    n_video = data["rotation_deg_s"].shape[0]
+    video_times = np.arange(n_video) / fps
+    sampled_times = np.arange(num_frames_sampled) * model_dt
+
+    def _resample(arr):
+        return np.column_stack([
+            np.interp(sampled_times, video_times, arr[:, i])
+            for i in range(arr.shape[1])
+        ])
+
+    rotation_deg_s = _resample(data["rotation_deg_s"])
+    velocity_m_s = _resample(data["velocity_m_s"])
+
+    omega_t = torch.tensor(rotation_deg_s, dtype=torch.float64)
+    vel_t = torch.tensor(velocity_m_s, dtype=torch.float64)
+
+    rotvec_deg = integrate_angular_velocity(omega_t, model_dt).numpy()
+    rotation_deg = Rotation.from_rotvec(np.deg2rad(rotvec_deg)).as_euler(
+        'xyz', degrees=True)
+    position_m = integrate_translational_velocity(
+        vel_t, omega_t, model_dt).numpy()
+
+    return rotation_deg, position_m, rotation_deg_s, velocity_m_s
 
 
 def main() -> None:
@@ -40,6 +86,9 @@ def main() -> None:
                         help="Output directory for the movie")
     parser.add_argument("--plot-extra", action="store_true", default=False,
                         help="Show sampled ommatidia and rotation/translation rates")
+    parser.add_argument("--pose-dir", type=str, default=None,
+                        help="Directory with new pose .npz files (default: "
+                             "<connectome_folder>/drone_poses)")
     args = parser.parse_args()
 
     config = du.load_config(args.config)
@@ -53,6 +102,7 @@ def main() -> None:
     model_dt = config["model"]["dt"]
     drone_data_path = connectome_folder / "drone_data.pt"
     drone_video_dir = connectome_folder / "drone_videos"
+    pose_dir = Path(args.pose_dir) if args.pose_dir else connectome_folder / "drone_poses"
 
     print("Loading preprocessed drone clips...")
     drone_clips = su.get_drone_stimulus(
@@ -74,7 +124,7 @@ def main() -> None:
         clip_id = sampled["clip_id"]
         video_dt = sampled["video_dt"]
 
-        from process_drone import load_video_grayscale
+        from drone_analysis.process_drone import load_video_grayscale
         raw_left = load_video_grayscale(drone_video_dir / f"left_{clip_id}.mp4")
         raw_right = load_video_grayscale(drone_video_dir / f"right_{clip_id}.mp4")
         raw = {"left": torch.from_numpy(raw_left), "right": torch.from_numpy(raw_right)}
@@ -98,10 +148,17 @@ def main() -> None:
         def _to_numpy(x):
             return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
 
-        rot_pos = _to_numpy(sampled["rotation"])
-        trans_pos = _to_numpy(sampled["translation"])
-        rot_rate = _to_numpy(sampled["rotation_rate"])
-        trans_rate = _to_numpy(sampled["translation_rate"])
+        pose_npz = pose_dir / f"pose_{clip_id}.npz"
+        if pose_npz.exists():
+            rot_pos, trans_pos, rot_rate, trans_rate = _load_new_pose(
+                pose_npz, num_frames_sampled, model_dt)
+            print(f"  Using new pose estimates from {pose_npz}")
+        else:
+            rot_pos = _to_numpy(sampled["rotation"])
+            trans_pos = _to_numpy(sampled["translation"])
+            rot_rate = _to_numpy(sampled["rotation_rate"])
+            trans_rate = _to_numpy(sampled["translation_rate"])
+            print(f"  Using old pose estimates (no {pose_npz})")
 
         fps = args.fps if args.fps is not None else round(1.0 / video_dt)
 
