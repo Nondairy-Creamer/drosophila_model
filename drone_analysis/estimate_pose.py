@@ -679,14 +679,51 @@ def _pnp_equirect(
     return pose_to_matrix(result.x[:3], result.x[3:6])
 
 
+def _pnp_single_tag_pinhole(
+    corners_2d: np.ndarray,
+    tag_size: float,
+    calib: CameraCalibration,
+) -> np.ndarray | None:
+    """Solve for body pose from one tag's pixel corners (pinhole).
+
+    Returns:
+        T_world_body (4×4) or None on failure.
+    """
+    corners_3d = _tag_local_corners(tag_size)
+    ok, rvec, tvec = cv2.solvePnP(
+        corners_3d, corners_2d,
+        calib.camera_matrix, calib.dist_coeffs,
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+    if not ok:
+        return None
+    T_cam_world = pose_to_matrix(rvec.ravel(), tvec.ravel())
+    T_world_cam = np.linalg.inv(T_cam_world)
+    return T_world_cam @ calib.T_cam_body
+
+
+def _pnp_single_tag(corners_2d, tag_size, cam):
+    """PnP dispatch — equirectangular or pinhole based on camera type."""
+    if isinstance(cam, EquirectCamera):
+        return _pnp_equirect(corners_2d, tag_size, cam)
+    return _pnp_single_tag_pinhole(corners_2d, tag_size, cam)
+
+
+def _project_corners(rvec, tvec, corners_world, cam):
+    """Projection dispatch — equirectangular or pinhole based on camera type."""
+    if isinstance(cam, EquirectCamera):
+        return _project_equirect(rvec, tvec, corners_world, cam)
+    return _project_tag_corners(rvec, tvec, corners_world, cam)
+
+
 def _init_body_poses_anchor(
     detections: list[TagDetection],
-    rig: EquirectRig,
+    rig: EquirectRig | DualCameraRig,
     tag_size: float,
     anchor_id: int,
     n_frames: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Initialize body poses using anchor-tag detections (equirectangular)."""
+    """Initialize body poses using anchor-tag detections."""
     anchor_dets = [d for d in detections if d.tag_id == anchor_id]
     by_frame: dict[int, list[TagDetection]] = {}
     for d in anchor_dets:
@@ -700,7 +737,7 @@ def _init_body_poses_anchor(
         dets = by_frame.get(fi, [])
         for det in dets:
             cam = rig.cameras[det.camera_id]
-            T_world_body = _pnp_equirect(det.corners, tag_size, cam)
+            T_world_body = _pnp_single_tag(det.corners, tag_size, cam)
             if T_world_body is None:
                 continue
             rvecs[fi], tvecs[fi] = matrix_to_pose(T_world_body)
@@ -724,13 +761,13 @@ def _init_body_poses_anchor(
 
 def _init_float_tag_pose(
     detections: list[TagDetection],
-    rig: EquirectRig,
+    rig: EquirectRig | DualCameraRig,
     tag_size: float,
     float_id: int,
     body_rvecs: np.ndarray,
     body_tvecs: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Estimate the float tag's pose relative to the anchor (equirectangular).
+    """Estimate the float tag's pose relative to the anchor.
 
     For each float-tag detection, runs PnP in the float tag's local frame
     to get T_float_body, then chains with the anchor-based body pose:
@@ -746,7 +783,7 @@ def _init_float_tag_pose(
     float_rvecs, float_tvecs = [], []
     for det in sample:
         cam = rig.cameras[det.camera_id]
-        T_float_body = _pnp_equirect(det.corners, tag_size, cam)
+        T_float_body = _pnp_single_tag(det.corners, tag_size, cam)
         if T_float_body is None:
             continue
         T_world_body = pose_to_matrix(
@@ -774,11 +811,11 @@ def _reprojection_residuals_auto(
     anchor_corners: np.ndarray,
     local_corners: np.ndarray,
     float_tag_id: int,
-    rig: EquirectRig,
+    rig: EquirectRig | DualCameraRig,
     n_frames: int,
     smoothness_weight: float,
 ) -> np.ndarray:
-    """Residuals with float-tag pose as unknowns (equirectangular).
+    """Residuals with float-tag pose as unknowns.
 
     params: [float_rvec(3), float_tvec(3), body_pose_0(6), …, body_pose_N(6)]
     """
@@ -794,7 +831,7 @@ def _reprojection_residuals_auto(
     for det in detections:
         corners_3d = (float_corners if det.tag_id == float_tag_id
                       else anchor_corners)
-        projected = _project_equirect(
+        projected = _project_corners(
             body_params[det.frame_idx, :3], body_params[det.frame_idx, 3:],
             corners_3d, rig.cameras[det.camera_id])
         residuals.append((projected - det.corners).ravel())
@@ -837,7 +874,7 @@ def _build_sparsity_auto(
 
 def estimate_trajectory_auto(
     detections: list[TagDetection],
-    rig: EquirectRig,
+    rig: EquirectRig | DualCameraRig,
     tag_size: float,
     n_frames: int,
     smoothness_weight: float = 0.1,
@@ -845,9 +882,9 @@ def estimate_trajectory_auto(
 ) -> dict:
     """Batch-optimise trajectory, auto-estimating relative tag positions.
 
-    Uses equirectangular projection. Fixes one tag as the world origin
-    and solves for the other tag's pose (6 DOF) jointly with the drone
-    trajectory. Only requires the tag side length.
+    Fixes one tag as the world origin and solves for the other tag's
+    pose (6 DOF) jointly with the drone trajectory. Dispatches to
+    equirectangular or pinhole projection based on rig type.
     """
     tag_ids = sorted(set(d.tag_id for d in detections))
     if len(tag_ids) != 2:
@@ -927,14 +964,15 @@ def estimate_trajectory_auto(
 def run_pipeline_auto(
     left_video_path: str,
     right_video_path: str,
-    rig: EquirectRig,
+    rig: EquirectRig | DualCameraRig,
     tag_size: float = 0.16,
     tag_family: str = 'tag36h11',
     smoothness_weight: float = 0.1,
 ) -> dict:
-    """Full pipeline with auto tag-position estimation (equirectangular).
+    """Full pipeline with auto tag-position estimation.
 
     Only requires the tag side length — no TagMap needed.
+    Dispatches to equirectangular or pinhole projection based on rig type.
     """
     print('Step 1/3  Loading videos...')
     videos = {
