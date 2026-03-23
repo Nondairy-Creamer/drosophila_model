@@ -116,6 +116,21 @@ def main() -> None:
         true_rot_rate = clip["rotation_rate"][:num_frames]
         true_trans_rate = clip["translation_rate"][:num_frames]
 
+        # Rescale predicted translation to match ground truth magnitude
+        trans_scale = np.std(true_trans_rate) / (np.std(pred_trans_np) + 1e-12)
+        pred_trans_scaled = pred_trans_np * trans_scale
+
+        _save_rate_figure(
+            true_rot_rate, pred_rot_np, true_trans_rate, pred_trans_scaled,
+            model_dt, clip_idx, clip_id,
+            output_dir / f"drone_rate_clip_{clip_idx}.png",
+        )
+        _save_integrated_figure(
+            true_rot_rate, pred_rot_np, true_trans_rate, pred_trans_scaled,
+            model_dt, clip_idx, clip_id,
+            output_dir / f"drone_integrated_clip_{clip_idx}.png",
+        )
+
         # Normalize translation to unit std (direction only, scale is arbitrary)
         true_std = np.std(true_trans_rate)
         pred_std = np.std(pred_trans_np)
@@ -157,6 +172,119 @@ def main() -> None:
             model_dt=model_dt,
             flow_label=flow_label,
         )
+
+
+def _save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,
+                      model_dt, clip_idx, clip_id, output_path):
+    """Save a 3x2 figure comparing ground-truth vs model velocity estimates.
+
+    Left column: rotational velocity (roll, pitch, yaw).
+    Right column: translational velocity (x, y, z).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    true_rot = np.asarray(true_rot)
+    pred_rot = np.asarray(pred_rot)
+    true_trans = np.asarray(true_trans)
+    pred_trans = np.asarray(pred_trans)
+
+    T = true_rot.shape[0]
+    times = np.arange(T) * model_dt
+    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
+    trans_labels = ["X", "Y", "Z"]
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
+    for i in range(3):
+        ax = axes[i, 0]
+        ax.plot(times, true_rot[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_rot[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{rot_labels[i]} (deg/s)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Rotational Velocity")
+
+        ax = axes[i, 1]
+        ax.plot(times, true_trans[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_trans[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{trans_labels[i]} (m/s)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Translational Velocity")
+
+    axes[2, 0].set_xlabel("Time (s)")
+    axes[2, 1].set_xlabel("Time (s)")
+    fig.suptitle(f"Clip {clip_idx} (id={clip_id}) — Velocity", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+    print(f"  Saved rate figure → {output_path}")
+
+
+def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
+                            model_dt, clip_idx, clip_id, output_path):
+    """Save a 3x2 figure comparing integrated ground-truth vs model pose.
+
+    Left column: integrated rotation (cumulative angle in degrees).
+    Right column: integrated translation (cumulative position in metres).
+    Uses SO(3)-aware integration from neural_models.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    true_rot = np.asarray(true_rot)
+    pred_rot = np.asarray(pred_rot)
+    true_trans = np.asarray(true_trans)
+    pred_trans = np.asarray(pred_trans)
+
+    true_rot_t = torch.tensor(true_rot, dtype=torch.float64)
+    pred_rot_t = torch.tensor(pred_rot, dtype=torch.float64)
+    true_trans_t = torch.tensor(true_trans, dtype=torch.float64)
+    pred_trans_t = torch.tensor(pred_trans, dtype=torch.float64)
+
+    true_rot_int = nm.integrate_angular_velocity(true_rot_t, model_dt).numpy()
+    pred_rot_int = nm.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
+    true_pos = nm.integrate_translational_velocity(
+        true_trans_t, true_rot_t, model_dt).numpy()
+    pred_pos = nm.integrate_translational_velocity(
+        pred_trans_t, pred_rot_t, model_dt).numpy()
+
+    T = true_rot.shape[0]
+    times = np.arange(T) * model_dt
+    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
+    trans_labels = ["X", "Y", "Z"]
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
+    for i in range(3):
+        ax = axes[i, 0]
+        ax.plot(times, true_rot_int[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_rot_int[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{rot_labels[i]} (deg)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Integrated Rotation")
+
+        ax = axes[i, 1]
+        ax.plot(times, true_pos[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_pos[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{trans_labels[i]} (m)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Integrated Translation")
+
+    axes[2, 0].set_xlabel("Time (s)")
+    axes[2, 1].set_xlabel("Time (s)")
+    fig.suptitle(f"Clip {clip_idx} (id={clip_id}) — Integrated Pose", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+    print(f"  Saved integrated figure → {output_path}")
 
 
 def _subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
