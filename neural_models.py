@@ -374,7 +374,8 @@ class MotionDecoder(torch.nn.Module):
 
     def __init__(self, num_channels, conv_sizes, neurons_to_decode,
                  column_p_q, cell_types, column_indices, num_neurons,
-                 num_columns, denom_eps=1e-2, device=None, dtype=None):
+                 num_columns, denom_eps=1e-2, device=None, dtype=None,
+                 use_bias=True):
         super().__init__()
         if len(num_channels) != len(conv_sizes):
             raise ValueError("num_channels and conv_sizes must have the same length.")
@@ -398,6 +399,7 @@ class MotionDecoder(torch.nn.Module):
                 column_p_q=column_p_q,
                 device=device,
                 dtype=dtype,
+                use_bias=use_bias,
             ))
             if i < len(num_channels) - 1:
                 self.batch_norms.append(
@@ -861,7 +863,7 @@ class NeuralModel(torch.nn.Module, ABC):
             num_modes=num_temporal_modes, dt=self.dt, device=self.device, dtype=self.dtype,
         )
 
-    def _initialize_decoder(self, num_channels=None, conv_sizes=None):
+    def _initialize_decoder(self, num_channels=None, conv_sizes=None, use_bias=True):
         """Create the ``MotionDecoder`` sub-module.
 
         All decoder-specific computation (neuron mapping, hex-grid neighbour
@@ -896,6 +898,7 @@ class NeuralModel(torch.nn.Module, ABC):
             denom_eps=self.decoder_denom_eps,
             device=self.device,
             dtype=self.dtype,
+            use_bias=use_bias,
         )
 
     def apply_input_conv(self, u_t, filter_state=None):
