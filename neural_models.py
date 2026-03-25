@@ -2161,3 +2161,158 @@ class CellAnnModel(NeuralModel):
 
         return v_next
 
+
+class ArbitraryModel(NeuralModel):
+    """All-to-all model with learned cell-type-to-cell-type weight matrix.
+
+    Like CurrentModel but without connectome sparsity or sign constraints.
+    The effective connectivity A is a dense (num_neurons x num_neurons) matrix
+    parameterized by a (num_cell_types x num_cell_types) weight matrix W,
+    where A[i,j] = W[type(i), type(j)].
+
+    Dynamics: v_{t+1} = p * v_t + (1-p) * (A @ g(v_t) + b + c*u_t)
+    """
+
+    def __init__(self, *, init_new_model=True, **kwargs):
+        super().__init__(**kwargs)
+        self._save_init_inputs()
+
+        self.max_allowed_sigma = 0.95
+
+        power_vec_np = self.rng.standard_normal(self.num_neurons)
+        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
+        power_vec = power_vec / (power_vec.norm() + 1e-12)
+        self.register_buffer('_power_vec', power_vec)
+
+        def logit(p, eps=1e-6):
+            p = np.clip(p, eps, 1 - eps)
+            return np.log(p / (1 - p))
+
+        persistence_init = 0.5
+        stimulus_strength_init = 10.0
+        offset_init = 0.0
+
+        self.persistence_logit = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), logit(persistence_init),
+                       dtype=self.dtype, device=self.device)
+        )
+        self.stimulus_strength_log = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), np.log(stimulus_strength_init),
+                       dtype=self.dtype, device=self.device)
+        )
+        self.offset = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), offset_init,
+                       dtype=self.dtype, device=self.device)
+        )
+
+        # Cell-type-to-cell-type weight matrix (no sign or sparsity constraints)
+        self.W = torch.nn.Parameter(
+            torch.zeros(self.num_cell_types, self.num_cell_types,
+                        dtype=self.dtype, device=self.device)
+        )
+
+        self.add_noise_to_parameters(self.init_std)
+
+        if init_new_model:
+            with torch.no_grad():
+                self.set_sigma_max()
+
+    def _apply_A(self, v, transpose=False):
+        """Efficiently compute A @ v where A[i,j] = W[type(i), type(j)].
+
+        Aggregates v by pre-synaptic cell type, multiplies by W in type-space,
+        then expands back to per-neuron. Avoids materializing the full
+        (num_neurons x num_neurons) matrix.
+        """
+        if v.dim() == 1:
+            idx = self.neuron_to_type_index
+        else:
+            idx = self.neuron_to_type_index.unsqueeze(0).expand_as(v)
+
+        v_by_type = torch.zeros(*v.shape[:-1], self.num_cell_types,
+                                device=v.device, dtype=v.dtype)
+        v_by_type.scatter_add_(-1, idx, v)
+
+        if transpose:
+            z_by_type = v_by_type @ self.W
+        else:
+            z_by_type = v_by_type @ self.W.T
+
+        return z_by_type[..., self.neuron_to_type_index]
+
+    def set_sigma_max(self):
+        """Iteratively scale W to achieve target max sigma (spectral norm)."""
+        with torch.no_grad():
+            max_scaling_iters = 100
+            rho_tolerance = 0.01
+            damping_factor = 0.3
+
+            for iter_idx in range(max_scaling_iters):
+                sigma_max = self.calc_sigma_max()
+
+                print(iter_idx, ':', sigma_max)
+                if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
+                    break
+
+                scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
+                self.W.mul_(scale_factor)
+
+    def calc_sigma_max(self, max_iter=100, eps=1e-12):
+        """Calculate the maximum singular value (spectral norm) of the dynamics matrix."""
+        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        one_minus_d = 1.0 - d
+
+        def apply_M(v):
+            return self._apply_A(v)
+
+        def apply_M_T(v):
+            return self._apply_A(v, transpose=True)
+
+        def apply_S(v):
+            return d * v + one_minus_d * apply_M(v)
+
+        def apply_S_T(v):
+            return d * v + apply_M_T(one_minus_d * v)
+
+        x = self._power_vec.clone()
+        x = x / (x.norm() + eps)
+
+        for _ in range(max_iter):
+            y = apply_S(x)
+            x = apply_S_T(y)
+            x = x / (x.norm() + eps)
+
+        y = apply_S(x)
+        sigma = y.norm()
+
+        self._power_vec.copy_(x.detach())
+
+        return sigma
+
+    def firing_rate(self, v):
+        return self.nonlinearity(v)
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
+        offset = self.offset[self.neuron_to_type_index]
+
+        fr = self.nonlinearity(v_prev)
+        z = self._apply_A(fr)
+
+        stim = torch.zeros_like(v_prev)
+        if stim_to_cell_mapping is None:
+            stim = u_t * stimulus_strength[None, :]
+        else:
+            cell_idx = stim_to_cell_mapping['neuron_index']
+            stim_idx = stim_to_cell_mapping['stimulus_index']
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                stim.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
+
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset[None, :] + stim)
+
+        return v_next
+
