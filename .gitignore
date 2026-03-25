@@ -8,5 +8,6 @@ __pycache__/
 .DS_Store
 logs/*
 drone/*
+*/.log
 
 *.lyx#
