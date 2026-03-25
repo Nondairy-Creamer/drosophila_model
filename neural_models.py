@@ -1587,7 +1587,7 @@ class CurrentModel(NeuralModel):
         
         # --- CurrentModel-specific parameters ---
         persistence_init = 0.5
-        stimulus_strength_init = 10.0
+        stimulus_strength_init = 1.0
         offset_init = 0.0
         
         persistence_logit_init = logit(persistence_init)
@@ -1804,7 +1804,7 @@ class ConductanceModel(NeuralModel):
         self.threshold = torch.full((self.num_cell_types,), threshold_default, dtype=self.dtype, device=self.device)
         
         # Stimulus strength (log scale) per cell type
-        stimulus_strength_init = 10.0
+        stimulus_strength_init = 1.0
         stimulus_strength_log_init = np.log(stimulus_strength_init)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), stimulus_strength_log_init, dtype=self.dtype, device=self.device)
         
@@ -2113,7 +2113,7 @@ class CellAnnModel(NeuralModel):
             return np.log(p / (1 - p))
 
         persistence_init = 0.5
-        stimulus_strength_init = 10.0
+        stimulus_strength_init = 1.0
         offset_init = 0.0
 
         self.persistence_logit = torch.nn.Parameter(
