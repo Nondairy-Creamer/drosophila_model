@@ -1611,16 +1611,13 @@ class CurrentModel(NeuralModel):
         
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         self.input_strength_log = torch.log(input_strength_init)
-        # Initialize output_strength_log to 0 so all cells start with output_strength = 1
-        self.output_strength_log = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        # # Fan-out initialization (commented out; set_max_sigma will adjust output_strength)
-        # synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
-        # synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        # for cti, ct in enumerate(self.unique_cell_types):
-        #     ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
-        #     synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
-        # output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
-        # self.output_strength_log = torch.log(output_strength_init)
+        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
+        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
+        self.output_strength_log = torch.log(output_strength_init)
         
         # Convert to Parameters
         self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
@@ -1833,16 +1830,14 @@ class ConductanceModel(NeuralModel):
         
         # --- Output strength: per cell type ---
         # Shape: (num_cell_types,)
-        # Initialize to 0 so all cells start with output_strength = 1
         self.output_strength_log = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
-        # # Fan-out initialization (commented out; set_max_sigma will adjust output_strength)
-        # for cti, ct in enumerate(self.unique_cell_types):
-        #     ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
-        #     ct_transmitter = self.cell_type_transmitters[cti]
-        #     ri = np.where(self.unique_transmitters == ct_transmitter)[0][0]
-        #     synapses_out_per_neuron = self.synapse_counts[ri].abs().sum(dim=0).to_dense()
-        #     fan_out = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
-        #     self.output_strength_log[cti] = -0.5 * torch.log(fan_out)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            ct_transmitter = self.cell_type_transmitters[cti]
+            ri = np.where(self.unique_transmitters == ct_transmitter)[0][0]
+            synapses_out_per_neuron = self.synapse_counts[ri].abs().sum(dim=0).to_dense()
+            fan_out = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+            self.output_strength_log[cti] = -0.5 * torch.log(fan_out)
         
         # --- Convert to Parameters ---
         self.rp_transmitter = torch.nn.Parameter(self.rp_transmitter)
