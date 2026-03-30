@@ -79,7 +79,7 @@ def main():
     # --- parameters ---
     directions = ["left", "right", "up", "down"]
     polarities = ["light", "dark"]
-    velocities = [15, 30, 60, 120, 240, 480]  # deg/s
+    velocities = [15, 30, 60, 120, 240, 480, 960, 1920]  # deg/s
     fov_deg = 180.0  # sweep extent (degrees)
     pre_stim_time = 0.5  # warm-up (seconds)
 
