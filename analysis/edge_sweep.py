@@ -93,7 +93,8 @@ def main():
 
     # Pre-allocate results storage
     results = None
-    if model.has_decoder:
+    decoder_key = next((k for k, m in model._readout_modules.items() if m.predicts_flow), None)
+    if decoder_key is not None:
         results = {d: {p: np.zeros((num_velocities, 2)) for p in polarities} for d in directions}
     else:
         print("Model has no decoder — skipping decoder figure.")
@@ -127,7 +128,7 @@ def main():
 
         # Decoder responses
         if results is not None:
-            decoder_out = pred["decoder"][:, pre_stim_steps:, :, :]
+            decoder_out = pred[decoder_key][:, pre_stim_steps:, :, :]
             mean_resp = torch.nanmean(decoder_out, dim=(1, 2)).cpu().numpy()
             for i, (direction, polarity) in enumerate(index_map):
                 results[direction][polarity][vi, :] = mean_resp[i]

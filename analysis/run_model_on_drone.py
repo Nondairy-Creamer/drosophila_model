@@ -102,8 +102,9 @@ def main() -> None:
                 right_input, left_input, oob_columns=oob,
             )
 
-        pred_flow_right = right_res["outputs"]["decoder"][0].cpu().numpy()
-        pred_flow_left = left_res["outputs"]["decoder"][0].cpu().numpy()
+        decoder_key = next(k for k, m in model._readout_modules.items() if m.predicts_flow)
+        pred_flow_right = right_res["outputs"][decoder_key][0].cpu().numpy()
+        pred_flow_left = left_res["outputs"][decoder_key][0].cpu().numpy()
         pred_rot_np = pred_rot[0].cpu().numpy()
         pred_trans_np = pred_trans[0].cpu().numpy()
 

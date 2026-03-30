@@ -606,7 +606,7 @@ class NeuralModel(torch.nn.Module, ABC):
     @property
     def has_decoder(self):
         """Backward-compat: True when any flow readout is configured."""
-        return any(mod.eye_asymmetric for mod in self._readout_modules.values())
+        return any(mod.predicts_flow for mod in self._readout_modules.values())
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
@@ -1184,7 +1184,7 @@ class NeuralModel(torch.nn.Module, ABC):
 
         flow_key = next(
             (k for k, m in self._readout_modules.items()
-             if m.eye_asymmetric and k in right_result['outputs']),
+             if m.predicts_flow and k in right_result['outputs']),
             None,
         )
         if flow_key is None:

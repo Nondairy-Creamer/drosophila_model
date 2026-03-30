@@ -27,7 +27,7 @@ import stimulus_utilities as su
 def get_flow_key(model):
     """Return the output key for the first flow (eye-asymmetric) readout."""
     return next(
-        (k for k, m in model._readout_modules.items() if m.eye_asymmetric),
+        (k for k, m in model._readout_modules.items() if m.predicts_flow),
         None,
     )
 

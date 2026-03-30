@@ -53,6 +53,7 @@ class HexGridReadout(torch.nn.Module):
 
     output_extra_dims: tuple = ()
     eye_asymmetric: bool = False
+    predicts_flow: bool = False
 
     def __init__(self, *, neurons_to_decode, column_p_q, cell_types,
                  column_indices, num_neurons, num_columns,
@@ -167,6 +168,7 @@ class FlowNeuronReadout(torch.nn.Module):
 
     output_extra_dims = (2,)
     eye_asymmetric = True
+    predicts_flow = True
 
     def __init__(self, *, cell_types, column_indices, num_neurons, num_columns,
                  device=None, dtype=None, **_kwargs):
@@ -216,6 +218,7 @@ class FlowLinearReadout(HexGridReadout):
 
     output_extra_dims = (2,)
     eye_asymmetric = True
+    predicts_flow = True
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -230,6 +233,7 @@ class FlowConv2Readout(HexGridReadout):
 
     output_extra_dims = (2,)
     eye_asymmetric = True
+    predicts_flow = True
 
     def __init__(self, **kwargs):
         super().__init__(

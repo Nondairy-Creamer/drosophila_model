@@ -63,7 +63,8 @@ def plot_loss(component_losses, save_folder=Path('figures')):
     ax1.set_title('Total loss')
     finite_mask = np.isfinite(total)
     if finite_mask.any():
-        ax1.set_ylim((0.9 * np.nanmin(total[finite_mask]), 1.1 * np.nanpercentile(total[finite_mask], 95)))
+        ax1.set_ylim(0.9 * np.nanmin(total[finite_mask]),
+                     1.1 * np.nanpercentile(total[finite_mask], 90))
 
     if ax2 is not None:
         for name, arr in components.items():
@@ -75,7 +76,8 @@ def plot_loss(component_losses, save_folder=Path('figures')):
         all_vals = np.concatenate(list(components.values()))
         finite = np.isfinite(all_vals)
         if finite.any():
-            ax2.set_ylim((0.9 * np.nanmin(all_vals[finite]), 1.1 * np.nanpercentile(all_vals[finite], 95)))
+            ax2.set_ylim(0.9 * np.nanmin(all_vals[finite]),
+                         1.1 * np.nanpercentile(all_vals[finite], 90))
 
     fig.tight_layout()
     fig.savefig(save_folder / 'loss.png')

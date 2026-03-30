@@ -53,7 +53,7 @@ def compute_loss_components(model, cell_inputs, target_rot, target_trans,
         pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
             right_input, left_input, oob_columns=oob,
         )
-        flow_key = next(k for k, m in model._readout_modules.items() if m.eye_asymmetric)
+        flow_key = next(k for k, m in model._readout_modules.items() if m.predicts_flow)
         pred_flow = torch.cat([right_res['outputs'][flow_key], left_res['outputs'][flow_key]], dim=2)
 
     num_stimuli = cell_inputs.shape[0]

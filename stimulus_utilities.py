@@ -1710,7 +1710,7 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
         )['outputs']
     
     flow_key = next(
-        (k for k, m in perturbed_model._readout_modules.items() if m.eye_asymmetric and k in pred),
+        (k for k, m in perturbed_model._readout_modules.items() if m.predicts_flow and k in pred),
         None,
     )
     if flow_key is not None:
