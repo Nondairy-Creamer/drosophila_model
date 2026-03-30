@@ -9,8 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-import training_utilities as tu
-
+from loss_functions import cos_loss
 from analysis_utilities import run_model_on_stimuli
 
 
@@ -46,7 +45,7 @@ def main() -> None:
 
         per_stim_sims: list[float] = []
         for i in range(num_stim):
-            sim = (1.0 - tu.cos_loss(true_flow[i], pred_flow[i])).item()
+            sim = (1.0 - cos_loss(true_flow[i], pred_flow[i])).item()
             per_stim_sims.append(sim)
 
         mean_sim = sum(per_stim_sims) / len(per_stim_sims)

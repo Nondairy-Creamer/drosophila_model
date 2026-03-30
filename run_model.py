@@ -42,6 +42,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # Extract parameters from config
     device = torch.device(config['model']['device'])
     dt = config['model']['dt']
+    loss_components = config['training']['loss_components']
+    uses_two_eyes = 'odometry_loss' in loss_components
 
     # save the config file and inputs
     if timestamp is None:
@@ -60,7 +62,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     # first generate the information about the columns - their location and ID
     # we'll use the columns that have all our input and output neurons
-    input_neurons = ['L1', 'L2', 'L3']  # Convert list to tuple for compatibility
+    input_neurons = ['L1', 'L2', 'L3']
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
@@ -103,39 +105,26 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             use_layer_norm=config['model']['use_layer_norm'],
             device=config['model']['device'],
             dtype=config['model']['dtype'],
-            decoder_type=config['model']['decoder_type'],
+            readouts=config['model']['readouts'],
             use_input_conv=config['model']['use_input_conv'],
             dt=dt,
             seed=seed,
             commit_hash=commit_hash,
         )
 
-    fit_odometry = config['training'].get('fit_odometry', False)
-
-    if fit_odometry:
+    # --- Build target dict ---
+    if uses_two_eyes:
         stimulus, optic_flow, target_rotation, target_translation, train_mask = \
             su.get_stimulus_two_eyes(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
         target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
     else:
         stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
 
-        if config['training']['use_synthetic_data']:
+        if config['training'].get('use_synthetic_data', False):
             target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
             target_model.save(model_save_folder / 'target_model.pt')
-
-        elif config['model']['decoder_type'] is not None and config['model']['decoder_type'] != 'none':
-            target = optic_flow
         else:
-            target = {}
-            for n, d in zip(output_neurons, output_neurons_direction):
-                if d == 'right':
-                    target[n] = torch.relu(optic_flow[:, :, :, 0])
-                elif d == 'left':
-                    target[n] = torch.relu(-optic_flow[:, :, :, 0])
-                elif d == 'up':
-                    target[n] = torch.relu(optic_flow[:, :, :, 1])
-                elif d == 'down':
-                    target[n] = torch.relu(-optic_flow[:, :, :, 1])
+            target = {'optic_flow': optic_flow}
 
     # Save seed info to config (filter out None values since TOML doesn't support them)
     run_info = {'seed': seed, 'device': str(device), 'run_id': run_id}
@@ -148,29 +137,23 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     else:
         torch.save(target.detach().cpu(), model_save_folder / "target.pt")
 
-    # get the loss function
-    loss_fn = getattr(tu, config['training']['loss_fn'])
     model.save(model_save_folder / 'model_init.pt')
     model.save(model_save_folder / 'model.pt')
 
     # --- train the model ---
     tu.train_model(model, stimulus, target, output_neurons, input_neurons,
+        loss_components=loss_components,
         model_save_folder=model_save_folder,
         rng=model.rng,
         num_steps=config['training']['num_steps'],
         save_every=config['training']['save_every'],
         alpha=config['training']['alpha'],
         clip_grad_norm=config['training'].get('clip_norm', None),
-        sigma_lambda=config['training'].get('sigma_lambda', 0),
-        peak_lambda=config['training'].get('peak_lambda', 0),
-        l1_lambda=config['training'].get('l1_lambda', 0),
-        loss_fn=loss_fn, 
         input_noise_std=config['training']['input_noise_std'],
         contrast_std=config['training']['contrast_std'],
         luminance_std=config['training']['luminance_std'],
         batch_size=config['training']['batch_size'],
         train_mask=train_mask,
-        fit_odometry=fit_odometry,
     )
 
 
@@ -193,4 +176,3 @@ if __name__ == '__main__':
         model_path=args.model_folder,
         config_path=args.config_path,
     )
-

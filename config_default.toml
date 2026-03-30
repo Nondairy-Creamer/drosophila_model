@@ -4,7 +4,7 @@ device = "cuda"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "Softplus"
-decoder_type = "conv_2"
+readouts = ['FlowConv2Readout']
 use_input_conv = true
 dt = 0.01
 synapse_count_threshold = 2
@@ -13,18 +13,14 @@ use_connectome_subset = []
 [training]
 num_steps = 100000
 save_every = 1
-loss_fn = "cos_loss"
+loss_components = ['flow_loss']
 input_noise_std = 0.0
 contrast_std = 0.0
 luminance_std = 0.0
 random_flip_input = false
 alpha = 0.01
 clip_norm = 1.0
-sigma_lambda = 0.0
-peak_lambda = 0.0
-l1_lambda = 0.0
 use_synthetic_data = false
-fit_odometry = false
 batch_size = 'none'
 
 [stimulus]

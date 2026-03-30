@@ -44,7 +44,7 @@ Key configuration arguments:
 | `nonlinearity` | `'Softplus'` | Activation function (any `torch.nn` class name, or `'identity'`) |
 | `dt` | `0.01` | Simulation timestep |
 | `count_threshold` | `2` | Minimum synapse count to keep a connection |
-| `decoder_type` | `'none'` | `'none'` or `'conv_2'` (adds a `MotionDecoder`) |
+| `readouts` | `[]` | List of readout class names: `'FlowNeuronReadout'`, `'FlowLinearReadout'`, `'FlowConv2Readout'`, `'MotionMagReadout'` |
 | `use_input_conv` | `True` | Whether to apply spatial/temporal input filtering |
 | `conv_size_x` | `5` | Hex-grid diameter for the input spatial convolution |
 | `num_temporal_modes` | `4` | Number of complex modes in the input temporal filter |

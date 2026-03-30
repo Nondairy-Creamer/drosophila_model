@@ -24,6 +24,13 @@ import neural_models as nm
 import stimulus_utilities as su
 
 
+def get_flow_key(model):
+    """Return the output key for the first flow (eye-asymmetric) readout."""
+    return next(
+        (k for k, m in model._readout_modules.items() if m.eye_asymmetric),
+        None,
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -152,11 +159,12 @@ def predict_optic_flow(
     model: nm.NeuralModel, stimulus: torch.Tensor
 ) -> torch.Tensor:
     """Run the model and return predicted optic flow."""
+    flow_key = get_flow_key(model)
+    if flow_key is None:
+        raise ValueError("Model has no flow readout configured. Cannot predict optic flow.")
     with torch.no_grad():
-        if model.has_decoder:
-            outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']
-            return outputs["decoder"]
-        raise ValueError("Model has no decoder (decoder_type='none'). Cannot predict optic flow.")
+        outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']
+        return outputs[flow_key]
 
 
 def run_model_on_stimuli(

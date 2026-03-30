@@ -30,7 +30,7 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
 import neural_models as nm
-from training_utilities import _normalized_mse, _cosine_loss
+from loss_functions import normalized_mse, cosine_loss
 
 
 def compute_loss_components(model, cell_inputs, target_rot, target_trans,
@@ -53,7 +53,8 @@ def compute_loss_components(model, cell_inputs, target_rot, target_trans,
         pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
             right_input, left_input, oob_columns=oob,
         )
-        pred_flow = torch.cat([right_res['outputs']['decoder'], left_res['outputs']['decoder']], dim=2)
+        flow_key = next(k for k, m in model._readout_modules.items() if m.eye_asymmetric)
+        pred_flow = torch.cat([right_res['outputs'][flow_key], left_res['outputs'][flow_key]], dim=2)
 
     num_stimuli = cell_inputs.shape[0]
     results = {k: [] for k in [
@@ -67,27 +68,27 @@ def compute_loss_components(model, cell_inputs, target_rot, target_trans,
         pt = pred_trans[i:i+1, loss_start_step:]
         tt = target_trans[i:i+1, loss_start_step:]
 
-        rot_rate = _normalized_mse(pr, tr)
-        trans_rate = _cosine_loss(pt, tt)
+        rot_rate = normalized_mse(pr, tr)
+        trans_rate = cosine_loss(pt, tt)
 
         pr_pos = nm.integrate_angular_velocity(pr, dt)
         tr_pos = nm.integrate_angular_velocity(tr, dt)
-        rot_pos = _normalized_mse(pr_pos, tr_pos)
+        rot_pos = normalized_mse(pr_pos, tr_pos)
 
         pt_pos = nm.integrate_translational_velocity(pt, pr, dt)
         tt_pos = nm.integrate_translational_velocity(tt, tr, dt)
-        trans_pos = _cosine_loss(pt_pos, tt_pos)
+        trans_pos = cosine_loss(pt_pos, tt_pos)
 
         pf = pred_flow[i:i+1, loss_start_step:]
         tf = target_flow[i:i+1, loss_start_step:]
         fm = train_mask[i:i+1, loss_start_step:].unsqueeze(-1).expand_as(tf)
         valid_flow = fm & ~torch.isnan(tf)
         if valid_flow.any():
-            flow_loss = _normalized_mse(pf[valid_flow], tf[valid_flow])
+            flow_loss = normalized_mse(pf[valid_flow], tf[valid_flow])
         else:
             flow_loss = pf.new_tensor(0.0)
 
-        flow_cos = _cosine_loss(pf, tf)
+        flow_cos = cosine_loss(pf, tf)
 
         odom_total = (rot_rate + trans_rate + rot_pos + trans_pos) / 4
         total = odom_total + flow_loss
@@ -234,7 +235,7 @@ def main() -> None:
 
     output_dir = model_folder / 'figures'
     output_dir.mkdir(parents=True, exist_ok=True)
-    plot_flow_cosine(results, stim_indices, output_dir / 'flow_cosine_loss.png')
+    plot_flow_cosine(results, stim_indices, output_dir / 'flowcosine_loss.png')
 
 
 if __name__ == "__main__":

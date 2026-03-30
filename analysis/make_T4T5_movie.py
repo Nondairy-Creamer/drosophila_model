@@ -10,7 +10,7 @@ import shutil
 import neural_models as nm
 import data_utilities as du
 import plotting_utilities as pu
-import training_utilities as tu
+
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt

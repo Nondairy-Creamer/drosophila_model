@@ -56,7 +56,7 @@ def _load_model(config: dict, device: str) -> nm.NeuralModel:
         use_layer_norm=config['model']['use_layer_norm'],
         device=device,
         dtype=config['model']['dtype'],
-        decoder_type=config['model']['decoder_type'],
+        readouts=config['model']['readouts'],
         use_input_conv=config['model']['use_input_conv'],
         dt=config['model']['dt'],
         seed=None,
@@ -247,8 +247,8 @@ def main() -> None:
 
     config = du.load_config(Path(args.config))
 
-    if config['model']['decoder_type'] == 'none':
-        print("Error: decoder_type is 'none' in config. Nothing to analyze.")
+    if not config['model'].get('readouts'):
+        print("Error: no readouts configured. Nothing to analyze.")
         sys.exit(1)
 
     model = _load_model(config, args.device)

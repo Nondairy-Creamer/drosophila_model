@@ -18,8 +18,7 @@ import numpy as np
 import neural_models as nm
 import data_utilities as du
 import model_utilities as mu
-from loss_functions import mse_loss
-from training_utilities import _compute_odometry_loss
+import loss_functions as lf
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('model_folder', type=str, help='Path to the model folder')
@@ -100,9 +99,23 @@ if not time_mask[:, 0].all():
 def compute_loss(mdl, stim):
     """Compute loss matching the training procedure."""
     if fit_odometry:
-        return _compute_odometry_loss(mdl, stim, target, train_mask, loss_start_step)
-    pred = mdl.predict(stim, input_neurons=input_neurons)['outputs']['decoder']
-    return mse_loss(target_tensor, pred)
+        N = stim.shape[2] // 2
+        oob = ~train_mask.any(dim=1).any(dim=0)
+        pred_rot, pred_trans, right_res, left_res = \
+            mdl.estimate_ego_motion_from_image(stim[:, :, :N], stim[:, :, N:], oob_columns=oob)
+        flow_key = next(k for k, m in mdl._readout_modules.items() if m.eye_asymmetric)
+        outputs = {
+            flow_key: torch.cat([right_res['outputs'][flow_key],
+                                 left_res['outputs'][flow_key]], dim=2),
+            'pred_rotation': pred_rot,
+            'pred_translation': pred_trans,
+        }
+        loss_names = ['flow_loss', 'odometry_loss']
+        return sum(getattr(lf, n)(mdl, outputs, target, train_mask, loss_start_step)
+                   for n in loss_names) / len(loss_names)
+    flow_key = next(k for k, m in mdl._readout_modules.items() if m.eye_asymmetric)
+    pred = mdl.predict(stim, input_neurons=input_neurons)['outputs'][flow_key]
+    return lf.mse_loss(target_tensor, pred)
 
 
 with torch.no_grad():

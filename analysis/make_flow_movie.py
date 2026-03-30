@@ -39,16 +39,22 @@ def _extract_optic_flow(target_loaded: object) -> torch.Tensor:
     raise TypeError("Unsupported target format. Expected tensor or dict of tensors.")
 
 
-def _extract_pred_flow(pred_output: object) -> torch.Tensor:
+def _extract_pred_flow(pred_output: object, model=None) -> torch.Tensor:
     if torch.is_tensor(pred_output):
         return pred_output
 
     if isinstance(pred_output, dict):
         if 'outputs' in pred_output:
             pred_output = pred_output['outputs']
-        if 'decoder' in pred_output:
-            return pred_output['decoder']
-        raise ValueError("Predict output dict missing 'decoder' key.")
+        if model is not None:
+            from analysis_utilities import get_flow_key
+            flow_key = get_flow_key(model)
+            if flow_key and flow_key in pred_output:
+                return pred_output[flow_key]
+        for key, val in pred_output.items():
+            if key not in ('voltage', 'firing_rate') and torch.is_tensor(val) and val.dim() >= 3:
+                return val
+        raise ValueError("Predict output dict missing flow readout key.")
 
     raise TypeError("Unsupported predict output format.")
 
@@ -91,9 +97,9 @@ def main() -> None:
     print(f"Running model prediction for stimulus {stim_index}...")
     with torch.no_grad():
         pred_output = model.predict(stim_input)
-        pred_flow = _extract_pred_flow(pred_output).to(device=device, dtype=dtype)[0]
+        pred_flow = _extract_pred_flow(pred_output, model=model).to(device=device, dtype=dtype)[0]
 
-    from training_utilities import cos_loss
+    from loss_functions import cos_loss
     print("Cosine similarity", 1 - cos_loss(true_flow_single, pred_flow))
 
     # Compute filtered stimulus (after model's input convolution)

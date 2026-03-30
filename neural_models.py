@@ -350,145 +350,6 @@ class TemporalLRU(torch.nn.Module):
         return modes, feedthrough
 
 
-class MotionDecoder(torch.nn.Module):
-    """N-layer hex-grid convolutional decoder: firing rates -> optic flow.
-
-    Each entry in *num_channels* adds a ``NeuralModelConv`` layer.  All layers
-    except the last are followed by BatchNorm + softplus.  The final layer's
-    first two channels are divided by softplus of the third to produce 2-D
-    optic flow per column.
-
-    Args:
-        num_channels: List of output channel counts, one per conv layer.
-        conv_sizes: List of hex-grid diameters (odd ints), same length as
-            *num_channels*.
-        neurons_to_decode: Ordered list of cell-type names used as decoder
-            input features.
-        column_p_q: ``(num_columns, 2)`` p,q lattice coordinates.
-        cell_types: Per-neuron cell type array (length *num_neurons*).
-        column_indices: Per-neuron column index array (length *num_neurons*).
-        num_neurons: Total neuron count in the model.
-        num_columns: Total column count in the model.
-        denom_eps: Clamping floor for the normalising denominator.
-    """
-
-    def __init__(self, num_channels, conv_sizes, neurons_to_decode,
-                 column_p_q, cell_types, column_indices, num_neurons,
-                 num_columns, denom_eps=1e-2, device=None, dtype=None,
-                 use_bias=True):
-        super().__init__()
-        if len(num_channels) != len(conv_sizes):
-            raise ValueError("num_channels and conv_sizes must have the same length.")
-        self.denom_eps = denom_eps
-        self.neurons_to_decode = list(neurons_to_decode)
-        self.conv_sizes = list(conv_sizes)
-
-        self._build_column_to_neuron_mapping(
-            cell_types, column_indices, num_neurons, num_columns, device,
-        )
-
-        num_decoder_neuron_types = len(self.neurons_to_decode)
-        in_features = num_decoder_neuron_types
-        self.conv_layers = torch.nn.ModuleList()
-        self.batch_norms = torch.nn.ModuleList()
-        for i, (channels, csz) in enumerate(zip(num_channels, conv_sizes)):
-            self.conv_layers.append(NeuralModelConv(
-                in_features=in_features,
-                out_features=channels,
-                conv_size=csz,
-                column_p_q=column_p_q,
-                device=device,
-                dtype=dtype,
-                use_bias=use_bias,
-            ))
-            if i < len(num_channels) - 1:
-                self.batch_norms.append(
-                    torch.nn.BatchNorm1d(channels).to(device=device, dtype=dtype)
-                )
-            in_features = channels
-
-    # ------------------------------------------------------------------
-    # Neuron-to-column mapping (built once at init)
-    # ------------------------------------------------------------------
-
-    def _build_column_to_neuron_mapping(self, cell_types, column_indices,
-                                        num_neurons, num_columns, device):
-        """Create ``column_to_decoder_neurons`` buffer.
-
-        Shape ``(num_columns, num_decoder_neuron_types)`` with neuron indices;
-        ``-1`` marks absent neuron types in a given column.
-        """
-        cell_types = np.asarray(cell_types)
-        column_indices = np.asarray(column_indices, dtype=np.float64)
-        cell_type_to_idx = {ct: i for i, ct in enumerate(self.neurons_to_decode)}
-        num_types = len(self.neurons_to_decode)
-
-        decoder_mask = np.zeros(num_neurons, dtype=bool)
-        for ct in self.neurons_to_decode:
-            decoder_mask |= (cell_types == ct)
-
-        mapping = np.full((num_columns, num_types), -1, dtype=np.int64)
-        for neuron_idx in np.where(decoder_mask)[0]:
-            col = column_indices[neuron_idx]
-            if np.isnan(col):
-                continue
-            col = int(col)
-            type_idx = cell_type_to_idx.get(cell_types[neuron_idx])
-            if type_idx is not None and mapping[col, type_idx] == -1:
-                mapping[col, type_idx] = neuron_idx
-
-        self.register_buffer(
-            'column_to_decoder_neurons',
-            torch.tensor(mapping, device=device, dtype=torch.int64),
-        )
-
-    # ------------------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------------------
-
-    def _extract_column_features(self, v):
-        """Map raw neuron firing rates to per-column features.
-
-        Returns ``(batch, num_columns, num_decoder_neuron_types)`` with
-        ``NaN`` for neuron types absent from a column.
-        """
-        valid = self.column_to_decoder_neurons >= 0
-        safe = self.column_to_decoder_neurons.clamp(min=0)
-        features = v[:, safe]
-        return features.masked_fill(~valid.unsqueeze(0), float('nan'))
-
-    def forward(self, v):
-        """Decode optic flow from firing rates.
-
-        Args:
-            v: ``(stimuli, num_neurons)`` or ``(num_neurons,)``.
-
-        Returns:
-            Optic flow ``(stimuli, num_columns, 2)`` or ``(num_columns, 2)``.
-        """
-        if v.dim() == 1:
-            v = v.unsqueeze(0)
-            squeeze = True
-        else:
-            squeeze = False
-
-        x = self._extract_column_features(v)
-
-        for i, conv in enumerate(self.conv_layers):
-            x = conv(x)
-            if i < len(self.batch_norms):
-                x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
-                x = torch.nn.functional.softplus(x)
-
-        denom = torch.nn.functional.softplus(x[:, :, -1:].clone())
-        denom = torch.clamp(denom, min=self.denom_eps)
-        optic_flow = x[:, :, :-1] / denom
-
-        if squeeze:
-            optic_flow = optic_flow.squeeze(0)
-        return optic_flow
-
-
 def _rodrigues(rotvec):
     """Rotation vectors (axis * angle, radians) to rotation matrices.
 
@@ -640,7 +501,7 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 decoder_type='none', use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
+                 readouts=None, use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
@@ -650,9 +511,8 @@ class NeuralModel(torch.nn.Module, ABC):
         self.count_threshold = count_threshold
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
-        self.decoder_type = decoder_type
+        self.readouts = list(readouts) if readouts else []
         self.use_input_conv = use_input_conv
-        self.decoder_denom_eps = 1e-2
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
 
         # Create RNG from seed for random initialization
@@ -738,18 +598,15 @@ class NeuralModel(torch.nn.Module, ABC):
                 device=self.device, dtype=self.dtype,
             )
 
-        if self.decoder_type == 'conv_1':
-            self._initialize_decoder(num_channels=[3], conv_sizes=[5])
-        if self.decoder_type == 'conv_2':
-            self._initialize_decoder()
+        self._initialize_readouts()
         if self.use_input_conv:
             self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
 
     @property
     def has_decoder(self):
-        """Whether the model has a trained decoder (any type other than 'none')."""
-        return self.decoder_type is not None and self.decoder_type != 'none'
+        """Backward-compat: True when any flow readout is configured."""
+        return any(mod.eye_asymmetric for mod in self._readout_modules.values())
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
@@ -863,43 +720,24 @@ class NeuralModel(torch.nn.Module, ABC):
             num_modes=num_temporal_modes, dt=self.dt, device=self.device, dtype=self.dtype,
         )
 
-    def _initialize_decoder(self, num_channels=None, conv_sizes=None, use_bias=True):
-        """Create the ``MotionDecoder`` sub-module.
-
-        All decoder-specific computation (neuron mapping, hex-grid neighbour
-        lookup, conv layers) lives inside ``MotionDecoder`` and
-        ``NeuralModelConv``.  This method simply passes the model's structural
-        data through.
-        """
-        if num_channels is None:
-            num_channels = [8, 3]
-        if conv_sizes is None:
-            conv_sizes = [5, 5]
-
-        neurons_to_decode = [
-            'T1', 'T2', 'T2a', 'T3',
-            'T4a', 'T4b', 'T4c', 'T4d',
-            'T5a', 'T5b', 'T5c', 'T5d',
-            'Tm1', 'Tm2', 'Tm3', 'Tm4',
-            # 'Tm5Y', 'Tm5a', 'Tm5b', 'Tm5c',
-            'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
-            # 'TmY3', 'TmY4', 'TmY9', 'TmY10', 'TmY15', 'TmY18', 'TmY5a'
-        ]
-
-        self.decoder = MotionDecoder(
-            num_channels=num_channels,
-            conv_sizes=conv_sizes,
-            neurons_to_decode=neurons_to_decode,
-            column_p_q=self.column_p_q,
+    def _initialize_readouts(self):
+        """Instantiate readout modules by class name from ``readout_utilities``."""
+        import readout_utilities
+        self._readout_modules = torch.nn.ModuleDict()
+        kwargs = dict(
             cell_types=self.cell_types,
             column_indices=self.column_indices,
+            column_p_q=self.column_p_q,
             num_neurons=self.num_neurons,
             num_columns=self.num_columns,
-            denom_eps=self.decoder_denom_eps,
             device=self.device,
             dtype=self.dtype,
-            use_bias=use_bias,
         )
+        for name in self.readouts:
+            cls = getattr(readout_utilities, name, None)
+            if cls is None or not isinstance(cls, type):
+                raise ValueError(f"Unknown readout class: {name!r}")
+            self._readout_modules[name] = cls(**kwargs)
 
     def apply_input_conv(self, u_t, filter_state=None):
         """Apply spatial pre-filter, contrast normalization, then temporal LRU.
@@ -1028,8 +866,10 @@ class NeuralModel(torch.nn.Module, ABC):
             outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
             outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
-        if self.has_decoder:
-            outputs['decoder'] = torch.full((num_batches, num_time, self.num_columns, 2), float('nan'), device=self.device, dtype=self.dtype)
+        for name, mod in self._readout_modules.items():
+            shape = (num_batches, num_time, self.num_columns) + mod.output_extra_dims
+            outputs[name] = torch.full(shape, float('nan'),
+                                       device=self.device, dtype=self.dtype)
 
         for t in range(num_time):
             u_t = inputs[:, t, :]
@@ -1044,8 +884,8 @@ class NeuralModel(torch.nn.Module, ABC):
 
             fr = self.firing_rate(v)
 
-            if self.has_decoder:
-                outputs['decoder'][:, t, :, :] = self.decoder(fr)
+            for name, mod in self._readout_modules.items():
+                outputs[name][:, t, ...] = mod(fr)
 
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
@@ -1099,11 +939,14 @@ class NeuralModel(torch.nn.Module, ABC):
                 right_outputs[key] = {k: v[:S] for k, v in outputs[key].items()}
                 left_outputs[key] = {k: v[S:] for k, v in outputs[key].items()}
 
-        if 'decoder' in outputs:
-            right_outputs['decoder'] = outputs['decoder'][:S]
-            left_decoder = outputs['decoder'][S:].clone()
-            left_decoder[..., 0] *= -1
-            left_outputs['decoder'] = left_decoder
+        for rname, mod in self._readout_modules.items():
+            if rname not in outputs:
+                continue
+            right_outputs[rname] = outputs[rname][:S]
+            left_val = outputs[rname][S:].clone()
+            if mod.eye_asymmetric:
+                left_val[..., 0] *= -1
+            left_outputs[rname] = left_val
 
         filter_state = result['model_state']['filter_state']
         right_filter = filter_state[:S] if filter_state is not None else None
@@ -1326,8 +1169,16 @@ class NeuralModel(torch.nn.Module, ABC):
             **predict_kwargs,
         )
 
-        optic_flow_right = right_result['outputs']['decoder']
-        optic_flow_left = left_result['outputs']['decoder']
+        flow_key = next(
+            (k for k, m in self._readout_modules.items()
+             if m.eye_asymmetric and k in right_result['outputs']),
+            None,
+        )
+        if flow_key is None:
+            raise ValueError("No flow readout configured; cannot estimate ego motion.")
+
+        optic_flow_right = right_result['outputs'][flow_key]
+        optic_flow_left = left_result['outputs'][flow_key]
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
         phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)

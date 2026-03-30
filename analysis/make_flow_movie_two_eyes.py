@@ -90,8 +90,10 @@ def main() -> None:
     print(f"Running model prediction ({num_frames} frames, N={N} columns per eye)...")
     with torch.no_grad():
         right_result, left_result = model.predict_two_eyes(right_input, left_input)
-        pred_flow_right = right_result['outputs']['decoder'][0].cpu().numpy()
-        pred_flow_left = left_result['outputs']['decoder'][0].cpu().numpy()
+        from analysis_utilities import get_flow_key
+        flow_key = get_flow_key(model)
+        pred_flow_right = right_result['outputs'][flow_key][0].cpu().numpy()
+        pred_flow_left = left_result['outputs'][flow_key][0].cpu().numpy()
 
     # Filtered stimulus
     filtered_right_np = None

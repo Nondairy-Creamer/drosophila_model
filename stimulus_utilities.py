@@ -1688,11 +1688,12 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
         output_neurons: List of output neuron types (e.g., ['T4a', 'T4b', ...])
         
     Returns:
-        target: If model.has_decoder, a tensor [batches, time, columns, 2];
-                otherwise a dict mapping output neuron types to firing rate tensors.
+        target: A dict. If the model has flow readouts, includes
+                'optic_flow' from the first flow readout; otherwise maps
+                output neuron types to firing rate tensors.
     """
     import copy
-    
+
     # Create a deep copy of the model to avoid modifying the original
     perturbed_model = copy.deepcopy(model)
     
@@ -1708,10 +1709,13 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
             init_state=None
         )['outputs']
     
-    if perturbed_model.has_decoder:
-        target = pred['decoder'].clone()
+    flow_key = next(
+        (k for k, m in perturbed_model._readout_modules.items() if m.eye_asymmetric and k in pred),
+        None,
+    )
+    if flow_key is not None:
+        target = {'optic_flow': pred[flow_key].clone()}
     else:
-        # Extract the firing rates as target dictionary
         target = {neuron: pred['firing_rate'][neuron].clone() for neuron in output_neurons}
     
     return target, perturbed_model

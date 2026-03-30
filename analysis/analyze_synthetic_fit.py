@@ -59,9 +59,11 @@ def _predict_decoder(model, stimulus, input_neurons, output_neurons) -> np.ndarr
             output_neurons=output_neurons,
             init_state=None,
         )['outputs']
-    if "decoder" not in pred:
-        raise ValueError("Decoder output not found. Ensure model.decoder_type is not 'none'.")
-    return pred["decoder"].detach().cpu().numpy()
+    from analysis_utilities import get_flow_key
+    flow_key = get_flow_key(model)
+    if flow_key is None or flow_key not in pred:
+        raise ValueError("No flow readout output found. Check model readouts config.")
+    return pred[flow_key].detach().cpu().numpy()
 
 
 

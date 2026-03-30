@@ -109,8 +109,10 @@ def main() -> None:
         outputs_right = model.predict(right_stim, init_state=None)['outputs']
         outputs_left = model.predict(left_stim, init_state=None)['outputs']
 
-    of_pred_right = outputs_right['decoder']   # (stimuli, time, N, 2)
-    of_pred_left = outputs_left['decoder']     # (stimuli, time, N, 2)
+    from analysis_utilities import get_flow_key
+    flow_key = get_flow_key(model)
+    of_pred_right = outputs_right[flow_key]   # (stimuli, time, N, 2)
+    of_pred_left = outputs_left[flow_key]     # (stimuli, time, N, 2)
 
     # The left eye decoder predicts flow in the left-eye frame (phi negated).
     # The ground truth left-eye flow was generated in the global frame, so

@@ -21,8 +21,7 @@ import numpy as np
 
 import data_utilities as du
 import neural_models as nm
-from loss_functions import calc_loss_dict, combined_loss, mse_loss, cos_loss
-from training_utilities import _compute_odometry_loss
+import loss_functions as lf
 
 INPUT_NEURONS = ['L1', 'L2', 'L3']
 
@@ -30,50 +29,41 @@ INPUT_NEURONS = ['L1', 'L2', 'L3']
 def compute_loss(model, cell_inputs, target, train_mask, config):
     """Compute the training loss for a model on saved data.
 
-    Automatically selects the correct loss path (odometry / decoder / cell-type)
-    based on the saved config and target format.
+    Uses the ``loss_components`` list from *config* to look up and call each
+    loss function by name from ``loss_functions``, mirroring the training loop.
     """
-    device = model.device
-    dtype = model.dtype
-
     time_mask = train_mask.any(dim=-1)
     loss_start_step = 0
     if not time_mask[:, 0].all():
         loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
 
-    fit_odometry = config['training'].get('fit_odometry', False)
-    loss_fn_name = config['training'].get('loss_fn', 'combined_loss')
-    loss_fn_map = {
-        'combined_loss': combined_loss,
-        'mse_loss': mse_loss,
-        'cos_loss': cos_loss,
-    }
-    loss_fn = loss_fn_map.get(loss_fn_name, combined_loss)
+    loss_names = config['training'].get('loss_components', ['flow_loss'])
 
     with torch.no_grad():
-        if fit_odometry and isinstance(target, dict) and 'rotation' in target:
-            return _compute_odometry_loss(
-                model, cell_inputs, target, train_mask, loss_start_step,
-            ).item()
+        if 'odometry_loss' in loss_names and isinstance(target, dict) and 'rotation' in target:
+            N = cell_inputs.shape[2] // 2
+            oob = ~train_mask.any(dim=1).any(dim=0)
+            pred_rot, pred_trans, right_res, left_res = \
+                model.estimate_ego_motion_from_image(
+                    cell_inputs[:, :, :N], cell_inputs[:, :, N:], oob_columns=oob)
+            outputs = {}
+            for key in right_res['outputs']:
+                if key in ('voltage', 'firing_rate'):
+                    continue
+                outputs[key] = torch.cat(
+                    [right_res['outputs'][key], left_res['outputs'][key]], dim=2)
+            outputs['pred_rotation'] = pred_rot
+            outputs['pred_translation'] = pred_trans
+        else:
+            input_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
+            result = model.predict(cell_inputs, input_neurons=input_neurons)
+            outputs = result['outputs']
 
-        input_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
-        result = model.predict(cell_inputs, input_neurons=input_neurons)
-        pred = result['outputs']
-
-        if model.has_decoder:
-            pred_dec = pred['decoder'][:, loss_start_step:].clone()
-            target_dec = target[:, loss_start_step:].clone()
-            invalid = ~train_mask[:, loss_start_step:].unsqueeze(-1).expand_as(pred_dec)
-            pred_dec[invalid] = float('nan')
-            target_dec[invalid] = float('nan')
-            return loss_fn(target_dec, pred_dec).item()
-
-        output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-        pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()
-                     if k in output_neurons}
-        target_loss = {k: v[:, loss_start_step:] for k, v in target.items()
-                       if k in output_neurons}
-        return calc_loss_dict(loss_fn, pred_loss, target_loss).item()
+        loss = sum(
+            getattr(lf, n)(model, outputs, target, train_mask, loss_start_step)
+            for n in loss_names
+        ) / len(loss_names)
+        return loss.item()
 
 
 def main() -> None:

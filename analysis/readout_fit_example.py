@@ -17,13 +17,14 @@ print("Loading model...")
 model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
 stimulus = torch.load(model_folder / 'cell_inputs.pt')
 
-if not model.has_decoder:
-    raise ValueError("Model has no decoder. Cannot predict optic flow.")
+from analysis_utilities import get_flow_key
+flow_key = get_flow_key(model)
+if flow_key is None:
+    raise ValueError("Model has no flow readout configured. Cannot predict optic flow.")
 
-# Run model to get decoder optic flow: [stimuli, time, ommatidia, (horizontal, vertical flow)]
 with torch.no_grad():
     outputs = model.predict(stimulus, input_neurons=['L1', 'L2', 'L3'])['outputs']
-    optic_flow = outputs['decoder']
+    optic_flow = outputs[flow_key]
 
 # Plot XT plots with optic flow
 pu.xt_plot(
