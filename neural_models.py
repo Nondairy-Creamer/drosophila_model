@@ -867,6 +867,8 @@ class NeuralModel(torch.nn.Module, ABC):
             outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
         for name, mod in self._readout_modules.items():
+            if getattr(mod, 'training_only', False):
+                continue
             shape = (num_batches, num_time, self.num_columns) + mod.output_extra_dims
             outputs[name] = torch.full(shape, float('nan'),
                                        device=self.device, dtype=self.dtype)
@@ -885,6 +887,8 @@ class NeuralModel(torch.nn.Module, ABC):
             fr = self.firing_rate(v)
 
             for name, mod in self._readout_modules.items():
+                if getattr(mod, 'training_only', False):
+                    continue
                 outputs[name][:, t, ...] = mod(fr)
 
             for i in readout_keys:
@@ -894,6 +898,11 @@ class NeuralModel(torch.nn.Module, ABC):
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
                     outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
+
+        if self.training:
+            for name, mod in self._readout_modules.items():
+                if getattr(mod, 'training_only', False):
+                    outputs[name] = mod(self)
 
         return {
             'outputs': outputs,
@@ -941,6 +950,10 @@ class NeuralModel(torch.nn.Module, ABC):
 
         for rname, mod in self._readout_modules.items():
             if rname not in outputs:
+                continue
+            if getattr(mod, 'training_only', False):
+                right_outputs[rname] = outputs[rname]
+                left_outputs[rname] = outputs[rname]
                 continue
             right_outputs[rname] = outputs[rname][:S]
             left_val = outputs[rname][S:].clone()

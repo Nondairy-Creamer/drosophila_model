@@ -1,13 +1,12 @@
 import numpy as np
 import torch
 
-import loss_functions as lf
 import training_utilities as tu
 from tests.test_model_factory import build_model_from_test_config
 
 
 def test_train_model_plateau_reload(capsys, tmp_path):
-    model, _, input_neurons, output_neurons = build_model_from_test_config(readouts=[])
+    model, _, input_neurons, output_neurons = build_model_from_test_config(readouts=['L1Reg'])
     model_save_folder = tmp_path / "model_run"
     initial_state = {k: v.clone() for k, v in model.state_dict().items()}
 
@@ -23,7 +22,7 @@ def test_train_model_plateau_reload(capsys, tmp_path):
         target,
         output_neurons=output_neurons,
         input_neurons=input_neurons,
-        loss_components=['l1_reg'],
+        loss_components=[],
         rng=np.random.default_rng(0),
         model_save_folder=model_save_folder,
         num_steps=2,

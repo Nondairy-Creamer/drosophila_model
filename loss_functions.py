@@ -148,34 +148,6 @@ def odometry_loss(model, outputs, target, train_mask, loss_start_step):
     return (loss_rot_rate + loss_trans_rate + loss_rot_pos + loss_trans_pos) / 4
 
 
-def l1_reg(model, outputs, target, train_mask, loss_start_step):
-    """L1 on input/output strength parameters and any readout conv weights."""
-    terms = [
-        model.input_strength_log.exp().mean(),
-        model.output_strength_log.exp().mean(),
-    ]
-    for mod in model._readout_modules.values():
-        for sub in mod.modules():
-            if hasattr(sub, 'conv_layers'):
-                terms.append(
-                    torch.stack([p.abs().mean() for p in sub.conv_layers.parameters()]).mean()
-                )
-                break
-    return sum(terms) / len(terms)
-
-
-def l2_reg(model, outputs, target, train_mask, loss_start_step):
-    """L2 on input/output strength parameters."""
-    return (model.input_strength_log.exp().pow(2).mean()
-            + model.output_strength_log.exp().pow(2).mean()) / 2
-
-
-def sigma_reg(model, outputs, target, train_mask, loss_start_step):
-    """Penalty when spectral radius exceeds the allowed maximum."""
-    sigma_max = model.calc_sigma_max(max_iter=10)
-    return torch.relu(sigma_max - model.max_allowed_sigma) ** 2
-
-
 def motion_mag(model, outputs, target, train_mask, loss_start_step):
     """Normalized MSE between predicted motion magnitude and ||optic_flow||."""
     target_flow = target['optic_flow']

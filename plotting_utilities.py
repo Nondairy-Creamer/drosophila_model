@@ -37,21 +37,49 @@ def plot_readout_target(readout, target, save_folder=Path('figures'), eps=1e-8):
         plt.savefig(save_folder / ('pred_vs_target_' + readout_neuron + '.png'))
         plt.close()
 
-def plot_loss(loss, save_folder=Path('figures')):
+def plot_loss(component_losses, save_folder=Path('figures')):
+    """Plot total loss and per-component losses side by side.
+
+    component_losses: dict mapping component name -> list of per-epoch values.
+    """
     save_folder = convert_and_create_save_folder(save_folder)
 
-    # Ensure numpy array for consistent plotting/percentiles
-    loss_np = np.asarray(loss, dtype=float)
+    components = {k: np.asarray(v, dtype=float) for k, v in component_losses.items() if v}
+    if not components:
+        return
 
-    plt.figure()
-    plt.plot(loss_np)
-    plt.ylabel('loss')
-    plt.xlabel('epochs')
-    finite_mask = np.isfinite(loss_np)
+    total = np.mean(list(components.values()), axis=0)
+
+    has_multiple = len(components) > 1
+    if has_multiple:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    else:
+        fig, ax1 = plt.subplots(1, 1, figsize=(6, 4))
+        ax2 = None
+
+    ax1.plot(total)
+    ax1.set_ylabel('loss')
+    ax1.set_xlabel('epochs')
+    ax1.set_title('Total loss')
+    finite_mask = np.isfinite(total)
     if finite_mask.any():
-        plt.ylim((0.9 * np.nanmin(loss_np[finite_mask]), 1.1 * np.nanpercentile(loss_np[finite_mask], 95)))
-    plt.savefig(save_folder / 'loss.png')
-    plt.close()
+        ax1.set_ylim((0.9 * np.nanmin(total[finite_mask]), 1.1 * np.nanpercentile(total[finite_mask], 95)))
+
+    if ax2 is not None:
+        for name, arr in components.items():
+            ax2.plot(arr, label=name)
+        ax2.set_ylabel('loss')
+        ax2.set_xlabel('epochs')
+        ax2.set_title('Loss components')
+        ax2.legend()
+        all_vals = np.concatenate(list(components.values()))
+        finite = np.isfinite(all_vals)
+        if finite.any():
+            ax2.set_ylim((0.9 * np.nanmin(all_vals[finite]), 1.1 * np.nanpercentile(all_vals[finite], 95)))
+
+    fig.tight_layout()
+    fig.savefig(save_folder / 'loss.png')
+    plt.close(fig)
 
 def plot_response_over_space(response, x, z, save_folder=Path('figures')):
     save_folder = convert_and_create_save_folder(save_folder)

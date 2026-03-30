@@ -1,16 +1,19 @@
-"""Readout modules for NeuralModel.
+"""Readout and regularizer modules for NeuralModel.
 
-Each readout is a ``torch.nn.Module`` with two class-level attributes that the
-model reads at runtime:
+**Readouts** are ``torch.nn.Module`` subclasses with two class-level attributes:
 
 * ``output_extra_dims`` – tuple of ints giving the trailing shape beyond
   ``(batch, num_columns)``.  For example ``(2,)`` for 2-D optic flow.
 * ``eye_asymmetric`` – ``True`` when the readout produces an output that
   differs between left and right eyes (e.g. horizontal flow is flipped).
 
-To add a new readout, define a class here following the same convention.
-The config file refers to readouts by class name, and ``NeuralModel`` discovers
-them automatically from this module — no registry to update.
+**Regularizers** are ``torch.nn.Module`` subclasses with ``training_only = True``.
+They are called once per ``predict()`` (after the time loop) with the model as
+input and return a scalar loss term.  They are skipped when the model is in
+eval mode.
+
+Both are listed in the config ``readouts`` key and discovered automatically by
+``NeuralModel`` — no registry to update.
 """
 
 import numpy as np
@@ -249,3 +252,59 @@ class MotionMagReadout(HexGridReadout):
             positive_weights=True, use_bias=False,
             **kwargs,
         )
+
+
+# ---------------------------------------------------------------------------
+# Regularizer base class and concrete regularizers
+# ---------------------------------------------------------------------------
+
+class Regularizer(torch.nn.Module):
+    """Base class for regularizer modules.
+
+    Regularizers are called once per ``predict()`` with the model as input and
+    return a scalar.  They are skipped when the model is in eval mode.
+    """
+
+    training_only: bool = True
+
+    def __init__(self, **_kwargs):
+        super().__init__()
+
+    def forward(self, model):
+        raise NotImplementedError
+
+
+class L1Reg(Regularizer):
+    """L1 on input/output strength parameters and readout conv weights."""
+
+    def forward(self, model):
+        terms = [
+            model.input_strength_log.exp().mean(),
+            model.output_strength_log.exp().mean(),
+        ]
+        for mod in model._readout_modules.values():
+            if getattr(mod, 'training_only', False):
+                continue
+            for sub in mod.modules():
+                if hasattr(sub, 'conv_layers'):
+                    terms.append(
+                        torch.stack([p.abs().mean() for p in sub.conv_layers.parameters()]).mean()
+                    )
+                    break
+        return sum(terms) / len(terms)
+
+
+class L2Reg(Regularizer):
+    """L2 on input/output strength parameters."""
+
+    def forward(self, model):
+        return (model.input_strength_log.exp().pow(2).mean()
+                + model.output_strength_log.exp().pow(2).mean()) / 2
+
+
+class SigmaReg(Regularizer):
+    """Penalty when spectral radius exceeds the allowed maximum."""
+
+    def forward(self, model):
+        sigma_max = model.calc_sigma_max(max_iter=10)
+        return torch.relu(sigma_max - model.max_allowed_sigma) ** 2

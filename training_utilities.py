@@ -54,7 +54,14 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(model.device)
 
-    loss_plot = list(loss_history) if loss_history else []
+    reg_names = [name for name, mod in model._readout_modules.items()
+                 if getattr(mod, 'training_only', False)]
+    all_component_names = list(loss_components) + reg_names
+
+    if loss_history:
+        loss_plot = {name: list(loss_history.get(name, [])) for name in all_component_names}
+    else:
+        loss_plot = {name: [] for name in all_component_names}
 
     best_loss = torch.tensor(float('inf'), device=model.device, dtype=model.dtype)
     time_since_best = 0
@@ -76,7 +83,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
     while step < num_steps:
         epoch_start = time.time()
         epoch_losses = []
-        epoch_component_losses = {name: [] for name in loss_components}
+        epoch_component_losses = {name: [] for name in all_component_names}
 
         for inputs_batch, target_batch, train_mask_batch in dataloader:
             if step >= num_steps:
@@ -134,7 +141,10 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                                         train_mask_batch, loss_start_step)
                 for name in loss_components
             }
-            loss = sum(component_vals.values()) / len(loss_components)
+            for name, mod in model._readout_modules.items():
+                if getattr(mod, 'training_only', False) and name in outputs:
+                    component_vals[name] = outputs[name]
+            loss = sum(component_vals.values()) / len(component_vals)
 
             if torch.isnan(loss):
                 print(f'Warning: NaN loss at step {step + 1}, skipping gradient update')
@@ -157,8 +167,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
         epoch += 1
 
         if epoch_losses:
+            for name in all_component_names:
+                vals = epoch_component_losses[name]
+                if vals:
+                    loss_plot[name].append(torch.stack(vals).mean().item())
             epoch_avg = torch.stack(epoch_losses).mean()
-            loss_plot.append(epoch_avg.item())
             if epoch_avg < best_loss:
                 best_loss = epoch_avg.detach()
                 time_since_best = 0
@@ -167,7 +180,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                     opt_path = Path(model_save_folder / 'model_opt.pt')
                     opt_payload = {
                         'optimizer_state_dict': opt.state_dict(),
-                        'loss': loss_plot,
+                        'loss': {k: list(v) for k, v in loss_plot.items()},
                         'step': step
                     }
                     try:
@@ -227,7 +240,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
         comp_str = ''
         if epoch_losses:
             comp_parts = []
-            for name in loss_components:
+            for name in all_component_names:
                 vals = epoch_component_losses[name]
                 if vals:
                     avg = torch.stack(vals).mean().item()

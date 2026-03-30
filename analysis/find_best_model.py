@@ -58,7 +58,16 @@ def find_best_models(models_dir=MODELS_DIR):
                 continue
 
             opt_data = torch.load(opt_path, map_location='cpu', weights_only=False)
-            min_loss = min(opt_data['loss'])
+            loss_data = opt_data['loss']
+            if isinstance(loss_data, dict):
+                component_arrays = [np.asarray(v, dtype=float) for v in loss_data.values() if v]
+                if not component_arrays:
+                    print(f"  {folder.name}: empty loss history, skipping")
+                    continue
+                total_loss = np.mean(component_arrays, axis=0)
+            else:
+                total_loss = np.asarray(loss_data, dtype=float)
+            min_loss = float(np.nanmin(total_loss))
 
             is_nan = np.isnan(min_loss)
             is_inf = np.isinf(min_loss)
