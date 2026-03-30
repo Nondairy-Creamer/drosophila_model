@@ -99,7 +99,9 @@ def _mask_pred_target(pred, target_flow, train_mask, loss_start_step):
     mask_t = train_mask[:, loss_start_step:]
 
     expand_shape = pred_t.shape
-    invalid = ~mask_t.unsqueeze(-1).expand(expand_shape)
+    if mask_t.ndim < pred_t.ndim:
+        mask_t = mask_t.unsqueeze(-1)
+    invalid = ~mask_t.expand(expand_shape)
     pred_t = pred_t.clone()
     target_t = target_t.clone()
     pred_t[invalid] = float('nan')

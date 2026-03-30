@@ -76,6 +76,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
     while step < num_steps:
         epoch_start = time.time()
         epoch_losses = []
+        epoch_component_losses = {name: [] for name in loss_components}
 
         for inputs_batch, target_batch, train_mask_batch in dataloader:
             if step >= num_steps:
@@ -128,11 +129,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 outputs = result['outputs']
                 cached_mappings = result['mappings']
 
-            loss = sum(
-                getattr(lf, name)(model, outputs, target_batch,
-                                  train_mask_batch, loss_start_step)
+            component_vals = {
+                name: getattr(lf, name)(model, outputs, target_batch,
+                                        train_mask_batch, loss_start_step)
                 for name in loss_components
-            ) / len(loss_components)
+            }
+            loss = sum(component_vals.values()) / len(loss_components)
 
             if torch.isnan(loss):
                 print(f'Warning: NaN loss at step {step + 1}, skipping gradient update')
@@ -146,6 +148,8 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                     torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
                 opt.step()
                 epoch_losses.append(loss.detach())
+                for name, val in component_vals.items():
+                    epoch_component_losses[name].append(val.detach())
 
             step += 1
 
@@ -220,7 +224,16 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
             pu.plot_loss(loss_plot, save_folder=model_save_folder)
 
         epoch_loss_str = f'{epoch_avg.item():.4f}' if epoch_losses else 'NaN'
-        print(f'epoch {epoch} | steps {step}/{num_steps} | loss = {epoch_loss_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
+        comp_str = ''
+        if epoch_losses:
+            comp_parts = []
+            for name in loss_components:
+                vals = epoch_component_losses[name]
+                if vals:
+                    avg = torch.stack(vals).mean().item()
+                    comp_parts.append(f'{name}={avg:.4f}')
+            comp_str = ' (' + ', '.join(comp_parts) + ')'
+        print(f'epoch {epoch} | steps {step}/{num_steps} | loss = {epoch_loss_str}{comp_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
 
     return model, loss_plot, opt.state_dict(), {
         "best_loss": float(best_loss.item()),
