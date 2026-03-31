@@ -111,6 +111,11 @@ def main() -> None:
     oob_right = oob[:, :N]   # (T, N) — time-varying
     oob_left = oob[:, N:]    # (T, N)
 
+    # Ground-truth per-column flow magnitude
+    flow_both = optic_flow_both[0]          # (T, 2N, 2)
+    true_mag_right = np.linalg.norm(flow_both[:, :N, :], axis=-1)   # (T, N)
+    true_mag_left = np.linalg.norm(flow_both[:, N:, :], axis=-1)    # (T, N)
+
     # Prepend pre-stimulus interval (middle gray, stationary, no oob)
     pre_stim_frames = int(round(pre_stim_time / model_dt))
     if pre_stim_frames > 0:
@@ -124,6 +129,9 @@ def main() -> None:
         pre_oob = np.zeros((pre_stim_frames, N), dtype=bool)
         oob_right = np.concatenate([pre_oob, oob_right], axis=0)
         oob_left = np.concatenate([pre_oob, oob_left], axis=0)
+        pre_mag = np.zeros((pre_stim_frames, N))
+        true_mag_right = np.concatenate([pre_mag, true_mag_right], axis=0)
+        true_mag_left = np.concatenate([pre_mag, true_mag_left], axis=0)
 
     num_frames = stimulus_right_np.shape[0]
     if args.max_frames is not None:
@@ -134,6 +142,8 @@ def main() -> None:
         true_trans_rate = true_trans_rate[:num_frames]
         oob_right = oob_right[:num_frames]
         oob_left = oob_left[:num_frames]
+        true_mag_right = true_mag_right[:num_frames]
+        true_mag_left = true_mag_left[:num_frames]
 
     right_input = torch.tensor(stimulus_right_np, device=device, dtype=dtype).unsqueeze(0)
     left_input = torch.tensor(stimulus_left_np, device=device, dtype=dtype).unsqueeze(0)
@@ -218,12 +228,12 @@ def main() -> None:
     if has_mag_readout:
         pred_mag_right = right_res['outputs']['MotionMagReadout'][0].cpu().numpy()
         pred_mag_left = left_res['outputs']['MotionMagReadout'][0].cpu().numpy()
-        true_rot_norm = np.linalg.norm(true_rot_rate, axis=1)
 
         print("  Model has MotionMagReadout — creating magnitude figures...")
 
         _save_magnitude_figure(
-            true_rot_norm, pred_mag_right, pred_mag_left,
+            true_mag_right, true_mag_left,
+            pred_mag_right, pred_mag_left,
             model_dt, output_dir / "pano_magnitude.png",
         )
 
@@ -232,10 +242,10 @@ def main() -> None:
         _make_magnitude_movie(
             stimulus_left=stimulus_left_np,
             stimulus_right=stimulus_right_np,
+            true_mag_left=true_mag_left[:num_frames],
+            true_mag_right=true_mag_right[:num_frames],
             pred_mag_left=pred_mag_left[:num_frames],
             pred_mag_right=pred_mag_right[:num_frames],
-            true_rot=true_rot_rate,
-            pred_rot=pred_rot_np,
             cell_x=cell_x, cell_y=cell_y, cell_z=cell_z,
             in_fov_left=in_fov_left, in_fov_right=in_fov_right,
             output_path=mag_movie_path,
@@ -348,42 +358,33 @@ def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
     print(f"  Saved integrated figure -> {output_path}")
 
 
-def _save_magnitude_figure(true_rot_norm, pred_mag_right, pred_mag_left,
+def _save_magnitude_figure(true_mag_right, true_mag_left,
+                           pred_mag_right, pred_mag_left,
                            model_dt, output_path):
-    """Save a figure comparing rotation norm vs mean predicted motion magnitude."""
+    """Save a figure comparing mean true vs predicted motion magnitude over time."""
     import matplotlib
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
 
-    T = true_rot_norm.shape[0]
+    T = true_mag_right.shape[0]
     times = np.arange(T) * model_dt
 
+    true_mag_mean = (np.nanmean(true_mag_right, axis=1)
+                     + np.nanmean(true_mag_left, axis=1)) / 2
     pred_mag_mean = (np.nanmean(pred_mag_right, axis=1)
                      + np.nanmean(pred_mag_left, axis=1)) / 2
 
-    fig, ax1 = plt.subplots(figsize=(14, 5))
+    fig, ax = plt.subplots(figsize=(14, 5))
 
-    color_true = "#e41a1c"
-    color_pred = "#377eb8"
-
-    ax1.plot(times, true_rot_norm, color=color_true, linewidth=1.5,
-             label="Rotation norm (deg/s)")
-    ax1.set_xlabel("Time (s)")
-    ax1.set_ylabel("Rotation norm (deg/s)", color=color_true)
-    ax1.tick_params(axis='y', labelcolor=color_true)
-
-    ax2 = ax1.twinx()
-    ax2.plot(times, pred_mag_mean, color=color_pred, linewidth=1.5,
-             linestyle="--", label="Predicted magnitude (mean)")
-    ax2.set_ylabel("Predicted magnitude", color=color_pred)
-    ax2.tick_params(axis='y', labelcolor=color_pred)
-
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=9)
-
-    ax1.grid(True, alpha=0.3)
-    fig.suptitle("Rotation Magnitude vs Predicted Motion Magnitude", fontsize=14)
+    ax.plot(times, true_mag_mean, color="#e41a1c", linewidth=1.5,
+            label="True magnitude (mean)")
+    ax.plot(times, pred_mag_mean, color="#377eb8", linewidth=1.5,
+            linestyle="--", label="Predicted magnitude (mean)")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Motion magnitude")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    fig.suptitle("Mean Motion Magnitude: True vs Predicted", fontsize=14)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(str(output_path), dpi=150)
     plt.close(fig)
@@ -392,14 +393,13 @@ def _save_magnitude_figure(true_rot_norm, pred_mag_right, pred_mag_left,
 
 def _make_magnitude_movie(
     stimulus_left, stimulus_right,
+    true_mag_left, true_mag_right,
     pred_mag_left, pred_mag_right,
-    true_rot, pred_rot,
     cell_x, cell_y, cell_z,
     in_fov_left, in_fov_right,
     output_path, frame_rate, model_dt,
-    trail_sec=5.0,
 ):
-    """Movie: stimulus + predicted magnitude (scatter) + rotation rate."""
+    """Movie: stimulus + ground-truth magnitude + predicted magnitude."""
     import matplotlib
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
@@ -407,8 +407,6 @@ def _make_magnitude_movie(
     import imageio as iio
 
     num_frames = stimulus_left.shape[0]
-    trail_frames = int(round(trail_sec / model_dt))
-    times = np.arange(num_frames) * model_dt
 
     _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
     gray_cmap = plt.cm.gray
@@ -424,12 +422,15 @@ def _make_magnitude_movie(
     stim_max = max(np.nanmax(stimulus_left), np.nanmax(stimulus_right))
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
-    all_mag = np.concatenate([pred_mag_right.ravel(), pred_mag_left.ravel()])
-    finite_mag = all_mag[np.isfinite(all_mag)]
-    max_mag = (np.percentile(finite_mag, 99)
-               if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
+    # Shared magnitude scale from ground truth
+    all_true_mag = np.concatenate([true_mag_right.ravel(), true_mag_left.ravel()])
+    finite_true = all_true_mag[np.isfinite(all_true_mag)]
+    max_mag = (np.percentile(finite_true, 99)
+               if finite_true.size > 0 and finite_true.max() > 0 else 1.0)
     mag_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
 
+    true_mag_right = np.nan_to_num(true_mag_right, nan=0.0)
+    true_mag_left = np.nan_to_num(true_mag_left, nan=0.0)
     pred_mag_right = np.nan_to_num(pred_mag_right, nan=0.0)
     pred_mag_left = np.nan_to_num(pred_mag_left, nan=0.0)
 
@@ -438,11 +439,17 @@ def _make_magnitude_movie(
             return in_fov[t]
         return in_fov
 
-    fig, axes = plt.subplots(3, 2, figsize=(12.8, 12.8), dpi=100,
-                             gridspec_kw={"height_ratios": [3, 3, 2]})
-    ax_stim_l, ax_stim_r = axes[0]
-    ax_mag_l, ax_mag_r = axes[1]
-    ax_rot, ax_mag_ts = axes[2]
+    fig, axes = plt.subplots(
+        3, 3, figsize=(12.8, 12.8), dpi=100,
+        gridspec_kw={"width_ratios": [1, 0.05, 1]},
+    )
+    ax_stim_l, ax_cbar_stim, ax_stim_r = axes[0]
+    ax_true_l, ax_cbar_mag, ax_true_r = axes[1]
+    ax_pred_l, ax_cbar_empty, ax_pred_r = axes[2]
+
+    # Hide the placeholder centre axes except for the magnitude colorbar
+    ax_cbar_stim.axis("off")
+    ax_cbar_empty.axis("off")
 
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
@@ -469,69 +476,32 @@ def _make_magnitude_movie(
     ax_stim_l.set_title("Left Eye (stimulus)")
     ax_stim_r.set_title("Right Eye (stimulus)")
 
-    # --- Row 1: predicted magnitude ---
-    _setup_eye_axes(ax_mag_l, ax_mag_r)
-    sc_mag_l = ax_mag_l.scatter(
+    # --- Row 1: ground-truth magnitude ---
+    _setup_eye_axes(ax_true_l, ax_true_r)
+    sc_true_l = ax_true_l.scatter(
+        cell_x, cell_z, c=mag_cmap(mag_norm(true_mag_left[0])),
+        s=90, edgecolors="none")
+    sc_true_r = ax_true_r.scatter(
+        cell_x, cell_z, c=mag_cmap(mag_norm(true_mag_right[0])),
+        s=90, edgecolors="none")
+    ax_true_l.set_title("Left Eye (true magnitude)")
+    ax_true_r.set_title("Right Eye (true magnitude)")
+
+    # --- Row 2: predicted magnitude ---
+    _setup_eye_axes(ax_pred_l, ax_pred_r)
+    sc_pred_l = ax_pred_l.scatter(
         cell_x, cell_z, c=mag_cmap(mag_norm(pred_mag_left[0])),
         s=90, edgecolors="none")
-    sc_mag_r = ax_mag_r.scatter(
+    sc_pred_r = ax_pred_r.scatter(
         cell_x, cell_z, c=mag_cmap(mag_norm(pred_mag_right[0])),
         s=90, edgecolors="none")
-    ax_mag_l.set_title("Left Eye (predicted magnitude)")
-    ax_mag_r.set_title("Right Eye (predicted magnitude)")
+    ax_pred_l.set_title("Left Eye (predicted magnitude)")
+    ax_pred_r.set_title("Right Eye (predicted magnitude)")
 
+    # Magnitude colorbar in the centre column (spans rows 1-2)
     sm = plt.cm.ScalarMappable(cmap=mag_cmap, norm=mag_norm)
     sm.set_array([])
-    fig.colorbar(sm, ax=[ax_mag_l, ax_mag_r], label="magnitude", shrink=0.8)
-
-    # --- Row 2 left: rotation rate ---
-    rot_labels = ["roll", "pitch", "yaw"]
-    colors = ["#e41a1c", "#377eb8", "#4daf4a"]
-
-    def _ylim(data, margin_frac=0.1, min_margin=0.01):
-        lo, hi = np.nanmin(data), np.nanmax(data)
-        margin = max(margin_frac * (hi - lo), min_margin)
-        return lo - margin, hi + margin
-
-    rot_true_lines, rot_pred_lines = [], []
-    for label, color in zip(rot_labels, colors):
-        lt, = ax_rot.plot([], [], color=color, linewidth=1.5, label=f"true {label}")
-        lp, = ax_rot.plot([], [], color=color, linewidth=1.5, linestyle="--",
-                          label=f"pred {label}")
-        rot_true_lines.append(lt)
-        rot_pred_lines.append(lp)
-    ax_rot.legend(loc="upper left", fontsize=7, ncol=2)
-    ax_rot.set_ylabel("deg/s")
-    ax_rot.set_xlabel("time (s)")
-    ax_rot.set_title("Rotation Rate")
-    all_rot = np.concatenate([true_rot, pred_rot], axis=0)
-    ax_rot.set_ylim(*_ylim(all_rot, min_margin=1.0))
-
-    # --- Row 2 right: rotation norm vs predicted magnitude ---
-    true_rot_norm = np.linalg.norm(true_rot, axis=1)
-    pred_mag_mean = (np.nanmean(pred_mag_right, axis=1)
-                     + np.nanmean(pred_mag_left, axis=1)) / 2.0
-
-    norm_true_line, = ax_mag_ts.plot([], [], color="#e41a1c", linewidth=1.5,
-                                     label="rotation norm")
-    ax_mag_ts.set_ylabel("rotation norm (deg/s)", color="#e41a1c")
-    ax_mag_ts.tick_params(axis='y', labelcolor="#e41a1c")
-    ax_mag_ts.set_xlabel("time (s)")
-    ax_mag_ts.set_title("Rotation Norm vs Predicted Magnitude")
-    ax_mag_ts.set_ylim(*_ylim(true_rot_norm, min_margin=1.0))
-
-    ax_mag_ts2 = ax_mag_ts.twinx()
-    mag_pred_line, = ax_mag_ts2.plot([], [], color="#377eb8", linewidth=1.5,
-                                     linestyle="--", label="pred magnitude")
-    ax_mag_ts2.set_ylabel("predicted magnitude", color="#377eb8")
-    ax_mag_ts2.tick_params(axis='y', labelcolor="#377eb8")
-    ax_mag_ts2.set_ylim(*_ylim(pred_mag_mean, min_margin=0.01))
-
-    ax_mag_ts.legend(
-        [norm_true_line, mag_pred_line],
-        [norm_true_line.get_label(), mag_pred_line.get_label()],
-        loc="upper left", fontsize=7,
-    )
+    fig.colorbar(sm, cax=ax_cbar_mag, label="magnitude")
 
     plt.tight_layout()
 
@@ -545,26 +515,15 @@ def _make_magnitude_movie(
             sc_stim_r.set_facecolors(
                 _masked_rgba(stimulus_right[t], _get_fov(in_fov_right, t), stim_norm))
 
-            sc_mag_l.set_facecolors(mag_cmap(mag_norm(pred_mag_left[t])))
-            sc_mag_r.set_facecolors(mag_cmap(mag_norm(pred_mag_right[t])))
+            sc_true_l.set_facecolors(mag_cmap(mag_norm(true_mag_left[t])))
+            sc_true_r.set_facecolors(mag_cmap(mag_norm(true_mag_right[t])))
+
+            sc_pred_l.set_facecolors(mag_cmap(mag_norm(pred_mag_left[t])))
+            sc_pred_r.set_facecolors(mag_cmap(mag_norm(pred_mag_right[t])))
 
             time_s = t * model_dt
             ax_stim_l.set_title(f"Left Eye (t={time_s:.2f}s)")
             ax_stim_r.set_title(f"Right Eye (t={time_s:.2f}s)")
-
-            t_start = max(0, t - trail_frames + 1)
-            t_slice = slice(t_start, t + 1)
-            t_times = times[t_slice]
-
-            for i in range(3):
-                rot_true_lines[i].set_data(t_times, true_rot[t_slice, i])
-                rot_pred_lines[i].set_data(t_times, pred_rot[t_slice, i])
-            ax_rot.set_xlim(t_times[0], t_times[0] + trail_sec)
-
-            norm_true_line.set_data(t_times, true_rot_norm[t_slice])
-            mag_pred_line.set_data(t_times, pred_mag_mean[t_slice])
-            ax_mag_ts.set_xlim(t_times[0], t_times[0] + trail_sec)
-            ax_mag_ts2.set_xlim(t_times[0], t_times[0] + trail_sec)
 
             writer.append_data(fig_to_rgb(fig))
             if (t + 1) % 100 == 0:
