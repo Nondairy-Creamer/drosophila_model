@@ -244,7 +244,7 @@ class FlowConv2Readout(HexGridReadout):
             # neurons_to_decode=_DECODER_NEURON_TYPES,
             neurons_to_decode=None,
             num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
-            regularizers={DecoderWeightL1Reg: 0.05},
+            regularizers={DecoderWeightL1Reg: 0.01},
             **kwargs,
         )
 
@@ -261,7 +261,7 @@ class MotionMagReadout(HexGridReadout):
             neurons_to_decode=None,
             num_channels=[1], conv_sizes=[5],
             positive_weights=True, use_bias=False,
-            regularizers={DecoderWeightL1Reg: 0.05},
+            regularizers={DecoderWeightL1Reg: 0.01},
             **kwargs,
         )
 
