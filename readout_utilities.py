@@ -60,6 +60,7 @@ class HexGridReadout(torch.nn.Module):
                  num_channels, conv_sizes,
                  positive_weights=False, use_bias=True,
                  use_denominator=False, denom_eps=1e-2,
+                 regularizers=None,
                  device=None, dtype=None, **_kwargs):
         super().__init__()
         if len(num_channels) != len(conv_sizes):
@@ -67,6 +68,7 @@ class HexGridReadout(torch.nn.Module):
 
         self.use_denominator = use_denominator
         self.denom_eps = denom_eps
+        self._regularizer_config = dict(regularizers) if regularizers else {}
         self.neurons_to_decode = list(neurons_to_decode)
 
         self._build_column_to_neuron_mapping(
@@ -239,6 +241,7 @@ class FlowConv2Readout(HexGridReadout):
         super().__init__(
             neurons_to_decode=_DECODER_NEURON_TYPES,
             num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
+            regularizers={DecoderWeightL1Reg: 0.1},
             **kwargs,
         )
 
@@ -312,3 +315,21 @@ class SigmaReg(Regularizer):
     def forward(self, model):
         sigma_max = model.calc_sigma_max(max_iter=10)
         return torch.relu(sigma_max - model.max_allowed_sigma) ** 2
+
+
+class DecoderWeightL1Reg(Regularizer):
+    """L1 on the first conv layer of a specific decoder to encourage cell-type sparsity.
+
+    Each instance is bound to a single readout (by name) and penalizes only
+    ``conv_layers[0].weight`` — the layer whose input dimension corresponds
+    to the decoder cell types.  The penalty is scaled by ``weight``.
+    """
+
+    def __init__(self, readout_name, weight=1.0, **_kwargs):
+        super().__init__()
+        self.readout_name = readout_name
+        self.l1_weight = weight
+
+    def forward(self, model):
+        readout = model._readout_modules[self.readout_name]
+        return self.l1_weight * readout.conv_layers[0].weight.abs().mean()

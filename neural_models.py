@@ -737,7 +737,12 @@ class NeuralModel(torch.nn.Module, ABC):
             cls = getattr(readout_utilities, name, None)
             if cls is None or not isinstance(cls, type):
                 raise ValueError(f"Unknown readout class: {name!r}")
-            self._readout_modules[name] = cls(**kwargs)
+            mod = cls(**kwargs)
+            self._readout_modules[name] = mod
+
+            for reg_cls, weight in getattr(mod, '_regularizer_config', {}).items():
+                reg_name = f"{name}_{reg_cls.__name__}"
+                self._readout_modules[reg_name] = reg_cls(readout_name=name, weight=weight)
 
     def apply_input_conv(self, u_t, filter_state=None):
         """Apply spatial pre-filter, contrast normalization, then temporal LRU.
