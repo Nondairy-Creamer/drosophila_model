@@ -69,6 +69,8 @@ class HexGridReadout(torch.nn.Module):
         self.use_denominator = use_denominator
         self.denom_eps = denom_eps
         self._regularizer_config = dict(regularizers) if regularizers else {}
+        if neurons_to_decode is None:
+            neurons_to_decode = sorted(set(np.asarray(cell_types)))
         self.neurons_to_decode = list(neurons_to_decode)
 
         self._build_column_to_neuron_mapping(
@@ -239,9 +241,10 @@ class FlowConv2Readout(HexGridReadout):
 
     def __init__(self, **kwargs):
         super().__init__(
-            neurons_to_decode=_DECODER_NEURON_TYPES,
+            # neurons_to_decode=_DECODER_NEURON_TYPES,
+            neurons_to_decode=None,
             num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
-            regularizers={DecoderWeightL1Reg: 0.1},
+            regularizers={DecoderWeightL1Reg: 0.05},
             **kwargs,
         )
 
@@ -254,9 +257,11 @@ class MotionMagReadout(HexGridReadout):
 
     def __init__(self, **kwargs):
         super().__init__(
-            neurons_to_decode=_DECODER_NEURON_TYPES,
+            # neurons_to_decode=_DECODER_NEURON_TYPES,
+            neurons_to_decode=None,
             num_channels=[1], conv_sizes=[5],
             positive_weights=True, use_bias=False,
+            regularizers={DecoderWeightL1Reg: 0.05},
             **kwargs,
         )
 
@@ -332,4 +337,4 @@ class DecoderWeightL1Reg(Regularizer):
 
     def forward(self, model):
         readout = model._readout_modules[self.readout_name]
-        return self.l1_weight * readout.conv_layers[0].weight.abs().mean()
+        return self.l1_weight * readout.conv_layers[0].weight.abs().sum()
