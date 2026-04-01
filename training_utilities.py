@@ -123,9 +123,14 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 for key in list(right_res['outputs'].keys()):
                     if key in ('voltage', 'firing_rate'):
                         continue
-                    outputs[key] = torch.cat(
-                        [right_res['outputs'][key],
-                         left_res['outputs'][key]], dim=2)
+                    r, l = right_res['outputs'][key], left_res['outputs'][key]
+                    if r.dim() < 2:
+                        outputs[key] = r
+                        continue
+                    if r.dim() == 2:
+                        r = r.unsqueeze(-1)
+                        l = l.unsqueeze(-1)
+                    outputs[key] = torch.cat([r, l], dim=2)
                 outputs['pred_rotation'] = pred_rot
                 outputs['pred_translation'] = pred_trans
             else:
@@ -144,7 +149,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
             for name, mod in model._readout_modules.items():
                 if getattr(mod, 'training_only', False) and name in outputs:
                     component_vals[name] = outputs[name]
-            loss = sum(component_vals.values()) / len(component_vals)
+            loss = sum(component_vals.values())
 
             if torch.isnan(loss):
                 print(f'Warning: NaN loss at step {step + 1}, skipping gradient update')

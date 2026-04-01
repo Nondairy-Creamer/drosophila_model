@@ -30,6 +30,8 @@ _DECODER_NEURON_TYPES = [
     'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
 ]
 
+_DEFAULT_REG_WEIGHT = 0.01
+
 _FLOW_NEURON_TYPES = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 
@@ -78,6 +80,7 @@ class HexGridReadout(torch.nn.Module):
         )
 
         in_features = len(self.neurons_to_decode)
+        self.conv_sizes = list(conv_sizes)
         self.conv_layers = torch.nn.ModuleList()
         self.batch_norms = torch.nn.ModuleList()
         for i, (channels, csz) in enumerate(zip(num_channels, conv_sizes)):
@@ -227,7 +230,8 @@ class FlowLinearReadout(HexGridReadout):
     def __init__(self, **kwargs):
         super().__init__(
             neurons_to_decode=_DECODER_NEURON_TYPES,
-            num_channels=[3], conv_sizes=[5], use_denominator=True,
+            num_channels=[2], conv_sizes=[3], use_denominator=False,
+            regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
 
@@ -241,10 +245,9 @@ class FlowConv2Readout(HexGridReadout):
 
     def __init__(self, **kwargs):
         super().__init__(
-            # neurons_to_decode=_DECODER_NEURON_TYPES,
-            neurons_to_decode=None,
+            neurons_to_decode=_DECODER_NEURON_TYPES,
             num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
-            regularizers={DecoderWeightL1Reg: 0.01},
+            regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
 
@@ -257,11 +260,10 @@ class MotionMagReadout(HexGridReadout):
 
     def __init__(self, **kwargs):
         super().__init__(
-            # neurons_to_decode=_DECODER_NEURON_TYPES,
-            neurons_to_decode=None,
-            num_channels=[1], conv_sizes=[5],
+            neurons_to_decode=_DECODER_NEURON_TYPES,
+            num_channels=[1], conv_sizes=[3],
             positive_weights=True, use_bias=False,
-            regularizers={DecoderWeightL1Reg: 0.01},
+            regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
 

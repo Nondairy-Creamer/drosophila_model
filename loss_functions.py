@@ -117,6 +117,8 @@ def flow_loss(model, outputs, target, train_mask, loss_start_step):
     target_flow = target['optic_flow']
     losses = []
     for key, mod in model._readout_modules.items():
+        if getattr(mod, 'training_only', False):
+            continue
         if not mod.predicts_flow or key not in outputs:
             continue
         pred_t, target_t = _mask_pred_target(outputs[key], target_flow,
