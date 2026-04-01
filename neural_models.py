@@ -741,6 +741,8 @@ class NeuralModel(torch.nn.Module, ABC):
             self._readout_modules[name] = mod
 
             for reg_cls, weight in getattr(mod, '_regularizer_config', {}).items():
+                if not weight:
+                    continue
                 reg_name = f"{name}_{reg_cls.__name__}"
                 self._readout_modules[reg_name] = reg_cls(readout_name=name, weight=weight)
 

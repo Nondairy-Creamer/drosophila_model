@@ -30,7 +30,7 @@ _DECODER_NEURON_TYPES = [
     'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
 ]
 
-_DEFAULT_REG_WEIGHT = 0.01
+_DEFAULT_REG_WEIGHT = 0.00
 
 _FLOW_NEURON_TYPES = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
@@ -246,7 +246,7 @@ class FlowConv2Readout(HexGridReadout):
     def __init__(self, **kwargs):
         super().__init__(
             neurons_to_decode=_DECODER_NEURON_TYPES,
-            num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
+            num_channels=[4, 3], conv_sizes=[5, 5], use_denominator=True,
             regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
