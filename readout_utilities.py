@@ -246,7 +246,7 @@ class FlowConv2Readout(HexGridReadout):
     def __init__(self, **kwargs):
         super().__init__(
             neurons_to_decode=_DECODER_NEURON_TYPES,
-            num_channels=[4, 3], conv_sizes=[5, 5], use_denominator=True,
+            num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
             regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
