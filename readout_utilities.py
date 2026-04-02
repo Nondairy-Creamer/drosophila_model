@@ -52,6 +52,7 @@ class HexGridReadout(torch.nn.Module):
                  column_indices, num_neurons, num_columns,
                  num_channels, conv_sizes,
                  positive_weights=False, use_bias=True,
+                 use_batch_norm=True,
                  use_denominator=False, denom_eps=1e-2,
                  regularizer_parameters=None,
                  device=None, dtype=None, **_kwargs):
@@ -59,6 +60,7 @@ class HexGridReadout(torch.nn.Module):
         if len(num_channels) != len(conv_sizes):
             raise ValueError("num_channels and conv_sizes must have the same length.")
 
+        self.use_batch_norm = use_batch_norm
         self.use_denominator = use_denominator
         self.denom_eps = denom_eps
 
@@ -89,7 +91,7 @@ class HexGridReadout(torch.nn.Module):
                 positive_weights=positive_weights if is_last else False,
                 use_bias=use_bias if is_last else True,
             ))
-            if not is_last:
+            if not is_last and use_batch_norm:
                 self.batch_norms.append(
                     torch.nn.BatchNorm1d(channels).to(device=device, dtype=dtype)
                 )
@@ -139,8 +141,10 @@ class HexGridReadout(torch.nn.Module):
 
         for i, conv in enumerate(self.conv_layers):
             x = conv(x)
-            if i < len(self.batch_norms):
-                x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
+            is_intermediate = (i < len(self.conv_layers) - 1)
+            if is_intermediate:
+                if self.use_batch_norm:
+                    x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
                 x = torch.nn.functional.softplus(x)
 
         if self.use_denominator:
