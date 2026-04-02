@@ -162,7 +162,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--device', type=str, default=None, help='Device override (e.g., cuda:0, cuda:1, cpu)')
     parser.add_argument('--run-id', type=str, default=None, help='Optional identifier for this run')
-    parser.add_argument('--timestamp', type=str, default=None, help='Timestamp string for model folder (format: YYYYMMDD_HHMMSS)')
+    parser.add_argument('--timestamp', type=str, default=None, help='Tag or timestamp string for model folder naming')
     parser.add_argument('--model-folder', type=str, default=None, help='Path to existing model folder to load (e.g., models/best_model)')
     parser.add_argument('--config-path', type=str, default=None, help='Path to config TOML (default: config.toml)')
 

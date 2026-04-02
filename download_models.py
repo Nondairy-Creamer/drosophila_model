@@ -127,15 +127,14 @@ def scp_transfer(
                 print("No entries found in remote models directory.")
                 return
 
-            # Group by timestamp prefix (YYYYMMDD_HHMMSS)
+            # Group by tag/timestamp prefix (strip _gpuN_runN suffix)
             groups: dict[str, list[str]] = {}
             for entry in remote_entries:
-                match = re.match(r'(\d{8}_\d{6})', entry)
-                ts = match.group(1) if match else 'other'
-                groups.setdefault(ts, []).append(entry)
+                prefix = re.sub(r'_gpu\d+_run\d+$', '', entry)
+                groups.setdefault(prefix, []).append(entry)
 
-            for ts, entries in groups.items():
-                local_ts_dir = _LOCAL_MODELS_DIR / ts
+            for prefix, entries in groups.items():
+                local_ts_dir = _LOCAL_MODELS_DIR / prefix
                 os.makedirs(local_ts_dir, exist_ok=True)
                 print(f"Pulling {len(entries)} folder(s) into {local_ts_dir}/")
                 for entry in entries:
