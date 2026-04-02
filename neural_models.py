@@ -501,7 +501,8 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 readouts=None, use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
+                 readouts=None, readout_neurons=None, regularizer_parameters=None,
+                 use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
@@ -512,6 +513,8 @@ class NeuralModel(torch.nn.Module, ABC):
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
         self.readouts = list(readouts) if readouts else []
+        self.readout_neurons = list(readout_neurons) if readout_neurons else None
+        self.regularizer_parameters = dict(regularizer_parameters) if regularizer_parameters else {}
         self.use_input_conv = use_input_conv
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
 
@@ -732,6 +735,8 @@ class NeuralModel(torch.nn.Module, ABC):
             num_columns=self.num_columns,
             device=self.device,
             dtype=self.dtype,
+            readout_neurons=self.readout_neurons,
+            regularizer_parameters=self.regularizer_parameters,
         )
         for name in self.readouts:
             cls = getattr(readout_utilities, name, None)

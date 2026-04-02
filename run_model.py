@@ -106,6 +106,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             device=config['model']['device'],
             dtype=config['model']['dtype'],
             readouts=config['model']['readouts'],
+            readout_neurons=config['model'].get('readout_neurons'),
+            regularizer_parameters=config['model'].get('regularizer_parameters'),
             use_input_conv=config['model']['use_input_conv'],
             dt=dt,
             seed=seed,

@@ -21,18 +21,9 @@ import torch
 
 from neural_models import NeuralModelConv
 
-# Cell types used as input features for hex-grid conv readouts.
-_DECODER_NEURON_TYPES = [
-    'T1', 'T2', 'T2a', 'T3',
-    'T4a', 'T4b', 'T4c', 'T4d',
-    'T5a', 'T5b', 'T5c', 'T5d',
-    'Tm1', 'Tm2', 'Tm3', 'Tm4',
-    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
-]
-
-_DEFAULT_REG_WEIGHT = 0.00
-
 _FLOW_NEURON_TYPES = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+
+_DEFAULT_INPUT_LAYER_L1 = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -57,12 +48,12 @@ class HexGridReadout(torch.nn.Module):
     eye_asymmetric: bool = False
     predicts_flow: bool = False
 
-    def __init__(self, *, neurons_to_decode, column_p_q, cell_types,
+    def __init__(self, *, neurons_to_decode=None, column_p_q, cell_types,
                  column_indices, num_neurons, num_columns,
                  num_channels, conv_sizes,
                  positive_weights=False, use_bias=True,
                  use_denominator=False, denom_eps=1e-2,
-                 regularizers=None,
+                 regularizer_parameters=None,
                  device=None, dtype=None, **_kwargs):
         super().__init__()
         if len(num_channels) != len(conv_sizes):
@@ -70,7 +61,10 @@ class HexGridReadout(torch.nn.Module):
 
         self.use_denominator = use_denominator
         self.denom_eps = denom_eps
-        self._regularizer_config = dict(regularizers) if regularizers else {}
+
+        reg_params = regularizer_parameters or {}
+        l1_weight = reg_params.get('input_layer_l1', _DEFAULT_INPUT_LAYER_L1)
+        self._regularizer_config = {DecoderWeightL1Reg: l1_weight} if l1_weight else {}
         if neurons_to_decode is None:
             neurons_to_decode = sorted(set(np.asarray(cell_types)))
         self.neurons_to_decode = list(neurons_to_decode)
@@ -227,11 +221,10 @@ class FlowLinearReadout(HexGridReadout):
     eye_asymmetric = True
     predicts_flow = True
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
-            neurons_to_decode=_DECODER_NEURON_TYPES,
+            neurons_to_decode=readout_neurons,
             num_channels=[2], conv_sizes=[3], use_denominator=False,
-            regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
 
@@ -243,11 +236,10 @@ class FlowConv2Readout(HexGridReadout):
     eye_asymmetric = True
     predicts_flow = True
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
-            neurons_to_decode=_DECODER_NEURON_TYPES,
+            neurons_to_decode=readout_neurons,
             num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
-            regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
 
@@ -258,12 +250,11 @@ class MotionMagReadout(HexGridReadout):
     output_extra_dims = ()
     eye_asymmetric = False
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
-            neurons_to_decode=_DECODER_NEURON_TYPES,
+            neurons_to_decode=readout_neurons,
             num_channels=[1], conv_sizes=[3],
             positive_weights=True, use_bias=False,
-            regularizers={DecoderWeightL1Reg: _DEFAULT_REG_WEIGHT},
             **kwargs,
         )
 

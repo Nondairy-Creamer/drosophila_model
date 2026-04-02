@@ -9,6 +9,16 @@ use_input_conv = true
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = []
+readout_neurons = [
+    'T1', 'T2', 'T2a', 'T3',
+    'T4a', 'T4b', 'T4c', 'T4d',
+    'T5a', 'T5b', 'T5c', 'T5d',
+    'Tm1', 'Tm2', 'Tm3', 'Tm4',
+    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+]
+
+[model.regularizer_parameters]
+input_layer_l1 = 0.0
 
 [training]
 num_steps = 100000
