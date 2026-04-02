@@ -253,11 +253,10 @@ class MotionMagReadout(HexGridReadout):
     def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
             neurons_to_decode=readout_neurons,
-            num_channels=[1], conv_sizes=[3],
-            positive_weights=True, use_bias=False,
+            num_channels=[1], conv_sizes=[5],
+            positive_weights=True, use_bias=False, use_denominator=False,
             **kwargs,
         )
-
 
 # ---------------------------------------------------------------------------
 # Regularizer base class and concrete regularizers
