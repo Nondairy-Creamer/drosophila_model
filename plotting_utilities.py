@@ -48,7 +48,7 @@ def plot_loss(component_losses, save_folder=Path('figures')):
     if not components:
         return
 
-    total = np.mean(list(components.values()), axis=0)
+    total = np.sum(list(components.values()), axis=0)
 
     has_multiple = len(components) > 1
     if has_multiple:
