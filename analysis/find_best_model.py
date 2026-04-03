@@ -65,7 +65,7 @@ def find_best_models(models_dir=MODELS_DIR):
                 if not component_arrays:
                     print(f"  {folder.name}: empty loss history, skipping")
                     continue
-                total_loss = np.mean(component_arrays, axis=0)
+                total_loss = np.sum(component_arrays, axis=0)
             else:
                 total_loss = np.asarray(loss_data, dtype=float)
             min_loss = float(np.nanmin(total_loss))
