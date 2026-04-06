@@ -1,11 +1,13 @@
 """
 Analyze decoder convolution weights.
 
-Creates:
-  1. Bar plot: average |weight| per neuron type across the 8 channels and spatial positions
+Creates per decoder:
+  1. Bar plot: average |weight| per neuron type across all channels and spatial positions
   2. Hex scatter heatmap: average |weight| at each spatial position in the conv kernel
+  3. Per-neuron weight maps: one subplot per output channel showing spatial weights
 """
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -80,8 +82,21 @@ def main() -> None:
 
     for readout_name, decoder in decoders.items():
         print(f"\n=== Analyzing {readout_name} ===")
-        prefix = readout_name.lower()
-        analyze_readout(decoder, readout_name, output_dir, prefix, args.top_n)
+        readout_dir = output_dir / "decoder_analysis" / readout_name.lower()
+        readout_dir.mkdir(parents=True, exist_ok=True)
+        analyze_readout(decoder, readout_name, readout_dir, readout_name.lower(), args.top_n)
+
+
+def _channel_grid_layout(num_channels):
+    """Return (nrows, ncols) for a compact subplot grid."""
+    ncols = math.ceil(math.sqrt(num_channels))
+    nrows = math.ceil(num_channels / ncols)
+    return nrows, ncols
+
+
+def _hex_scatter_size(num_points):
+    """Auto-scale scatter dot size so hex grids of different sizes look good."""
+    return min(760, 760 * 7 / max(num_points, 1))
 
 
 def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
@@ -93,16 +108,20 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
     avg_per_neuron_all = np.mean(np.abs(conv_1), axis=(0, 1))
     num_to_show = min(top_n, len(all_neuron_names))
     top_indices = np.argsort(avg_per_neuron_all)[::-1][:num_to_show]
-    top_indices_sorted = np.sort(top_indices)
 
-    neuron_names = list(all_neuron_names[top_indices_sorted])
-    avg_per_neuron = avg_per_neuron_all[top_indices_sorted]
-    conv_1_top = conv_1[:, :, top_indices_sorted]
+    neuron_names = list(all_neuron_names[top_indices])
+    avg_per_neuron = avg_per_neuron_all[top_indices]
+    conv_1_top = conv_1[:, :, top_indices]
+
+    axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(decoder.conv_sizes[0])
+    grid_points = hex_grid_points(axial_coords)
+    num_spatial = grid_points.shape[0]
+    scatter_s = _hex_scatter_size(num_spatial)
 
     # ------------------------------------------------------------------
     # Bar plot: average |weight| per neuron type (top N)
     # ------------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(12, 5), dpi=150)
+    fig, ax = plt.subplots(figsize=(max(6, 0.5 * num_to_show), 5), dpi=150)
     x_pos = np.arange(len(neuron_names))
     ax.bar(x_pos, avg_per_neuron, color="tab:blue", edgecolor="black", linewidth=0.5)
     ax.set_xticks(x_pos)
@@ -122,16 +141,13 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
     # ------------------------------------------------------------------
     avg_per_position = np.mean(np.abs(conv_1_top), axis=(0, 2))
 
-    axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(decoder.conv_sizes[0])
-    grid_points = hex_grid_points(axial_coords)
-
     fig, ax = plt.subplots(figsize=(6, 5), dpi=150)
     sc = ax.scatter(
         grid_points[:, 0],
         grid_points[:, 1],
         c=avg_per_position,
         cmap="viridis",
-        s=760,
+        s=scatter_s,
         linewidths=0.6,
         edgecolors="black",
     )
@@ -154,25 +170,23 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
     print(f"Saved hex scatter to {hex_path}")
 
     # ------------------------------------------------------------------
-    # Per-neuron conv_1 weight maps
+    # Per-neuron conv_1 weight maps (one subplot per output channel)
     # ------------------------------------------------------------------
     channels_1 = conv_1_top.shape[0]
-
-    # Map channels to grid positions, skipping center (1,1) for 3x3
-    positions = [(0, 0), (0, 1), (0, 2),
-                 (1, 0),         (1, 2),
-                 (2, 0), (2, 1), (2, 2)]
+    nrows, ncols = _channel_grid_layout(channels_1)
 
     for neuron_idx, neuron_name in enumerate(neuron_names):
-        fig, axes = plt.subplots(3, 3, figsize=(10, 10), dpi=150)
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(4 * ncols, 4 * nrows), dpi=150,
+                                 squeeze=False)
 
         weights_all_channels = conv_1_top[:, :, neuron_idx]
         vmax = np.max(np.abs(weights_all_channels))
         if vmax == 0:
             vmax = 1.0
 
-        for ch_idx in range(min(channels_1, len(positions))):
-            row, col = positions[ch_idx]
+        for ch_idx in range(channels_1):
+            row, col = divmod(ch_idx, ncols)
             ax = axes[row, col]
             weights = conv_1_top[ch_idx, :, neuron_idx]
 
@@ -183,7 +197,7 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
                 cmap="coolwarm",
                 vmin=-vmax,
                 vmax=vmax,
-                s=760,
+                s=scatter_s,
                 linewidths=0.6,
                 edgecolors="black",
             )
@@ -193,10 +207,8 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
             ax.set_yticks([])
             fig.colorbar(scatter, ax=ax, shrink=0.7, pad=0.04)
 
-        axes[1, 1].axis("off")
-
-        for ch_idx in range(channels_1, len(positions)):
-            row, col = positions[ch_idx]
+        for idx in range(channels_1, nrows * ncols):
+            row, col = divmod(idx, ncols)
             axes[row, col].axis("off")
 
         fig.suptitle(f"{readout_name} conv_1 weights — {neuron_name}", fontsize=14)
