@@ -1177,6 +1177,25 @@ class NeuralModel(torch.nn.Module, ABC):
             result.device = device
         return result
 
+    def _collect_extra_state(self):
+        """Collect non-parameter, non-buffer state for serialization.
+
+        Override in subclasses to persist tensor attributes (like
+        ``synapse_counts``) that are not registered as buffers or parameters
+        and would therefore be lost by ``state_dict()`` alone.
+        """
+        return {'synapse_counts': self.synapse_counts}
+
+    def _restore_extra_state(self, state, device, dtype):
+        """Restore state saved by :meth:`_collect_extra_state`."""
+        if 'synapse_counts' not in state:
+            return
+        sc = state['synapse_counts']
+        if isinstance(sc, torch.Tensor):
+            self.synapse_counts = sc.to(device=device, dtype=dtype)
+        elif isinstance(sc, list):
+            self.synapse_counts = [t.to(device=device, dtype=dtype) for t in sc]
+
     def save(self, path):
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -1186,6 +1205,7 @@ class NeuralModel(torch.nn.Module, ABC):
             'class_name': self.__class__.__name__,
             # store weights on CPU for portability (includes buffers like optic_flow_*_readout)
             'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
+            'extra_state': self._collect_extra_state(),
         }
 
         # Use atomic write to prevent corruption on network filesystems
@@ -1272,8 +1292,30 @@ class NeuralModel(torch.nn.Module, ABC):
 
         model_cls = MODEL_CLASS_REGISTRY[data['class_name']]
         inputs['init_new_model'] = False
+
+        # Strip saved keys that no constructor in the MRO accepts (guards
+        # against stray locals that older _save_init_inputs may have captured).
+        accepted = set()
+        for klass in model_cls.__mro__:
+            if klass is object:
+                continue
+            init = getattr(klass, '__init__', None)
+            if init is None:
+                continue
+            for name, p in inspect.signature(init).parameters.items():
+                if p.kind == inspect.Parameter.VAR_KEYWORD:
+                    continue
+                if name != 'self':
+                    accepted.add(name)
+        inputs = {k: v for k, v in inputs.items() if k in accepted}
+
         model = model_cls(**inputs)
         model.load_state_dict(data['state_dict'])
+
+        if 'extra_state' in data:
+            model_device = torch.device(inputs['device'])
+            model_dtype = getattr(torch, inputs.get('dtype', 'float32'))
+            model._restore_extra_state(data['extra_state'], model_device, model_dtype)
 
         if freeze_params:
             for param in model.parameters():
