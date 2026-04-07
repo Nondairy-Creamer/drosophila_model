@@ -109,6 +109,20 @@ def _mask_pred_target(pred, target_flow, train_mask, loss_start_step):
     return pred_t, target_t
 
 
+def _flow_2ch_to_4ch(flow_2ch):
+    """Decompose 2-channel flow (x, y) into 4 rectified channels (right, left, up, down).
+
+    Channels: right = clamp(x, min=0), left = clamp(-x, min=0),
+              up = clamp(y, min=0), down = clamp(-y, min=0).
+    """
+    return torch.cat([
+        flow_2ch[..., 0:1].clamp(min=0),
+        (-flow_2ch[..., 0:1]).clamp(min=0),
+        flow_2ch[..., 1:2].clamp(min=0),
+        (-flow_2ch[..., 1:2]).clamp(min=0),
+    ], dim=-1)
+
+
 def flow_loss(model, outputs, target, train_mask, loss_start_step):
     """Normalized MSE between predicted flow and ground-truth optic flow.
 
@@ -122,6 +136,31 @@ def flow_loss(model, outputs, target, train_mask, loss_start_step):
         if not mod.predicts_flow or key not in outputs:
             continue
         pred_t, target_t = _mask_pred_target(outputs[key], target_flow,
+                                             train_mask, loss_start_step)
+        losses.append(normalized_mse(pred_t, target_t))
+    if not losses:
+        return target_flow.new_tensor(0.0)
+    return sum(losses) / len(losses)
+
+
+def flow_loss_4ch(model, outputs, target, train_mask, loss_start_step):
+    """Normalized MSE for 4-channel rectified flow readouts.
+
+    Decomposes the 2-channel optic flow target into 4 rectified channels
+    (right, left, up, down) and compares against readouts with
+    ``output_extra_dims == (4,)``.
+    """
+    target_flow = target['optic_flow']
+    target_4ch = _flow_2ch_to_4ch(target_flow)
+    losses = []
+    for key, mod in model._readout_modules.items():
+        if getattr(mod, 'training_only', False):
+            continue
+        if not getattr(mod, 'predicts_flow', False) or key not in outputs:
+            continue
+        if getattr(mod, 'output_extra_dims', ()) != (4,):
+            continue
+        pred_t, target_t = _mask_pred_target(outputs[key], target_4ch,
                                              train_mask, loss_start_step)
         losses.append(normalized_mse(pred_t, target_t))
     if not losses:

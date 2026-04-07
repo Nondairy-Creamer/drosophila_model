@@ -130,6 +130,15 @@ class HexGridReadout(torch.nn.Module):
         features = v[:, safe]
         return features.masked_fill(~valid.unsqueeze(0), float('nan'))
 
+    def flip_for_left_eye(self, x):
+        """Transform readout output for left-eye convention.
+
+        Default: negate the first channel (horizontal flow sign flip).
+        Subclasses with different output layouts should override.
+        """
+        x[..., 0] *= -1
+        return x
+
     def forward(self, fr):
         if fr.dim() == 1:
             fr = fr.unsqueeze(0)
@@ -202,6 +211,11 @@ class FlowNeuronReadout(torch.nn.Module):
             torch.zeros(8, device=device, dtype=dtype)
         )
 
+    def flip_for_left_eye(self, x):
+        """Negate horizontal flow channel for the left eye."""
+        x[..., 0] *= -1
+        return x
+
     def forward(self, fr):
         idx = self.column_indices                       # (cols, 8)
         valid = idx >= 0
@@ -246,6 +260,32 @@ class FlowConv2Readout(HexGridReadout):
             num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
             **kwargs,
         )
+
+
+class FlowConv2Readout4ch(HexGridReadout):
+    """Two-layer positive-weight hex-grid conv decoder producing 4-channel rectified flow.
+
+    Outputs (right, left, up, down) non-negative components trained against
+    ``clamp(flow_x, 0)``, ``clamp(-flow_x, 0)``, ``clamp(flow_y, 0)``,
+    ``clamp(-flow_y, 0)``.  Uses softplus between layers and a denominator
+    channel in the second layer.
+    """
+
+    output_extra_dims = (4,)
+    eye_asymmetric = True
+    predicts_flow = True
+
+    def __init__(self, *, readout_neurons=None, **kwargs):
+        super().__init__(
+            neurons_to_decode=readout_neurons,
+            num_channels=[8, 5], conv_sizes=[5, 5], use_denominator=True, use_bias=True,
+            positive_weights=True,
+            **kwargs,
+        )
+
+    def flip_for_left_eye(self, x):
+        """Swap right↔left channels to account for the mirrored column sampling."""
+        return x[..., [1, 0, 2, 3]]
 
 
 class MotionMagReadout(HexGridReadout):

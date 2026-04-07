@@ -82,6 +82,10 @@ def main():
         type=str,
         help="Path to model folder (containing model.pt and config.toml)",
     )
+    parser.add_argument(
+        "--expressive", action="store_true", default=False,
+        help="Plot all neuron groups (default: only T4 and T5)",
+    )
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
@@ -102,10 +106,14 @@ def main():
     pre_stim_steps = int(pre_stim_time / dt)
     num_sweep = len(temporal_frequencies)
 
-    # Collect all unique neuron types across groups, filtering to those present in the model
+    # Select neuron groups to plot
+    T4_T5_GROUPS = [g for g in NEURON_GROUPS if g[0] in ("T4", "T5")]
+    active_groups = NEURON_GROUPS if args.expressive else T4_T5_GROUPS
+
+    # Collect all unique neuron types across active groups, filtering to those present in the model
     available_types = set(model.unique_cell_types)
     all_neurons = []
-    for _, types in NEURON_GROUPS:
+    for _, types in active_groups:
         for ct in types:
             if ct not in all_neurons and ct in available_types:
                 all_neurons.append(ct)
@@ -137,9 +145,15 @@ def main():
     decoder_results = None
     decoder_key = next((k for k, m in model._readout_modules.items() if m.predicts_flow), None)
     if decoder_key is not None:
-        decoder_out = pred[decoder_key]  # (N, time, columns, 2)
+        decoder_out = pred[decoder_key]
         decoder_stim = decoder_out[:, pre_stim_steps:, :, :]
-        mean_responses = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()  # (N, 2)
+        mean_responses = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()
+
+        if mean_responses.shape[-1] == 4:
+            mean_responses = np.stack([
+                mean_responses[:, 0] - mean_responses[:, 1],
+                mean_responses[:, 2] - mean_responses[:, 3],
+            ], axis=-1)
 
         decoder_results = {d: {w: np.zeros((num_sweep, 2)) for w in wavelengths} for d in directions}
         for i, (direction, wavelength, si) in enumerate(index_map):
@@ -195,7 +209,7 @@ def main():
         print(f"Saved {save_path}")
 
     # --- Per-group velocity sweep figures ---
-    for group_name, cell_types in NEURON_GROUPS:
+    for group_name, cell_types in active_groups:
         present = [ct for ct in cell_types if ct in cell_results]
         if not present:
             print(f"Skipping group {group_name} — no matching neurons in model.")
