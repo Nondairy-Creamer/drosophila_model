@@ -26,7 +26,7 @@ import neural_models as nm
 from stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave
 
 
-def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity, dt, stim_time, pre_stim_time):
+def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity, dt, stim_time, pre_stim_time, zero_center=False):
     """Generate a single sine wave stimulus for a given direction and velocity.
 
     Returns stimulus tensor of shape (1, time, columns) and the number of
@@ -58,7 +58,8 @@ def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity,
         )
     else:
         raise ValueError(f"Unknown direction: {direction}")
-
+    if zero_center:
+        sine_wave = 2*sine_wave - 1
     # sine_wave shape: (time, columns) — add batch dim
     stimulus = sine_wave[None, :, :]
     return stimulus
@@ -71,6 +72,12 @@ def main():
         type=str,
         help="Path to model folder (containing model.pt and config.toml)",
     )
+    parser.add_argument(
+        "--zero_center",
+        action="store_true",
+        help="Zero-center the stimulus.",
+    )
+
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
@@ -91,7 +98,9 @@ def main():
     pre_stim_time = 0.5  # warm-up (seconds)
     stim_time = 1.0  # stimulus duration (seconds)
 
-    pre_stim_steps = int(pre_stim_time / dt)
+    stim_dt = model.dt
+
+    pre_stim_steps = int(pre_stim_time / stim_dt)
 
     # Build the list of sweep values.  When sweeping by velocity the same
     # velocities are used for every wavelength; when sweeping by temporal
@@ -112,7 +121,8 @@ def main():
                     velocity = sv * wavelength  # velocity = tf * wavelength
                 stim_np = generate_stimulus(
                     direction, sample_phi, sample_theta,
-                    wavelength, velocity, dt, stim_time, pre_stim_time,
+                    wavelength, velocity, stim_dt, stim_time, pre_stim_time,
+                    zero_center=args.zero_center,
                 )
                 stim_list.append(stim_np)
                 index_map.append((direction, wavelength, si))
