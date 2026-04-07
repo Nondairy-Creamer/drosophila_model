@@ -2208,3 +2208,592 @@ class CellAnnModel(NeuralModel):
 
         return v_next
 
+
+@_register_model_class
+class HandTunedModel(NeuralModel):
+    """Hand-tuned model with per-cell-type dynamics parameters.
+
+    Implements Julia optic-lobe-dynamics-style Euler integration:
+
+        dx/dt = -x/tau + f_type(omega * W_norm @ x) + stimulus + offset
+
+    Discretized (forward Euler):
+
+        x_new = x + dt * (-x/tau + f_type(h) + stimulus + offset)
+
+    where h = omega * W_norm @ x, and W_norm is the signed synapse matrix
+    with each neuron's incoming weights normalized to sum to 1 (in absolute
+    value).  Entry W_norm[i, j] is the fraction of neuron i's total input
+    contributed by neuron j (with sign from the presynaptic neurotransmitter).
+
+    Per-cell-type parameters:
+        tau               -> time constants (positive)
+        offset            -> bias
+        stimulus_strength -> stimulus gain (positive)
+
+    Per-cell-type configuration (buffer, not learned):
+        activation_type -> nonlinearity index (0=tanh, 1=relu, 2=softplus, 3=identity)
+
+    Global parameter:
+        omega            -> gain factor (positive)
+
+    Constructor accepts override dicts keyed by cell-type name for convenient
+    hand-tuning of tau, offset, and activation function per cell type.
+    """
+
+    ACTIVATION_NAMES = ['tanh', 'relu', 'softplus', 'identity','sigmoid']
+
+    def __init__(self, *, init_new_model=True,
+                 tau_overrides=None, offset_overrides=None,
+                 activation_overrides=None,
+                 synapse_amplification=None,
+                 omega_init=1.0, tau_default=0.05,
+                 stimulus_strength_init=1.0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self._save_init_inputs()
+
+        # Snapshot the raw (unsigned, unnormalized) connectome so we can
+        # re-derive the weight matrix when amplification factors change.
+        self._raw_synapse_counts = self.synapse_counts.clone()
+        self._sign_flips = []
+
+        self._sign_synapses()
+        self.activation_overrides = activation_overrides
+        # Per-cell-type amplification applied before row-wise normalization.
+        # A factor > 1 for a presynaptic cell type makes its synapses occupy
+        # a larger share of each postsynaptic neuron's normalized input.
+        self.register_buffer('_synapse_amplification',
+                             torch.ones(self.num_cell_types, dtype=self.dtype, device=self.device))
+        if synapse_amplification:
+            for ct_name, factor in synapse_amplification.items():
+                idx = self._cell_type_name_to_index(ct_name)
+                if idx is not None:
+                    self._synapse_amplification[idx] = factor
+
+        # Sign-based amplification: scale negative (inhibitory) or positive
+        # (excitatory) synapses based on their actual sign in the matrix,
+        # which accounts for manual flip_sign_between_cell_types calls.
+        self.register_buffer('_negative_amplification',
+                             torch.tensor(1.0, dtype=self.dtype, device=self.device))
+        self.register_buffer('_positive_amplification',
+                             torch.tensor(1.0, dtype=self.dtype, device=self.device))
+
+        self._normalize_synapse_counts()
+
+        # --- Global gain (omega) ---
+        self.omega = torch.nn.Parameter(
+            torch.tensor(omega_init, dtype=self.dtype, device=self.device))
+
+        # --- Per-cell-type tau (time constant) ---
+        tau_values = torch.full((self.num_cell_types,), tau_default,
+                                dtype=self.dtype, device=self.device)
+        if tau_overrides:
+            for ct_name, tau_val in tau_overrides.items():
+                idx = self._cell_type_name_to_index(ct_name)
+                if idx is not None:
+                    tau_values[idx] = tau_val
+        self.tau = torch.nn.Parameter(tau_values)
+
+        # --- Per-cell-type offset (bias) ---
+        offset_values = torch.zeros(self.num_cell_types,
+                                    dtype=self.dtype, device=self.device)
+        if offset_overrides:
+            for ct_name, off_val in offset_overrides.items():
+                idx = self._cell_type_name_to_index(ct_name)
+                if idx is not None:
+                    offset_values[idx] = off_val
+        self.offset = torch.nn.Parameter(offset_values)
+
+        # --- Per-cell-type activation function (buffer, not learned) ---
+        act_indices = torch.zeros(self.num_cell_types,
+                                  dtype=torch.int64, device=self.device)
+        if activation_overrides:
+            for ct_name, act_name in activation_overrides.items():
+                idx = self._cell_type_name_to_index(ct_name)
+                if idx is not None:
+                    act_indices[idx] = self.ACTIVATION_NAMES.index(act_name)
+        self.register_buffer('activation_type', act_indices)
+
+        # --- Per-cell-type stimulus strength ---
+        self.stimulus_strength = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), stimulus_strength_init,
+                        dtype=self.dtype, device=self.device))
+
+        #self.add_noise_to_parameters(self.init_std)
+
+        with torch.no_grad():
+            self.omega.clamp_(min=1e-6)
+            self.tau.clamp_(min=1e-6)
+            self.stimulus_strength.clamp_(min=1e-6)
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def _collect_extra_state(self):
+        state = super()._collect_extra_state()
+        state['_raw_synapse_counts'] = self._raw_synapse_counts
+        state['_sign_flips'] = self._sign_flips
+        return state
+
+    def _restore_extra_state(self, state, device, dtype):
+        super()._restore_extra_state(state, device, dtype)
+        if '_raw_synapse_counts' in state:
+            self._raw_synapse_counts = state['_raw_synapse_counts'].to(
+                device=device, dtype=dtype)
+        if '_sign_flips' in state:
+            self._sign_flips = state['_sign_flips']
+
+    # ------------------------------------------------------------------
+    # Weight-matrix normalization
+    # ------------------------------------------------------------------
+
+    def _normalize_synapse_counts(self):
+        """Normalize each neuron's incoming weights to sum to 1 (absolute value).
+
+        After this, synapse_counts[i, j] is the signed fraction of neuron i's
+        total input that comes from neuron j.  Matches the Julia code's
+        ``WW = WW * spdiagm(1 ./ indegree)`` normalization.
+
+        Amplification is applied in two stages before normalizing:
+
+        1. **Per-cell-type** (``_synapse_amplification``): scales each synapse
+           by its presynaptic cell type's factor.
+        2. **Sign-based** (``_negative_amplification`` /
+           ``_positive_amplification``): scales synapses by their actual sign
+           in the matrix (after NT signing and manual flips).
+        """
+        sc = self.synapse_counts.coalesce()
+        indices = sc.indices()
+        values = sc.values()
+        row_indices = indices[0]
+        col_indices = indices[1]
+
+        # Per-presynaptic-cell-type amplification
+        if hasattr(self, '_synapse_amplification'):
+            pre_type = self.neuron_to_type_index[col_indices]
+            values = values * self._synapse_amplification[pre_type]
+
+        # Sign-based amplification (uses actual sign after NT signing + flips)
+        if hasattr(self, '_negative_amplification') and self._negative_amplification != 1.0:
+            values = torch.where(values < 0,
+                                 values * self._negative_amplification,
+                                 values)
+        if hasattr(self, '_positive_amplification') and self._positive_amplification != 1.0:
+            values = torch.where(values > 0,
+                                 values * self._positive_amplification,
+                                 values)
+
+        row_abs_sums = torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype)
+        row_abs_sums.index_add_(0, row_indices, values.abs())
+        row_abs_sums.clamp_(min=1.0)
+
+        normalized_values = values / row_abs_sums[row_indices]
+        self.synapse_counts = torch.sparse_coo_tensor(
+            indices, normalized_values, sc.size(),
+            dtype=self.dtype, device=self.device,
+        ).coalesce()
+
+    # ------------------------------------------------------------------
+    # Cell-type lookup helpers
+    # ------------------------------------------------------------------
+
+    def _cell_type_name_to_index(self, name):
+        """Return index into ``unique_cell_types`` for *name*, or ``None``."""
+        matches = np.where(self.unique_cell_types == name)[0]
+        if len(matches) == 0:
+            warnings.warn(f"HandTunedModel: cell type '{name}' not found")
+            return None
+        return int(matches[0])
+
+    # ------------------------------------------------------------------
+    # Convenience setters for hand-tuning after construction
+    # ------------------------------------------------------------------
+
+    def set_tau(self, cell_type_name, value):
+        assert value > 0, f"tau must be positive, got {value}"
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is not None:
+            with torch.no_grad():
+                self.tau[idx] = value
+
+    def set_offset(self, cell_type_name, value):
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is not None:
+            with torch.no_grad():
+                self.offset[idx] = value
+
+    def set_activation(self, cell_type_name, activation_name):
+        """*activation_name* is one of
+        ``ACTIVATION_NAMES`` ('tanh', 'relu', 'softplus', 'identity')."""
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is not None:
+            self.activation_type[idx] = self.ACTIVATION_NAMES.index(activation_name)
+    
+    def set_default_activation(self, activation_name):
+        with torch.no_grad():
+            # apply new default to all cells
+            self.activation_type[:] = self.ACTIVATION_NAMES.index(activation_name)
+            # reapply
+            if self.activation_overrides:
+                for ct_name, act_name in self.activation_overrides.items():
+                    idx = self._cell_type_name_to_index(ct_name)
+                    if idx is not None:
+                        self.activation_type[idx] = self.ACTIVATION_NAMES.index(act_name)
+
+    def set_omega(self, value):
+        assert value > 0, f"omega must be positive, got {value}"
+        with torch.no_grad():
+            self.omega.fill_(value)
+
+    def set_stimulus_strength(self, cell_type_name, value):
+        assert value > 0, f"stimulus_strength must be positive, got {value}"
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is not None:
+            with torch.no_grad():
+                self.stimulus_strength[idx] = value
+
+    def set_synapse_amplification(self, cell_type_name, value, renormalize=True):
+        """Set the synapse amplification factor for a presynaptic cell type.
+
+        After updating, re-signs and re-normalizes the weight matrix from
+        the raw connectome so the new factor takes effect, unless
+        *renormalize* is ``False``.
+        """
+        assert value > 0, f"synapse_amplification must be positive, got {value}"
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is not None:
+            self._synapse_amplification[idx] = value
+            if renormalize:
+                self._renormalize_from_raw()
+
+    def amplify_inhibitory(self, factor):
+        """Amplify all functionally inhibitory (negative) synapses.
+
+        Uses the actual sign of each synapse in the matrix (after NT-based
+        signing *and* any manual ``flip_sign_between_cell_types`` calls), so
+        connections that were flipped to act as inhibitory are included.
+        """
+        assert factor > 0, f"factor must be positive, got {factor}"
+        self._negative_amplification.fill_(factor)
+        self._renormalize_from_raw()
+
+    def amplify_excitatory(self, factor):
+        """Amplify all functionally excitatory (positive) synapses."""
+        assert factor > 0, f"factor must be positive, got {factor}"
+        self._positive_amplification.fill_(factor)
+        self._renormalize_from_raw()
+
+    def _renormalize_from_raw(self):
+        """Re-apply sign, stored sign flips, and normalization from the
+        original connectome."""
+        self.synapse_counts = self._raw_synapse_counts.clone()
+        self._sign_synapses()
+        for pre, post, fac in self._sign_flips:
+            self._apply_sign_flip(pre, post, fac)
+        self._normalize_synapse_counts()
+
+    def flip_sign_between_cell_types(
+        self, presynaptic_cell_type, postsynaptic_cell_type, factor=-1.0
+    ):
+        """Scale synaptic weights for edges from *presynaptic_cell_type* → *postsynaptic_cell_type*.
+
+        ``synapse_counts`` is stored with row = post, column = pre (see ``forward``).
+        Default *factor* is ``-1`` (flip inhibitory/excitatory effect for that pair).
+        Row-wise absolute normalization is unchanged, so you do not need to call
+        ``_normalize_synapse_counts`` again after this.
+
+        Also updates ``synapse_counts_coo`` to match the sparse tensor.
+        The flip is recorded so that ``_renormalize_from_raw`` can replay it.
+        """
+        self._sign_flips.append((presynaptic_cell_type, postsynaptic_cell_type, factor))
+        self._apply_sign_flip(presynaptic_cell_type, postsynaptic_cell_type, factor)
+
+    def _apply_sign_flip(self, presynaptic_cell_type, postsynaptic_cell_type, factor):
+        """Apply a single sign flip to the current synapse_counts matrix."""
+        pre_ti = self._cell_type_name_to_index(presynaptic_cell_type)
+        post_ti = self._cell_type_name_to_index(postsynaptic_cell_type)
+        if pre_ti is None or post_ti is None:
+            return
+
+        sc = self.synapse_counts.coalesce()
+        indices = sc.indices()
+        values = sc.values().clone()
+
+        post_n = indices[0]
+        pre_n = indices[1]
+        pre_types = self.neuron_to_type_index[pre_n]
+        post_types = self.neuron_to_type_index[post_n]
+        mask = (pre_types == pre_ti) & (post_types == post_ti)
+
+        fac = torch.as_tensor(factor, device=values.device, dtype=values.dtype)
+        values = torch.where(mask, values * fac, values)
+
+        self.synapse_counts = torch.sparse_coo_tensor(
+            indices, values, size=sc.size(),
+            dtype=self.dtype, device=self.device,
+        ).coalesce()
+
+        coalesced = self.synapse_counts.coalesce()
+        self.synapse_counts_coo = np.column_stack([
+            coalesced.indices()[1].cpu().numpy(),
+            coalesced.indices()[0].cpu().numpy(),
+            coalesced.values().cpu().numpy(),
+        ])
+
+    # ------------------------------------------------------------------
+    # Ablation
+    # ------------------------------------------------------------------
+
+    def ablate_cell_type(self, cell_type_name):
+        """Remove a cell type from the network by zeroing all its connections.
+
+        Zeroes every incoming and outgoing synapse for neurons of
+        *cell_type_name* in both the current weight matrix and the raw
+        connectome snapshot, so the ablation persists across
+        ``_renormalize_from_raw`` calls.
+        """
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is None:
+            return
+
+        neuron_mask = self.neuron_to_type_index == idx  # (num_neurons,)
+
+        for sc_attr in ('synapse_counts', '_raw_synapse_counts'):
+            sc = getattr(self, sc_attr).coalesce()
+            indices = sc.indices()
+            values = sc.values().clone()
+
+            post_n = indices[0]
+            pre_n = indices[1]
+            hit = neuron_mask[post_n] | neuron_mask[pre_n]
+            values[hit] = 0.0
+
+            setattr(self, sc_attr, torch.sparse_coo_tensor(
+                indices, values, size=sc.size(),
+                dtype=self.dtype, device=self.device,
+            ).coalesce())
+
+        # Re-normalize so remaining neurons' weights still sum to 1
+        self._renormalize_from_raw()
+        print(f"Ablated cell type '{cell_type_name}' "
+              f"({neuron_mask.sum().item()} neurons disconnected)")
+
+    # ------------------------------------------------------------------
+    # Inspection
+    # ------------------------------------------------------------------
+
+    def get_omega(self):
+        return self.omega.item()
+
+    def get_cell_type_params(self, cell_type_name):
+        """Return a dict of current parameter values for *cell_type_name*."""
+        idx = self._cell_type_name_to_index(cell_type_name)
+        if idx is None:
+            return None
+        return {
+            'tau': self.tau[idx].item(),
+            'offset': self.offset[idx].item(),
+            'activation': self.ACTIVATION_NAMES[self.activation_type[idx].item()],
+            'stimulus_strength': self.stimulus_strength[idx].item(),
+            'synapse_amplification': self._synapse_amplification[idx].item(),
+        }
+
+    # ------------------------------------------------------------------
+    # Cell-type readout helpers
+    # ------------------------------------------------------------------
+
+    def _cell_type_column_mapping(self, cell_type_name):
+        """Return (neuron_indices, column_indices) for *cell_type_name*."""
+        mask = self.cell_types == cell_type_name
+        neuron_idx = np.where(mask)[0]
+        col_idx = self.column_indices[mask]
+        valid = ~np.isnan(col_idx)
+        return neuron_idx[valid].astype(int), col_idx[valid].astype(int)
+
+    def get_cell_voltage(self, v, cell_type_name):
+        """Extract raw (pre-activation) voltage for a cell type, by column.
+
+        Args:
+            v: ``(batch, num_neurons)`` or ``(num_neurons,)`` state vector.
+            cell_type_name: e.g. ``'T4a'``.
+
+        Returns:
+            ``(batch, num_columns)`` or ``(num_columns,)`` tensor with NaN for
+            columns that lack a neuron of this type.
+        """
+        squeeze = v.dim() == 1
+        if squeeze:
+            v = v.unsqueeze(0)
+        neuron_idx, col_idx = self._cell_type_column_mapping(cell_type_name)
+        out = torch.full((v.shape[0], self.num_columns), float('nan'),
+                         device=v.device, dtype=v.dtype)
+        if len(neuron_idx) > 0:
+            ni = torch.tensor(neuron_idx, device=v.device, dtype=torch.int64)
+            ci = torch.tensor(col_idx, device=v.device, dtype=torch.int64)
+            out[:, ci] = v[:, ni]
+        return out.squeeze(0) if squeeze else out
+
+    # ------------------------------------------------------------------
+    # Per-cell-type nonlinearity
+    # ------------------------------------------------------------------
+
+    def _apply_activation(self, h):
+        """Apply per-cell-type activation to post-synaptic input *h*.
+
+        Activation indices (must match ACTIVATION_NAMES):
+            0=tanh  1=relu  2=softplus  3=identity  4=sigmoid
+        """
+        unique_acts = self.activation_type.unique()
+
+        if len(unique_acts) == 1:
+            act = unique_acts.item()
+            if act == 0:
+                return torch.tanh(h)
+            if act == 1:
+                return torch.relu(h)
+            if act == 2:
+                return torch.nn.functional.softplus(h)
+            if act == 3:
+                return h
+            if act == 4:
+                return torch.sigmoid(h)
+            return h
+
+        act_per_neuron = self.activation_type[self.neuron_to_type_index]
+        result = torch.tanh(h)
+        for act_idx in unique_acts.tolist():
+            if act_idx == 0:
+                continue
+            mask = (act_per_neuron == act_idx).unsqueeze(0)
+            if act_idx == 1:
+                result = torch.where(mask, torch.relu(h), result)
+            elif act_idx == 2:
+                result = torch.where(mask, torch.nn.functional.softplus(h), result)
+            elif act_idx == 3:
+                result = torch.where(mask, h, result)
+            elif act_idx == 4:
+                result = torch.where(mask, torch.sigmoid(h), result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
+
+    def firing_rate(self, v):
+        """Apply per-cell-type activations (``activation_type`` / ``_apply_activation``).
+
+        Same family as in ``forward`` (tanh / relu / softplus / identity), used by
+        ``predict`` for readout.  *v* has shape ``(batch, num_neurons)``.
+        """
+        return self._apply_activation(v)
+
+    def compute_synaptic_current(self, v):
+        """Total synaptic current into each neuron: omega * W_norm @ f(v).
+
+        Args:
+            v: ``(batch, num_neurons)`` state vector.
+
+        Returns:
+            ``(batch, num_neurons)`` synaptic current tensor.
+        """
+        nonlin = self._apply_activation(v)
+        h = torch.sparse.mm(self.synapse_counts, nonlin.transpose(0, 1)).transpose(0, 1)
+        return self.omega * h
+
+    def decompose_synaptic_input(self, v, target_cell_type):
+        """Decompose synaptic input to *target_cell_type* by presynaptic type.
+
+        For each presynaptic type P structurally connected to the target::
+
+            contribution_P = omega * sum_{j in P} W_norm[i,j] * f(v_j)
+
+        mapped to the target neuron's column.
+
+        Args:
+            v: ``(batch, num_neurons)`` state vector.
+            target_cell_type: name of the postsynaptic cell type.
+
+        Returns:
+            dict mapping presynaptic type name to ``(batch, num_columns)``
+            tensor.  Target columns have real values; others are NaN.
+        """
+        neuron_idx, col_idx = self._cell_type_column_mapping(target_cell_type)
+        if len(neuron_idx) == 0:
+            return {}
+
+        ti = torch.tensor(neuron_idx, device=self.device, dtype=torch.int64)
+        ci = torch.tensor(col_idx, device=self.device, dtype=torch.int64)
+        B = v.shape[0]
+
+        nonlin = self._apply_activation(v)
+
+        sc = self.synapse_counts.coalesce()
+        sc_idx = sc.indices()
+        sc_val = sc.values()
+
+        row_mask = torch.isin(sc_idx[0], ti)
+        sub_rows = sc_idx[0, row_mask]
+        sub_cols = sc_idx[1, row_mask]
+        sub_vals = sc_val[row_mask]
+
+        if sub_vals.numel() == 0:
+            return {}
+
+        neuron_to_col = torch.full((self.num_neurons,), -1,
+                                   device=self.device, dtype=torch.int64)
+        neuron_to_col[ti] = ci
+        target_cols = neuron_to_col[sub_rows]
+
+        pre_type_idx = self.neuron_to_type_index[sub_cols]
+
+        result = {}
+        for tidx in pre_type_idx.unique():
+            mask = pre_type_idx == tidx
+            w = sub_vals[mask]
+            pre_n = sub_cols[mask]
+            tgt_c = target_cols[mask]
+
+            weighted = self.omega * w.unsqueeze(0) * nonlin[:, pre_n]
+
+            out = torch.full((B, self.num_columns), float('nan'),
+                             device=self.device, dtype=self.dtype)
+            out[:, ci] = 0.0
+            out.scatter_add_(1, tgt_c.unsqueeze(0).expand(B, -1), weighted)
+
+            type_name = self.unique_cell_types[tidx.item()]
+            result[type_name] = out
+
+        return result
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        """One Euler step of the dynamics.
+
+        x_new = x + dt * (-x/tau + f(omega * W_norm @ x) + stim + offset)
+        """
+        tau = self.tau[self.neuron_to_type_index]
+        omega = self.omega
+        stimulus_strength = self.stimulus_strength[self.neuron_to_type_index]
+        offset_all = self.offset[self.neuron_to_type_index]
+
+        # Stimulus drive
+        stim = torch.zeros_like(v_prev)
+        if stim_to_cell_mapping is None:
+            stim = u_t * stimulus_strength[None, :]
+        else:
+            cell_idx = stim_to_cell_mapping['neuron_index']
+            stim_idx = stim_to_cell_mapping['stimulus_index']
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                stim.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
+        nonlin = self._apply_activation(v_prev)
+        h = torch.sparse.mm(self.synapse_counts, nonlin.transpose(0, 1)).transpose(0, 1)
+        h_nonlin = omega * h
+        # Euler step
+        v_next = v_prev + self.dt/ tau[None, :] * (
+            -v_prev + h_nonlin + stim + offset_all[None, :]
+        )
+        return v_next
