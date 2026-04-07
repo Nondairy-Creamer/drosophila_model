@@ -33,7 +33,7 @@ def main() -> None:
         help="Stimulus indices to visualize (space-separated list)"
     )
     parser.add_argument(
-        "--fps", type=int, default=100, help="Output movie frame rate"
+        "--fps", type=int, default=None, help="Output movie frame rate (default: 1/dt from config)"
     )
     parser.add_argument(
         "--stim-type", type=str, default='flyview',
@@ -51,7 +51,7 @@ def main() -> None:
     output_folder.mkdir(parents=True, exist_ok=True)
 
     stimulus_type = args.stim_type if args.stim_type else config['stimulus']['stimulus_type']
-    frame_rate = args.fps
+    frame_rate = args.fps if args.fps else int(round(1.0 / config['model']['dt']))
 
     # --- Load column positions for scatter/quiver plots ---
     column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
@@ -60,9 +60,9 @@ def main() -> None:
     # --- Load stimulus and optic flow ---
     print("Loading stimulus and optic flow...")
     stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(stimulus_type, config, column_phi_theta)
-    stimulus = stimulus.numpy()
-    optic_flow = optic_flow.numpy()
-    train_mask = train_mask.numpy()
+    stimulus = stimulus.cpu().numpy()
+    optic_flow = optic_flow.cpu().numpy()
+    train_mask = train_mask.cpu().numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"Optic flow shape: {optic_flow.shape}")

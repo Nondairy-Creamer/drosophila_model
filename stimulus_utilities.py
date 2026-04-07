@@ -145,7 +145,7 @@ def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
 
         # Interpolate positions and rates to model_dt.
         video_times = np.arange(T) * video_dt
-        num_model_steps = int((T - 1) * video_dt / model_dt) + 1
+        num_model_steps = int(round((T - 1) * video_dt / model_dt)) + 1
         model_times = np.linspace(video_times[0], video_times[-1], num_model_steps)
 
         rotation_interp = np.column_stack([
@@ -213,9 +213,10 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
     """
     wavelength = wavelength * np.pi / 180  # convert degrees to radians
     filter_std_base = 2.5 * np.pi / 180  # radians
-    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    pre_stim_index = int(pre_stim_time / dt)
-    post_stim_index = int((pre_stim_time + stim_time) / dt)
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_stim_index = int(round(pre_stim_time / dt))
+    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
     t[:pre_stim_index] = t[pre_stim_index]
     t[post_stim_index:] = t[post_stim_index - 1]
     t_mesh, phi_mesh = np.meshgrid(t, sample_phi, indexing='ij')
@@ -274,9 +275,10 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
     """
     wavelength = wavelength * np.pi / 180  # convert degrees to radians
     filter_std_base = 2.5 * np.pi / 180  # radians
-    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    pre_stim_index = int(pre_stim_time / dt)
-    post_stim_index = int((pre_stim_time + stim_time) / dt)
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_stim_index = int(round(pre_stim_time / dt))
+    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
     t[:pre_stim_index] = t[pre_stim_index]
     t[post_stim_index:] = t[post_stim_index - 1]
     t_mesh, theta_mesh = np.meshgrid(t, sample_theta, indexing='ij')
@@ -318,6 +320,132 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
 
     return sine_wave, optic_flow
 
+def make_counterphase_sine(sample_phi, sample_theta, contrast=1,
+                           wavelength_phi=30, wavelength_theta=30,
+                           temporal_frequency=4,
+                           phase_phi=0, phase_theta=0, phase_t=0,
+                           dt=0.01, stim_time=1.0,
+                           pre_stim_time=0.0, post_stim_time=0.0):
+    """
+    Generate a counterphase (standing wave) sine stimulus on a sphere.
+
+    A spatial checkerboard pattern that flickers in place without translating.
+    Mathematically equivalent to the sum of two gratings drifting in opposite
+    directions at the same speed.
+
+    stimulus = sin(2π t tf + phase_t) · sin(2π φ/λ_φ + phase_φ) · sin(2π θ/λ_θ + phase_θ)
+
+    Args:
+        sample_phi: azimuthal angles (radians)
+        sample_theta: polar angles (radians)
+        contrast: contrast of the sine wave
+        wavelength_phi: spatial wavelength in phi direction (degrees)
+        wavelength_theta: spatial wavelength in theta direction (degrees)
+        temporal_frequency: flicker frequency (Hz)
+        phase_phi: spatial phase offset in phi (radians)
+        phase_theta: spatial phase offset in theta (radians)
+        phase_t: temporal phase offset (radians)
+        dt: time step (seconds)
+        stim_time: stimulus duration (seconds)
+        pre_stim_time: pre-stimulus time (seconds)
+        post_stim_time: post-stimulus time (seconds)
+
+    Returns:
+        stimulus: [time, points in space] array with values in [0, 1]
+        optic_flow: [time, points in space, 2] array (zeros — no net motion)
+    """
+    wavelength_phi_rad = wavelength_phi * np.pi / 180
+    wavelength_theta_rad = wavelength_theta * np.pi / 180
+    filter_std_base = 2.5 * np.pi / 180
+
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_stim_index = int(round(pre_stim_time / dt))
+    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
+    t[:pre_stim_index] = t[pre_stim_index]
+    t[post_stim_index:] = t[post_stim_index - 1]
+
+    # Contrast attenuation from ommatidia Gaussian filtering (same as LR sine)
+    filter_std = filter_std_base / np.cos(sample_theta - np.pi / 2)
+    contrast_scaling = np.exp(-2 * np.pi**2 * filter_std**2 / wavelength_phi_rad**2)
+
+    spatial_phi = np.sin(2 * np.pi * sample_phi / wavelength_phi_rad + phase_phi)
+    spatial_theta = np.sin(2 * np.pi * sample_theta / wavelength_theta_rad + phase_theta)
+    spatial_pattern = spatial_phi * spatial_theta * contrast_scaling
+
+    temporal = np.sin(2 * np.pi * temporal_frequency * t + phase_t)
+
+    stimulus = contrast * temporal[:, None] * spatial_pattern[None, :]
+    stimulus = (stimulus + 1.0) / 2.0
+
+    optic_flow = np.zeros((stimulus.shape[0], stimulus.shape[1], 2))
+    return stimulus, optic_flow
+
+
+def create_counterphase_sine(sample_phi, sample_theta, contrast=1,
+                              temporal_frequencies=None,
+                              wavelengths_phi=None, wavelengths_theta=None,
+                              seed=None, dt=0.01, stim_time=1.0,
+                              pre_stim_time=0.0, post_stim_time=0.0):
+    """
+    Generate counterphase sine stimuli for all combinations of temporal
+    frequency, phi wavelength, and theta wavelength, with randomized
+    spatiotemporal phase for each.
+
+    Args:
+        sample_phi: azimuthal angles (radians)
+        sample_theta: polar angles (radians)
+        contrast: contrast of the sine wave
+        temporal_frequencies: list of temporal frequencies in Hz (default [2, 4, 8])
+        wavelengths_phi: list of phi wavelengths in degrees (default [30, 90])
+        wavelengths_theta: list of theta wavelengths in degrees (default [30, 90])
+        seed: random seed for phase randomization
+        dt: time step (seconds)
+        stim_time: stimulus duration (seconds)
+        pre_stim_time: pre-stimulus time (seconds)
+        post_stim_time: post-stimulus time (seconds)
+
+    Returns:
+        stimulus: [examples, time, points in space] array with values in [0, 1]
+        optic_flow: [examples, time, points in space, 2] array (zeros)
+    """
+    if temporal_frequencies is None:
+        temporal_frequencies = [2, 4, 8]
+    if wavelengths_phi is None:
+        wavelengths_phi = [30, 90]
+    if wavelengths_theta is None:
+        wavelengths_theta = [30, 90]
+
+    rng = np.random.default_rng(seed)
+
+    stim_list = []
+    flow_list = []
+
+    for tf in temporal_frequencies:
+        for wl_phi in wavelengths_phi:
+            for wl_theta in wavelengths_theta:
+                phase_phi = rng.uniform(0, 2 * np.pi)
+                phase_theta = rng.uniform(0, 2 * np.pi)
+                phase_t = rng.uniform(0, 2 * np.pi)
+
+                s, f = make_counterphase_sine(
+                    sample_phi, sample_theta, contrast=contrast,
+                    wavelength_phi=wl_phi, wavelength_theta=wl_theta,
+                    temporal_frequency=tf,
+                    phase_phi=phase_phi, phase_theta=phase_theta,
+                    phase_t=phase_t,
+                    dt=dt, stim_time=stim_time,
+                    pre_stim_time=pre_stim_time,
+                    post_stim_time=post_stim_time,
+                )
+                stim_list.append(s[None, :, :])
+                flow_list.append(f[None, :, :, :])
+
+    stimulus = np.concatenate(stim_list, axis=0)
+    optic_flow = np.concatenate(flow_list, axis=0)
+    return stimulus, optic_flow
+
+
 def make_lr_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
                  dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
@@ -347,9 +475,10 @@ def make_lr_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     velocity_rad = velocity * np.pi / 180
     filter_std_base = 2.5 * np.pi / 180
 
-    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    pre_stim_index = int(pre_stim_time / dt)
-    post_stim_index = int((pre_stim_time + stim_time) / dt)
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_stim_index = int(round(pre_stim_time / dt))
+    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
     t[:pre_stim_index] = t[pre_stim_index]
     t[post_stim_index:] = t[post_stim_index - 1]
 
@@ -409,9 +538,10 @@ def make_ud_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     velocity_rad = velocity * np.pi / 180
     filter_std_base = 2.5 * np.pi / 180
 
-    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    pre_stim_index = int(pre_stim_time / dt)
-    post_stim_index = int((pre_stim_time + stim_time) / dt)
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_stim_index = int(round(pre_stim_time / dt))
+    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
     t[:pre_stim_index] = t[pre_stim_index]
     t[post_stim_index:] = t[post_stim_index - 1]
 
@@ -480,9 +610,10 @@ def make_full_field_flicker(num_points, temporal_frequency, dt, stim_time,
         optic_flow: (time, num_points, 2) array of zeros.
     """
     total_time = pre_stim_time + stim_time + post_stim_time
-    t = np.arange(0, total_time, step=dt)
-    pre_idx = int(pre_stim_time / dt)
-    post_idx = int((pre_stim_time + stim_time) / dt)
+    num_time = int(round(total_time / dt))
+    t = np.arange(num_time) * dt
+    pre_idx = int(round(pre_stim_time / dt))
+    post_idx = int(round((pre_stim_time + stim_time) / dt))
 
     t_eff = t.copy()
     t_eff[:pre_idx] = t_eff[pre_idx]
@@ -703,7 +834,8 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     filter_std_base = 2.5 * np.pi / 180  # radians
     # double the number of stim because we want to symmetrize the temporal frequnecies
     num_repeats = num_repeats * 2
-    time_vect = np.arange(0, stim_time * num_repeats, step=dt)
+    num_time = int(round(stim_time * num_repeats / dt))
+    time_vect = np.arange(num_time) * dt
     t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
     t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
     num_time, num_cell = phi_mesh.shape
@@ -1195,7 +1327,7 @@ def get_stimulus_one_eye(
                 raise Exception('sine waves require column_phi_theta input')
             stimulus, optic_flow = create_balanced_sine_wave(
                 column_phi_theta[:, 0], column_phi_theta[:, 1],
-                temporal_frequency=temporal_frequencies, dt=model_dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
+                temporal_frequency=temporal_frequencies, dt=model_dt, stim_time=stim_time, pre_stim_time=0.0, post_stim_time=0.0
             )
             stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
             optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
@@ -1389,6 +1521,18 @@ def get_stimulus_one_eye(
             optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt) * 180 / np.pi / model_dt
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'counterphase_sine':
+            if column_phi_theta is None:
+                raise Exception('counterphase_sine requires column_phi_theta input')
+            stimulus, optic_flow = create_counterphase_sine(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                seed=stimulus_seed, dt=model_dt, stim_time=stim_time,
+                pre_stim_time=0.0, post_stim_time=0.0,
+            )
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
         elif stim_type == 'full_field_step':
             if column_phi_theta is None:
                 raise Exception('full_field_step requires column_phi_theta input')
@@ -1421,7 +1565,8 @@ def get_stimulus_one_eye(
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}'. "
                 "Expected one of: static_sine, directional_sine, edge, random_pano, "
-                "random_sine, flow_360, sintel, flyview, full_field_step, full_field_flicker."
+                "random_sine, flow_360, sintel, flyview, full_field_step, "
+                "full_field_flicker, counterphase_sine."
             )
 
         stim_list.append(stimulus)
@@ -1436,7 +1581,7 @@ def get_stimulus_one_eye(
     num_cols = stimulus.shape[2]
 
     # Add pre-stimulus interval (mean-gray stimulus with zero optic flow)
-    pre_stim_points = int(pre_stim_time / model_dt)
+    pre_stim_points = int(round(pre_stim_time / model_dt))
     if pre_stim_points > 0:
         n_examples = stimulus.shape[0]
         pre_stim = torch.full((n_examples, pre_stim_points, num_cols), middle_gray, device=device, dtype=dtype)
@@ -1601,6 +1746,27 @@ def get_stimulus_two_eyes(
             observer_translation = torch.zeros_like(observer_rotation)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'counterphase_sine':
+            if column_phi_theta is None:
+                raise Exception('counterphase_sine requires column_phi_theta input')
+            stim_time = config['stimulus']['stim_time']
+            stimulus_seed = config['stimulus'].get('seed', None)
+
+            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
+            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
+
+            stimulus_np, optic_flow_np = create_counterphase_sine(
+                both_phi, both_theta,
+                seed=stimulus_seed, dt=model_dt, stim_time=stim_time,
+                pre_stim_time=0.0, post_stim_time=0.0,
+            )
+            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
+            n_cp = stimulus.shape[0]
+            observer_rotation = torch.zeros((n_cp, stimulus.shape[1], 3), device=device, dtype=dtype)
+            observer_translation = torch.zeros((n_cp, stimulus.shape[1], 3), device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
         elif stim_type == 'full_field_step':
             if column_phi_theta is None:
                 raise Exception('full_field_step requires column_phi_theta input')
@@ -1639,7 +1805,8 @@ def get_stimulus_two_eyes(
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
-                "Expected one of: random_pano, drone_view, edge, full_field_step, full_field_flicker."
+                "Expected one of: random_pano, drone_view, edge, full_field_step, "
+                "full_field_flicker, counterphase_sine."
             )
 
         stim_list.append(stimulus)
@@ -1659,7 +1826,7 @@ def get_stimulus_two_eyes(
     num_flow_cols = optic_flow.shape[2]
 
     # Add pre-stimulus interval (stationary observer, middle-gray stimulus)
-    pre_stim_points = int(pre_stim_time / model_dt)
+    pre_stim_points = int(round(pre_stim_time / model_dt))
     if pre_stim_points > 0:
         n_examples = stimulus.shape[0]
         pre_stim = torch.full((n_examples, pre_stim_points, num_cols), middle_gray, device=device, dtype=dtype)
@@ -1712,7 +1879,7 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     
     # Calculate new time dimension
     total_duration = (original_time - 1) * stimulus_dt
-    new_time = int(total_duration / model_dt) + 1
+    new_time = int(round(total_duration / model_dt)) + 1
     
     # Flatten all dimensions after time for interpolation
     # Shape: (batch, time, *remaining) -> (batch, -1, time) for F.interpolate

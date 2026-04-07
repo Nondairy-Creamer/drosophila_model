@@ -1466,7 +1466,7 @@ class CurrentModel(NeuralModel):
         
         # --- CurrentModel-specific parameters ---
         persistence_init = 0.5
-        stimulus_strength_init = 1.0
+        stimulus_strength_init = 10.0
         offset_init = 0.0
         
         persistence_logit_init = logit(persistence_init)
@@ -1528,25 +1528,13 @@ class CurrentModel(NeuralModel):
                 self.output_strength_log.add_(torch.log(scale_factor))
 
     def calc_sigma_max(self, max_iter=100, eps=1e-12):
-        """Calculate the maximum singular value (spectral norm) of the dynamics matrix.
-
-        Includes the nonlinearity's derivative at the current steady state so
-        that the spectral norm reflects the true Jacobian, not just the linear
-        weight matrix.
-        """
+        """Calculate the maximum singular value (spectral norm) of the dynamics matrix."""
         A = self.synapse_counts.coalesce()
         D_in = self.input_strength_log.exp()[self.neuron_to_type_index]
         D_out = self.output_strength_log.exp()[self.neuron_to_type_index]
         d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
         one_minus_d = 1.0 - d
 
-        # Scale D_out by the nonlinearity's derivative at the steady state
-        v_ss = self.steady_state.detach()
-        with torch.enable_grad():
-            v_ss_grad = v_ss.clone().requires_grad_(True)
-            f_val = self.nonlinearity(v_ss_grad)
-            f_prime = torch.autograd.grad(f_val.sum(), v_ss_grad)[0]
-        D_out = D_out * f_prime.detach()
 
         def apply_M(v):
             v_scaled = v * D_out
