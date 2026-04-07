@@ -318,6 +318,130 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
 
     return sine_wave, optic_flow
 
+
+def make_lr_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
+                        dt=0.01, stim_time=1.0, pre_stim_time=0.0,
+                        post_stim_time=0.0, edge_width=2.5):
+    """Generate a left-right moving edge stimulus.
+
+    Args:
+        sample_phi: azimuthal angles of ommatidia (radians).
+        sample_theta: polar angles of ommatidia (radians).
+        velocity: edge speed in degrees/second (positive = rightward).
+        edge_type: ``'on'`` (dark-to-light transition as edge passes each
+            point, i.e. a bright leading edge) or ``'off'`` (light-to-dark,
+            dark leading edge).
+        dt: time step (seconds).
+        stim_time: stimulus duration (seconds).
+        pre_stim_time: blank time before the edge enters the field.
+        post_stim_time: blank time after stimulus ends.
+        edge_width: base Gaussian smoothing sigma in degrees (scaled by
+            theta to match ommatidium acceptance angle, same as sine wave).
+
+    Returns:
+        stimulus: ``(time, columns)`` array with values in [0, 1].
+    """
+    from scipy.special import erf
+
+    velocity_rad = velocity * np.pi / 180
+    filter_std_base = edge_width * np.pi / 180
+
+    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
+    pre_idx = int(pre_stim_time / dt)
+    post_idx = int((pre_stim_time + stim_time) / dt)
+    t_eff = t.copy()
+    t_eff[:pre_idx] = t_eff[pre_idx]
+    if post_idx < len(t_eff):
+        t_eff[post_idx:] = t_eff[post_idx - 1]
+
+    # Start edge well outside the visual field
+    phi_span = sample_phi.max() - sample_phi.min()
+    margin = 4 * filter_std_base + 0.1 * phi_span
+    if velocity_rad >= 0:
+        start_pos = sample_phi.min() - margin
+    else:
+        start_pos = sample_phi.max() + margin
+    edge_pos = start_pos + velocity_rad * t_eff  # (time,)
+
+    # Theta-dependent sigma (wider near poles, same convention as sine wave)
+    sigma = filter_std_base / np.abs(np.cos(sample_theta - np.pi / 2))
+
+    # Gaussian-smoothed step via error function.
+    # "Has the edge passed this point?" depends on direction:
+    #   rightward (v>0): passed when edge_pos > phi  → diff = +(edge_pos - phi)
+    #   leftward  (v<0): passed when edge_pos < phi  → diff = -(edge_pos - phi)
+    # Multiplying by sign(velocity) unifies both cases.
+    direction = np.sign(velocity_rad) if velocity_rad != 0 else 1.0
+    diff = direction * (edge_pos[:, None] - sample_phi[None, :])  # (time, columns)
+    step = 0.5 * (1.0 + erf(diff / (sigma[None, :] * np.sqrt(2))))
+
+    if edge_type.lower() in ('off', 'dark'):
+        step = 1.0 - step
+
+    return step
+
+
+def make_ud_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
+                        dt=0.01, stim_time=1.0, pre_stim_time=0.0,
+                        post_stim_time=0.0, edge_width=2.5):
+    """Generate an up-down moving edge stimulus.
+
+    Uses the same ``tan(theta - pi/2)`` coordinate mapping as
+    :func:`make_ud_sine_wave` so that the edge moves at constant apparent
+    speed on the virtual cylinder.
+
+    Args:
+        sample_phi: azimuthal angles of ommatidia (radians).
+        sample_theta: polar angles of ommatidia (radians).
+        velocity: edge speed in degrees/second at the equator
+            (positive = upward, negative = downward).
+        edge_type: ``'on'`` or ``'off'`` (see :func:`make_lr_moving_edge`).
+        dt: time step (seconds).
+        stim_time: stimulus duration (seconds).
+        pre_stim_time: blank time before the edge enters the field.
+        post_stim_time: blank time after stimulus ends.
+        edge_width: base Gaussian smoothing sigma in degrees.
+
+    Returns:
+        stimulus: ``(time, columns)`` array with values in [0, 1].
+    """
+    from scipy.special import erf
+
+    velocity_rad = velocity * np.pi / 180
+    filter_std_base = edge_width * np.pi / 180
+
+    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
+    pre_idx = int(pre_stim_time / dt)
+    post_idx = int((pre_stim_time + stim_time) / dt)
+    t_eff = t.copy()
+    t_eff[:pre_idx] = t_eff[pre_idx]
+    if post_idx < len(t_eff):
+        t_eff[post_idx:] = t_eff[post_idx - 1]
+
+    # Map theta to cartesian vertical coordinate (same as UD sine wave)
+    y = np.tan(sample_theta - np.pi / 2)  # (columns,)
+
+    y_span = y.max() - y.min()
+    margin = 4 * filter_std_base + 0.1 * y_span
+    if velocity_rad >= 0:
+        start_pos = y.min() - margin
+    else:
+        start_pos = y.max() + margin
+    edge_pos = start_pos + velocity_rad * t_eff  # (time,)
+
+    # Theta-dependent sigma
+    sigma = filter_std_base / np.abs(np.cos(sample_theta - np.pi / 2))
+
+    direction = np.sign(velocity_rad) if velocity_rad != 0 else 1.0
+    diff = direction * (edge_pos[:, None] - y[None, :])  # (time, columns)
+    step = 0.5 * (1.0 + erf(diff / (sigma[None, :] * np.sqrt(2))))
+
+    if edge_type.lower() in ('off', 'dark'):
+        step = 1.0 - step
+
+    return step
+
+
 def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=[4],
                               dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
