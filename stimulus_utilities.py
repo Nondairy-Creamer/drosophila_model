@@ -1027,6 +1027,134 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
     return stimulus, optic_flow, rotation_vectors, oob_mask
 
 
+def _omega_world_cardinal_pano(direction, velocity_deg_per_s):
+    """World-frame angular velocity (rad/s) for constant panoramic rotation.
+
+    Coordinate convention matches ``get_random_velocity_pano`` and
+    ``make_lr_sine_wave`` / ``generate_optic_flow``: +x forward, +y left, +z up.
+    Signs are chosen so horizontal motion matches LR sine (rotation about z)
+    and vertical motion matches the retinal up component from rotation about y.
+    """
+    w = float(velocity_deg_per_s) * (np.pi / 180.0)
+    d = direction.lower()
+    if d == "right":
+        return np.array([0.0, 0.0, w], dtype=np.float64)
+    if d == "left":
+        return np.array([0.0, 0.0, -w], dtype=np.float64)
+    if d == "up":
+        return np.array([0.0, w, 0.0], dtype=np.float64)
+    if d == "down":
+        return np.array([0.0, -w, 0.0], dtype=np.float64)
+    raise ValueError(f"Unknown direction {direction!r}; expected left/right/up/down")
+
+
+def get_constant_velocity_pano(
+    sample_phi,
+    sample_theta,
+    direction,
+    velocity_deg_per_s,
+    dt,
+    stim_time,
+    pre_stim_time=0.0,
+    seed=None,
+    pano_indices=None,
+    log_scale=False,
+):
+    """
+    Panoramic natural scenes rotating at constant angular speed about a
+    cardinal axis (yaw for left/right, pitch for up/down).
+
+    Uses the same loading, Gaussian filtering, and spherical sampling as
+    ``get_random_velocity_pano``, but with fixed ``omega_world`` during the
+    stimulus interval. Pre-stimulus time holds the view fixed at a random
+    initial orientation (reproducible from ``seed``).
+
+    Args:
+        sample_phi: (N,) azimuthal angles (radians).
+        sample_theta: (N,) polar angles (radians).
+        direction: one of ``"left"``, ``"right"``, ``"up"``, ``"down"``.
+        velocity_deg_per_s: rotation speed (deg/s); sign is taken from
+            ``direction``.
+        dt: time step (seconds).
+        stim_time: motion duration (seconds), excluding ``pre_stim_time``.
+        pre_stim_time: static panorama duration before rotation (seconds).
+        seed: RNG seed for initial orientations (one per panorama).
+        pano_indices: optional 1D array of indices into ``all_panoramic.pt``;
+            default uses every panorama.
+
+    Returns:
+        stimulus: (P, T_total, N) with ``T_total = pre + stim`` steps, values
+            in ``[0, 1]`` as in ``get_random_velocity_pano``.
+    """
+    from scipy.ndimage import map_coordinates
+
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng()
+
+    omega_world = _omega_world_cardinal_pano(direction, velocity_deg_per_s)
+
+    raw_panos = _load_all_panos()
+    if log_scale:
+        raw_panos = np.log(raw_panos+1) / np.log(raw_panos.max()+1)
+    if pano_indices is not None:
+        raw_panos = raw_panos[np.asarray(pano_indices, dtype=int)]
+
+    sample_xyz = np.stack([
+        np.sin(sample_theta) * np.cos(sample_phi),
+        np.sin(sample_theta) * np.sin(sample_phi),
+        np.cos(sample_theta),
+    ], axis=1).astype(np.float64)
+
+    pre_steps = int(round(pre_stim_time / dt))
+    stim_steps = int(round(stim_time / dt))
+
+    pano_list = []
+    for i in range(raw_panos.shape[0]):
+        pano_filtered, pano_y_lim, pano_x_lim = _filter_pano(raw_panos[i])
+        pano_height, pano_width = pano_filtered.shape
+
+        R = _random_rotation_matrix(rng)
+
+        def sample_dirs(xyz_nc3):
+            rotated_theta = np.arccos(np.clip(xyz_nc3[:, 2], -1.0, 1.0))
+            rotated_phi = np.arctan2(xyz_nc3[:, 1], xyz_nc3[:, 0])
+            y_indices = (rotated_theta - pano_y_lim[0]) / (pano_y_lim[1] - pano_y_lim[0]) * (pano_height - 1)
+            x_indices = (pano_x_lim[0] - rotated_phi) / (pano_x_lim[0] - pano_x_lim[1]) * pano_width
+            x_indices = x_indices % pano_width
+            out_of_bounds = (y_indices < 0) | (y_indices > pano_height - 1)
+            y_clip = np.clip(y_indices, 0, pano_height - 1)
+            stim = map_coordinates(
+                pano_filtered, [y_clip.ravel(), x_indices.ravel()],
+                order=1, mode="nearest",
+            ).reshape(-1)
+            stim[out_of_bounds] = pano_filtered.mean()
+            return stim
+
+        rows = []
+        xyz_pre = (R @ sample_xyz.T).T
+        pre_row = sample_dirs(xyz_pre)
+        for _ in range(pre_steps):
+            rows.append(pre_row.copy())
+
+        for _ti in range(stim_steps):
+            angle = np.linalg.norm(omega_world) * dt
+            if angle > 1e-12:
+                ax = omega_world / np.linalg.norm(omega_world)
+                K = np.array([[0, -ax[2], ax[1]],
+                              [ax[2], 0, -ax[0]],
+                              [-ax[1], ax[0], 0]])
+                R_inc = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+                R = R_inc @ R
+            xyz = (R @ sample_xyz.T).T
+            rows.append(sample_dirs(xyz))
+
+        pano_list.append(np.stack(rows, axis=0))
+
+    return np.stack(pano_list, axis=0)
+
+
 def consolidate_stim(stim_dict, optic_flow_dict):
     time_per_stim, num_cell = next(iter(stim_dict.values()))[0].shape[1:]
     stimulus = np.zeros((0, time_per_stim, num_cell))
@@ -1114,7 +1242,18 @@ def get_stimulus_one_eye(
             stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
             optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
+        elif stim_type == "constant_velocity_pano":
+            if column_phi_theta is None:
+                raise Exception('constant_velocity_pano require column_phi_theta input')
+            stimulus = get_constant_velocity_pano(
+                column_phi_theta[:, 0], column_phi_theta[:, 1],
+                direction=config['stimulus'].get('direction', 'right'),
+                velocity_deg_per_s=config['stimulus'].get('velocity_deg_per_s', 45),
+                dt=model_dt, stim_time=stim_time, seed=stimulus_seed,log_scale=True,
+            )
+            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
+            optic_flow = torch.ones(stimulus.shape[0], stimulus.shape[1], stimulus.shape[2], 2, device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
         elif stim_type == 'random_sine':
             if column_phi_theta is None:
                 raise Exception('sine waves require column_phi_theta input')
