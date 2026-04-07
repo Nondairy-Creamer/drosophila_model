@@ -1170,7 +1170,6 @@ def get_stimulus_one_eye(
     sine_temporal_frequency: float | None = None,
     random_sine_duration_s: float | None = None,
     pre_stim_time_override: float | None = None,
-    add_blank: bool = True,
 ):
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])
@@ -1436,17 +1435,6 @@ def get_stimulus_one_eye(
     num_time = stimulus.shape[1]
     num_cols = stimulus.shape[2]
 
-    if add_blank:
-        blank_stim = torch.zeros((3, num_time, num_cols), device=device, dtype=dtype)
-        blank_stim[0, :, :] = 0.0
-        blank_stim[1, :, :] = 0.5
-        blank_stim[2, :, :] = 1.0
-        blank_flow = torch.zeros((3, num_time, optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
-        blank_mask = torch.ones((3, num_time, num_cols), dtype=torch.bool, device=device)
-        stimulus = torch.cat([blank_stim, stimulus], dim=0)
-        optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
-        train_mask = torch.cat([blank_mask, train_mask], dim=0)
-
     # Add pre-stimulus interval (mean-gray stimulus with zero optic flow)
     pre_stim_points = int(pre_stim_time / model_dt)
     if pre_stim_points > 0:
@@ -1467,7 +1455,6 @@ def get_stimulus_two_eyes(
     column_phi_theta=None,
     *,
     pre_stim_time_override: float | None = None,
-    add_blank: bool = True,
 ):
     """
     Load a two-eye stimulus and return sampled images, optic flow,
@@ -1479,8 +1466,6 @@ def get_stimulus_two_eyes(
         column_phi_theta: (N, 2) right-eye (phi, theta) in radians.
             Left eye is sampled at (-phi, theta).
         pre_stim_time_override: override pre-stim time from config.
-        add_blank: if True (default), prepend 3 blank stimuli (luminance 0, 0.5, 1).
-
     Returns:
         stimulus: (examples, time, 2*N) right then left eye stimulus.
         optic_flow: (examples, time, 2*N, 2) right then left optic flow (NaN if unavailable).
@@ -1672,23 +1657,6 @@ def get_stimulus_two_eyes(
     num_time = stimulus.shape[1]
     num_cols = stimulus.shape[2]   # 2*N
     num_flow_cols = optic_flow.shape[2]
-
-    if add_blank:
-        # Add blank stimuli (constant luminance: 0, 0.5, 1.0) with zero optic flow
-        blank_stim = torch.zeros((3, num_time, num_cols), device=device, dtype=dtype)
-        blank_stim[0] = 0.0
-        blank_stim[1] = 0.5
-        blank_stim[2] = 1.0
-        blank_flow = torch.zeros((3, num_time, num_flow_cols, 2), device=device, dtype=dtype)
-        blank_rot = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
-        blank_trans = torch.zeros((3, num_time, 3), device=device, dtype=dtype)
-        blank_mask = torch.ones((3, num_time, num_cols), dtype=torch.bool, device=device)
-
-        stimulus = torch.cat([blank_stim, stimulus], dim=0)
-        optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
-        observer_rotation = torch.cat([blank_rot, observer_rotation], dim=0)
-        observer_translation = torch.cat([blank_trans, observer_translation], dim=0)
-        train_mask = torch.cat([blank_mask, train_mask], dim=0)
 
     # Add pre-stimulus interval (stationary observer, middle-gray stimulus)
     pre_stim_points = int(pre_stim_time / model_dt)
