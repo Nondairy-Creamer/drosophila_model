@@ -1021,9 +1021,14 @@ class NeuralModel(torch.nn.Module, ABC):
 
         # outputs for each neuron in output_neurons are (batches, time, number of columns)
         outputs = {'voltage': {}, 'firing_rate': {}}
+        record_synaptic = isinstance(self, HandTunedModel)
+        if record_synaptic:
+            outputs['synaptic_current'] = {}
         for i in readout_keys:
             outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
             outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
+            if record_synaptic:
+                outputs['synaptic_current'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
         if self.has_decoder:
             outputs['decoder'] = torch.full((num_batches, num_time, self.num_columns, 2), float('nan'), device=self.device, dtype=self.dtype)
@@ -1044,6 +1049,9 @@ class NeuralModel(torch.nn.Module, ABC):
             if self.has_decoder:
                 outputs['decoder'][:, t, :, :] = self.decoder(fr)
 
+            if record_synaptic:
+                syn_current = self.compute_synaptic_current(v)
+
             for i in readout_keys:
                 ci = readout_dict[i]['column_indices']
                 ni = readout_dict[i]['neuron_indices']
@@ -1051,7 +1059,8 @@ class NeuralModel(torch.nn.Module, ABC):
                 if torch.any(valid):
                     outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
                     outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
-
+                    if record_synaptic:
+                        outputs['synaptic_current'][i][:, t, ci[valid]] = syn_current[:, ni[valid]]
         return {
             'outputs': outputs,
             'model_state': {'v': v.detach(), 'filter_state': filter_state},
@@ -1091,7 +1100,7 @@ class NeuralModel(torch.nn.Module, ABC):
         right_outputs = {}
         left_outputs = {}
 
-        for key in ('voltage', 'firing_rate'):
+        for key in ('voltage', 'firing_rate', 'synaptic_current'):
             if key in outputs:
                 right_outputs[key] = {k: v[:S] for k, v in outputs[key].items()}
                 left_outputs[key] = {k: v[S:] for k, v in outputs[key].items()}
