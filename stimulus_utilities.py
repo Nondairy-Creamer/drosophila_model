@@ -461,6 +461,42 @@ def make_ud_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     return stimulus, optic_flow
 
 
+def make_full_field_flicker(num_points, temporal_frequency, dt, stim_time,
+                            pre_stim_time=0.0, post_stim_time=0.0):
+    """
+    Generate a full-field flicker stimulus where luminance at every spatial
+    point oscillates sinusoidally at a given temporal frequency.
+
+    Args:
+        num_points: number of spatial points (columns).
+        temporal_frequency: flicker frequency in Hz.
+        dt: time step in seconds.
+        stim_time: stimulus duration in seconds.
+        pre_stim_time: pre-stimulus hold at mean gray (seconds).
+        post_stim_time: post-stimulus hold at final value (seconds).
+
+    Returns:
+        stimulus: (time, num_points) array with values in [0, 1].
+        optic_flow: (time, num_points, 2) array of zeros.
+    """
+    total_time = pre_stim_time + stim_time + post_stim_time
+    t = np.arange(0, total_time, step=dt)
+    pre_idx = int(pre_stim_time / dt)
+    post_idx = int((pre_stim_time + stim_time) / dt)
+
+    t_eff = t.copy()
+    t_eff[:pre_idx] = t_eff[pre_idx]
+    t_eff[post_idx:] = t_eff[post_idx - 1]
+    t_eff -= t_eff[pre_idx]
+
+    luminance = 0.5 + 0.5 * np.sin(2 * np.pi * temporal_frequency * t_eff)
+
+    stimulus = np.broadcast_to(luminance[:, None], (len(t), num_points)).copy()
+    optic_flow = np.zeros((len(t), num_points, 2))
+
+    return stimulus, optic_flow
+
+
 def create_edge_stimulus(sample_phi, sample_theta, velocities=None,
                          dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
@@ -1134,6 +1170,7 @@ def get_stimulus_one_eye(
     sine_temporal_frequency: float | None = None,
     random_sine_duration_s: float | None = None,
     pre_stim_time_override: float | None = None,
+    add_blank: bool = True,
 ):
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])
@@ -1353,11 +1390,39 @@ def get_stimulus_one_eye(
             optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt) * 180 / np.pi / model_dt
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'full_field_step':
+            if column_phi_theta is None:
+                raise Exception('full_field_step requires column_phi_theta input')
+            num_time_steps = int(round(stim_time / model_dt))
+            n_cols = column_phi_theta.shape[0]
+            stimulus = torch.zeros((3, num_time_steps, n_cols), device=device, dtype=dtype)
+            stimulus[0] = 0.0
+            stimulus[1] = 0.5
+            stimulus[2] = 1.0
+            optic_flow = torch.zeros((3, num_time_steps, n_cols, 2), device=device, dtype=dtype)
+            train_mask = torch.ones((3, num_time_steps, n_cols), dtype=torch.bool, device=device)
+
+        elif stim_type == 'full_field_flicker':
+            if column_phi_theta is None:
+                raise Exception('full_field_flicker requires column_phi_theta input')
+            n_cols = column_phi_theta.shape[0]
+            flicker_tfs = config['stimulus'].get('flicker_temporal_frequencies', temporal_frequencies)
+            if not isinstance(flicker_tfs, list):
+                flicker_tfs = [flicker_tfs]
+            stim_arrays, flow_arrays = [], []
+            for tf in flicker_tfs:
+                s, f = make_full_field_flicker(n_cols, tf, model_dt, stim_time)
+                stim_arrays.append(s[None])
+                flow_arrays.append(f[None])
+            stimulus = torch.tensor(np.concatenate(stim_arrays), device=device, dtype=dtype)
+            optic_flow = torch.tensor(np.concatenate(flow_arrays), device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}'. "
                 "Expected one of: static_sine, directional_sine, edge, random_pano, "
-                "random_sine, sine_const_rand, flow_360, sintel, flyview."
+                "random_sine, flow_360, sintel, flyview, full_field_step, full_field_flicker."
             )
 
         stim_list.append(stimulus)
@@ -1371,16 +1436,16 @@ def get_stimulus_one_eye(
     num_time = stimulus.shape[1]
     num_cols = stimulus.shape[2]
 
-    # Add blank stimuli (constant luminance: 0, 0.5, 1.0) with zero optic flow
-    blank_stim = torch.zeros((3, num_time, num_cols), device=device, dtype=dtype)
-    blank_stim[0, :, :] = 0.0
-    blank_stim[1, :, :] = 0.5
-    blank_stim[2, :, :] = 1.0
-    blank_flow = torch.zeros((3, num_time, optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
-    blank_mask = torch.ones((3, num_time, num_cols), dtype=torch.bool, device=device)
-    stimulus = torch.cat([blank_stim, stimulus], dim=0)
-    optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
-    train_mask = torch.cat([blank_mask, train_mask], dim=0)
+    if add_blank:
+        blank_stim = torch.zeros((3, num_time, num_cols), device=device, dtype=dtype)
+        blank_stim[0, :, :] = 0.0
+        blank_stim[1, :, :] = 0.5
+        blank_stim[2, :, :] = 1.0
+        blank_flow = torch.zeros((3, num_time, optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
+        blank_mask = torch.ones((3, num_time, num_cols), dtype=torch.bool, device=device)
+        stimulus = torch.cat([blank_stim, stimulus], dim=0)
+        optic_flow = torch.cat([blank_flow, optic_flow], dim=0)
+        train_mask = torch.cat([blank_mask, train_mask], dim=0)
 
     # Add pre-stimulus interval (mean-gray stimulus with zero optic flow)
     pre_stim_points = int(pre_stim_time / model_dt)
@@ -1551,10 +1616,45 @@ def get_stimulus_two_eyes(
             observer_translation = torch.zeros_like(observer_rotation)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'full_field_step':
+            if column_phi_theta is None:
+                raise Exception('full_field_step requires column_phi_theta input')
+            stim_time = config['stimulus']['stim_time']
+            num_time_steps = int(round(stim_time / model_dt))
+            num_cols_both = 2 * column_phi_theta.shape[0]
+            stimulus = torch.zeros((3, num_time_steps, num_cols_both), device=device, dtype=dtype)
+            stimulus[0] = 0.0
+            stimulus[1] = 0.5
+            stimulus[2] = 1.0
+            optic_flow = torch.zeros((3, num_time_steps, num_cols_both, 2), device=device, dtype=dtype)
+            observer_rotation = torch.zeros((3, num_time_steps, 3), device=device, dtype=dtype)
+            observer_translation = torch.zeros((3, num_time_steps, 3), device=device, dtype=dtype)
+            train_mask = torch.ones((3, num_time_steps, num_cols_both), dtype=torch.bool, device=device)
+
+        elif stim_type == 'full_field_flicker':
+            if column_phi_theta is None:
+                raise Exception('full_field_flicker requires column_phi_theta input')
+            stim_time = config['stimulus']['stim_time']
+            num_cols_both = 2 * column_phi_theta.shape[0]
+            flicker_tfs = config['stimulus'].get('flicker_temporal_frequencies', [1.0])
+            if not isinstance(flicker_tfs, list):
+                flicker_tfs = [flicker_tfs]
+            stim_arrays, flow_arrays = [], []
+            for tf in flicker_tfs:
+                s, f = make_full_field_flicker(num_cols_both, tf, model_dt, stim_time)
+                stim_arrays.append(s[None])
+                flow_arrays.append(f[None])
+            n_flicker = len(flicker_tfs)
+            stimulus = torch.tensor(np.concatenate(stim_arrays), device=device, dtype=dtype)
+            optic_flow = torch.tensor(np.concatenate(flow_arrays), device=device, dtype=dtype)
+            observer_rotation = torch.zeros((n_flicker, stimulus.shape[1], 3), device=device, dtype=dtype)
+            observer_translation = torch.zeros((n_flicker, stimulus.shape[1], 3), device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
-                "Expected one of: random_pano, drone_view, edge."
+                "Expected one of: random_pano, drone_view, edge, full_field_step, full_field_flicker."
             )
 
         stim_list.append(stimulus)
