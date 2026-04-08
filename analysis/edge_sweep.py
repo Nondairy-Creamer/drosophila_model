@@ -141,7 +141,7 @@ def main():
                 cell_results[ct][direction][polarity][vi] = mean_fr[i]
 
     # --- plotting ---
-    fig_folder = model_folder / "figures"
+    fig_folder = model_folder / "figures" / "edge_sweep"
     fig_folder.mkdir(parents=True, exist_ok=True)
 
     x_label = "Velocity (deg/s)"
