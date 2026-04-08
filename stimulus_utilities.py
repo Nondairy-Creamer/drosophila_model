@@ -426,7 +426,7 @@ def create_counterphase_sine(sample_phi, sample_theta, contrast=1,
             for wl_theta in wavelengths_theta:
                 phase_phi = rng.uniform(0, 2 * np.pi)
                 phase_theta = rng.uniform(0, 2 * np.pi)
-                phase_t = rng.uniform(0, 2 * np.pi)
+                phase_t = np.pi / 2 if tf == 0 else 0.0
 
                 s, f = make_counterphase_sine(
                     sample_phi, sample_theta, contrast=contrast,
@@ -1526,6 +1526,7 @@ def get_stimulus_one_eye(
                 raise Exception('counterphase_sine requires column_phi_theta input')
             stimulus, optic_flow = create_counterphase_sine(
                 column_phi_theta[:, 0], column_phi_theta[:, 1],
+                temporal_frequencies=temporal_frequencies,
                 seed=stimulus_seed, dt=model_dt, stim_time=stim_time,
                 pre_stim_time=0.0, post_stim_time=0.0,
             )
@@ -1751,12 +1752,14 @@ def get_stimulus_two_eyes(
                 raise Exception('counterphase_sine requires column_phi_theta input')
             stim_time = config['stimulus']['stim_time']
             stimulus_seed = config['stimulus'].get('seed', None)
+            temporal_frequencies = config['stimulus'].get('temporal_frequencies', [0, 2, 4, 8])
 
             both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
             both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
 
             stimulus_np, optic_flow_np = create_counterphase_sine(
                 both_phi, both_theta,
+                temporal_frequencies=temporal_frequencies,
                 seed=stimulus_seed, dt=model_dt, stim_time=stim_time,
                 pre_stim_time=0.0, post_stim_time=0.0,
             )
