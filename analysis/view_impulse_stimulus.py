@@ -18,12 +18,16 @@ Usage:
 """
 import argparse
 from pathlib import Path
+import sys
 
-import numpy as np
-import torch
 import matplotlib
 from matplotlib import pyplot as plt
+import numpy as np
+import torch
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import neural_models as nm
 
 # ── Defaults ──────────────────────────────────────────────────────────

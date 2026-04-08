@@ -18,14 +18,17 @@ Usage:
 """
 import argparse
 from pathlib import Path
+import sys
 
-import numpy as np
-import torch
 import matplotlib
 from matplotlib import pyplot as plt
+import numpy as np
+import torch
 
 import neural_models as nm
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from stimulus_utilities import make_lr_moving_edge, make_ud_moving_edge
+
 
 # ── Defaults ──────────────────────────────────────────────────────────
 DEFAULT_MODEL_PATH = "models/hand_tuned/model.pt"
