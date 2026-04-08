@@ -1,11 +1,12 @@
 """
 Full model benchmark suite.
 
-Runs all four sweep analyses on a trained model:
+Runs all five analyses on a trained model:
   1. sine_wave_sweep  — temporal frequency tuning curves
   2. edge_sweep       — edge velocity tuning curves
   3. pano_sweep       — panoramic ego-motion estimation (5 stimuli)
   4. drone_sweep      — drone video ego-motion estimation (3 clips)
+  5. white_noise      — linear filter recovery via STA
 
 All figures are saved under <model_folder>/figures/.
 
@@ -45,6 +46,8 @@ def main() -> None:
                         help="Skip panoramic sweep")
     parser.add_argument("--skip-drone", action="store_true",
                         help="Skip drone sweep")
+    parser.add_argument("--skip-white-noise", action="store_true",
+                        help="Skip white noise analysis")
     parser.add_argument("--num-panos", type=int, default=5,
                         help="Number of pano stimuli (default: 5)")
     parser.add_argument("--num-clips", type=int, default=3,
@@ -83,6 +86,13 @@ def main() -> None:
             num_panos=args.num_panos,
             stim_time=args.pano_stim_time,
         )
+
+    # --- White noise analysis (subprocess) ---
+    if not args.skip_white_noise:
+        _run_subprocess("White Noise Analysis", [
+            sys.executable, str(analysis_dir / "white_noise.py"),
+            model_folder,
+        ])
 
     # --- Drone sweep (import directly to capture metrics) ---
     drone_results = None
