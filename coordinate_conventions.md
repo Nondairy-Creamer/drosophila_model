@@ -52,7 +52,7 @@ Flow is represented in local spherical coordinates at each column:
 - **u_right**: positive = rightward motion on the retina
 - **u_up**: positive = upward motion on the retina
 
-`generate_optic_flow` (in `analysis/estimate_self_motion.py`) computes flow
+`generate_optic_flow` (in `analysis/analysis_utilities.py`) computes flow
 by projecting the 3D velocity onto the local `e_phi` and `e_theta` basis
 vectors.  The projection `u_right = -(u · e_phi)` already yields the
 **same** `u_right` sign for symmetric left/right-eye columns — both the

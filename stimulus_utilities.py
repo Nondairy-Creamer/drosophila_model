@@ -234,7 +234,7 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
     
     # Generate optic flow assuming fly rotates in a virtual cylinder.
     # For LR sine waves, the fly rotates counter-clockwise about z at omega_z = velocity.
-    from analysis.estimate_self_motion import generate_optic_flow
+    from analysis.analysis_utilities import generate_optic_flow
     velocity_rad_s = temporal_frequency * wavelength  # rad/s (wavelength already in radians)
     phi_t = torch.tensor(sample_phi, dtype=torch.float32)
     theta_t = torch.tensor(sample_theta, dtype=torch.float32)
@@ -301,7 +301,7 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
     # Generate optic flow assuming fly translates vertically in a virtual cylinder.
     # The cylinder wall is at distance Z = 1/sin(theta) (unit radius at theta=pi/2).
     # T_z is chosen so the flow at theta=pi/2 equals the requested velocity.
-    from analysis.estimate_self_motion import generate_optic_flow
+    from analysis.analysis_utilities import generate_optic_flow
     velocity_rad_s = temporal_frequency * wavelength  # rad/s at theta=pi/2
     phi_t = torch.tensor(sample_phi, dtype=torch.float32)
     theta_t = torch.tensor(sample_theta, dtype=torch.float32)
@@ -900,7 +900,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['right_left'].append((-sine_wave_right_left_shifted).reshape(num_repeats, time_per_stim, num_cell))
 
     # Compute optic flow for LR using generate_optic_flow (rotation about z-axis in cylinder)
-    from analysis.estimate_self_motion import generate_optic_flow
+    from analysis.analysis_utilities import generate_optic_flow
     velocity_rad_s = tf * wavelength  # (num_time,) in rad/s
     phi_t = torch.tensor(sample_phi, dtype=torch.float32)
     theta_t = torch.tensor(sample_theta, dtype=torch.float32)
@@ -1142,7 +1142,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
             falls outside panorama bounds (above/below image).
     """
     from scipy.ndimage import map_coordinates
-    from analysis.estimate_self_motion import generate_optic_flow
+    from analysis.analysis_utilities import generate_optic_flow
 
     # Create RNG from seed
     if seed is not None:

@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
+import pandas as pd
 import torch
 
 import data_utilities as du
@@ -268,6 +269,124 @@ def run_model_on_stimuli(
         responses[spec["name"]] = entry
 
     return responses
+
+
+# ---------------------------------------------------------------------------
+# Optic flow generation
+# ---------------------------------------------------------------------------
+
+
+def cross_matrix(a):
+    """
+    a: (..., 3) tensor
+    returns (..., 3, 3) skew-symmetric matrix [a]_x
+    """
+    ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+    O = torch.zeros_like(ax)
+    return torch.stack([
+        torch.stack([   O, -az,  ay], dim=-1),
+        torch.stack([  az,   O, -ax], dim=-1),
+        torch.stack([ -ay,  ax,   O], dim=-1)
+    ], dim=-2)
+
+
+def load_viewing_directions(connectome_folder: str | Path | None = None):
+    """Load column info with theta/phi viewing directions for both hemispheres.
+
+    Args:
+        connectome_folder: Path to connectome data directory.  When *None*,
+            defaults to ``../connectome_data`` relative to this file.
+
+    Returns:
+        phi, theta: tensors of shape (2*N_columns,)
+    """
+    if connectome_folder is None:
+        connectome_folder = Path(__file__).parent.parent / 'connectome_data'
+    connectome_folder = Path(connectome_folder)
+    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+
+    theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)
+    phi_half = torch.tensor(column_info_df['phi'].values, dtype=torch.float32)
+
+    theta = torch.cat([theta_half, theta_half])
+    phi = torch.cat([phi_half, -phi_half])
+    return phi, theta
+
+
+def generate_optic_flow(phi, theta, omega, T, Z):
+    """
+    Generate synthetic optic flow given rotation omega, translation T, and depths Z.
+
+    Args:
+        phi: (N,) azimuthal angles
+        theta: (N,) polar angles
+        omega: (3,) or (T, 3) rotation vector(s)
+        T: (3,) or (T, 3) translation vector(s)
+        Z: (N,) or scalar depth values
+
+    Returns:
+        u_right: (N,) or (T, N) arc length / s right
+        u_up: (N,) or (T, N) arc length / s up
+        When omega/T are (3,), returns (N,). When (T, 3), returns (T, N).
+    """
+    N = theta.shape[0]
+
+    if omega.dim() != T.dim():
+        raise ValueError(f"omega and T must have the same number of dimensions, "
+                         f"got omega: {omega.shape} and T: {T.shape}")
+    single_timepoint = omega.dim() == 1
+    if single_timepoint:
+        omega = omega.unsqueeze(0)  # (1, 3)
+        T = T.unsqueeze(0)          # (1, 3)
+
+    # Convert to 3D viewing directions (N, 3)
+    x = torch.stack((
+        torch.sin(theta) * torch.cos(phi),
+        torch.sin(theta) * torch.sin(phi),
+        torch.cos(theta)
+    ), dim=1)
+
+    # Basis vectors on the sphere
+    e_theta = torch.stack((
+        torch.cos(theta) * torch.cos(phi),
+        torch.cos(theta) * torch.sin(phi),
+        -torch.sin(theta)
+    ), dim=1)
+
+    e_phi = torch.stack((
+        -torch.sin(phi),
+        torch.cos(phi),
+        torch.zeros_like(phi)
+    ), dim=1)
+
+    # Rotation contribution: u = -Ω × x = x × Ω = [x]_× Ω
+    # Physical: leftward rotation (positive omega_z) → rightward image motion (positive d_phi)
+    A = cross_matrix(x)  # (N, 3, 3)
+    u_rot = torch.einsum('nij,tj->tni', A, omega)  # (T, N, 3)
+
+    # Translation contribution: u_trans = -(1/Z) * Pi * T
+    # where Pi = I - x x^T (projection onto tangent plane)
+    outer = x.unsqueeze(2) @ x.unsqueeze(1)  # (N, 3, 3)
+    I = torch.eye(3, device=phi.device, dtype=phi.dtype).expand(N, 3, 3)
+    Pi = I - outer
+
+    Pi_T = torch.einsum('nij,tj->tni', Pi, T)  # (T, N, 3)
+    if torch.is_tensor(Z) and Z.dim() > 0:
+        u_trans = -Pi_T / Z.unsqueeze(0).unsqueeze(-1)  # (T, N, 3)
+    else:
+        u_trans = -Pi_T / Z  # (T, N, 3)
+
+    u = u_rot + u_trans  # (T, N, 3)
+
+    # Project onto spherical basis to get angular flow
+    u_right = -(u * e_phi).sum(dim=-1)   # (T, N)
+    u_up = -(u * e_theta).sum(dim=-1)    # (T, N)
+
+    if single_timepoint:
+        u_right = u_right.squeeze(0)
+        u_up = u_up.squeeze(0)
+
+    return u_right, u_up
 
 
 # ---------------------------------------------------------------------------

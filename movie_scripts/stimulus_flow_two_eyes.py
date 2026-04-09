@@ -21,7 +21,7 @@ import torch
 
 import data_utilities as du
 import stimulus_utilities as su
-from analysis.estimate_self_motion import generate_optic_flow
+from analysis.analysis_utilities import generate_optic_flow
 
 
 def main() -> None:

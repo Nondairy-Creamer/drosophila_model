@@ -134,7 +134,7 @@ def main() -> None:
         if np.all(np.isnan(flow_right[pre_stim_steps:])):
             print(f"  Stim {stim_index}: ground-truth flow unavailable — "
                   "synthesizing from odometry (Z=1)")
-            from analysis.estimate_self_motion import generate_optic_flow
+            from analysis.analysis_utilities import generate_optic_flow
             omega_t = torch.tensor(
                 observer_rotation_np[stim_index] * np.pi / 180.0,
                 dtype=torch.float32,

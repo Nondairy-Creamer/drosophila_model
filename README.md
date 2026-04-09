@@ -45,7 +45,7 @@ Analysis scripts are assorted and live in the `analysis/` folder. Some highlight
 - `analyze_connectome.py` / `visualize_connectome.py` — inspect connectivity
 - `make_flow_movie.py` / `make_flow_movie_two_eyes.py` — optic flow visualizations
 - `sine_wave_sweep.py` — tuning curve analysis
-- `estimate_self_motion.py` / `plot_odometry.py` — ego-motion estimation
+- `plot_odometry.py` — ego-motion estimation
 - `benchmark_model.py` — runtime benchmarking
 - `analyze_decoder.py` / `analyze_conv.py` — inspect learned decoder and input conv weights
 - `analyze_signal_prop.py` — signal propagation analysis
