@@ -1,12 +1,14 @@
 """
 Full model benchmark suite.
 
-Runs all five analyses on a trained model:
-  1. sine_wave_sweep  — temporal frequency tuning curves
-  2. edge_sweep       — edge velocity tuning curves
-  3. pano_sweep       — panoramic ego-motion estimation (5 stimuli)
-  4. drone_sweep      — drone video ego-motion estimation (3 clips)
-  5. white_noise      — linear filter recovery via STA
+Runs all seven analyses on a trained model:
+  1. sine_wave_sweep        — temporal frequency tuning curves
+  2. edge_sweep             — edge velocity tuning curves
+  3. pano_sweep             — panoramic ego-motion estimation (5 stimuli)
+  4. drone_sweep            — drone video ego-motion estimation (3 clips)
+  5. white_noise            — linear filter recovery via STA
+  6. white_noise_silencing  — STA filter comparison under neuron silencing
+  7. sine_wave_silencing    — tuning curve comparison under neuron silencing
 
 All figures are saved under <model_folder>/figures/.
 
@@ -48,6 +50,10 @@ def main() -> None:
                         help="Skip drone sweep")
     parser.add_argument("--skip-white-noise", action="store_true",
                         help="Skip white noise analysis")
+    parser.add_argument("--skip-white-noise-silencing", action="store_true",
+                        help="Skip white noise silencing analysis")
+    parser.add_argument("--skip-sine-silencing", action="store_true",
+                        help="Skip sine wave silencing analysis")
     parser.add_argument("--num-panos", type=int, default=5,
                         help="Number of pano stimuli (default: 5)")
     parser.add_argument("--num-clips", type=int, default=3,
@@ -91,6 +97,20 @@ def main() -> None:
     if not args.skip_white_noise:
         _run_subprocess("White Noise Analysis", [
             sys.executable, str(analysis_dir / "white_noise.py"),
+            model_folder,
+        ])
+
+    # --- White noise silencing (subprocess) ---
+    if not args.skip_white_noise_silencing:
+        _run_subprocess("White Noise Silencing", [
+            sys.executable, str(analysis_dir / "white_noise_silencing.py"),
+            model_folder,
+        ])
+
+    # --- Sine wave silencing (subprocess) ---
+    if not args.skip_sine_silencing:
+        _run_subprocess("Sine Wave Silencing", [
+            sys.executable, str(analysis_dir / "sine_wave_silencing.py"),
             model_folder,
         ])
 

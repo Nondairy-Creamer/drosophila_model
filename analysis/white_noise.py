@@ -197,55 +197,71 @@ def plot_sta(sta, pq_offsets, dt, cell_type, output_path):
     plt.close(fig)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='White noise analysis: recover linear filters via STA.',
-    )
-    parser.add_argument('model_folder', type=str,
-                        help='Path to model folder or model.pt')
-    parser.add_argument('--cell-types', type=str, nargs='+',
-                        default=[
-                            'L1', 'L2', 'L3', 'L4', 'L5',
-                            'C2', 'C3', 'CT1_L', 'CT1_M',
-                            'Mi1', 'Tm3', 'Mi9', 'Mi4',
-                            'T4a', 'T4b', 'T4c', 'T4d',
-                            'T5a', 'T5b', 'T5c', 'T5d',
-                            'Tm1', 'Tm2', 'Tm4', 'Tm9',
-                            'T1', 'T2', 'T3',
-                        ],
-                        help='Cell types to compute STA for')
-    parser.add_argument('--output-dir', type=str, default=None,
-                        help='Output directory '
-                             '(default: <model_folder>/figures/white_noise)')
-    parser.add_argument('--duration', type=float, default=None,
-                        help=f'Stimulus duration in seconds '
-                             f'(default: {STIM_DURATION_S})')
-    parser.add_argument('--sta-duration-ms', type=float, default=None,
-                        help=f'STA window duration in ms (default: {STA_DURATION_MS})')
-    parser.add_argument('--filter-size', type=int, default=None,
-                        help=f'Hex grid diameter for spatial filter '
-                             f'(default: {FILTER_SIZE})')
-    args = parser.parse_args()
+DEFAULT_CELL_TYPES = [
+    'L1', 'L2', 'L3', 'L4', 'L5',
+    'C2', 'C3', 'CT1_L', 'CT1_M',
+    'Mi1', 'Tm3', 'Mi9', 'Mi4',
+    'T4a', 'T4b', 'T4c', 'T4d',
+    'T5a', 'T5b', 'T5c', 'T5d',
+    'Tm1', 'Tm2', 'Tm4', 'Tm9',
+    'T1', 'T2', 'T3',
+]
 
-    duration = args.duration if args.duration is not None else STIM_DURATION_S
-    sta_duration_ms = args.sta_duration_ms if args.sta_duration_ms is not None else STA_DURATION_MS
-    filter_size = args.filter_size if args.filter_size is not None else FILTER_SIZE
 
-    model_path = Path(args.model_folder)
-    model_folder = model_path.parent if model_path.is_file() else model_path
+def run_white_noise(model, cell_types=None, silenced_neurons=None,
+                    output_dir=None, duration=STIM_DURATION_S,
+                    sta_duration_ms=STA_DURATION_MS, filter_size=FILTER_SIZE):
+    """Run white noise STA analysis on *model* and return extracted filters.
 
-    print(f'Loading model from {model_path}...')
-    model = nm.NeuralModel.load(model_path)
-    model.eval()
+    Args:
+        model: A loaded ``NeuralModel`` instance (already on the desired
+            device and in eval mode).
+        cell_types: List of cell type names to analyse. Defaults to
+            ``DEFAULT_CELL_TYPES``.
+        silenced_neurons: Optional list of neuron names to silence before
+            running the model.  ``output_strength_log`` is saved and
+            restored automatically.
+        output_dir: Path to write per-cell STA figures and ``sta_data.npz``.
+            If *None*, figure saving is skipped.
+        duration: Stimulus duration in seconds.
+        sta_duration_ms: STA window duration in milliseconds.
+        filter_size: Hex grid diameter for spatial filter extraction.
+
+    Returns:
+        dict mapping cell-type name to its STA array (K, num_lags).
+    """
+    if cell_types is None:
+        cell_types = list(DEFAULT_CELL_TYPES)
 
     dt = model.dt
     num_lags = int(round(sta_duration_ms / (dt * 1000)))
     num_columns = model.num_columns
 
     if model.column_p_q is None:
-        print('Error: model has no column_p_q; '
-              'cannot compute hex neighbor structure.')
-        sys.exit(1)
+        raise RuntimeError('Model has no column_p_q; '
+                           'cannot compute hex neighbor structure.')
+
+    # ── Apply silencing ───────────────────────────────────────────────
+    original_output_strength = None
+    if silenced_neurons:
+        original_output_strength = model.output_strength_log.data.clone()
+        model.silence_neurons(silenced_neurons)
+
+    try:
+        return _run_white_noise_inner(
+            model, cell_types, output_dir, duration,
+            sta_duration_ms, filter_size,
+            dt, num_lags, num_columns,
+        )
+    finally:
+        if original_output_strength is not None:
+            model.output_strength_log.data.copy_(original_output_strength)
+
+
+def _run_white_noise_inner(model, cell_types, output_dir, duration,
+                           sta_duration_ms, filter_size,
+                           dt, num_lags, num_columns):
+    """Core analysis loop (called by :func:`run_white_noise`)."""
 
     # ── Generate stimulus ────────────────────────────────────────────
     num_frames = int(round(duration / dt))
@@ -264,20 +280,19 @@ def main():
           f'{num_lags} temporal lags')
 
     # ── Identify valid cell types ────────────────────────────────────
-    cell_types = [ct for ct in args.cell_types
-                  if ct in model.unique_cell_types]
-    if not cell_types:
+    valid_cell_types = [ct for ct in cell_types
+                        if ct in model.unique_cell_types]
+    if not valid_cell_types:
         available = sorted(model.unique_cell_types)
-        print(f'None of {args.cell_types} found in model.')
-        print(f'Available: {available}')
-        sys.exit(1)
-    print(f'Cell types: {cell_types}')
+        print(f'None of {cell_types} found in model. Available: {available}')
+        return {}
+    print(f'Cell types: {valid_cell_types}')
 
     # ── Run model in chunks ──────────────────────────────────────────
     stimulus_tensor = torch.tensor(
         stimulus, device=model.device, dtype=model.dtype,
     )
-    all_firing_rates = {ct: [] for ct in cell_types}
+    all_firing_rates = {ct: [] for ct in valid_cell_types}
     init_state = None
     init_filter_state = None
     cached_mappings = None
@@ -291,7 +306,7 @@ def main():
             predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
             predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
         else:
-            predict_kwargs['output_neurons'] = cell_types
+            predict_kwargs['output_neurons'] = valid_cell_types
 
         print(f'  Running model: frames {chunk_start}–{chunk_end}...')
         with torch.no_grad():
@@ -307,17 +322,14 @@ def main():
         if cached_mappings is None:
             cached_mappings = result['mappings']
 
-        for ct in cell_types:
+        for ct in valid_cell_types:
             fr = result['outputs']['firing_rate'][ct][0].cpu().numpy()
             all_firing_rates[ct].append(fr)
 
-    # ── Compute and plot STAs ────────────────────────────────────────
-    output_dir = (Path(args.output_dir) if args.output_dir
-                  else model_folder / 'figures' / 'white_noise')
-
+    # ── Compute STAs ─────────────────────────────────────────────────
     sta_dict = {}
 
-    for ct in cell_types:
+    for ct in valid_cell_types:
         fr_full = np.concatenate(all_firing_rates[ct], axis=0)
         valid_cols = ~np.isnan(fr_full[0])
         n_valid = valid_cols.sum()
@@ -332,23 +344,80 @@ def main():
         sta = compute_pooled_sta(stimulus, fr_valid, nearest_valid, num_lags)
         sta_dict[ct] = sta
 
-        out_path = output_dir / f'sta_{ct}.png'
-        plot_sta(sta, pq_offsets, dt, ct, out_path)
-        print(f'    Saved {out_path}')
+    # ── Plot and save ────────────────────────────────────────────────
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        for ct, sta in sta_dict.items():
+            out_path = output_dir / f'sta_{ct}.png'
+            plot_sta(sta, pq_offsets, dt, ct, out_path)
+            print(f'    Saved {out_path}')
 
-    # ── Save raw STA data ────────────────────────────────────────────
-    if sta_dict:
-        data_path = output_dir / 'sta_data.npz'
-        np.savez(
-            data_path,
-            pq_offsets=pq_offsets,
-            time_lags_ms=np.arange(num_lags) * dt * 1000,
-            cell_types=np.array(list(sta_dict.keys())),
-            **{f'sta_{ct}': sta for ct, sta in sta_dict.items()},
-        )
-        print(f'Saved STA data to {data_path}')
+        if sta_dict:
+            data_path = output_dir / 'sta_data.npz'
+            np.savez(
+                data_path,
+                pq_offsets=pq_offsets,
+                time_lags_ms=np.arange(num_lags) * dt * 1000,
+                cell_types=np.array(list(sta_dict.keys())),
+                **{f'sta_{ct}': s for ct, s in sta_dict.items()},
+            )
+            print(f'Saved STA data to {data_path}')
 
-    print('\nDone!')
+    return sta_dict
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='White noise analysis: recover linear filters via STA.',
+    )
+    parser.add_argument('model_folder', type=str,
+                        help='Path to model folder or model.pt')
+    parser.add_argument('--cell-types', type=str, nargs='+',
+                        default=None,
+                        help='Cell types to compute STA for')
+    parser.add_argument('--silenced-neurons', type=str, nargs='*',
+                        default=None,
+                        help='Neuron types to silence before analysis')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory '
+                             '(default: <model_folder>/figures/white_noise)')
+    parser.add_argument('--duration', type=float, default=None,
+                        help=f'Stimulus duration in seconds '
+                             f'(default: {STIM_DURATION_S})')
+    parser.add_argument('--sta-duration-ms', type=float, default=None,
+                        help=f'STA window duration in ms (default: {STA_DURATION_MS})')
+    parser.add_argument('--filter-size', type=int, default=None,
+                        help=f'Hex grid diameter for spatial filter '
+                             f'(default: {FILTER_SIZE})')
+    args = parser.parse_args()
+
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+
+    print(f'Loading model from {model_path}...')
+    model = nm.NeuralModel.load(model_path)
+    model.eval()
+
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else model_folder / 'figures' / 'white_noise')
+
+    kwargs = {}
+    if args.duration is not None:
+        kwargs['duration'] = args.duration
+    if args.sta_duration_ms is not None:
+        kwargs['sta_duration_ms'] = args.sta_duration_ms
+    if args.filter_size is not None:
+        kwargs['filter_size'] = args.filter_size
+
+    sta_dict = run_white_noise(
+        model,
+        cell_types=args.cell_types,
+        silenced_neurons=args.silenced_neurons,
+        output_dir=output_dir,
+        **kwargs,
+    )
+
+    print(f'\nDone! Recovered filters for {len(sta_dict)} cell types.')
 
 
 if __name__ == '__main__':
