@@ -52,7 +52,7 @@ class HexGridReadout(torch.nn.Module):
                  column_indices, num_neurons, num_columns,
                  num_channels, conv_sizes,
                  positive_weights=False, use_bias=True,
-                 use_batch_norm=True,
+                 use_batch_norm=False,
                  use_denominator=False, denom_eps=1e-2,
                  regularizer_parameters=None,
                  device=None, dtype=None, **_kwargs):
