@@ -1,14 +1,12 @@
 """
 Full model benchmark suite.
 
-Runs all seven analyses on a trained model:
-  1. sine_wave_sweep        — temporal frequency tuning curves
-  2. edge_sweep             — edge velocity tuning curves
-  3. pano_sweep             — panoramic ego-motion estimation (5 stimuli)
-  4. drone_sweep            — drone video ego-motion estimation (3 clips)
-  5. white_noise            — linear filter recovery via STA
-  6. white_noise_silencing  — STA filter comparison under neuron silencing
-  7. sine_wave_silencing    — tuning curve comparison under neuron silencing
+Runs all five analyses on a trained model:
+  1. edge_sweep             — edge velocity tuning curves
+  2. pano_sweep             — panoramic ego-motion estimation (5 stimuli)
+  3. drone_sweep            — drone video ego-motion estimation (3 clips)
+  4. white_noise_silencing  — STA filter recovery + silencing comparison
+  5. sine_wave_silencing    — tuning curves + silencing comparison
 
 All figures are saved under <model_folder>/figures/.
 
@@ -40,16 +38,12 @@ def main() -> None:
     )
     parser.add_argument("model_folder", type=str,
                         help="Path to model folder (containing model.pt)")
-    parser.add_argument("--skip-sine", action="store_true",
-                        help="Skip sine wave sweep")
     parser.add_argument("--skip-edge", action="store_true",
                         help="Skip edge sweep")
     parser.add_argument("--skip-pano", action="store_true",
                         help="Skip panoramic sweep")
     parser.add_argument("--skip-drone", action="store_true",
                         help="Skip drone sweep")
-    parser.add_argument("--skip-white-noise", action="store_true",
-                        help="Skip white noise analysis")
     parser.add_argument("--skip-white-noise-silencing", action="store_true",
                         help="Skip white noise silencing analysis")
     parser.add_argument("--skip-sine-silencing", action="store_true",
@@ -64,13 +58,6 @@ def main() -> None:
 
     analysis_dir = Path(__file__).parent
     model_folder = args.model_folder
-
-    # --- Sine wave sweep (subprocess — no return value needed) ---
-    if not args.skip_sine:
-        _run_subprocess("Sine Wave Sweep", [
-            sys.executable, str(analysis_dir / "sine_wave_sweep.py"),
-            model_folder,
-        ])
 
     # --- Edge sweep (subprocess — no return value needed) ---
     if not args.skip_edge:
@@ -93,14 +80,7 @@ def main() -> None:
             stim_time=args.pano_stim_time,
         )
 
-    # --- White noise analysis (subprocess) ---
-    if not args.skip_white_noise:
-        _run_subprocess("White Noise Analysis", [
-            sys.executable, str(analysis_dir / "white_noise.py"),
-            model_folder,
-        ])
-
-    # --- White noise silencing (subprocess) ---
+    # --- White noise silencing (subprocess — includes baseline) ---
     if not args.skip_white_noise_silencing:
         _run_subprocess("White Noise Silencing", [
             sys.executable, str(analysis_dir / "white_noise_silencing.py"),
