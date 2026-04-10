@@ -75,24 +75,39 @@ def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity,
     return stimulus
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Sine wave velocity sweep analysis.")
-    parser.add_argument(
-        "model_folder",
-        type=str,
-        help="Path to model folder (containing model.pt and config.toml)",
-    )
-    parser.add_argument(
-        "--expressive", action="store_true", default=False,
-        help="Plot all neuron groups (default: only T4 and T5)",
-    )
-    args = parser.parse_args()
+def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
+                        expressive=True):
+    """Run sine-wave temporal-frequency sweep and return per-cell mean rates.
 
-    model_folder = Path(args.model_folder)
-    model_config = du.load_config(model_folder / "config.toml")
-    model = nm.NeuralModel.load(model_folder / "model.pt")
+    Args:
+        model: A loaded ``NeuralModel`` (already on the desired device and
+            in eval mode).
+        silenced_neurons: Optional list of neuron names to silence.
+            ``output_strength_log`` is saved and restored automatically.
+        output_dir: Path for figures.  If *None*, plotting is skipped.
+        expressive: If True, analyse all ``NEURON_GROUPS``; otherwise only
+            T4 and T5.
 
-    dt = model_config["model"]["dt"]
+    Returns:
+        dict mapping ``cell_type -> direction -> wavelength -> np.ndarray``
+        of mean firing rates across temporal frequencies.
+    """
+    original_output_strength = None
+    if silenced_neurons:
+        original_output_strength = model.output_strength_log.data.clone()
+        model.silence_neurons(silenced_neurons)
+
+    try:
+        return _run_sine_wave_sweep_inner(model, output_dir, expressive)
+    finally:
+        if original_output_strength is not None:
+            model.output_strength_log.data.copy_(original_output_strength)
+
+
+def _run_sine_wave_sweep_inner(model, output_dir, expressive):
+    """Core sweep loop (called by :func:`run_sine_wave_sweep`)."""
+
+    dt = model.dt
     sample_phi = model.column_phi_theta[:, 0]
     sample_theta = model.column_phi_theta[:, 1]
 
@@ -108,9 +123,9 @@ def main():
 
     # Select neuron groups to plot
     T4_T5_GROUPS = [g for g in NEURON_GROUPS if g[0] in ("T4", "T5")]
-    active_groups = NEURON_GROUPS if args.expressive else T4_T5_GROUPS
+    active_groups = NEURON_GROUPS if expressive else T4_T5_GROUPS
 
-    # Collect all unique neuron types across active groups, filtering to those present in the model
+    # Collect unique neuron types across active groups present in the model
     available_types = set(model.unique_cell_types)
     all_neurons = []
     for _, types in active_groups:
@@ -170,117 +185,158 @@ def main():
         for i, (direction, wavelength, si) in enumerate(index_map):
             cell_results[ct][direction][wavelength][si] = mean_fr[i]
 
-    # --- plotting ---
-    sweep_folder = model_folder / "figures" / "sine_sweep"
-    sweep_folder.mkdir(parents=True, exist_ok=True)
+    # --- plotting (skip when no output_dir) ---
+    if output_dir is not None:
+        sweep_folder = Path(output_dir)
+        sweep_folder.mkdir(parents=True, exist_ok=True)
 
-    x_label = "Temporal frequency (Hz)"
-    title_label = "Temporal Frequency"
-    sweep_values = temporal_frequencies
+        x_label = "Temporal frequency (Hz)"
+        title_label = "Temporal Frequency"
+        sweep_values = temporal_frequencies
 
-    def _format_ax(ax, title, ylabel):
-        ax.set_title(title)
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(ylabel)
-        ax.axhline(0, color="gray", linewidth=0.5, linestyle=":")
-        ax.legend(fontsize=8)
-        ax.set_xscale("log")
-        ax.set_xticks(sweep_values)
-        ax.set_xticklabels([str(v) for v in sweep_values])
+        def _format_ax(ax, title, ylabel):
+            ax.set_title(title)
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(ylabel)
+            ax.axhline(0, color="gray", linewidth=0.5, linestyle=":")
+            ax.legend(fontsize=8)
+            ax.set_xscale("log")
+            ax.set_xticks(sweep_values)
+            ax.set_xticklabels([str(v) for v in sweep_values])
 
-    # --- Decoder figure ---
-    if decoder_results is not None:
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
-        dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
-                    "up": axes[1, 0], "down": axes[1, 1]}
+        # --- Decoder figure ---
+        if decoder_results is not None:
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
+            dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
+                        "up": axes[1, 0], "down": axes[1, 1]}
 
-        for direction, ax in dir_axes.items():
-            for wavelength in wavelengths:
-                data = decoder_results[direction][wavelength]
-                ax.plot(sweep_values, data[:, 0], "o-", label=f"LR (λ={wavelength}°)")
-                ax.plot(sweep_values, data[:, 1], "s--", label=f"UD (λ={wavelength}°)")
-            _format_ax(ax, f"Direction: {direction}", "Mean decoder response")
+            for direction, ax in dir_axes.items():
+                for wavelength in wavelengths:
+                    data = decoder_results[direction][wavelength]
+                    ax.plot(sweep_values, data[:, 0], "o-", label=f"LR (λ={wavelength}°)")
+                    ax.plot(sweep_values, data[:, 1], "s--", label=f"UD (λ={wavelength}°)")
+                _format_ax(ax, f"Direction: {direction}", "Mean decoder response")
 
-        fig.suptitle(f"Decoder — Sine Wave {title_label} Sweep", fontsize=14)
-        plt.tight_layout()
-        save_path = sweep_folder / "decoder_sweep.png"
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved {save_path}")
-
-    # --- Per-group velocity sweep figures ---
-    for group_name, cell_types in active_groups:
-        present = [ct for ct in cell_types if ct in cell_results]
-        if not present:
-            print(f"Skipping group {group_name} — no matching neurons in model.")
-            continue
-
-        for wavelength in wavelengths:
-            nplots = len(present)
-            ncols = min(nplots, 2)
-            nrows = (nplots + ncols - 1) // ncols
-            fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows),
-                                     sharex=True, squeeze=False)
-
-            for idx, ct in enumerate(present):
-                row, col = divmod(idx, ncols)
-                ax = axes[row, col]
-                for direction in directions:
-                    data = cell_results[ct][direction][wavelength]
-                    ax.plot(sweep_values, data, "o-", label=direction)
-                _format_ax(ax, ct, "Mean firing rate")
-
-            for idx in range(nplots, nrows * ncols):
-                row, col = divmod(idx, ncols)
-                axes[row, col].axis("off")
-
-            fig.suptitle(f"{group_name} — {title_label} Sweep (λ={wavelength}°)", fontsize=14)
+            fig.suptitle(f"Decoder — Sine Wave {title_label} Sweep", fontsize=14)
             plt.tight_layout()
-            save_path = sweep_folder / f"{group_name.lower()}_lambda{wavelength}.png"
+            save_path = sweep_folder / "decoder_sweep.png"
             fig.savefig(save_path, dpi=150)
             plt.close(fig)
             print(f"Saved {save_path}")
 
-    # --- XT plots at 8 Hz ---
-    xt_folder = sweep_folder / "xt_plots"
-    xt_folder.mkdir(parents=True, exist_ok=True)
+        # --- Per-group velocity sweep figures ---
+        for group_name, cell_types in active_groups:
+            present = [ct for ct in cell_types if ct in cell_results]
+            if not present:
+                print(f"Skipping group {group_name} — no matching neurons in model.")
+                continue
 
-    tf_8hz = 8
-    if tf_8hz not in temporal_frequencies:
-        print(f"8 Hz not in sweep — skipping XT plots.")
-    else:
-        si_8hz = temporal_frequencies.index(tf_8hz)
-        batch_lookup = {}
-        for i, (direction, wavelength, si) in enumerate(index_map):
-            if si == si_8hz:
-                batch_lookup[(direction, wavelength)] = i
+            for wavelength in wavelengths:
+                nplots = len(present)
+                ncols = min(nplots, 2)
+                nrows = (nplots + ncols - 1) // ncols
+                fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows),
+                                         sharex=True, squeeze=False)
 
-        xt_wavelength = wavelengths[0]
-        for ct in all_neurons:
-            fr_all = pred["firing_rate"][ct]  # (N, time, columns)
-            for wavelength in [xt_wavelength]:
-                fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-                dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
-                            "up": axes[1, 0], "down": axes[1, 1]}
+                for idx, ct in enumerate(present):
+                    row, col = divmod(idx, ncols)
+                    ax = axes[row, col]
+                    for direction in directions:
+                        data = cell_results[ct][direction][wavelength]
+                        ax.plot(sweep_values, data, "o-", label=direction)
+                    _format_ax(ax, ct, "Mean firing rate")
 
-                for direction, ax in dir_axes.items():
-                    bi = batch_lookup[(direction, wavelength)]
-                    fr_np = fr_all[bi].cpu().numpy()  # (time, columns)
-                    sorted_data, extent = prepare_xt(fr_np, sample_phi)
-                    im = ax.imshow(sorted_data, aspect="auto",
-                                   extent=[extent[0], extent[1], extent[3], extent[2]],
-                                   cmap="viridis", origin="upper")
-                    ax.set_title(direction)
-                    ax.set_xlabel("φ (rad)")
-                    ax.set_ylabel("Time step")
-                    fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
+                for idx in range(nplots, nrows * ncols):
+                    row, col = divmod(idx, ncols)
+                    axes[row, col].axis("off")
 
-                fig.suptitle(f"{ct} — 8 Hz, λ={wavelength}°", fontsize=14)
+                fig.suptitle(f"{group_name} — {title_label} Sweep (λ={wavelength}°)", fontsize=14)
                 plt.tight_layout()
-                save_path = xt_folder / f"{ct}_lambda{wavelength}_8hz.png"
+                save_path = sweep_folder / f"{group_name.lower()}_lambda{wavelength}.png"
                 fig.savefig(save_path, dpi=150)
                 plt.close(fig)
                 print(f"Saved {save_path}")
+
+        # --- XT plots at 8 Hz ---
+        xt_folder = sweep_folder / "xt_plots"
+        xt_folder.mkdir(parents=True, exist_ok=True)
+
+        tf_8hz = 8
+        if tf_8hz not in temporal_frequencies:
+            print("8 Hz not in sweep — skipping XT plots.")
+        else:
+            si_8hz = temporal_frequencies.index(tf_8hz)
+            batch_lookup = {}
+            for i, (direction, wavelength, si) in enumerate(index_map):
+                if si == si_8hz:
+                    batch_lookup[(direction, wavelength)] = i
+
+            xt_wavelength = wavelengths[0]
+            for ct in all_neurons:
+                fr_all = pred["firing_rate"][ct]  # (N, time, columns)
+                for wavelength in [xt_wavelength]:
+                    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+                    dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
+                                "up": axes[1, 0], "down": axes[1, 1]}
+
+                    for direction, ax in dir_axes.items():
+                        bi = batch_lookup[(direction, wavelength)]
+                        fr_np = fr_all[bi].cpu().numpy()  # (time, columns)
+                        sorted_data, extent = prepare_xt(fr_np, sample_phi)
+                        im = ax.imshow(sorted_data, aspect="auto",
+                                       extent=[extent[0], extent[1], extent[3], extent[2]],
+                                       cmap="viridis", origin="upper")
+                        ax.set_title(direction)
+                        ax.set_xlabel("φ (rad)")
+                        ax.set_ylabel("Time step")
+                        fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
+
+                    fig.suptitle(f"{ct} — 8 Hz, λ={wavelength}°", fontsize=14)
+                    plt.tight_layout()
+                    save_path = xt_folder / f"{ct}_lambda{wavelength}_8hz.png"
+                    fig.savefig(save_path, dpi=150)
+                    plt.close(fig)
+                    print(f"Saved {save_path}")
+
+    return cell_results
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sine wave velocity sweep analysis.")
+    parser.add_argument(
+        "model_folder",
+        type=str,
+        help="Path to model folder (containing model.pt and config.toml)",
+    )
+    parser.add_argument(
+        "--expressive", action="store_true", default=False,
+        help="Plot all neuron groups (default: only T4 and T5)",
+    )
+    parser.add_argument(
+        "--silenced-neurons", type=str, nargs="*", default=None,
+        help="Neuron types to silence before analysis",
+    )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory (default: <model_folder>/figures/sine_sweep)",
+    )
+    args = parser.parse_args()
+
+    model_folder = Path(args.model_folder)
+    model = nm.NeuralModel.load(model_folder / "model.pt")
+    model.eval()
+
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else model_folder / "figures" / "sine_sweep")
+
+    cell_results = run_sine_wave_sweep(
+        model,
+        silenced_neurons=args.silenced_neurons,
+        output_dir=output_dir,
+        expressive=args.expressive,
+    )
+
+    print(f"\nDone! Computed sweep for {len(cell_results)} cell types.")
 
 
 if __name__ == "__main__":
