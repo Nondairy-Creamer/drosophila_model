@@ -505,27 +505,54 @@ def main() -> int:
             )
 
             with torch.no_grad():
-                ego_rotation, ego_translation, right_res, left_res = model.estimate_ego_motion_from_image(
-                    right_stim,
-                    left_stim,
-                    initial_state_right=state_right,
-                    initial_state_left=state_left,
-                    initial_filter_state_right=filter_state_right,
-                    initial_filter_state_left=filter_state_left,
-                    oob_columns=oob_columns,
-                    cached_mappings=cached_mappings,
+                # ego_rotation, ego_translation, right_res, left_res = model.estimate_ego_motion_from_image(
+                #     right_stim,
+                #     left_stim,
+                #     initial_state_right=state_right,
+                #     initial_state_left=state_left,
+                #     initial_filter_state_right=filter_state_right,
+                #     initial_filter_state_left=filter_state_left,
+                #     oob_columns=oob_columns,
+                #     cached_mappings=cached_mappings,
+                # )
+
+                predict_kwargs = {}
+                if cached_mappings is not None:
+                    predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
+                    predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
+
+                right_result, left_result = model.predict_two_eyes(
+                    right_stim, left_stim,
+                    init_state_right=state_right, init_state_left=state_left,
+                    init_filter_state_right=filter_state_right,
+                    init_filter_state_left=filter_state_left,
+                    **predict_kwargs,
                 )
 
+                flow_key = next(
+                    (k for k, m in model._readout_modules.items()
+                        if getattr(m, 'predicts_flow', False) and k in right_result['outputs']),
+                    None,
+                )
+                if flow_key is None:
+                    raise ValueError("No flow readout configured; cannot estimate ego motion.")
+
+                optic_flow_right = right_result['outputs'][flow_key]
+                optic_flow_left = left_result['outputs'][flow_key]
+                optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
+
+                average_flow = torch.mean(optic_flow_right).cpu().numpy()
+
             if cached_mappings is None:
-                cached_mappings = right_res["mappings"]
+                cached_mappings = right_result["mappings"]
 
-            state_right = right_res["model_state"]["v"]
-            state_left = left_res["model_state"]["v"]
-            filter_state_right = right_res["model_state"]["filter_state"]
-            filter_state_left = left_res["model_state"]["filter_state"]
+            state_right = right_result["model_state"]["v"]
+            state_left = left_result["model_state"]["v"]
+            filter_state_right = right_result["model_state"]["filter_state"]
+            filter_state_left = left_result["model_state"]["filter_state"]
 
-            omega_body = ego_rotation[0, 0].detach().cpu().numpy().astype(np.float64)
-            translation_body_raw = ego_translation[0, 0].detach().cpu().numpy().astype(np.float64)
+            # omega_body = ego_rotation[0, 0].detach().cpu().numpy().astype(np.float64)
+            # translation_body_raw = ego_translation[0, 0].detach().cpu().numpy().astype(np.float64)
 
             used_hold = 0
             if not (np.all(np.isfinite(omega_body)) and np.all(np.isfinite(translation_body_raw))):
