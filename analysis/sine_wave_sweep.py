@@ -93,8 +93,10 @@ def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
         of mean firing rates across temporal frequencies.
     """
     original_output_strength = None
+    original_input_strength = None
     if silenced_neurons:
         original_output_strength = model.output_strength_log.data.clone()
+        original_input_strength = model.input_strength_log.data.clone()
         model.silence_neurons(silenced_neurons)
 
     try:
@@ -102,6 +104,7 @@ def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
     finally:
         if original_output_strength is not None:
             model.output_strength_log.data.copy_(original_output_strength)
+            model.input_strength_log.data.copy_(original_input_strength)
 
 
 def _run_sine_wave_sweep_inner(model, output_dir, expressive):

@@ -17,8 +17,10 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_repo_root = str(Path(__file__).parent.parent)
+sys.path.insert(0, _repo_root)
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(_repo_root) / "analysis"))
 
 import numpy as np
 import torch
@@ -45,6 +47,9 @@ def main() -> None:
                         help="Four cell types to plot in diamond (right, left, up, down)")
     parser.add_argument("--stim-type", type=str, default="random_sine",
                         help="Stimulus type passed to get_stimulus_one_eye")
+    parser.add_argument("--sine-direction", type=str, nargs="+", default=None,
+                        choices=["right", "left", "up", "down"],
+                        help="Direction(s) for directional_sine stimulus type (default: all four)")
     parser.add_argument("--input-neurons", type=str, nargs="+", default=['L1', 'L2', 'L3'],
                         help="Input neuron types for model.predict")
     parser.add_argument("--num-stim", type=int, default=4,
@@ -71,14 +76,20 @@ def main() -> None:
     output_dir = Path(args.output_dir) if args.output_dir else model_folder / "movie"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Generating stimulus (type={args.stim_type})...")
-    stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(
-        args.stim_type, config, column_phi_theta)
-    stimulus = stimulus.to(device=device, dtype=dtype)
-
-    # Limit to num_stim examples
-    if stimulus.shape[0] > args.num_stim:
-        stimulus = stimulus[:args.num_stim]
+    if args.stim_type == 'directional_sine':
+        directions = args.sine_direction or ['right', 'left', 'up', 'down']
+        stim_parts = []
+        for d in directions:
+            print(f"Generating stimulus (type={args.stim_type}, direction={d})...")
+            s, _, _ = su.get_stimulus_one_eye(
+                args.stim_type, config, column_phi_theta, sine_direction=d)
+            stim_parts.append(s[:args.num_stim])
+        stimulus = torch.cat(stim_parts, dim=0).to(device=device, dtype=dtype)
+    else:
+        print(f"Generating stimulus (type={args.stim_type})...")
+        stimulus, _, _ = su.get_stimulus_one_eye(
+            args.stim_type, config, column_phi_theta)
+        stimulus = stimulus[:args.num_stim].to(device=device, dtype=dtype)
 
     output_neurons = list(set(args.input_neurons + args.cell_types))
 
@@ -91,11 +102,10 @@ def main() -> None:
             output_neurons=output_neurons,
         )['outputs']['firing_rate']
 
-    xyz = model.get_column_xyz()
-    cell_x = -xyz[:, 0]
-    cell_z = xyz[:, 1]
     cell_phi = model.column_phi_theta[:, 0]
     cell_theta = model.column_phi_theta[:, 1]
+    cell_x = -np.sin(cell_theta) * np.cos(cell_phi)
+    cell_z = np.cos(cell_theta)
 
     seq_data = {}
     for mct in args.cell_types:

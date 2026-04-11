@@ -15,7 +15,10 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_repo_root = str(Path(__file__).parent.parent)
+sys.path.insert(0, _repo_root)
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(_repo_root) / "analysis"))
 
 import numpy as np
 import torch
@@ -27,6 +30,9 @@ import stimulus_utilities as su
 from analysis_utilities import (
     fig_to_rgb,
     angular_flow_to_cartesian_xz,
+    flow_direction_colors,
+    update_direction_quiver,
+    add_direction_colorwheel,
 )
 
 
@@ -381,10 +387,10 @@ def _make_movie(
     mag_r = np.hypot(flow_vx_r, flow_vz_r)
     mag_l = np.hypot(flow_vx_l, flow_vz_l)
 
-    all_mag = np.concatenate([mag_r.ravel(), mag_l.ravel()])
-    finite_mag = all_mag[np.isfinite(all_mag)]
-    max_mag = np.percentile(finite_mag, 99) if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0
-    flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
+    all_vx = np.concatenate([flow_vx_r.ravel(), flow_vx_l.ravel()])
+    all_vz = np.concatenate([flow_vz_r.ravel(), flow_vz_l.ravel()])
+    _, max_mag = flow_direction_colors(
+        np.nan_to_num(all_vx, nan=0.0), np.nan_to_num(all_vz, nan=0.0))
     arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
 
     flow_vx_r = np.nan_to_num(flow_vx_r, nan=0.0)
@@ -426,14 +432,18 @@ def _make_movie(
 
     # Row 1: predicted flow
     _setup_eye_axes(ax_flow_l, ax_flow_r)
-    quiver_kw = dict(
-        cmap="viridis", norm=flow_norm, angles="xy",
-        scale_units="xy", scale=1 / arrow_scale, width=0.003,
-    )
-    q_left = ax_flow_l.quiver(cell_x, cell_z, flow_vx_l[0], flow_vz_l[0], mag_l[0], **quiver_kw)
-    q_right = ax_flow_r.quiver(cell_x, cell_z, flow_vx_r[0], flow_vz_r[0], mag_r[0], **quiver_kw)
+    quiver_kw = dict(angles="xy", scale_units="xy", scale=1 / arrow_scale, width=0.003)
+    colors_l0, _ = flow_direction_colors(flow_vx_l[0], flow_vz_l[0], max_mag)
+    colors_r0, _ = flow_direction_colors(flow_vx_r[0], flow_vz_r[0], max_mag)
+    q_left = ax_flow_l.quiver(cell_x, cell_z, flow_vx_l[0], flow_vz_l[0], **quiver_kw)
+    q_left.set_facecolor(colors_l0)
+    q_left.set_edgecolor(colors_l0)
+    q_right = ax_flow_r.quiver(cell_x, cell_z, flow_vx_r[0], flow_vz_r[0], **quiver_kw)
+    q_right.set_facecolor(colors_r0)
+    q_right.set_edgecolor(colors_r0)
     ax_flow_l.set_title(f"Left Eye ({flow_label})")
     ax_flow_r.set_title(f"Right Eye ({flow_label})")
+    add_direction_colorwheel(fig)
 
     # Row 2: rotation and translation (true vs predicted)
     rot_labels = ["roll", "pitch", "yaw"]
@@ -481,8 +491,8 @@ def _make_movie(
             sc_stim_l.set_facecolors(_masked_rgba(stimulus_left[t], in_fov_left, stim_norm))
             sc_stim_r.set_facecolors(_masked_rgba(stimulus_right[t], in_fov_right, stim_norm))
 
-            q_left.set_UVC(flow_vx_l[t], flow_vz_l[t], mag_l[t])
-            q_right.set_UVC(flow_vx_r[t], flow_vz_r[t], mag_r[t])
+            update_direction_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag)
+            update_direction_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag)
 
             time_s = t * model_dt
             ax_stim_l.set_title(f"Left Eye (t={time_s:.2f}s)")

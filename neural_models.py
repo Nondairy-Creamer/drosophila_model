@@ -1093,26 +1093,24 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return selected_neuron_indices, selected_column_indices
 
-    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
-        if len(neurons_to_silence) > 0:
-
-            if not invert_silencing:
-                print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
-                # set the input and output strength of these neurons to a small value
-                chosen_neurons = np.zeros(self.num_cell_types) == 1
-                for ns in neurons_to_silence:
-                    chosen_neurons[self.unique_cell_types == ns] = True
-            else:
-                print("\n--- WARNING silencing everything but", neurons_to_silence, '---\n')
-                # set the input and output strength of these neurons to a small value
-                chosen_neurons = np.zeros(self.num_cell_types) == 0
-                for ns in neurons_to_silence:
-                    chosen_neurons[self.unique_cell_types == ns] = False
-
-            with torch.no_grad():
-                self.output_strength_log.data[chosen_neurons] = np.log(self.silence_val)
-        else:
+    def _silencing_mask(self, neurons_to_silence, invert_silencing=False):
+        """Return a boolean mask over cell types for the neurons to silence."""
+        if not neurons_to_silence:
             print('No neurons selected for silencing')
+            return None
+
+        if not invert_silencing:
+            print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
+            chosen = np.zeros(self.num_cell_types, dtype=bool)
+            for ns in neurons_to_silence:
+                chosen[self.unique_cell_types == ns] = True
+        else:
+            print("\n--- WARNING silencing everything but", neurons_to_silence, '---\n')
+            chosen = np.ones(self.num_cell_types, dtype=bool)
+            for ns in neurons_to_silence:
+                chosen[self.unique_cell_types == ns] = False
+
+        return chosen
 
     @classmethod
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
@@ -1567,6 +1565,13 @@ class CurrentModel(NeuralModel):
 
         return sigma
 
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
+        chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
+        if chosen is not None:
+            with torch.no_grad():
+                self.output_strength_log.data[chosen] = np.log(self.silence_val)
+                self.input_strength_log.data[chosen] = np.log(self.silence_val)
+
     def firing_rate(self, v):
         """Convert voltage to firing rate."""
         return self.nonlinearity(v)
@@ -1738,6 +1743,13 @@ class ConductanceModel(NeuralModel):
         # if init_new_model:
         #     with torch.no_grad():
         #         self.find_steady_state()
+
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
+        chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
+        if chosen is not None:
+            with torch.no_grad():
+                self.output_strength_log.data[chosen] = np.log(self.silence_val)
+                self.input_strength_log.data[:, chosen] = np.log(self.silence_val)
 
     def firing_rate(self, v):
         """Convert voltage to firing rate with threshold subtraction.

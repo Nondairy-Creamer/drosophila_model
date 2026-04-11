@@ -243,8 +243,10 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
 
     # ── Apply silencing ───────────────────────────────────────────────
     original_output_strength = None
+    original_input_strength = None
     if silenced_neurons:
         original_output_strength = model.output_strength_log.data.clone()
+        original_input_strength = model.input_strength_log.data.clone()
         model.silence_neurons(silenced_neurons)
 
     try:
@@ -256,6 +258,7 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
     finally:
         if original_output_strength is not None:
             model.output_strength_log.data.copy_(original_output_strength)
+            model.input_strength_log.data.copy_(original_input_strength)
 
 
 def _run_white_noise_inner(model, cell_types, output_dir, duration,
@@ -362,6 +365,19 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
                 **{f'sta_{ct}': s for ct, s in sta_dict.items()},
             )
             print(f'Saved STA data to {data_path}')
+
+    # ── Report cell polarity ────────────────────────────────────────
+    if sta_dict:
+        on_cells = []
+        off_cells = []
+        for ct, sta in sta_dict.items():
+            peak_idx = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)
+            if sta[peak_idx] >= 0:
+                on_cells.append(ct)
+            else:
+                off_cells.append(ct)
+        print(f'  ON  cells (positive polarity): {", ".join(on_cells)}')
+        print(f'  OFF cells (negative polarity): {", ".join(off_cells)}')
 
     return sta_dict
 

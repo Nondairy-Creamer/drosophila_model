@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -107,10 +109,29 @@ def main() -> None:
             num_clips=args.num_clips,
         )
 
+    # --- Cell polarity from baseline STA ---
+    on_cells = []
+    off_cells = []
+    sta_data_path = (Path(model_folder) / 'figures' / 'white_noise_silencing'
+                     / 'baseline' / 'sta_data.npz')
+    if sta_data_path.exists():
+        sta_data = np.load(sta_data_path, allow_pickle=True)
+        for ct in sta_data['cell_types']:
+            sta = sta_data[f'sta_{ct}']
+            peak_idx = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)
+            if sta[peak_idx] >= 0:
+                on_cells.append(ct)
+            else:
+                off_cells.append(ct)
+
     # --- Summary ---
     print(f"\n{'='*60}")
     print("  Benchmark Summary")
     print(f"{'='*60}")
+
+    if on_cells or off_cells:
+        print(f"  ON  cells (positive polarity): {', '.join(on_cells)}")
+        print(f"  OFF cells (negative polarity): {', '.join(off_cells)}")
 
     if pano_results is not None:
         print(f"  Pano rotation  median cos sim: {pano_results['median_rot_cos']:.4f}")

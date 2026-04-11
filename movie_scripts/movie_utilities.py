@@ -11,7 +11,9 @@ Provides:
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_repo_root = str(Path(__file__).parent.parent)
+sys.path.insert(0, _repo_root)
+sys.path.insert(0, str(Path(_repo_root) / "analysis"))
 
 import numpy as np
 import matplotlib
@@ -25,6 +27,9 @@ from analysis_utilities import (
     get_flow_key,
     make_flow_comparison_movie,
     make_stimulus_flow_movie,
+    flow_direction_colors,
+    update_direction_quiver,
+    add_direction_colorwheel,
 )
 
 _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
@@ -474,11 +479,9 @@ def make_scatter_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.
 def make_quiver_plot_factory(x_flow, z_flow, cell_x, cell_z):
     """
     Returns a factory callable that, given a direction index, initializes a quiver plot (+X from pred_plot_0, +Y from pred_plot_1)
-    and provides an update function for per-frame rendering. Arrow color encodes magnitude.
+    and provides an update function for per-frame rendering. Arrow color encodes direction (hue) and amplitude (saturation).
     """
-    magnitude = np.hypot(x_flow, z_flow)
-    max_mag = np.percentile(magnitude, 99) if np.any(magnitude) else 1.0
-    norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
+    _, max_mag = flow_direction_colors(x_flow, z_flow)
 
     def init_plot_for_direction(d, di):
         fig, ax = plt.subplots(figsize=(6,4), dpi=120)
@@ -486,25 +489,22 @@ def make_quiver_plot_factory(x_flow, z_flow, cell_x, cell_z):
         chosen_v = z_flow[di, :, :]
 
         ax.set_xlim(-1, 1); ax.set_ylim(-1, 1)
+        colors_0, _ = flow_direction_colors(chosen_u[0, :], chosen_v[0, :], max_mag)
         q = ax.quiver(
             cell_x, cell_z,
             chosen_u[0, :], chosen_v[0, :],
-            np.hypot(chosen_u[0, :], chosen_v[0, :]),
-            cmap="viridis", norm=norm,
             angles='xy', scale_units='xy', scale=1.0,
         )
-        cbar = fig.colorbar(q, ax=ax)
+        q.set_facecolor(colors_0)
+        q.set_edgecolor(colors_0)
+        add_direction_colorwheel(fig)
         ax.set_xlabel('location in x, posterior <-> anterior')
         ax.set_ylabel('location in z, ventral <-> dorsal')
         ax.set_title(d)
         num_frames = chosen_u.shape[0]
 
         def update(frame_t):
-            q.set_UVC(
-                chosen_u[frame_t, :], chosen_v[frame_t, :],
-                np.hypot(chosen_u[frame_t, :], chosen_v[frame_t, :])
-            )
-            cbar.update_normal(q)
+            update_direction_quiver(q, chosen_u[frame_t, :], chosen_v[frame_t, :], max_mag)
 
         return fig, update, num_frames
 
@@ -840,11 +840,9 @@ def make_quiver_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6
     d1 = safe_diff(arr1, arr2)
     d2 = safe_diff(arr3, arr4)
     if d1 is not None and d2 is not None and d1.size > 0 and d2.size > 0:
-        magnitude = np.hypot(d1, d2)
-        max_mag = np.percentile(magnitude, 99) if np.any(magnitude) else 1.0
+        _, max_mag = flow_direction_colors(d1, d2)
     else:
         max_mag = 1.0
-    quiver_norm = mcolors.Normalize(vmin=0.0, vmax=max(1e-9, max_mag))
 
     def init_plot_for_direction(d, di):
         fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
@@ -900,14 +898,16 @@ def make_quiver_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6
         else:
             u0 = np.zeros(num_cols, dtype=float)
             v0 = np.zeros(num_cols, dtype=float)
+        colors_0, _ = flow_direction_colors(u0, v0, max_mag)
         q = ax.quiver(
             scale * cell_x + right_x, scale * cell_z + 0.0,
-            u0, v0, np.hypot(u0, v0),
-            cmap="viridis", norm=quiver_norm,
+            u0, v0,
             angles='xy', scale_units='xy',
             scale=max(1e-9, 1.0 / float(arrow_scale)),
         )
-        cbar = fig.colorbar(q, ax=ax)
+        q.set_facecolor(colors_0)
+        q.set_edgecolor(colors_0)
+        add_direction_colorwheel(fig)
 
         blanks = 25
         total_frames = num_stimuli * (L + blanks)
@@ -915,7 +915,7 @@ def make_quiver_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6
         def update(frame_t):
             if total_frames == 0 or L == 0:
                 stim_scatter.set_array(zero_vec)
-                q.set_UVC(zero_vec, zero_vec, zero_vec)
+                update_direction_quiver(q, zero_vec, zero_vec, max_mag)
                 return
             block = L + blanks
             stim_idx, within = divmod(frame_t, block)
@@ -931,12 +931,10 @@ def make_quiver_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6
                      (arr2[stim_idx, t, :] if arr2 is not None and stim_idx < arr2.shape[0] else 0.0))
                 v = ((arr3[stim_idx, t, :] if arr3 is not None and stim_idx < arr3.shape[0] else 0.0) -
                      (arr4[stim_idx, t, :] if arr4 is not None and stim_idx < arr4.shape[0] else 0.0))
-                mag = np.hypot(u, v)
-                q.set_UVC(u, v, mag)
-                cbar.update_normal(q)
+                update_direction_quiver(q, u, v, max_mag)
             else:
                 stim_scatter.set_array(zero_vec)
-                q.set_UVC(zero_vec, zero_vec, zero_vec)
+                update_direction_quiver(q, zero_vec, zero_vec, max_mag)
 
         return fig, update, total_frames
 

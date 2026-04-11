@@ -126,17 +126,22 @@ def main():
             pred = model.predict(batch_tensor, input_neurons=["L1", "L2", "L3"],
                                  output_neurons=output_neurons)['outputs']
 
-        # Decoder responses
+        # Decoder responses (baseline-subtracted)
         if results is not None:
-            decoder_out = pred[decoder_key][:, pre_stim_steps:, :, :]
-            mean_resp = torch.nanmean(decoder_out, dim=(1, 2)).cpu().numpy()
+            decoder_baseline = torch.nanmean(
+                pred[decoder_key][:, :pre_stim_steps, :, :], dim=(1, 2))
+            decoder_stim = torch.nanmean(
+                pred[decoder_key][:, pre_stim_steps:, :, :], dim=(1, 2))
+            mean_resp = (decoder_stim - decoder_baseline).cpu().numpy()
             for i, (direction, polarity) in enumerate(index_map):
                 results[direction][polarity][vi, :] = mean_resp[i]
 
-        # Cell firing rates
+        # Cell firing rates (baseline-subtracted)
         for ct in output_neurons:
-            fr = pred["firing_rate"][ct][:, pre_stim_steps:, :]
-            mean_fr = torch.nanmean(fr, dim=(1, 2)).cpu().numpy()
+            fr = pred["firing_rate"][ct]
+            baseline = torch.nanmean(fr[:, :pre_stim_steps, :], dim=(1, 2))
+            stim = torch.nanmean(fr[:, pre_stim_steps:, :], dim=(1, 2))
+            mean_fr = (stim - baseline).cpu().numpy()
             for i, (direction, polarity) in enumerate(index_map):
                 cell_results[ct][direction][polarity][vi] = mean_fr[i]
 

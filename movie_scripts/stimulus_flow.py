@@ -41,6 +41,9 @@ from movie_utilities import (
     ylim_from_data,
     fig_to_rgb,
     make_stimulus_flow_movie,
+    flow_direction_colors,
+    update_direction_quiver,
+    add_direction_colorwheel,
 )
 
 
@@ -75,7 +78,7 @@ def main() -> None:
         config["stimulus"]["stim_time"] = args.stim_time
 
     output_folder = Path(args.output_dir) if args.output_dir else (
-        Path("figures/two_eyes") if args.two_eyes else Path("figures/natural_movie"))
+        Path("figures/two_eyes") if args.two_eyes else Path("figures/movie"))
     output_folder.mkdir(parents=True, exist_ok=True)
 
     frame_rate = args.fps if args.fps else int(round(1.0 / config['model']['dt']))
@@ -211,9 +214,9 @@ def _make_two_eyes_input_movie(
     flow_r_vx, flow_r_vz, mag_r, _, _ = prepare_flow_quiver(flow_right, cell_x, cell_y, cell_z)
     flow_l_vx, flow_l_vz, mag_l, _, _ = prepare_flow_quiver(flow_left, cell_x, cell_y_left, cell_z)
 
-    finite_mag = np.concatenate([mag_r[np.isfinite(mag_r)], mag_l[np.isfinite(mag_l)]])
-    flow_max_mag = np.percentile(finite_mag, 99) if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0
-    flow_norm = mcolors.Normalize(vmin=0.0, vmax=flow_max_mag)
+    all_vx = np.concatenate([flow_r_vx.ravel(), flow_l_vx.ravel()])
+    all_vz = np.concatenate([flow_r_vz.ravel(), flow_l_vz.ravel()])
+    _, flow_max_mag = flow_direction_colors(all_vx, all_vz)
     arrow_scale = 0.2 / flow_max_mag if flow_max_mag > 0 else 1.0
 
     fig, axes = plt.subplots(3, 2, figsize=(12.8, 14), dpi=100,
@@ -235,15 +238,20 @@ def _make_two_eyes_input_movie(
     ax_sam_r.set_title("Right Eye")
     ax_sam_l.set_title("Left Eye")
 
-    quiver_kw = dict(cmap="viridis", norm=flow_norm, angles="xy",
-                     scale_units="xy", scale=1 / arrow_scale, width=0.003)
-    q_r = ax_flow_r.quiver(cell_x, cell_z, flow_r_vx[0], flow_r_vz[0], mag_r[0], **quiver_kw)
+    quiver_kw = dict(angles="xy", scale_units="xy", scale=1 / arrow_scale, width=0.003)
+    colors_r0, _ = flow_direction_colors(flow_r_vx[0], flow_r_vz[0], flow_max_mag)
+    q_r = ax_flow_r.quiver(cell_x, cell_z, flow_r_vx[0], flow_r_vz[0], **quiver_kw)
+    q_r.set_facecolor(colors_r0)
+    q_r.set_edgecolor(colors_r0)
     ax_flow_r.set_title(f"Right Eye {flow_label}")
-    fig.colorbar(q_r, ax=ax_flow_r, label="magnitude")
 
-    q_l = ax_flow_l.quiver(cell_x, cell_z, flow_l_vx[0], flow_l_vz[0], mag_l[0], **quiver_kw)
+    colors_l0, _ = flow_direction_colors(flow_l_vx[0], flow_l_vz[0], flow_max_mag)
+    q_l = ax_flow_l.quiver(cell_x, cell_z, flow_l_vx[0], flow_l_vz[0], **quiver_kw)
+    q_l.set_facecolor(colors_l0)
+    q_l.set_edgecolor(colors_l0)
     ax_flow_l.set_title(f"Left Eye {flow_label}")
-    fig.colorbar(q_l, ax=ax_flow_l, label="magnitude")
+
+    add_direction_colorwheel(fig)
 
     rot_labels = ["roll", "pitch", "yaw"]
     trans_labels = ["x", "y", "z"]
@@ -283,8 +291,8 @@ def _make_two_eyes_input_movie(
         ax_sam_r.set_title(f"Right Eye (t={time_s:.2f}s)")
         ax_sam_l.set_title(f"Left Eye (t={time_s:.2f}s)")
 
-        q_r.set_UVC(flow_r_vx[t], flow_r_vz[t], np.hypot(flow_r_vx[t], flow_r_vz[t]))
-        q_l.set_UVC(flow_l_vx[t], flow_l_vz[t], np.hypot(flow_l_vx[t], flow_l_vz[t]))
+        update_direction_quiver(q_r, flow_r_vx[t], flow_r_vz[t], flow_max_mag)
+        update_direction_quiver(q_l, flow_l_vx[t], flow_l_vz[t], flow_max_mag)
 
         t_start = max(0, t - trail_frames + 1)
         t_slice = slice(t_start, t + 1)

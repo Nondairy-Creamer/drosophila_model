@@ -42,9 +42,8 @@ def get_flow_key(model):
 def fig_to_rgb(fig) -> np.ndarray:
     """Convert a matplotlib figure to an RGB numpy array *(H, W, 3)*."""
     fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.asarray(fig.canvas.buffer_rgba())
-    return np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
+    rgba = np.asarray(fig.canvas.buffer_rgba())
+    return rgba[..., :3].copy()
 
 
 def centered_norm(data: np.ndarray) -> tuple[float, float]:
@@ -430,6 +429,70 @@ def angular_flow_to_cartesian_xz(
     return v_x, v_z
 
 
+def flow_direction_colors(u, v, max_mag=None):
+    """RGBA colors encoding direction as hue and amplitude as saturation.
+
+    Parameters
+    ----------
+    u, v : array-like, same shape
+        Cartesian flow components (e.g. vx, vz from quiver).
+    max_mag : float or None
+        Saturation normalisation ceiling.  ``None`` → 99th percentile.
+
+    Returns
+    -------
+    colors : (*shape, 4) RGBA array
+    max_mag : float — the normalisation value actually used
+    """
+    from matplotlib.colors import hsv_to_rgb
+
+    u = np.asarray(u, dtype=float)
+    v = np.asarray(v, dtype=float)
+    angle = np.arctan2(v, u)
+    hue = (angle / (2 * np.pi)) % 1.0
+
+    mag = np.hypot(u, v)
+    if max_mag is None:
+        finite = mag[np.isfinite(mag)]
+        max_mag = float(np.percentile(finite, 99)) if finite.size > 0 and finite.max() > 0 else 1.0
+    sat = np.clip(mag / max(max_mag, 1e-9), 0, 1)
+
+    hsv = np.stack([hue, sat, np.ones_like(hue)], axis=-1)
+    rgb = hsv_to_rgb(hsv)
+    return np.concatenate([rgb, np.ones(rgb.shape[:-1] + (1,))], axis=-1), max_mag
+
+
+def update_direction_quiver(q, u, v, max_mag):
+    """Update a direction-colored quiver's geometry and colors."""
+    q.set_UVC(u, v)
+    colors, _ = flow_direction_colors(u, v, max_mag)
+    q.set_facecolor(colors)
+    q.set_edgecolor(colors)
+
+
+def add_direction_colorwheel(fig, rect=None):
+    """Add a small HSV colour wheel showing the direction-to-hue mapping."""
+    from matplotlib.colors import hsv_to_rgb
+
+    if rect is None:
+        rect = [0.87, 0.87, 0.11, 0.11]
+    ax_cw = fig.add_axes(rect, projection='polar')
+    n = 256
+    theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    width = 2 * np.pi / n
+    hues = (theta / (2 * np.pi)) % 1.0
+    colors = hsv_to_rgb(np.stack([hues, np.ones(n), np.ones(n)], axis=-1))
+    ax_cw.bar(theta, 1, width=width, bottom=0.0, color=colors,
+              edgecolor='none', linewidth=0)
+    ax_cw.set_yticks([])
+    ax_cw.set_xticks([0, np.pi / 2, np.pi, 3 * np.pi / 2])
+    ax_cw.set_xticklabels(['\u2192', '\u2191', '\u2190', '\u2193'], fontsize=8)
+    ax_cw.tick_params(pad=1)
+    ax_cw.grid(False)
+    ax_cw.spines['polar'].set_visible(False)
+    return ax_cw
+
+
 # ---------------------------------------------------------------------------
 # Movie creation helpers
 # ---------------------------------------------------------------------------
@@ -495,13 +558,10 @@ def make_flow_comparison_movie(
         cell_x, cell_y, cell_z,
     )
 
-    true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
-    finite_true_mag = true_magnitude[np.isfinite(true_magnitude)]
-    if finite_true_mag.size > 0 and finite_true_mag.max() > 0:
-        true_max_mag = np.percentile(finite_true_mag, 99)
-    else:
-        true_max_mag = 1.0
-    true_flow_norm = mcolors.Normalize(vmin=0.0, vmax=true_max_mag)
+    _, true_max_mag = flow_direction_colors(
+        np.nan_to_num(true_flow_vx, nan=0.0),
+        np.nan_to_num(true_flow_vz, nan=0.0),
+    )
 
     has_pred = pred_flow is not None
     has_filtered = filtered_stimulus is not None
@@ -510,13 +570,10 @@ def make_flow_comparison_movie(
             pred_flow[:, :, 0], pred_flow[:, :, 1],
             cell_x, cell_y, cell_z,
         )
-        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
-        finite_pred_mag = pred_magnitude[np.isfinite(pred_magnitude)]
-        if finite_pred_mag.size > 0 and finite_pred_mag.max() > 0:
-            pred_max_mag = np.percentile(finite_pred_mag, 99)
-        else:
-            pred_max_mag = 1.0
-        pred_flow_norm = mcolors.Normalize(vmin=0.0, vmax=pred_max_mag)
+        _, pred_max_mag = flow_direction_colors(
+            np.nan_to_num(pred_flow_vx, nan=0.0),
+            np.nan_to_num(pred_flow_vz, nan=0.0),
+        )
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         ax_bottom_left = axes[1, 0]
@@ -574,47 +631,36 @@ def make_flow_comparison_movie(
 
     true_arrow_scale = 0.2 / true_max_mag if true_max_mag > 0 else 1.0
 
-    # Replace NaN in flow data with 0 so quiver arrows render correctly
     true_flow_vx = np.nan_to_num(true_flow_vx, nan=0.0)
     true_flow_vz = np.nan_to_num(true_flow_vz, nan=0.0)
-    true_magnitude = np.nan_to_num(true_magnitude, nan=0.0)
 
+    true_colors_0, _ = flow_direction_colors(true_flow_vx[0, :], true_flow_vz[0, :], true_max_mag)
     q_true = ax_true.quiver(
-        cell_x,
-        cell_z,
-        true_flow_vx[0, :],
-        true_flow_vz[0, :],
-        true_magnitude[0, :],
-        cmap="viridis",
-        norm=true_flow_norm,
-        angles="xy",
-        scale_units="xy",
-        scale=1 / true_arrow_scale,
-        width=0.003,
+        cell_x, cell_z,
+        true_flow_vx[0, :], true_flow_vz[0, :],
+        angles="xy", scale_units="xy",
+        scale=1 / true_arrow_scale, width=0.003,
     )
+    q_true.set_facecolor(true_colors_0)
+    q_true.set_edgecolor(true_colors_0)
     ax_true.set_title("True Optic Flow")
-    fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
     if has_pred:
         pred_arrow_scale = 0.2 / pred_max_mag if pred_max_mag > 0 else 1.0
         pred_flow_vx = np.nan_to_num(pred_flow_vx, nan=0.0)
         pred_flow_vz = np.nan_to_num(pred_flow_vz, nan=0.0)
-        pred_magnitude = np.nan_to_num(pred_magnitude, nan=0.0)
+        pred_colors_0, _ = flow_direction_colors(pred_flow_vx[0, :], pred_flow_vz[0, :], pred_max_mag)
         q_pred = ax_pred.quiver(
-            cell_x,
-            cell_z,
-            pred_flow_vx[0, :],
-            pred_flow_vz[0, :],
-            pred_magnitude[0, :],
-            cmap="viridis",
-            norm=pred_flow_norm,
-            angles="xy",
-            scale_units="xy",
-            scale=1 / pred_arrow_scale,
-            width=0.003,
+            cell_x, cell_z,
+            pred_flow_vx[0, :], pred_flow_vz[0, :],
+            angles="xy", scale_units="xy",
+            scale=1 / pred_arrow_scale, width=0.003,
         )
+        q_pred.set_facecolor(pred_colors_0)
+        q_pred.set_edgecolor(pred_colors_0)
         ax_pred.set_title("Predicted Optic Flow")
-        fig.colorbar(q_pred, ax=ax_pred, label="magnitude")
+
+    add_direction_colorwheel(fig)
 
     plt.tight_layout()
 
@@ -631,16 +677,10 @@ def make_flow_comparison_movie(
             if sc_filt is not None:
                 sc_filt.set_facecolors(_masked_rgba(filtered_stimulus[t, :], mask_t, gray_cmap, filt_norm))
 
-            vx_true_t = true_flow_vx[t, :]
-            vz_true_t = true_flow_vz[t, :]
-            mag_true_t = np.hypot(vx_true_t, vz_true_t)
-            q_true.set_UVC(vx_true_t, vz_true_t, mag_true_t)
+            update_direction_quiver(q_true, true_flow_vx[t, :], true_flow_vz[t, :], true_max_mag)
 
             if has_pred:
-                vx_pred_t = pred_flow_vx[t, :]
-                vz_pred_t = pred_flow_vz[t, :]
-                mag_pred_t = np.hypot(vx_pred_t, vz_pred_t)
-                q_pred.set_UVC(vx_pred_t, vz_pred_t, mag_pred_t)
+                update_direction_quiver(q_pred, pred_flow_vx[t, :], pred_flow_vz[t, :], pred_max_mag)
 
             frame_title = (
                 f"Stimulus ({stim_name}) frame {t+1}/{num_time}"

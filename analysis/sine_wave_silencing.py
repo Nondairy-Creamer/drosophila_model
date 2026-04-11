@@ -29,6 +29,7 @@ SILENCING_CONFIGS = [
     ['L2'],
     ['L3'],
     ['L1', 'L2'],
+    ['L1', 'L2', 'L3'],
 ]
 
 
@@ -39,14 +40,15 @@ def _config_label(silenced):
     return 'silence_' + '+'.join(silenced)
 
 
-def _response_range(cell_results_ct):
-    """Max minus min firing rate across all directions/wavelengths/frequencies."""
-    values = []
+def _response_amplitude_per_wavelength(cell_results_ct):
+    """(max + 0.05) / (min + 0.05) across directions/frequencies, per wavelength."""
+    wavelength_vals = {}
     for dir_dict in cell_results_ct.values():
-        for arr in dir_dict.values():
-            values.append(arr)
-    all_vals = np.concatenate(values)
-    return float(np.max(all_vals) - np.min(all_vals))
+        for wl, arr in dir_dict.items():
+            wavelength_vals.setdefault(wl, []).append(arr)
+    return {wl: float((np.max(np.concatenate(arrs)) + 0.05)
+                       / (np.min(np.concatenate(arrs)) + 0.05))
+            for wl, arrs in wavelength_vals.items()}
 
 
 def plot_relative_amplitudes(baseline_results, silenced_results,
@@ -59,9 +61,15 @@ def plot_relative_amplitudes(baseline_results, silenced_results,
 
     ratios = []
     for ct in common_types:
-        base_amp = _response_range(baseline_results[ct])
-        sil_amp = _response_range(silenced_results[ct])
-        ratios.append(sil_amp / base_amp if base_amp > 0 else 0.0)
+        base_ranges = _response_amplitude_per_wavelength(baseline_results[ct])
+        sil_ranges = _response_amplitude_per_wavelength(silenced_results[ct])
+        per_wl_ratios = []
+        for wl in base_ranges:
+            if base_ranges[wl] > 0:
+                per_wl_ratios.append(sil_ranges.get(wl, 0.0) / base_ranges[wl])
+            else:
+                per_wl_ratios.append(0.0)
+        ratios.append(float(np.mean(per_wl_ratios)))
 
     fig, ax = plt.subplots(figsize=(max(6, 0.45 * len(common_types)), 4))
     x = np.arange(len(common_types))
@@ -69,9 +77,10 @@ def plot_relative_amplitudes(baseline_results, silenced_results,
     ax.axhline(1.0, color='k', linewidth=0.8, linestyle='--')
     ax.set_xticks(x)
     ax.set_xticklabels(common_types, rotation=45, ha='right', fontsize=8)
-    ax.set_ylabel('Relative mean response')
+    ax.set_ylabel('Relative response ratio')
     ax.set_title(f'Silenced: {"+".join(silenced_neurons)}')
-    ax.set_ylim(0, 2)
+    ax.set_yscale('log')
+    ax.set_ylim(0.1, 10)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
