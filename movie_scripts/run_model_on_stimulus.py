@@ -488,8 +488,10 @@ def _make_one_eye_flow_movie(
 
     x_margin = 0.1 * (cell_x.max() - cell_x.min())
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
+    # Match analysis_utilities.make_stimulus_flow_movie / two-eye left panel:
+    # posterior (large x) on the left of the figure so facets face like other movies.
     for ax in axes:
-        ax.set_xlim(cell_x.min() - x_margin, cell_x.max() + x_margin)
+        ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
         ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
         ax.set_aspect("equal")
 
@@ -560,7 +562,7 @@ def _make_one_eye_directional_movie(
     z_margin = 0.1 * (cell_z.max() - cell_z.min())
     dot_size = max(20, int(90 * 2 / n_dirs))
     for ax in axes.flat:
-        ax.set_xlim(cell_x.min() - x_margin, cell_x.max() + x_margin)
+        ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
         ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
         ax.set_aspect("equal")
 

@@ -13,6 +13,15 @@ Usage:
     python analysis/white_noise.py models/best_cells_30hz/
     python analysis/white_noise.py models/best_cells_30hz/ --cell-types L1 L2 L3
     python analysis/white_noise.py models/best_cells_30hz/ --duration 300 --num-lags 20
+
+Outputs in ``output_dir`` include ``temporal_tau_mean_f2.png``,
+``temporal_tau_rms_f2.png``, ``temporal_tau_peak_abs.png`` (number-line
+summaries), plus ``tau_rms_ms``, ``tau_mean_ms``, ``tau_peak_abs_ms`` in
+``sta_data.npz`` (center-column STA; peak lag is argmax of ``|f(τ)|``).
+``tau_rms_ms`` is the **standard deviation** of lag (ms), :math:`\\sigma_\\tau
+=\\sqrt{\\mathrm{Var}[\\tau]}`, not the variance :math:`\\sigma_\\tau^2`;
+:math:`\\tau` is distributed as :math:`p(\\tau)\\propto f(\\tau)^2` over lags
+(normalized), not over stimulus intensity.
 """
 import argparse
 import sys
@@ -43,7 +52,7 @@ SEED = 42
 #   K_spatial = 37 (FILTER_SIZE=7), num_lags = 9 (300 ms), params = 333
 #   P ≈ 800 columns, T = 600 frames (20 s) → P×T_eff ≈ 473,000
 #   Ratio ≈ 1400×  overdetermined — 20 s is more than sufficient.
-STA_DURATION_MS = 400.0    # STA window duration in milliseconds
+STA_DURATION_MS = 200.0    # STA window duration in milliseconds
 FILTER_SIZE = 9            # hex grid diameter for spatial filter extraction
 CHUNK_SIZE = 3000          # frames per model.predict() call
 
@@ -100,6 +109,106 @@ def compute_pooled_sta(stimulus, firing_rates, nearest_columns, num_lags):
     return sta
 
 
+def squared_kernel_temporal_moments(time_lags_ms, temporal_profile):
+    """Temporal moments of lag :math:`\\tau` under :math:`p(\\tau)\\propto f(\\tau)^2`.
+
+    Here :math:`f(\\tau)` is the STA along time at fixed (center) space;
+    :math:`p` is normalized over **lags** :math:`\\tau`. We compute
+    :math:`\\mathrm{Var}[\\tau]=\\sum_\\tau p(\\tau)(\\tau-\\mu)^2` (variance of
+    lag in ms²) and return its **square root** :math:`\\sigma_\\tau` so the
+    second return value is a **standard deviation in ms**, not ms². It is **not**
+    the variance of :math:`f^2` across intensity/contrast, nor spatial variance.
+
+    Squaring :math:`f` removes sign cancellation for biphasic filters.
+    ``mu_ms`` is :math:`\\mathbb{E}[\\tau]` under the same :math:`p`.
+
+    Returns:
+        (mu_ms, sigma_ms): ``sigma_ms`` is :math:`\\sigma_\\tau=\\sqrt{\\mathrm{Var}[\\tau]}`
+        in **milliseconds** (standard deviation of lag), or ``(nan, nan)`` if no energy.
+    """
+    w = np.asarray(temporal_profile, dtype=np.float64) ** 2
+    s = w.sum()
+    if s <= 0 or not np.isfinite(s):
+        return np.nan, np.nan
+    t = np.asarray(time_lags_ms, dtype=np.float64)
+    p = w / s
+    mu = (p * t).sum()
+    var = (p * (t - mu) ** 2).sum()
+    var = max(var, 0.0)
+    sigma = np.sqrt(var)
+    return float(mu), float(sigma)
+
+
+def peak_abs_lag_ms(time_lags_ms, temporal_profile):
+    """Time lag (ms) where ``|f|`` is largest on the center-column STA."""
+    prof = np.asarray(temporal_profile, dtype=np.float64)
+    t = np.asarray(time_lags_ms, dtype=np.float64)
+    if prof.size == 0 or not np.any(np.isfinite(prof)):
+        return np.nan
+    i = int(np.nanargmax(np.abs(prof)))
+    return float(t[i])
+
+
+def plot_temporal_moment_number_line(
+    cell_to_ms,
+    output_path,
+    *,
+    xlabel,
+    title,
+    color='C0',
+    clip_xmin_zero=False,
+):
+    """One point per cell type on a horizontal axis (ms)."""
+    items = [(ct, cell_to_ms[ct])
+             for ct in sorted(cell_to_ms)
+             if np.isfinite(cell_to_ms[ct])]
+    if not items:
+        return
+
+    names = [x[0] for x in items]
+    xs = np.array([x[1] for x in items], dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=(max(10.0, len(items) * 0.35), 3.2))
+    span = xs.max() - xs.min()
+    pad = max(2.0, 0.05 * (span + 1e-6))
+    lo = xs.min() - pad
+    hi = xs.max() + pad
+    if clip_xmin_zero:
+        lo = max(0.0, lo)
+    ax.hlines(0, lo, hi, colors='k', linewidth=0.8, zorder=0)
+    ax.scatter(xs, np.zeros(len(xs)), s=36, zorder=2, color=color)
+
+    order = np.argsort(xs)
+    for rank, j in enumerate(order):
+        ct = names[j]
+        x = xs[j]
+        voff = 14 + (rank % 4) * 11
+        ax.annotate(
+            ct,
+            (x, 0),
+            xytext=(0, voff),
+            textcoords='offset points',
+            ha='center',
+            va='bottom',
+            fontsize=7,
+            rotation=0,
+            zorder=3,
+        )
+
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(-0.12, 0.12)
+    ax.set_yticks([])
+    ax.set_xlabel(xlabel)
+    ax.set_title(title, fontsize=11)
+    ax.spines['left'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
 def pq_to_xy(pq):
     """Project hex lattice (p, q) coordinates to flat (x, y) for plotting."""
     angle_1 = np.pi / 6
@@ -112,9 +221,9 @@ def pq_to_xy(pq):
 def _build_xt_profile(sta, pq_offsets):
     """Collapse 2D hex STA to a 1D horizontal profile for an x-t plot.
 
-    Selects the middle row (p+q == 0) and one row above/below (p+q == ±1),
-    giving 7 hex positions. Positions sharing the same horizontal coordinate
-    are averaged, yielding 5 spatial bins sorted left-to-right.
+    Selects five bands perpendicular to the hex ``p+q`` direction
+    (``|p+q| <= 2``). Positions sharing the same horizontal coordinate
+    (``p - q``) are averaged; bins are sorted left-to-right.
 
     Returns (xt, x_positions):
         xt : (n_x, n_lags) array
@@ -122,7 +231,7 @@ def _build_xt_profile(sta, pq_offsets):
     """
     pq = pq_offsets.astype(np.float64)
     row_sum = (pq[:, 0] + pq[:, 1]).astype(int)
-    mask = np.abs(row_sum) <= 1
+    mask = np.abs(row_sum) <= 2
     x_coords = np.sqrt(3) / 2 * (pq[mask, 0] - pq[mask, 1])
     sta_sel = sta[mask]
 
@@ -138,7 +247,7 @@ def plot_sta(sta, pq_offsets, dt, cell_type, output_path):
     """Plot the recovered spatiotemporal filter as an x-t image.
 
     Top panel: horizontal position vs time-lag heatmap (averaged over
-    the middle three rows of the hex kernel).
+    the middle five rows of the hex kernel).
     Bottom panel: temporal profile at the center position.
     """
     num_lags = sta.shape[1]
@@ -221,7 +330,12 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
         silenced_neurons: Optional list of neuron names to silence before
             running the model.  ``output_strength_log`` is saved and
             restored automatically.
-        output_dir: Path to write per-cell STA figures and ``sta_data.npz``.
+        output_dir: Path to write per-cell STA figures, ``sta_data.npz``
+            (includes ``tau_mean_ms``, ``tau_rms_ms`` — standard deviation of
+            lag in ms, :math:`\\sqrt{\\mathrm{Var}[\\tau]}`, under
+            :math:`p(\\tau)\\propto f^2` over **lags**), and
+            ``temporal_tau_mean_f2.png``,
+            ``temporal_tau_rms_f2.png``, ``temporal_tau_peak_abs.png``.
             If *None*, figure saving is skipped.
         duration: Stimulus duration in seconds.
         sta_duration_ms: STA window duration in milliseconds.
@@ -356,12 +470,95 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
             print(f'    Saved {out_path}')
 
         if sta_dict:
+            center_idx = int(np.argmin(np.abs(pq_offsets).sum(axis=1)))
+            time_lags_ms = np.arange(num_lags) * dt * 1000
+            cell_to_mu_ms = {}
+            cell_to_sigma_ms = {}
+            cell_to_peak_abs_ms = {}
+            for ct, sta in sta_dict.items():
+                prof = sta[center_idx]
+                mu_ms, sigma_ms = squared_kernel_temporal_moments(
+                    time_lags_ms, prof,
+                )
+                cell_to_mu_ms[ct] = mu_ms
+                cell_to_sigma_ms[ct] = sigma_ms
+                cell_to_peak_abs_ms[ct] = peak_abs_lag_ms(time_lags_ms, prof)
+
+            path_mean = output_dir / 'temporal_tau_mean_f2.png'
+            path_rms = output_dir / 'temporal_tau_rms_f2.png'
+            path_peak = output_dir / 'temporal_tau_peak_abs.png'
+            plot_temporal_moment_number_line(
+                cell_to_mu_ms,
+                path_mean,
+                xlabel=r'Mean lag $\mu_\tau$ (ms), center of mass under $f^2$',
+                title='STA temporal moments (center column): mean lag',
+                color='C0',
+                clip_xmin_zero=False,
+            )
+            plot_temporal_moment_number_line(
+                cell_to_sigma_ms,
+                path_rms,
+                xlabel=(
+                    r'$\sigma_\tau$ (ms) = std.\ dev.\ of lag, '
+                    r'$\sqrt{\mathrm{Var}[\tau]}$ with $p(\tau)\propto f(\tau)^2$ '
+                    r'over lags (not intensity)'
+                ),
+                title=(
+                    'STA (center column): $\sigma_\tau$ of lag under $f^2$ (ms)'
+                ),
+                color='C1',
+                clip_xmin_zero=True,
+            )
+            plot_temporal_moment_number_line(
+                cell_to_peak_abs_ms,
+                path_peak,
+                xlabel=r'Lag (ms) at $\mathrm{argmax}\,|f(\tau)|$',
+                title='STA (center column): peak $|f|$',
+                color='C2',
+                clip_xmin_zero=True,
+            )
+            print(f'    Saved {path_mean}')
+            print(f'    Saved {path_rms}')
+            print(f'    Saved {path_peak}')
+            mu_line = ', '.join(
+                f'{ct}={cell_to_mu_ms[ct]:.1f}'
+                for ct in sorted(
+                    sta_dict,
+                    key=lambda c: cell_to_mu_ms.get(c, float('nan')),
+                )
+                if np.isfinite(cell_to_mu_ms[ct])
+            )
+            sig_line = ', '.join(
+                f'{ct}={cell_to_sigma_ms[ct]:.1f}'
+                for ct in sorted(
+                    sta_dict,
+                    key=lambda c: cell_to_sigma_ms.get(c, float('nan')),
+                )
+                if np.isfinite(cell_to_sigma_ms[ct])
+            )
+            peak_line = ', '.join(
+                f'{ct}={cell_to_peak_abs_ms[ct]:.1f}'
+                for ct in sorted(
+                    sta_dict,
+                    key=lambda c: cell_to_peak_abs_ms.get(c, float('nan')),
+                )
+                if np.isfinite(cell_to_peak_abs_ms[ct])
+            )
+            print(f'  Temporal μ_τ (ms, center STA, f² kernel): {mu_line}')
+            print(f'  Temporal σ_τ (ms, center STA, f² kernel): {sig_line}')
+            print(f'  Peak |f| lag (ms, center STA): {peak_line}')
+
+            cts_ordered = list(sta_dict.keys())
             data_path = output_dir / 'sta_data.npz'
             np.savez(
                 data_path,
                 pq_offsets=pq_offsets,
-                time_lags_ms=np.arange(num_lags) * dt * 1000,
-                cell_types=np.array(list(sta_dict.keys())),
+                time_lags_ms=time_lags_ms,
+                cell_types=np.array(cts_ordered),
+                tau_mean_ms=np.array([cell_to_mu_ms[c] for c in cts_ordered]),
+                tau_rms_ms=np.array([cell_to_sigma_ms[c] for c in cts_ordered]),
+                tau_peak_abs_ms=np.array(
+                    [cell_to_peak_abs_ms[c] for c in cts_ordered]),
                 **{f'sta_{ct}': s for ct, s in sta_dict.items()},
             )
             print(f'Saved STA data to {data_path}')

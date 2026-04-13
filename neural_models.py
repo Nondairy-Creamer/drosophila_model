@@ -1565,12 +1565,13 @@ class CurrentModel(NeuralModel):
 
         return sigma
 
-    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
         chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
         if chosen is not None:
             with torch.no_grad():
                 self.output_strength_log.data[chosen] = np.log(self.silence_val)
-                self.input_strength_log.data[chosen] = np.log(self.silence_val)
+                if silence_inputs:
+                    self.input_strength_log.data[chosen] = np.log(self.silence_val)
 
     def firing_rate(self, v):
         """Convert voltage to firing rate."""
@@ -1744,12 +1745,13 @@ class ConductanceModel(NeuralModel):
         #     with torch.no_grad():
         #         self.find_steady_state()
 
-    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
         chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
         if chosen is not None:
             with torch.no_grad():
                 self.output_strength_log.data[chosen] = np.log(self.silence_val)
-                self.input_strength_log.data[:, chosen] = np.log(self.silence_val)
+                if silence_inputs:
+                    self.input_strength_log.data[:, chosen] = np.log(self.silence_val)
 
     def firing_rate(self, v):
         """Convert voltage to firing rate with threshold subtraction.
