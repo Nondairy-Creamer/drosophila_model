@@ -3,7 +3,7 @@ Shared utilities for analysis scripts.
 
 Provides:
   - Matplotlib helpers (fig_to_rgb, centered_norm)
-  - Data prep (prepare_xt, interp_nan_column)
+  - Data prep (prepare_xt, input_conv_stimulus_timecourse, interp_nan_column)
   - Hex grid (hex_grid_points)
   - Model prediction (predict_optic_flow, run_model_on_stimuli)
   - Movie creation (make_flow_comparison_movie)
@@ -81,6 +81,40 @@ def prepare_xt(
         activity_sorted.shape[0],
     ]
     return activity_sorted, extent
+
+
+def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
+    """Apply :meth:`~neural_models.NeuralModel.apply_input_conv` at each time step.
+
+    Matches the input path inside :meth:`~neural_models.NeuralModel.predict` when
+    ``use_input_conv`` is True (spatial pre-filter, local contrast norm, temporal LRU).
+
+    If ``model.use_input_conv`` is False, returns *inputs* unchanged.
+
+    Parameters
+    ----------
+    model
+        A model with optional ``use_input_conv`` and ``apply_input_conv``.
+    inputs
+        Shape *(batch, time, num_columns)* on the model device/dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Same shape as *inputs* — drive fed to ``forward`` after filtering each step.
+    """
+    if not getattr(model, "use_input_conv", False):
+        return inputs
+    if inputs.ndim != 3:
+        raise ValueError(f"expected inputs (B, T, C), got shape {tuple(inputs.shape)}")
+    b, t_steps, c = inputs.shape
+    out = torch.empty_like(inputs)
+    state = None
+    with torch.no_grad():
+        for t in range(t_steps):
+            y, state = model.apply_input_conv(inputs[:, t, :], state)
+            out[:, t, :] = y
+    return out
 
 
 def interp_nan_column(

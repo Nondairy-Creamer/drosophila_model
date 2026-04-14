@@ -2,8 +2,8 @@
 Time traces of a central T4a and **all** presynaptic partners (every unique pre in
 ``synapse_counts_coo`` onto that T4a).  Stimulus is chosen with ``--stim-type``:
 
-* **edge** — same as ``edge_sweep``: light edges at 240°/s, right & up, FOV 180°,
-  0.5 s pre-stim (figures under ``figures/t4_input_traces/edge/``).
+* **edge** — same as ``edge_sweep``: light **and** dark edges at 240°/s, right & up,
+  FOV 180°, 0.5 s pre-stim (figures under ``figures/t4_input_traces/edge/``).
 * **sine** — same as ``sine_wave_sweep``: drifting sine (default 4 Hz, 30° wavelength,
   1 s stim, 0.5 s pre-stim; figures under ``figures/t4_input_traces/sine/``).
 
@@ -22,7 +22,7 @@ import argparse
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -41,7 +41,6 @@ from stimulus_utilities import make_lr_edge, make_ud_edge, make_lr_sine_wave, ma
 VELOCITY_DEG_S = 240.0
 FOV_DEG = 180.0
 PRE_STIM_TIME_S = 0.5
-EDGE_POLARITY = "light"
 
 # --- Sine defaults (match sine_wave_sweep / former t4_input_sine_traces) ---
 STIM_TIME_S_SINE_DEFAULT = 1.0
@@ -367,29 +366,10 @@ def run_t4_input_traces(
         stim_time = FOV_DEG / VELOCITY_DEG_S
         pre_stim = PRE_STIM_TIME_S
 
-        def gen_stim(direction: str) -> np.ndarray:
-            return generate_stimulus_edge(
-                direction,
-                sample_phi,
-                sample_theta,
-                VELOCITY_DEG_S,
-                EDGE_POLARITY,
-                dt,
-                stim_time,
-                pre_stim,
-            )
-
-        stim_labels = {
-            "right": f"Light edge {VELOCITY_DEG_S:g}°/s → (right)",
-            "up": f"Light edge {VELOCITY_DEG_S:g}°/s ↑ (up)",
-        }
-
-        def output_basename(direction: str) -> str:
-            return f"light_edge_240deg_s_{direction}"
-
         stim_summary_line = (
             f"Stimulus (edge): {VELOCITY_DEG_S:g} deg/s, FOV={FOV_DEG:g} deg, "
-            f"stim_time={stim_time:g} s, pre_stim={pre_stim:g} s, polarity={EDGE_POLARITY!r}"
+            f"stim_time={stim_time:g} s, pre_stim={pre_stim:g} s; "
+            f"polarities light + dark; directions right + up"
         )
     else:
         stim_time = stim_time_sine
@@ -426,10 +406,6 @@ def run_t4_input_traces(
             f"stim_time={stim_time:g} s, pre_stim={pre_stim:g} s"
         )
 
-    _probe = gen_stim("right")
-    num_time = _probe.shape[1]
-    time_s = np.arange(num_time, dtype=np.float64) * dt
-
     _, input_cols_arr = model.get_shared_columns(["L1", "L2", "L3"])
     input_cols = np.unique(input_cols_arr)
 
@@ -465,34 +441,93 @@ def run_t4_input_traces(
         raise RuntimeError("No output cell types available to plot.")
 
     directions = ["right", "up"]
-    traces: dict[str, dict[str, np.ndarray]] = {d: {} for d in directions}
+    edge_polarities = ("light", "dark")
 
-    for direction in directions:
-        stim_np = gen_stim(direction)
-        assert stim_np.shape[1] == num_time
-        batch = torch.tensor(stim_np, device=model.device, dtype=model.dtype)
-        with torch.no_grad():
-            pred = model.predict(
-                batch,
-                input_neurons=["L1", "L2", "L3"],
-                output_neurons=output_types,
-            )["outputs"]
+    if stim_type == "edge":
+        _probe = generate_stimulus_edge(
+            "right",
+            sample_phi,
+            sample_theta,
+            VELOCITY_DEG_S,
+            "light",
+            dt,
+            stim_time,
+            pre_stim,
+        )
+        num_time = _probe.shape[1]
+        traces_edge: dict[str, dict[str, dict[str, np.ndarray]]] = {
+            pol: {d: {} for d in directions} for pol in edge_polarities
+        }
+        for pol in edge_polarities:
+            for direction in directions:
+                stim_np = generate_stimulus_edge(
+                    direction,
+                    sample_phi,
+                    sample_theta,
+                    VELOCITY_DEG_S,
+                    pol,
+                    dt,
+                    stim_time,
+                    pre_stim,
+                )
+                assert stim_np.shape[1] == num_time
+                batch = torch.tensor(stim_np, device=model.device, dtype=model.dtype)
+                with torch.no_grad():
+                    pred = model.predict(
+                        batch,
+                        input_neurons=["L1", "L2", "L3"],
+                        output_neurons=output_types,
+                    )["outputs"]
 
-        for trace_key, _leg, ct, ni in plot_specs:
-            if ct not in output_types:
-                continue
-            if ni is None:
-                tr = pred["firing_rate"][ct][0, :, t4_col].detach().cpu().numpy()
-            else:
-                tr = trace_for_neuron(pred, model, ct, ni) * partner_path_scales[ni]
-            traces[direction][trace_key] = tr
+                for trace_key, _leg, ct, ni in plot_specs:
+                    if ct not in output_types:
+                        continue
+                    if ni is None:
+                        tr = pred["firing_rate"][ct][0, :, t4_col].detach().cpu().numpy()
+                    else:
+                        tr = trace_for_neuron(pred, model, ct, ni) * partner_path_scales[ni]
+                    traces_edge[pol][direction][trace_key] = tr
+        traces = traces_edge  # type: ignore[assignment]
+    else:
+        _probe = gen_stim("right")
+        num_time = _probe.shape[1]
+        traces_sin: dict[str, dict[str, np.ndarray]] = {d: {} for d in directions}
+        for direction in directions:
+            stim_np = gen_stim(direction)
+            assert stim_np.shape[1] == num_time
+            batch = torch.tensor(stim_np, device=model.device, dtype=model.dtype)
+            with torch.no_grad():
+                pred = model.predict(
+                    batch,
+                    input_neurons=["L1", "L2", "L3"],
+                    output_neurons=output_types,
+                )["outputs"]
+
+            for trace_key, _leg, ct, ni in plot_specs:
+                if ct not in output_types:
+                    continue
+                if ni is None:
+                    tr = pred["firing_rate"][ct][0, :, t4_col].detach().cpu().numpy()
+                else:
+                    tr = trace_for_neuron(pred, model, ct, ni) * partner_path_scales[ni]
+                traces_sin[direction][trace_key] = tr
+        traces = traces_sin  # type: ignore[assignment]
+
+    time_s = np.arange(num_time, dtype=np.float64) * dt
 
     partner_keys_all = [tk for tk, _l, ct, ni in plot_specs if ni is not None]
     peak_by_key: dict[str, float] = {}
     for lbl in partner_keys_all:
-        peak_by_key[lbl] = max(
-            float(np.nanmax(np.abs(traces[d][lbl]))) for d in directions
-        )
+        if stim_type == "edge":
+            peak_by_key[lbl] = max(
+                float(np.nanmax(np.abs(traces[pol][d][lbl])))  # type: ignore[index]
+                for pol in edge_polarities
+                for d in directions
+            )
+        else:
+            peak_by_key[lbl] = max(
+                float(np.nanmax(np.abs(traces[d][lbl]))) for d in directions  # type: ignore[index]
+            )
     if min_trace_peak <= 0.0:
         partner_keys_plot = partner_keys_all
     else:
@@ -509,14 +544,35 @@ def run_t4_input_traces(
     stim_start_s = pre_stim
     _, n_in_cycle = _color_cycle()
 
-    for direction in directions:
+    def _edge_stim_title(pol: str, direction: str) -> str:
+        lab = "Light" if pol == "light" else "Dark"
+        if direction == "right":
+            return f"{lab} edge {VELOCITY_DEG_S:g}°/s → (right)"
+        return f"{lab} edge {VELOCITY_DEG_S:g}°/s ↑ (up)"
+
+    plot_jobs: List[Tuple[Any, str, str]] = []
+    if stim_type == "edge":
+        for pol in edge_polarities:
+            for direction in directions:
+                plot_jobs.append(
+                    (
+                        traces[pol][direction],  # type: ignore[index]
+                        _edge_stim_title(pol, direction),
+                        f"{pol}_edge_240deg_s_{direction}",
+                    )
+                )
+    else:
+        for direction in directions:
+            plot_jobs.append((traces[direction], stim_labels[direction], output_basename(direction)))  # type: ignore[index]
+
+    for tr_dict, stim_line, base in plot_jobs:
         fig_t4, ax_t4 = plt.subplots(figsize=(10, 4))
-        t4_y = traces[direction]["T4a"]
+        t4_y = tr_dict["T4a"]
         ax_t4.plot(time_s, t4_y, color="k", linewidth=1.5, label="T4a FR")
         if partner_keys_plot:
             sum_linear = (
                 np.nansum(
-                    np.stack([traces[direction][k] for k in partner_keys_plot], axis=0),
+                    np.stack([tr_dict[k] for k in partner_keys_plot], axis=0),
                     axis=0,
                 )
                 + t4_offset
@@ -552,12 +608,11 @@ def run_t4_input_traces(
         ax_t4.set_xlabel("Time (s)")
         ax_t4.set_ylabel("Firing rate")
         ax_t4.set_title(
-            f"{stim_labels[direction]}\n"
+            f"{stim_line}\n"
             f"T4a neuron_idx={t4_idx}, column={t4_col} (L1/L2/L3 overlap column)",
         )
         ax_t4.set_xlim(time_s[0], time_s[-1])
         fig_t4.tight_layout()
-        base = output_basename(direction)
         path_t4 = fig_folder / f"{base}_t4a_firing_rate.png"
         fig_t4.savefig(path_t4, dpi=150)
         plt.close(fig_t4)
@@ -565,9 +620,9 @@ def run_t4_input_traces(
 
         fig_in, ax_in = plt.subplots(figsize=(10, 6))
         for j, lbl in enumerate(partner_keys_plot):
-            if lbl not in traces[direction]:
+            if lbl not in tr_dict:
                 continue
-            y = traces[direction][lbl]
+            y = tr_dict[lbl]
             color, ls = _color_and_linestyle(j, n_in_cycle)
             ax_in.plot(
                 time_s,
@@ -581,7 +636,7 @@ def run_t4_input_traces(
         ax_in.set_xlabel("Time (s)")
         ax_in.set_ylabel("W·g_out(pre)·g_in(T4a)·FR")
         ax_in.set_title(
-            f"{stim_labels[direction]}\n"
+            f"{stim_line}\n"
             f"Presynaptic paths onto T4a neuron_idx={t4_idx} "
             f"(showing {len(partner_keys_plot)}/{len(partner_keys_all)} partners, min-|peak|={min_trace_peak})",
         )
@@ -640,7 +695,7 @@ def main() -> None:
         type=str,
         choices=("edge", "sine"),
         default="edge",
-        help="Stimulus family: moving light edge (240°/s) or drifting sine grating. Default: %(default)s.",
+        help="Stimulus family: moving light+dark edges (240°/s, right & up) or drifting sine grating. Default: %(default)s.",
     )
     parser.add_argument(
         "--temporal-frequency",

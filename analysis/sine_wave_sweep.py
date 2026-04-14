@@ -5,7 +5,8 @@ Generates constant-velocity sine waves (left, right, up, down) at two
 wavelengths (30 deg, 60 deg) across a range of temporal frequencies.
 Velocity is scaled with wavelength so that temporal frequency is matched
 across spatial frequencies. Plots mean firing rate as a function of
-temporal frequency for each direction, plus XT plots at 8 Hz.
+temporal frequency for each direction, plus XT plots at 8 Hz (firing rates and,
+under ``xt_plots/``, stimulus after the model's input convolution when enabled).
 """
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ from matplotlib import pyplot as plt
 import data_utilities as du
 import neural_models as nm
 from stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave
-from analysis_utilities import prepare_xt
+from analysis_utilities import input_conv_stimulus_timecourse, prepare_xt
 
 
 NEURON_GROUPS = [
@@ -273,6 +274,32 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive):
             for i, (direction, wavelength, si) in enumerate(index_map):
                 if si == si_8hz:
                     batch_lookup[(direction, wavelength)] = i
+
+            conv_inputs = input_conv_stimulus_timecourse(model, all_stim_tensor)
+            use_conv = getattr(model, "use_input_conv", False)
+            stim_label = "Input-conv stimulus" if use_conv else "Raw stimulus (no input conv)"
+
+            for wavelength in wavelengths:
+                fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+                dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
+                            "up": axes[1, 0], "down": axes[1, 1]}
+                for direction, ax in dir_axes.items():
+                    bi = batch_lookup[(direction, wavelength)]
+                    stim_np = conv_inputs[bi].detach().cpu().numpy()
+                    sorted_data, extent = prepare_xt(stim_np, sample_phi)
+                    im = ax.imshow(sorted_data, aspect="auto",
+                                   extent=[extent[0], extent[1], extent[3], extent[2]],
+                                   cmap="viridis", origin="upper")
+                    ax.set_title(direction)
+                    ax.set_xlabel("φ (rad)")
+                    ax.set_ylabel("Time step")
+                    fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
+                fig.suptitle(f"{stim_label} — 8 Hz, λ={wavelength}°", fontsize=14)
+                plt.tight_layout()
+                save_path = xt_folder / f"stimulus_8hz_lambda{wavelength}_input_conv_xt.png"
+                fig.savefig(save_path, dpi=150)
+                plt.close(fig)
+                print(f"Saved {save_path}")
 
             xt_wavelength = wavelengths[0]
             for ct in all_neurons:
