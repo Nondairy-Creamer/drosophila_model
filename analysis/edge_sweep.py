@@ -12,9 +12,11 @@ and XT outputs.
 
 With ``--expressive``, plots the same neuron groups as :mod:`sine_wave_sweep`
 (T4, T5, L, C_CT1, Tm_A, Mi_Tm, T_other) when those types exist in the model.
-Also writes space–time (XT) plots at a fixed edge speed (default 240°/s, light
-edge): one PNG per cell type under ``edge_sweep/xt_plots/``, plus a stimulus
-XT after the model's input convolution (``stimulus_edge_*_input_conv_xt.png``).
+Also writes space–time (XT) plots at a fixed edge speed (default 240°/s) for
+both light and dark edges: one PNG per cell type under ``edge_sweep/xt_plots/``
+per polarity, plus stimulus XTs: raw drive before input convolution
+(``stimulus_edge_*_{light|dark}_raw_xt.png``), and after input convolution when
+the model uses it (``stimulus_edge_*_{light|dark}_input_conv_xt.png``).
 """
 import sys
 from pathlib import Path
@@ -47,9 +49,8 @@ NEURON_GROUPS = [
     ("T_other", ["T1", "T2", "T3"]),
 ]
 
-# XT plots: match a representative speed from the sweep (or nearest)
+# XT plots: match a representative speed from the sweep (or nearest); both polarities
 XT_EDGE_VELOCITY_DEG_S = 240.0
-XT_EDGE_POLARITY = "light"
 
 
 def generate_stimulus(direction, sample_phi, sample_theta, velocity, edge_polarity, dt, stim_time, pre_stim_time):
@@ -337,49 +338,21 @@ def main():
 
     conv_xt = input_conv_stimulus_timecourse(model, batch_xt_tensor)
     use_conv = getattr(model, "use_input_conv", False)
-    stim_label = "Input-conv stimulus" if use_conv else "Raw stimulus (no input conv)"
 
     xt_folder = fig_folder / "xt_plots"
     xt_folder.mkdir(parents=True, exist_ok=True)
 
+    batch_xt_np = np.asarray(batch_xt)
     conv_xt_np = conv_xt.detach().cpu().numpy()
-    fig_stim, axes_stim = plt.subplots(2, 2, figsize=(12, 10))
-    dir_axes_stim = {"right": axes_stim[0, 0], "left": axes_stim[0, 1],
-                     "up": axes_stim[1, 0], "down": axes_stim[1, 1]}
-    for direction, ax in dir_axes_stim.items():
-        bi = _single_velocity_batch_index(direction, XT_EDGE_POLARITY, directions, polarities)
-        stim_np = conv_xt_np[bi]
-        sorted_data, extent = prepare_xt(stim_np, sample_phi)
-        im = ax.imshow(
-            sorted_data,
-            aspect="auto",
-            extent=[extent[0], extent[1], extent[3], extent[2]],
-            cmap="viridis",
-            origin="upper",
-        )
-        ax.set_title(direction)
-        ax.set_xlabel("φ (rad)")
-        ax.set_ylabel("Time step")
-        fig_stim.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
-    fig_stim.suptitle(
-        f"{stim_label} — edge {xt_v:g}°/s, {XT_EDGE_POLARITY} (XT)",
-        fontsize=14,
-    )
-    plt.tight_layout()
-    path_stim = xt_folder / f"stimulus_edge_{int(xt_v)}deg_s_{XT_EDGE_POLARITY}_input_conv_xt.png"
-    fig_stim.savefig(path_stim, dpi=150)
-    plt.close(fig_stim)
-    print(f"Saved {path_stim}")
 
-    for ct in output_neurons:
-        fr_all = pred_xt["firing_rate"][ct]
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        dir_axes = {"right": axes[0, 0], "left": axes[0, 1], "up": axes[1, 0], "down": axes[1, 1]}
-
-        for direction, ax in dir_axes.items():
-            bi = _single_velocity_batch_index(direction, XT_EDGE_POLARITY, directions, polarities)
-            fr_np = fr_all[bi].cpu().numpy()
-            sorted_data, extent = prepare_xt(fr_np, sample_phi)
+    def _save_stimulus_xt_figure(data_np: np.ndarray, polarity: str, suptitle: str, path: Path) -> None:
+        fig_stim, axes_stim = plt.subplots(2, 2, figsize=(12, 10))
+        dir_axes_stim = {"right": axes_stim[0, 0], "left": axes_stim[0, 1],
+                         "up": axes_stim[1, 0], "down": axes_stim[1, 1]}
+        for direction, ax in dir_axes_stim.items():
+            bi = _single_velocity_batch_index(direction, polarity, directions, polarities)
+            stim_np = data_np[bi]
+            sorted_data, extent = prepare_xt(stim_np, sample_phi)
             im = ax.imshow(
                 sorted_data,
                 aspect="auto",
@@ -390,17 +363,58 @@ def main():
             ax.set_title(direction)
             ax.set_xlabel("φ (rad)")
             ax.set_ylabel("Time step")
-            fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
-
-        fig.suptitle(
-            f"{ct} — edge {xt_v:g}°/s, {XT_EDGE_POLARITY} edge (XT)",
-            fontsize=14,
-        )
+            fig_stim.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
+        fig_stim.suptitle(suptitle, fontsize=14)
         plt.tight_layout()
-        save_path = xt_folder / f"{ct}_velocity{int(xt_v)}deg_s_{XT_EDGE_POLARITY}_xt.png"
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved {save_path}")
+        fig_stim.savefig(path, dpi=150)
+        plt.close(fig_stim)
+        print(f"Saved {path}")
+
+    for xt_polarity in polarities:
+        _save_stimulus_xt_figure(
+            batch_xt_np,
+            xt_polarity,
+            f"Raw stimulus (before input convolution) — edge {xt_v:g}°/s, {xt_polarity} (XT)",
+            xt_folder / f"stimulus_edge_{int(xt_v)}deg_s_{xt_polarity}_raw_xt.png",
+        )
+        if use_conv:
+            _save_stimulus_xt_figure(
+                conv_xt_np,
+                xt_polarity,
+                f"Input-conv stimulus — edge {xt_v:g}°/s, {xt_polarity} (XT)",
+                xt_folder / f"stimulus_edge_{int(xt_v)}deg_s_{xt_polarity}_input_conv_xt.png",
+            )
+
+        for ct in output_neurons:
+            fr_all = pred_xt["firing_rate"][ct]
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            dir_axes = {"right": axes[0, 0], "left": axes[0, 1], "up": axes[1, 0], "down": axes[1, 1]}
+
+            for direction, ax in dir_axes.items():
+                bi = _single_velocity_batch_index(direction, xt_polarity, directions, polarities)
+                fr_np = fr_all[bi].cpu().numpy()
+                sorted_data, extent = prepare_xt(fr_np, sample_phi)
+                im = ax.imshow(
+                    sorted_data,
+                    aspect="auto",
+                    extent=[extent[0], extent[1], extent[3], extent[2]],
+                    cmap="viridis",
+                    origin="upper",
+                )
+                ax.set_title(direction)
+                ax.set_xlabel("φ (rad)")
+                ax.set_ylabel("Time step")
+                fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
+
+            fig.suptitle(
+                f"{ct} — edge {xt_v:g}°/s, {xt_polarity} edge (XT)",
+                fontsize=14,
+            )
+            plt.tight_layout()
+            save_path = xt_folder / f"{ct}_velocity{int(xt_v)}deg_s_{xt_polarity}_xt.png"
+            fig.savefig(save_path, dpi=150)
+            plt.close(fig)
+            print(f"Saved {save_path}")
 
 
 if __name__ == "__main__":
