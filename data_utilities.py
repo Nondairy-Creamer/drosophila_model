@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import tempfile
+import warnings
 from typing import Any, Dict, TYPE_CHECKING
 
 import numpy as np
@@ -29,7 +30,11 @@ except ImportError:  # pragma: no cover - tomli_w present per requirements for <
 def load_config(config_path: str = 'config.toml') -> dict:
     '''
     Load configuration by merging default config with user config.
-    
+
+    The GPU/CPU device for the model is ``config['model']['device']``. A
+    ``[run_info]`` table (if present) is only provenance from saved runs and is
+    not used to set the model device.
+
     Returns:
         Dictionary containing the merged configuration
     '''
@@ -46,9 +51,16 @@ def load_config(config_path: str = 'config.toml') -> dict:
     if user_path.exists():
         with open(user_path, 'rb') as f:
             user_config = tomllib.load(f)
-        
+
         # Recursively merge user config into default config
         config = _merge_configs(config, user_config)
+    elif config_path != 'config.toml':
+        warnings.warn(
+            f'User config file not found: {user_path.resolve()!s}. '
+            'Using only config_default.toml (no overlay). '
+            'Did you mean config.toml?',
+            stacklevel=2,
+        )
     
     # Convert "none" strings to Python None
     config = _convert_none_strings(config)

@@ -102,6 +102,9 @@ synapse_counts_df.to_parquet(connectome_folder / 'optic_lobes_synapse_counts.par
 
 # Add neurotransmitter to each neuron based on its cell type
 type_to_nt = cell_type_nt_df.set_index('cell_type')['neurotransmitter'].to_dict()
+type_to_nt['R1-6'] = 'HIS'
+type_to_nt['R7'] = 'HIS'
+type_to_nt['R8'] = 'HIS'
 visual_neurons_df['neurotransmitter'] = visual_neurons_df['type'].map(type_to_nt)
 
 # Save the column id to visual neurons for those neurons that have a column
