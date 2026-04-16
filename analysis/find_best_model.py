@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import re
 import sys
 from pathlib import Path
 from collections import defaultdict
@@ -14,9 +15,9 @@ NEAR_ZERO_THRESHOLD = 1e-6
 
 def find_best_models(models_dir=MODELS_DIR):
     """
-    Scan the models directory, group model folders by their timestamp prefix
-    (first 15 characters, e.g. '20260210_162742'), and for each group find
-    the folder with the lowest valid loss.
+    Scan the models directory, group model folders by their tag/timestamp prefix
+    (stripping any _gpuN_runN suffix), and for each group find the folder with
+    the lowest valid loss.
 
     Losses that are NaN, inf, or within 1e-6 of zero are ignored.
 
@@ -27,19 +28,19 @@ def find_best_models(models_dir=MODELS_DIR):
     if not models_dir.is_dir():
         raise ValueError(f"Models directory not found: {models_dir}")
 
-    # Collect all subdirectories that start with a digit (timestamp)
+    # Collect all subdirectories (skip hidden directories)
     all_folders = sorted(
         f for f in models_dir.iterdir()
-        if f.is_dir() and f.name[:1].isdigit()
+        if f.is_dir() and not f.name.startswith('.')
     )
 
     if not all_folders:
         raise ValueError(f"No model folders found in {models_dir}")
 
-    # Group by the first 15 characters of the folder name
+    # Group by stripping the _gpuN_runN suffix (if present) from the folder name
     groups = defaultdict(list)
     for folder in all_folders:
-        prefix = folder.name[:15]
+        prefix = re.sub(r'_gpu\d+_run\d+$', '', folder.name)
         groups[prefix].append(folder)
 
     results = {}
@@ -58,7 +59,16 @@ def find_best_models(models_dir=MODELS_DIR):
                 continue
 
             opt_data = torch.load(opt_path, map_location='cpu', weights_only=False)
-            min_loss = min(opt_data['loss'])
+            loss_data = opt_data['loss']
+            if isinstance(loss_data, dict):
+                component_arrays = [np.asarray(v, dtype=float) for v in loss_data.values() if v]
+                if not component_arrays:
+                    print(f"  {folder.name}: empty loss history, skipping")
+                    continue
+                total_loss = np.sum(component_arrays, axis=0)
+            else:
+                total_loss = np.asarray(loss_data, dtype=float)
+            min_loss = float(np.nanmin(total_loss))
 
             is_nan = np.isnan(min_loss)
             is_inf = np.isinf(min_loss)

@@ -1,9 +1,9 @@
 """
-Evaluate model loss with systematic silencing of L1, L2, and L3 neurons.
+Evaluate model loss with systematic neuron silencing.
 
 Loads a trained model and its saved stimuli, computes the baseline loss,
-then silences every non-empty combination of {L1, L2, L3} and reports the
-resulting loss.
+then silences every non-empty combination of {L1, L2, L3}, plus grouped
+T4 (T4a-d), T5 (T5a-d), and combined T4+T5 silencing.
 
 Usage:
     python analysis/silencing.py <model_folder>
@@ -21,64 +21,56 @@ import numpy as np
 
 import data_utilities as du
 import neural_models as nm
-from loss_functions import calc_loss_dict, combined_loss, mse_loss, cos_loss
-from training_utilities import _compute_odometry_loss
+import loss_functions as lf
 
 INPUT_NEURONS = ['L1', 'L2', 'L3']
+T4_NEURONS = ['T4a', 'T4b', 'T4c', 'T4d']
+T5_NEURONS = ['T5a', 'T5b', 'T5c', 'T5d']
 
 
 def compute_loss(model, cell_inputs, target, train_mask, config):
     """Compute the training loss for a model on saved data.
 
-    Automatically selects the correct loss path (odometry / decoder / cell-type)
-    based on the saved config and target format.
+    Uses the ``loss_components`` list from *config* to look up and call each
+    loss function by name from ``loss_functions``, mirroring the training loop.
     """
-    device = model.device
-    dtype = model.dtype
-
     time_mask = train_mask.any(dim=-1)
     loss_start_step = 0
     if not time_mask[:, 0].all():
         loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
 
-    fit_odometry = config['training'].get('fit_odometry', False)
-    loss_fn_name = config['training'].get('loss_fn', 'combined_loss')
-    loss_fn_map = {
-        'combined_loss': combined_loss,
-        'mse_loss': mse_loss,
-        'cos_loss': cos_loss,
-    }
-    loss_fn = loss_fn_map.get(loss_fn_name, combined_loss)
+    loss_names = config['training'].get('loss_components', ['flow_loss'])
 
     with torch.no_grad():
-        if fit_odometry and isinstance(target, dict) and 'rotation' in target:
-            return _compute_odometry_loss(
-                model, cell_inputs, target, train_mask, loss_start_step,
-            ).item()
+        if 'odometry_loss' in loss_names and isinstance(target, dict) and 'rotation' in target:
+            N = cell_inputs.shape[2] // 2
+            oob = ~train_mask.any(dim=1).any(dim=0)
+            pred_rot, pred_trans, right_res, left_res = \
+                model.estimate_ego_motion_from_image(
+                    cell_inputs[:, :, :N], cell_inputs[:, :, N:], oob_columns=oob)
+            outputs = {}
+            for key in right_res['outputs']:
+                if key in ('voltage', 'firing_rate'):
+                    continue
+                outputs[key] = torch.cat(
+                    [right_res['outputs'][key], left_res['outputs'][key]], dim=2)
+            outputs['pred_rotation'] = pred_rot
+            outputs['pred_translation'] = pred_trans
+        else:
+            input_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
+            result = model.predict(cell_inputs, input_neurons=input_neurons)
+            outputs = result['outputs']
 
-        input_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
-        result = model.predict(cell_inputs, input_neurons=input_neurons)
-        pred = result['outputs']
-
-        if model.has_decoder:
-            pred_dec = pred['decoder'][:, loss_start_step:].clone()
-            target_dec = target[:, loss_start_step:].clone()
-            invalid = ~train_mask[:, loss_start_step:].unsqueeze(-1).expand_as(pred_dec)
-            pred_dec[invalid] = float('nan')
-            target_dec[invalid] = float('nan')
-            return loss_fn(target_dec, pred_dec).item()
-
-        output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
-        pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()
-                     if k in output_neurons}
-        target_loss = {k: v[:, loss_start_step:] for k, v in target.items()
-                       if k in output_neurons}
-        return calc_loss_dict(loss_fn, pred_loss, target_loss).item()
+        loss = sum(
+            getattr(lf, n)(model, outputs, target, train_mask, loss_start_step)
+            for n in loss_names
+        ) / len(loss_names)
+        return loss.item()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Evaluate loss under systematic L1/L2/L3 silencing.",
+        description="Evaluate loss under systematic neuron silencing.",
     )
     parser.add_argument(
         "model_folder", type=str,
@@ -87,6 +79,14 @@ def main() -> None:
     parser.add_argument(
         "--device", type=str, default=None,
         help="Device override (default: from config)",
+    )
+    parser.add_argument(
+        "--num-stimuli", type=int, default=50,
+        help="Number of stimuli to randomly sample (default: 50, 0 = use all)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Random seed for stimulus sampling (default: 0)",
     )
     args = parser.parse_args()
 
@@ -126,48 +126,82 @@ def main() -> None:
     else:
         target = target.to(device=device, dtype=model.dtype)
 
+    # --- Subsample stimuli ---
+    num_stimuli = cell_inputs.shape[0]
+    if args.num_stimuli and args.num_stimuli < num_stimuli:
+        rng = np.random.default_rng(args.seed)
+        idx = rng.choice(num_stimuli, size=args.num_stimuli, replace=False)
+        idx.sort()
+        cell_inputs = cell_inputs[idx]
+        train_mask = train_mask[idx]
+        if isinstance(target, dict):
+            target = {k: (v[idx] if torch.is_tensor(v) else v) for k, v in target.items()}
+        else:
+            target = target[idx]
+        print(f"  Sampled {args.num_stimuli}/{num_stimuli} stimuli (seed={args.seed})")
+
     print(f"  cell_inputs shape: {cell_inputs.shape}")
 
     # --- Baseline loss (no silencing) ---
     baseline_loss = compute_loss(model, cell_inputs, target, train_mask, model_config)
     print(f"\nBaseline loss (no silencing): {baseline_loss:.6f}")
 
-    # --- Silencing combinations ---
-    silencing_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
-    if not silencing_neurons:
-        print("None of L1, L2, L3 found in model cell types.")
+    # --- Build silencing experiments ---
+    def present(neurons):
+        return [n for n in neurons if n in model.unique_cell_types]
+
+    silencing_groups = []
+
+    # All non-empty combinations of L1/L2/L3
+    input_neurons = present(INPUT_NEURONS)
+    for r in range(1, len(input_neurons) + 1):
+        for combo in combinations(input_neurons, r):
+            silencing_groups.append(list(combo))
+
+    # T4 as a group, T5 as a group, T4+T5 together
+    t4_present = present(T4_NEURONS)
+    t5_present = present(T5_NEURONS)
+    if t4_present:
+        silencing_groups.append(t4_present)
+    if t5_present:
+        silencing_groups.append(t5_present)
+    if t4_present and t5_present:
+        silencing_groups.append(t4_present + t5_present)
+
+    if not silencing_groups:
+        print("No silenceable neurons found in model cell types.")
         return
 
     original_output_strength = model.output_strength_log.data.clone()
+    original_input_strength = model.input_strength_log.data.clone()
 
     results = [("none", baseline_loss)]
 
-    all_combos = []
-    for r in range(1, len(silencing_neurons) + 1):
-        all_combos.extend(combinations(silencing_neurons, r))
-
-    for combo in all_combos:
-        combo_list = list(combo)
-        label = "+".join(combo_list)
+    for group in silencing_groups:
+        label = "+".join(group)
 
         model.output_strength_log.data.copy_(original_output_strength)
-        model.silence_neurons(combo_list)
+        model.input_strength_log.data.copy_(original_input_strength)
+        model.silence_neurons(group)
 
         loss = compute_loss(model, cell_inputs, target, train_mask, model_config)
         results.append((label, loss))
-        print(f"  Silenced {label:12s} -> loss = {loss:.6f}")
+        print(f"  Silenced {label:30s} -> loss = {loss:.6f}")
 
     # Restore original weights
     model.output_strength_log.data.copy_(original_output_strength)
+    model.input_strength_log.data.copy_(original_input_strength)
 
     # --- Summary table ---
-    print("\n" + "=" * 40)
-    print(f"{'Silenced':<16s} {'Loss':>12s} {'Δ Loss':>12s}")
-    print("-" * 40)
+    max_label = max(len(label) for label, _ in results)
+    width = max_label + 30
+    print("\n" + "=" * width)
+    print(f"{'Silenced':<{max_label}s} {'Loss':>12s} {'Δ Loss':>12s}")
+    print("-" * width)
     for label, loss in results:
         delta = loss - baseline_loss
-        print(f"{label:<16s} {loss:>12.6f} {delta:>+12.6f}")
-    print("=" * 40)
+        print(f"{label:<{max_label}s} {loss:>12.6f} {delta:>+12.6f}")
+    print("=" * width)
 
 
 if __name__ == "__main__":

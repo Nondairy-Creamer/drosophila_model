@@ -44,7 +44,7 @@ Key configuration arguments:
 | `nonlinearity` | `'Softplus'` | Activation function (any `torch.nn` class name, or `'identity'`) |
 | `dt` | `0.01` | Simulation timestep |
 | `count_threshold` | `2` | Minimum synapse count to keep a connection |
-| `decoder_type` | `'none'` | `'none'` or `'conv_2'` (adds a `MotionDecoder`) |
+| `readouts` | `[]` | List of readout class names: `'FlowNeuronReadout'`, `'FlowLinearReadout'`, `'FlowConv2Readout'`, `'MotionMagReadout'` |
 | `use_input_conv` | `True` | Whether to apply spatial/temporal input filtering |
 | `conv_size_x` | `5` | Hex-grid diameter for the input spatial convolution |
 | `num_temporal_modes` | `4` | Number of complex modes in the input temporal filter |
@@ -83,7 +83,7 @@ Subclasses must implement:
 | `predict(inputs, ...)` | Run the full simulation loop. Returns per-cell-type voltage/firing-rate traces, optional decoder output, and final state. |
 | `find_steady_state(...)` | Iterate the model with zero input until state converges; stores result in `self.steady_state`. |
 | `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` dispatches to the correct subclass via `MODEL_CLASS_REGISTRY`. |
-| `silence_neurons(names)` | Zero the output strength of specified cell types (for lesion experiments). |
+| `silence_neurons(names)` | Zero the input and output strength of specified cell types (for lesion experiments). |
 | `get_shared_columns(neuron_list)` | Find columns that contain all specified cell types; returns neuron and column index arrays. |
 | `estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline: run both eyes through the model, decode optic flow, then solve for rotation and translation. |
 | `estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | (static) Solve for 6-DOF ego-motion from optic flow via least-squares rotation estimation followed by SVD-based translation estimation. |

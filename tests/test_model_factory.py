@@ -25,10 +25,12 @@ def load_test_config() -> tuple[dict, Path]:
     return config, repo_root
 
 
-def build_model_from_test_config(decoder_type: str = 'conv_2', use_input_conv: bool = True):
+def build_model_from_test_config(readouts=None, use_input_conv=True):
+    if readouts is None:
+        readouts = ['FlowConv2Readout']
     config, repo_root = load_test_config()
     config["model"]["device"] = "cpu"
-    config["model"]["decoder_type"] = decoder_type
+    config["model"]["readouts"] = readouts
     config["model"]["use_input_conv"] = use_input_conv
 
     connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
@@ -61,7 +63,7 @@ def build_model_from_test_config(decoder_type: str = 'conv_2', use_input_conv: b
         count_threshold=config["model"]["synapse_count_threshold"],
         device=config["model"]["device"],
         dtype=config["model"]["dtype"],
-        decoder_type=config["model"]["decoder_type"],
+        readouts=config["model"]["readouts"],
         use_input_conv=config["model"]["use_input_conv"],
         dt=config["model"]["dt"],
         seed=0,

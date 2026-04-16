@@ -8,78 +8,7 @@ import tempfile
 import os
 from pathlib import Path
 
-from loss_functions import (
-    nannorm,
-    nanstd,
-    log_nanmean_exp,
-    corr_loss,
-    cos_loss,
-    mse_loss,
-    combined_loss,
-    calc_loss_dict,
-)
-
-
-def _normalized_mse(pred, target, eps=1e-8):
-    """MSE normalized by target variance (fraction of variance unexplained).
-
-    NaN entries in *target* are excluded from both MSE and variance.
-    """
-    valid = ~torch.isnan(target)
-    if not valid.any():
-        return pred.new_tensor(0.0)
-    p, t = pred[valid], target[valid]
-    return (p - t).pow(2).mean() / (t.var() + eps)
-
-
-def _cosine_loss(pred, target, eps=1e-8):
-    """Cosine distance treating the full batch x time trajectory as one vector.
-
-    Flattens all (batch, time, 3) entries into a single vector so that
-    per-timestep magnitude variation is preserved in the loss.  NaN and
-    near-zero target rows are masked before flattening.
-    """
-    pred_flat = pred.reshape(-1, pred.shape[-1])
-    target_flat = target.reshape(-1, target.shape[-1])
-    has_nan = torch.isnan(target_flat).any(dim=-1)
-    mag = target_flat.norm(dim=-1)
-    valid = (mag > eps) & ~has_nan
-    if not valid.any():
-        return pred.new_tensor(0.0)
-    p = pred_flat[valid].reshape(-1)
-    t = target_flat[valid].reshape(-1)
-    cos_sim = torch.dot(p, t) / (p.norm() * t.norm() + eps)
-    return 1.0 - cos_sim
-
-
-def odometry_loss(pred_rot, pred_trans, target_rot, target_trans, dt):
-    """Combined rate + position loss for ego-motion estimation.
-
-    Rotation uses normalized MSE (fraction of variance unexplained, 0-1 range).
-    Translation uses cosine distance (direction only, 0-1 range).  Both are
-    computed on instantaneous rates and on integrated positions; rotational
-    position is integrated via SO(3) composition (Rodrigues).  The four terms
-    are averaged.
-
-    Args:
-        pred_rot: (batch, T, 3) predicted rotation rate (deg/s).
-        pred_trans: (batch, T, 3) predicted translation rate.
-        target_rot: (batch, T, 3) target rotation rate (deg/s).
-        target_trans: (batch, T, 3) target translation rate.
-        dt: time step (seconds).
-    """
-    loss_rot_rate = _normalized_mse(pred_rot, target_rot)
-    loss_trans_rate = _cosine_loss(pred_trans, target_trans)
-
-    pred_rot_pos = nm.integrate_angular_velocity(pred_rot, dt)
-    target_rot_pos = nm.integrate_angular_velocity(target_rot, dt)
-    loss_rot_pos = _normalized_mse(pred_rot_pos, target_rot_pos)
-
-    pred_trans_pos = nm.integrate_translational_velocity(pred_trans, pred_rot, dt)
-    target_trans_pos = nm.integrate_translational_velocity(target_trans, target_rot, dt)
-    loss_trans_pos = _cosine_loss(pred_trans_pos, target_trans_pos)
-
-    return (loss_rot_rate + loss_trans_rate + loss_rot_pos + loss_trans_pos) / 4
+import loss_functions as lf
 
 
 class StimulusDataset(Dataset):
@@ -98,44 +27,19 @@ class StimulusDataset(Dataset):
             return self.inputs[idx], {k: v[idx] for k, v in self.target.items()}, self.train_mask[idx]
         return self.inputs[idx], self.target[idx], self.train_mask[idx]
 
-def _compute_odometry_loss(model, inputs_batch, target_batch, train_mask_batch, loss_start_step):
-    """Combined ego-motion + flow reconstruction loss."""
-    N = inputs_batch.shape[2] // 2
-    right_batch = inputs_batch[:, :, :N]
-    left_batch = inputs_batch[:, :, N:]
-    oob = ~train_mask_batch.any(dim=1).any(dim=0)
-    pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
-        right_batch, left_batch, oob_columns=oob)
-    pred_flow = torch.cat([right_res['outputs']['decoder'], left_res['outputs']['decoder']], dim=2)
 
-    target_rot = target_batch['rotation'][:, loss_start_step:]
-    target_trans = target_batch['translation'][:, loss_start_step:]
-    odom_loss = odometry_loss(
-        pred_rot[:, loss_start_step:], pred_trans[:, loss_start_step:],
-        target_rot, target_trans, model.dt,
-    )
+def train_model(model, inputs, target, output_neurons, input_neurons,
+                loss_components,
+                rng=np.random.default_rng(0), model_save_folder=None,
+                num_steps=100, save_every=100, alpha=1e-4,
+                clip_grad_norm=None, clip_grad_value=None,
+                reload_best_on_loss_jump=True,
+                patience=10, alpha_factor=0.5,
+                opt_state_dict=None, loss_history=None,
+                input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0,
+                batch_size=None, train_mask=None):
 
-    target_flow = target_batch['optic_flow'][:, loss_start_step:]
-    pred_flow_valid = pred_flow[:, loss_start_step:]
-    flow_mask = train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(target_flow)
-    valid_flow = flow_mask & ~torch.isnan(target_flow)
-    if valid_flow.any():
-        flow_loss = _normalized_mse(pred_flow_valid[valid_flow], target_flow[valid_flow])
-    else:
-        flow_loss = pred_flow.new_tensor(0.0)
-
-    return (odom_loss + flow_loss) / 2
-
-
-def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.random.default_rng(0), model_save_folder=None, num_steps=100, save_every=100, alpha=1e-4,
-                clip_grad_norm=None, clip_grad_value=None, reload_best_on_loss_jump=True, loss_fn=combined_loss,
-                patience=10, alpha_factor=0.5, opt_state_dict=None, loss_history=None,
-                sigma_lambda=0, peak_lambda=0, l1_lambda=0, 
-                input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0, random_flip_input=False,
-                batch_size=None, train_mask=None, fit_odometry=False):
-
-    assert sigma_lambda >= 0, 'lambdas must be positive'
-    assert peak_lambda >= 0, 'lambdas must be positive'
+    uses_two_eyes = 'odometry_loss' in loss_components
 
     if train_mask is None:
         train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
@@ -150,7 +54,14 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(model.device)
 
-    loss_plot = list(loss_history) if loss_history else []
+    reg_names = [name for name, mod in model._readout_modules.items()
+                 if getattr(mod, 'training_only', False)]
+    all_component_names = list(loss_components) + reg_names
+
+    if loss_history:
+        loss_plot = {name: list(loss_history.get(name, [])) for name in all_component_names}
+    else:
+        loss_plot = {name: [] for name in all_component_names}
 
     best_loss = torch.tensor(float('inf'), device=model.device, dtype=model.dtype)
     time_since_best = 0
@@ -172,6 +83,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
     while step < num_steps:
         epoch_start = time.time()
         epoch_losses = []
+        epoch_component_losses = {name: [] for name in all_component_names}
 
         for inputs_batch, target_batch, train_mask_batch in dataloader:
             if step >= num_steps:
@@ -198,44 +110,46 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             if not time_mask[:, 0].all():
                 loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
 
-            if fit_odometry:
-                loss = _compute_odometry_loss(model, inputs_batch, target_batch, train_mask_batch, loss_start_step)
-                pred = None
+            if uses_two_eyes:
+                N = inputs_batch.shape[2] // 2
+                right_batch = inputs_batch[:, :, :N]
+                left_batch = inputs_batch[:, :, N:]
+                oob = ~train_mask_batch.any(dim=1).any(dim=0)
+                pred_rot, pred_trans, right_res, left_res = \
+                    model.estimate_ego_motion_from_image(
+                        right_batch, left_batch, oob_columns=oob)
+
+                outputs = {}
+                for key in list(right_res['outputs'].keys()):
+                    if key in ('voltage', 'firing_rate'):
+                        continue
+                    r, l = right_res['outputs'][key], left_res['outputs'][key]
+                    if r.dim() < 2:
+                        outputs[key] = r
+                        continue
+                    if r.dim() == 2:
+                        r = r.unsqueeze(-1)
+                        l = l.unsqueeze(-1)
+                    outputs[key] = torch.cat([r, l], dim=2)
+                outputs['pred_rotation'] = pred_rot
+                outputs['pred_translation'] = pred_trans
             else:
-                result = model.predict(inputs_batch, input_neurons=cached_mappings['input_mapping'], output_neurons=cached_mappings['output_mapping'])
-                pred = result['outputs']
+                result = model.predict(
+                    inputs_batch,
+                    input_neurons=cached_mappings['input_mapping'],
+                    output_neurons=cached_mappings['output_mapping'])
+                outputs = result['outputs']
                 cached_mappings = result['mappings']
 
-                if model.has_decoder:
-                    pred_dec = pred['decoder'][:, loss_start_step:].clone()
-                    target_dec = target_batch[:, loss_start_step:].clone()
-                    invalid = ~train_mask_batch[:, loss_start_step:].unsqueeze(-1).expand_as(pred_dec)
-                    pred_dec[invalid] = float('nan')
-                    target_dec[invalid] = float('nan')
-                    loss = loss_fn(target_dec, pred_dec)
-                else:
-                    pred_loss = {k: v[:, loss_start_step:] for k, v in pred['firing_rate'].items()}
-                    target_loss = {k: v[:, loss_start_step:] for k, v in target_batch.items()}
-                    loss = calc_loss_dict(loss_fn, pred_loss, target_loss)
-
-            if sigma_lambda > 0:
-                max_sigma_penalty = torch.relu(model.calc_sigma_max(max_iter=10) - model.max_allowed_sigma)**2
-                loss = loss + sigma_lambda * max_sigma_penalty
-
-            if peak_lambda > 0 and not fit_odometry:
-                peak_val = torch.stack([
-                    log_nanmean_exp(v)
-                    for v in pred['firing_rate'].values()
-                ]).mean()
-                loss = loss + peak_lambda * peak_val
-
-            if l1_lambda > 0:
-                input_l1 = model.input_strength_log.exp().mean()
-                output_l1 = model.output_strength_log.exp().mean()
-                loss = loss + l1_lambda * (input_l1 + output_l1) / 2
-                if model.has_decoder:
-                    decoder_l1 = torch.stack([p.abs().mean() for p in model.decoder.conv_layers.parameters()]).mean()
-                    loss = loss + l1_lambda * decoder_l1
+            component_vals = {
+                name: getattr(lf, name)(model, outputs, target_batch,
+                                        train_mask_batch, loss_start_step)
+                for name in loss_components
+            }
+            for name, mod in model._readout_modules.items():
+                if getattr(mod, 'training_only', False) and name in outputs:
+                    component_vals[name] = outputs[name]
+            loss = sum(component_vals.values())
 
             if torch.isnan(loss):
                 print(f'Warning: NaN loss at step {step + 1}, skipping gradient update')
@@ -249,6 +163,8 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                     torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_grad_value)
                 opt.step()
                 epoch_losses.append(loss.detach())
+                for name, val in component_vals.items():
+                    epoch_component_losses[name].append(val.detach())
 
             step += 1
 
@@ -256,8 +172,11 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         epoch += 1
 
         if epoch_losses:
+            for name in all_component_names:
+                vals = epoch_component_losses[name]
+                if vals:
+                    loss_plot[name].append(torch.stack(vals).mean().item())
             epoch_avg = torch.stack(epoch_losses).mean()
-            loss_plot.append(epoch_avg.item())
             if epoch_avg < best_loss:
                 best_loss = epoch_avg.detach()
                 time_since_best = 0
@@ -266,7 +185,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
                     opt_path = Path(model_save_folder / 'model_opt.pt')
                     opt_payload = {
                         'optimizer_state_dict': opt.state_dict(),
-                        'loss': loss_plot,
+                        'loss': {k: list(v) for k, v in loss_plot.items()},
                         'step': step
                     }
                     try:
@@ -323,7 +242,16 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
             pu.plot_loss(loss_plot, save_folder=model_save_folder)
 
         epoch_loss_str = f'{epoch_avg.item():.4f}' if epoch_losses else 'NaN'
-        print(f'epoch {epoch} | steps {step}/{num_steps} | loss = {epoch_loss_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
+        comp_str = ''
+        if epoch_losses:
+            comp_parts = []
+            for name in all_component_names:
+                vals = epoch_component_losses[name]
+                if vals:
+                    avg = torch.stack(vals).mean().item()
+                    comp_parts.append(f'{name}={avg:.4f}')
+            comp_str = ' (' + ', '.join(comp_parts) + ')'
+        print(f'epoch {epoch} | steps {step}/{num_steps} | loss = {epoch_loss_str}{comp_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
 
     return model, loss_plot, opt.state_dict(), {
         "best_loss": float(best_loss.item()),
@@ -332,4 +260,3 @@ def train_model(model, inputs, target, output_neurons, input_neurons, rng=np.ran
         "last_reload_state": last_reload_state,
         "last_reload_opt_state": last_reload_opt_state,
     }
-

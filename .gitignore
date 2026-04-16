@@ -9,4 +9,6 @@ __pycache__/
 logs/*
 drone/*
 scratch*
+*/.log
+
 *.lyx#

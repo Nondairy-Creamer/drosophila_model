@@ -3,7 +3,7 @@ Shared utilities for analysis scripts.
 
 Provides:
   - Matplotlib helpers (fig_to_rgb, centered_norm)
-  - Data prep (prepare_xt, interp_nan_column)
+  - Data prep (prepare_xt, input_conv_stimulus_timecourse, interp_nan_column)
   - Hex grid (hex_grid_points)
   - Model prediction (predict_optic_flow, run_model_on_stimuli)
   - Movie creation (make_flow_comparison_movie)
@@ -17,12 +17,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
+import pandas as pd
 import torch
 
 import data_utilities as du
 import neural_models as nm
 import stimulus_utilities as su
 
+
+def get_flow_key(model):
+    """Return the output key for the first flow (eye-asymmetric) readout."""
+    return next(
+        (k for k, m in model._readout_modules.items() if m.predicts_flow),
+        None,
+    )
 
 
 
@@ -34,9 +42,8 @@ import stimulus_utilities as su
 def fig_to_rgb(fig) -> np.ndarray:
     """Convert a matplotlib figure to an RGB numpy array *(H, W, 3)*."""
     fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.asarray(fig.canvas.buffer_rgba())
-    return np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()
+    rgba = np.asarray(fig.canvas.buffer_rgba())
+    return rgba[..., :3].copy()
 
 
 def centered_norm(data: np.ndarray) -> tuple[float, float]:
@@ -74,6 +81,40 @@ def prepare_xt(
         activity_sorted.shape[0],
     ]
     return activity_sorted, extent
+
+
+def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
+    """Apply :meth:`~neural_models.NeuralModel.apply_input_conv` at each time step.
+
+    Matches the input path inside :meth:`~neural_models.NeuralModel.predict` when
+    ``use_input_conv`` is True (spatial pre-filter, local contrast norm, temporal LRU).
+
+    If ``model.use_input_conv`` is False, returns *inputs* unchanged.
+
+    Parameters
+    ----------
+    model
+        A model with optional ``use_input_conv`` and ``apply_input_conv``.
+    inputs
+        Shape *(batch, time, num_columns)* on the model device/dtype.
+
+    Returns
+    -------
+    torch.Tensor
+        Same shape as *inputs* — drive fed to ``forward`` after filtering each step.
+    """
+    if not getattr(model, "use_input_conv", False):
+        return inputs
+    if inputs.ndim != 3:
+        raise ValueError(f"expected inputs (B, T, C), got shape {tuple(inputs.shape)}")
+    b, t_steps, c = inputs.shape
+    out = torch.empty_like(inputs)
+    state = None
+    with torch.no_grad():
+        for t in range(t_steps):
+            y, state = model.apply_input_conv(inputs[:, t, :], state)
+            out[:, t, :] = y
+    return out
 
 
 def interp_nan_column(
@@ -152,11 +193,12 @@ def predict_optic_flow(
     model: nm.NeuralModel, stimulus: torch.Tensor
 ) -> torch.Tensor:
     """Run the model and return predicted optic flow."""
+    flow_key = get_flow_key(model)
+    if flow_key is None:
+        raise ValueError("Model has no flow readout configured. Cannot predict optic flow.")
     with torch.no_grad():
-        if model.has_decoder:
-            outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']
-            return outputs["decoder"]
-        raise ValueError("Model has no decoder (decoder_type='none'). Cannot predict optic flow.")
+        outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']
+        return outputs[flow_key]
 
 
 def run_model_on_stimuli(
@@ -263,6 +305,124 @@ def run_model_on_stimuli(
 
 
 # ---------------------------------------------------------------------------
+# Optic flow generation
+# ---------------------------------------------------------------------------
+
+
+def cross_matrix(a):
+    """
+    a: (..., 3) tensor
+    returns (..., 3, 3) skew-symmetric matrix [a]_x
+    """
+    ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+    O = torch.zeros_like(ax)
+    return torch.stack([
+        torch.stack([   O, -az,  ay], dim=-1),
+        torch.stack([  az,   O, -ax], dim=-1),
+        torch.stack([ -ay,  ax,   O], dim=-1)
+    ], dim=-2)
+
+
+def load_viewing_directions(connectome_folder: str | Path | None = None):
+    """Load column info with theta/phi viewing directions for both hemispheres.
+
+    Args:
+        connectome_folder: Path to connectome data directory.  When *None*,
+            defaults to ``../connectome_data`` relative to this file.
+
+    Returns:
+        phi, theta: tensors of shape (2*N_columns,)
+    """
+    if connectome_folder is None:
+        connectome_folder = Path(__file__).parent.parent / 'connectome_data'
+    connectome_folder = Path(connectome_folder)
+    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+
+    theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)
+    phi_half = torch.tensor(column_info_df['phi'].values, dtype=torch.float32)
+
+    theta = torch.cat([theta_half, theta_half])
+    phi = torch.cat([phi_half, -phi_half])
+    return phi, theta
+
+
+def generate_optic_flow(phi, theta, omega, T, Z):
+    """
+    Generate synthetic optic flow given rotation omega, translation T, and depths Z.
+
+    Args:
+        phi: (N,) azimuthal angles
+        theta: (N,) polar angles
+        omega: (3,) or (T, 3) rotation vector(s)
+        T: (3,) or (T, 3) translation vector(s)
+        Z: (N,) or scalar depth values
+
+    Returns:
+        u_right: (N,) or (T, N) arc length / s right
+        u_up: (N,) or (T, N) arc length / s up
+        When omega/T are (3,), returns (N,). When (T, 3), returns (T, N).
+    """
+    N = theta.shape[0]
+
+    if omega.dim() != T.dim():
+        raise ValueError(f"omega and T must have the same number of dimensions, "
+                         f"got omega: {omega.shape} and T: {T.shape}")
+    single_timepoint = omega.dim() == 1
+    if single_timepoint:
+        omega = omega.unsqueeze(0)  # (1, 3)
+        T = T.unsqueeze(0)          # (1, 3)
+
+    # Convert to 3D viewing directions (N, 3)
+    x = torch.stack((
+        torch.sin(theta) * torch.cos(phi),
+        torch.sin(theta) * torch.sin(phi),
+        torch.cos(theta)
+    ), dim=1)
+
+    # Basis vectors on the sphere
+    e_theta = torch.stack((
+        torch.cos(theta) * torch.cos(phi),
+        torch.cos(theta) * torch.sin(phi),
+        -torch.sin(theta)
+    ), dim=1)
+
+    e_phi = torch.stack((
+        -torch.sin(phi),
+        torch.cos(phi),
+        torch.zeros_like(phi)
+    ), dim=1)
+
+    # Rotation contribution: u = -Ω × x = x × Ω = [x]_× Ω
+    # Physical: leftward rotation (positive omega_z) → rightward image motion (positive d_phi)
+    A = cross_matrix(x)  # (N, 3, 3)
+    u_rot = torch.einsum('nij,tj->tni', A, omega)  # (T, N, 3)
+
+    # Translation contribution: u_trans = -(1/Z) * Pi * T
+    # where Pi = I - x x^T (projection onto tangent plane)
+    outer = x.unsqueeze(2) @ x.unsqueeze(1)  # (N, 3, 3)
+    I = torch.eye(3, device=phi.device, dtype=phi.dtype).expand(N, 3, 3)
+    Pi = I - outer
+
+    Pi_T = torch.einsum('nij,tj->tni', Pi, T)  # (T, N, 3)
+    if torch.is_tensor(Z) and Z.dim() > 0:
+        u_trans = -Pi_T / Z.unsqueeze(0).unsqueeze(-1)  # (T, N, 3)
+    else:
+        u_trans = -Pi_T / Z  # (T, N, 3)
+
+    u = u_rot + u_trans  # (T, N, 3)
+
+    # Project onto spherical basis to get angular flow
+    u_right = -(u * e_phi).sum(dim=-1)   # (T, N)
+    u_up = -(u * e_theta).sum(dim=-1)    # (T, N)
+
+    if single_timepoint:
+        u_right = u_right.squeeze(0)
+        u_up = u_up.squeeze(0)
+
+    return u_right, u_up
+
+
+# ---------------------------------------------------------------------------
 # Flow coordinate helpers
 # ---------------------------------------------------------------------------
 
@@ -301,6 +461,70 @@ def angular_flow_to_cartesian_xz(
     v_z = flow_v * sin_theta
 
     return v_x, v_z
+
+
+def flow_direction_colors(u, v, max_mag=None):
+    """RGBA colors encoding direction as hue and amplitude as saturation.
+
+    Parameters
+    ----------
+    u, v : array-like, same shape
+        Cartesian flow components (e.g. vx, vz from quiver).
+    max_mag : float or None
+        Saturation normalisation ceiling.  ``None`` → 99th percentile.
+
+    Returns
+    -------
+    colors : (*shape, 4) RGBA array
+    max_mag : float — the normalisation value actually used
+    """
+    from matplotlib.colors import hsv_to_rgb
+
+    u = np.asarray(u, dtype=float)
+    v = np.asarray(v, dtype=float)
+    angle = np.arctan2(v, u)
+    hue = (angle / (2 * np.pi)) % 1.0
+
+    mag = np.hypot(u, v)
+    if max_mag is None:
+        finite = mag[np.isfinite(mag)]
+        max_mag = float(np.percentile(finite, 99)) if finite.size > 0 and finite.max() > 0 else 1.0
+    sat = np.clip(mag / max(max_mag, 1e-9), 0, 1)
+
+    hsv = np.stack([hue, sat, np.ones_like(hue)], axis=-1)
+    rgb = hsv_to_rgb(hsv)
+    return np.concatenate([rgb, np.ones(rgb.shape[:-1] + (1,))], axis=-1), max_mag
+
+
+def update_direction_quiver(q, u, v, max_mag):
+    """Update a direction-colored quiver's geometry and colors."""
+    q.set_UVC(u, v)
+    colors, _ = flow_direction_colors(u, v, max_mag)
+    q.set_facecolor(colors)
+    q.set_edgecolor(colors)
+
+
+def add_direction_colorwheel(fig, rect=None):
+    """Add a small HSV colour wheel showing the direction-to-hue mapping."""
+    from matplotlib.colors import hsv_to_rgb
+
+    if rect is None:
+        rect = [0.87, 0.87, 0.11, 0.11]
+    ax_cw = fig.add_axes(rect, projection='polar')
+    n = 256
+    theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    width = 2 * np.pi / n
+    hues = (theta / (2 * np.pi)) % 1.0
+    colors = hsv_to_rgb(np.stack([hues, np.ones(n), np.ones(n)], axis=-1))
+    ax_cw.bar(theta, 1, width=width, bottom=0.0, color=colors,
+              edgecolor='none', linewidth=0)
+    ax_cw.set_yticks([])
+    ax_cw.set_xticks([0, np.pi / 2, np.pi, 3 * np.pi / 2])
+    ax_cw.set_xticklabels(['\u2192', '\u2191', '\u2190', '\u2193'], fontsize=8)
+    ax_cw.tick_params(pad=1)
+    ax_cw.grid(False)
+    ax_cw.spines['polar'].set_visible(False)
+    return ax_cw
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +592,10 @@ def make_flow_comparison_movie(
         cell_x, cell_y, cell_z,
     )
 
-    true_magnitude = np.hypot(true_flow_vx, true_flow_vz)
-    finite_true_mag = true_magnitude[np.isfinite(true_magnitude)]
-    if finite_true_mag.size > 0 and finite_true_mag.max() > 0:
-        true_max_mag = np.percentile(finite_true_mag, 99)
-    else:
-        true_max_mag = 1.0
-    true_flow_norm = mcolors.Normalize(vmin=0.0, vmax=true_max_mag)
+    _, true_max_mag = flow_direction_colors(
+        np.nan_to_num(true_flow_vx, nan=0.0),
+        np.nan_to_num(true_flow_vz, nan=0.0),
+    )
 
     has_pred = pred_flow is not None
     has_filtered = filtered_stimulus is not None
@@ -383,13 +604,10 @@ def make_flow_comparison_movie(
             pred_flow[:, :, 0], pred_flow[:, :, 1],
             cell_x, cell_y, cell_z,
         )
-        pred_magnitude = np.hypot(pred_flow_vx, pred_flow_vz)
-        finite_pred_mag = pred_magnitude[np.isfinite(pred_magnitude)]
-        if finite_pred_mag.size > 0 and finite_pred_mag.max() > 0:
-            pred_max_mag = np.percentile(finite_pred_mag, 99)
-        else:
-            pred_max_mag = 1.0
-        pred_flow_norm = mcolors.Normalize(vmin=0.0, vmax=pred_max_mag)
+        _, pred_max_mag = flow_direction_colors(
+            np.nan_to_num(pred_flow_vx, nan=0.0),
+            np.nan_to_num(pred_flow_vz, nan=0.0),
+        )
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         ax_bottom_left = axes[1, 0]
@@ -447,47 +665,36 @@ def make_flow_comparison_movie(
 
     true_arrow_scale = 0.2 / true_max_mag if true_max_mag > 0 else 1.0
 
-    # Replace NaN in flow data with 0 so quiver arrows render correctly
     true_flow_vx = np.nan_to_num(true_flow_vx, nan=0.0)
     true_flow_vz = np.nan_to_num(true_flow_vz, nan=0.0)
-    true_magnitude = np.nan_to_num(true_magnitude, nan=0.0)
 
+    true_colors_0, _ = flow_direction_colors(true_flow_vx[0, :], true_flow_vz[0, :], true_max_mag)
     q_true = ax_true.quiver(
-        cell_x,
-        cell_z,
-        true_flow_vx[0, :],
-        true_flow_vz[0, :],
-        true_magnitude[0, :],
-        cmap="viridis",
-        norm=true_flow_norm,
-        angles="xy",
-        scale_units="xy",
-        scale=1 / true_arrow_scale,
-        width=0.003,
+        cell_x, cell_z,
+        true_flow_vx[0, :], true_flow_vz[0, :],
+        angles="xy", scale_units="xy",
+        scale=1 / true_arrow_scale, width=0.003,
     )
+    q_true.set_facecolor(true_colors_0)
+    q_true.set_edgecolor(true_colors_0)
     ax_true.set_title("True Optic Flow")
-    fig.colorbar(q_true, ax=ax_true, label="magnitude")
 
     if has_pred:
         pred_arrow_scale = 0.2 / pred_max_mag if pred_max_mag > 0 else 1.0
         pred_flow_vx = np.nan_to_num(pred_flow_vx, nan=0.0)
         pred_flow_vz = np.nan_to_num(pred_flow_vz, nan=0.0)
-        pred_magnitude = np.nan_to_num(pred_magnitude, nan=0.0)
+        pred_colors_0, _ = flow_direction_colors(pred_flow_vx[0, :], pred_flow_vz[0, :], pred_max_mag)
         q_pred = ax_pred.quiver(
-            cell_x,
-            cell_z,
-            pred_flow_vx[0, :],
-            pred_flow_vz[0, :],
-            pred_magnitude[0, :],
-            cmap="viridis",
-            norm=pred_flow_norm,
-            angles="xy",
-            scale_units="xy",
-            scale=1 / pred_arrow_scale,
-            width=0.003,
+            cell_x, cell_z,
+            pred_flow_vx[0, :], pred_flow_vz[0, :],
+            angles="xy", scale_units="xy",
+            scale=1 / pred_arrow_scale, width=0.003,
         )
+        q_pred.set_facecolor(pred_colors_0)
+        q_pred.set_edgecolor(pred_colors_0)
         ax_pred.set_title("Predicted Optic Flow")
-        fig.colorbar(q_pred, ax=ax_pred, label="magnitude")
+
+    add_direction_colorwheel(fig)
 
     plt.tight_layout()
 
@@ -504,16 +711,10 @@ def make_flow_comparison_movie(
             if sc_filt is not None:
                 sc_filt.set_facecolors(_masked_rgba(filtered_stimulus[t, :], mask_t, gray_cmap, filt_norm))
 
-            vx_true_t = true_flow_vx[t, :]
-            vz_true_t = true_flow_vz[t, :]
-            mag_true_t = np.hypot(vx_true_t, vz_true_t)
-            q_true.set_UVC(vx_true_t, vz_true_t, mag_true_t)
+            update_direction_quiver(q_true, true_flow_vx[t, :], true_flow_vz[t, :], true_max_mag)
 
             if has_pred:
-                vx_pred_t = pred_flow_vx[t, :]
-                vz_pred_t = pred_flow_vz[t, :]
-                mag_pred_t = np.hypot(vx_pred_t, vz_pred_t)
-                q_pred.set_UVC(vx_pred_t, vz_pred_t, mag_pred_t)
+                update_direction_quiver(q_pred, pred_flow_vx[t, :], pred_flow_vz[t, :], pred_max_mag)
 
             frame_title = (
                 f"Stimulus ({stim_name}) frame {t+1}/{num_time}"

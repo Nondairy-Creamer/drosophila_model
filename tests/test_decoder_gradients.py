@@ -6,7 +6,7 @@ from tests.test_model_factory import build_model_from_test_config
 
 def test_model_gradients():
     model, _, input_neurons, _ = build_model_from_test_config(
-        decoder_type='conv_2',
+        readouts=['FlowConv2Readout'],
         use_input_conv=True,
     )
     model.train()
@@ -14,9 +14,9 @@ def test_model_gradients():
     torch.manual_seed(42)
     inputs = torch.randn((1, 20, model.num_columns), dtype=model.dtype, device=model.device)
     outputs = model.predict(inputs, input_neurons=input_neurons, output_neurons=model.unique_cell_types.tolist())['outputs']
-    target = torch.zeros_like(outputs["decoder"]) + 1
+    target = torch.zeros_like(outputs["FlowConv2Readout"]) + 1
 
-    loss = lf.mse_loss(target, outputs["decoder"])
+    loss = lf.mse_loss(target, outputs["FlowConv2Readout"])
     loss.backward()
 
     grad_nonzero = {}

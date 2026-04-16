@@ -8,6 +8,7 @@ each with a different random seed. All runs are executed in parallel.
 Usage:
     python submit_runs.py --runs-per-gpu 4
     python submit_runs.py --runs-per-gpu 10 --base-seed 100
+    python submit_runs.py --runs-per-gpu 4 --tag my_experiment
 """
 
 import torch
@@ -119,7 +120,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     return process, log_file
 
 
-def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py', model_path=None):
+def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py', model_path=None, tag=None):
     """
     Submit multiple training runs across available GPUs.
     
@@ -128,10 +129,10 @@ def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py', model_p
         base_seed: Base seed value (each run gets base_seed + run_index)
         script_path: Path to the run_model.py script
         model_path: Optional path to existing model folder to load
+        tag: Optional tag to use instead of the auto-generated timestamp
     """
-    # Generate a single timestamp for all runs in this batch
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    print(f"Using timestamp for all runs: {timestamp}")
+    timestamp = tag if tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
+    print(f"Using tag for all runs: {timestamp}")
     
     # Detect available GPUs
     gpus = get_available_gpus()
@@ -247,6 +248,13 @@ def main():
     )
     
     parser.add_argument(
+        '--tag',
+        type=str,
+        default=None,
+        help='Tag to use instead of the auto-generated timestamp for naming runs'
+    )
+    
+    parser.add_argument(
         '--foreground', '--fg',
         action='store_true',
         default=False,
@@ -294,7 +302,8 @@ def main():
         runs_per_gpu=args.runs_per_gpu,
         base_seed=args.base_seed,
         script_path=str(script_path),
-        model_path=model_path
+        model_path=model_path,
+        tag=args.tag
     )
 
 

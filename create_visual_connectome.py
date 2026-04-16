@@ -111,9 +111,12 @@ visual_neurons_df['neurotransmitter'] = visual_neurons_df['type'].map(type_to_nt
 columns_df = columns_df[columns_df.root_id.isin(model_root_ids)]
 visual_neurons_df['column_id'] = np.nan
 row_pos = pd.Index(visual_neurons_df.root_id).get_indexer(columns_df.root_id)
-row_pos = row_pos[row_pos >= 0]  # don't index into neurons that don't have a column
+valid_mask = row_pos >= 0
+row_pos = row_pos[valid_mask]
 col_idx = visual_neurons_df.columns.get_loc('column_id')
-visual_neurons_df.iloc[row_pos, col_idx] = columns_df['column_id'].to_numpy().astype(int)
+column_ids = columns_df['column_id'].to_numpy()[valid_mask]
+notnan = ~np.isnan(column_ids)
+visual_neurons_df.iloc[row_pos[notnan], col_idx] = column_ids[notnan].astype(int)
 visual_neurons_df['column_index'] = visual_neurons_df['column_id'] - 1
 
 # save the cell info (includes neurotransmitter per neuron)

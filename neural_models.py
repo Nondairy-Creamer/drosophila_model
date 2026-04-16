@@ -350,143 +350,6 @@ class TemporalLRU(torch.nn.Module):
         return modes, feedthrough
 
 
-class MotionDecoder(torch.nn.Module):
-    """N-layer hex-grid convolutional decoder: firing rates -> optic flow.
-
-    Each entry in *num_channels* adds a ``NeuralModelConv`` layer.  All layers
-    except the last are followed by BatchNorm + softplus.  The final layer's
-    first two channels are divided by softplus of the third to produce 2-D
-    optic flow per column.
-
-    Args:
-        num_channels: List of output channel counts, one per conv layer.
-        conv_sizes: List of hex-grid diameters (odd ints), same length as
-            *num_channels*.
-        neurons_to_decode: Ordered list of cell-type names used as decoder
-            input features.
-        column_p_q: ``(num_columns, 2)`` p,q lattice coordinates.
-        cell_types: Per-neuron cell type array (length *num_neurons*).
-        column_indices: Per-neuron column index array (length *num_neurons*).
-        num_neurons: Total neuron count in the model.
-        num_columns: Total column count in the model.
-        denom_eps: Clamping floor for the normalising denominator.
-    """
-
-    def __init__(self, num_channels, conv_sizes, neurons_to_decode,
-                 column_p_q, cell_types, column_indices, num_neurons,
-                 num_columns, denom_eps=1e-2, device=None, dtype=None):
-        super().__init__()
-        if len(num_channels) != len(conv_sizes):
-            raise ValueError("num_channels and conv_sizes must have the same length.")
-        self.denom_eps = denom_eps
-        self.neurons_to_decode = list(neurons_to_decode)
-        self.conv_sizes = list(conv_sizes)
-
-        self._build_column_to_neuron_mapping(
-            cell_types, column_indices, num_neurons, num_columns, device,
-        )
-
-        num_decoder_neuron_types = len(self.neurons_to_decode)
-        in_features = num_decoder_neuron_types
-        self.conv_layers = torch.nn.ModuleList()
-        self.batch_norms = torch.nn.ModuleList()
-        for i, (channels, csz) in enumerate(zip(num_channels, conv_sizes)):
-            self.conv_layers.append(NeuralModelConv(
-                in_features=in_features,
-                out_features=channels,
-                conv_size=csz,
-                column_p_q=column_p_q,
-                device=device,
-                dtype=dtype,
-            ))
-            if i < len(num_channels) - 1:
-                self.batch_norms.append(
-                    torch.nn.BatchNorm1d(channels).to(device=device, dtype=dtype)
-                )
-            in_features = channels
-
-    # ------------------------------------------------------------------
-    # Neuron-to-column mapping (built once at init)
-    # ------------------------------------------------------------------
-
-    def _build_column_to_neuron_mapping(self, cell_types, column_indices,
-                                        num_neurons, num_columns, device):
-        """Create ``column_to_decoder_neurons`` buffer.
-
-        Shape ``(num_columns, num_decoder_neuron_types)`` with neuron indices;
-        ``-1`` marks absent neuron types in a given column.
-        """
-        cell_types = np.asarray(cell_types)
-        column_indices = np.asarray(column_indices, dtype=np.float64)
-        cell_type_to_idx = {ct: i for i, ct in enumerate(self.neurons_to_decode)}
-        num_types = len(self.neurons_to_decode)
-
-        decoder_mask = np.zeros(num_neurons, dtype=bool)
-        for ct in self.neurons_to_decode:
-            decoder_mask |= (cell_types == ct)
-
-        mapping = np.full((num_columns, num_types), -1, dtype=np.int64)
-        for neuron_idx in np.where(decoder_mask)[0]:
-            col = column_indices[neuron_idx]
-            if np.isnan(col):
-                continue
-            col = int(col)
-            type_idx = cell_type_to_idx.get(cell_types[neuron_idx])
-            if type_idx is not None and mapping[col, type_idx] == -1:
-                mapping[col, type_idx] = neuron_idx
-
-        self.register_buffer(
-            'column_to_decoder_neurons',
-            torch.tensor(mapping, device=device, dtype=torch.int64),
-        )
-
-    # ------------------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------------------
-
-    def _extract_column_features(self, v):
-        """Map raw neuron firing rates to per-column features.
-
-        Returns ``(batch, num_columns, num_decoder_neuron_types)`` with
-        ``NaN`` for neuron types absent from a column.
-        """
-        valid = self.column_to_decoder_neurons >= 0
-        safe = self.column_to_decoder_neurons.clamp(min=0)
-        features = v[:, safe]
-        return features.masked_fill(~valid.unsqueeze(0), float('nan'))
-
-    def forward(self, v):
-        """Decode optic flow from firing rates.
-
-        Args:
-            v: ``(stimuli, num_neurons)`` or ``(num_neurons,)``.
-
-        Returns:
-            Optic flow ``(stimuli, num_columns, 2)`` or ``(num_columns, 2)``.
-        """
-        if v.dim() == 1:
-            v = v.unsqueeze(0)
-            squeeze = True
-        else:
-            squeeze = False
-
-        x = self._extract_column_features(v)
-
-        for i, conv in enumerate(self.conv_layers):
-            x = conv(x)
-            if i < len(self.batch_norms):
-                x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
-                x = torch.nn.functional.softplus(x)
-
-        denom = torch.nn.functional.softplus(x[:, :, -1:].clone())
-        denom = torch.clamp(denom, min=self.denom_eps)
-        optic_flow = x[:, :, :-1] / denom
-
-        if squeeze:
-            optic_flow = optic_flow.squeeze(0)
-        return optic_flow
-
-
 def _rodrigues(rotvec):
     """Rotation vectors (axis * angle, radians) to rotation matrices.
 
@@ -638,7 +501,8 @@ class NeuralModel(torch.nn.Module, ABC):
                  column_indices, column_phi_theta, column_p_q=None,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'], nonlinearity='Softplus', device='cpu', dtype='float32',
                  init_new_model=True, dt=0.01, seed=None, init_std=0.1, count_threshold=2, commit_hash=None,
-                 decoder_type='none', use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
+                 readouts=None, readout_neurons=None, regularizer_parameters=None,
+                 use_input_conv=True, conv_size_x=7, input_pre_conv_size=5, num_temporal_modes=4, use_layer_norm=True):
         super().__init__()
         # Save constructor inputs for serialization (child classes will merge their own on top)
         self._save_init_inputs()
@@ -648,9 +512,10 @@ class NeuralModel(torch.nn.Module, ABC):
         self.count_threshold = count_threshold
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
-        self.decoder_type = decoder_type
+        self.readouts = list(readouts) if readouts else []
+        self.readout_neurons = list(readout_neurons) if readout_neurons else None
+        self.regularizer_parameters = dict(regularizer_parameters) if regularizer_parameters else {}
         self.use_input_conv = use_input_conv
-        self.decoder_denom_eps = 1e-2
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
 
         # Create RNG from seed for random initialization
@@ -736,18 +601,15 @@ class NeuralModel(torch.nn.Module, ABC):
                 device=self.device, dtype=self.dtype,
             )
 
-        if self.decoder_type == 'conv_1':
-            self._initialize_decoder(num_channels=[3], conv_sizes=[5])
-        if self.decoder_type == 'conv_2':
-            self._initialize_decoder()
+        self._initialize_readouts()
         if self.use_input_conv:
             self._initialize_input_conv(conv_size_x=conv_size_x, input_pre_conv_size=input_pre_conv_size, num_temporal_modes=num_temporal_modes)
 
 
     @property
     def has_decoder(self):
-        """Whether the model has a trained decoder (any type other than 'none')."""
-        return self.decoder_type is not None and self.decoder_type != 'none'
+        """Backward-compat: True when any flow readout is configured."""
+        return any(getattr(mod, 'predicts_flow', False) for mod in self._readout_modules.values())
 
     def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
         """Return column locations projected to 3D Cartesian coordinates."""
@@ -861,42 +723,33 @@ class NeuralModel(torch.nn.Module, ABC):
             num_modes=num_temporal_modes, dt=self.dt, device=self.device, dtype=self.dtype,
         )
 
-    def _initialize_decoder(self, num_channels=None, conv_sizes=None):
-        """Create the ``MotionDecoder`` sub-module.
-
-        All decoder-specific computation (neuron mapping, hex-grid neighbour
-        lookup, conv layers) lives inside ``MotionDecoder`` and
-        ``NeuralModelConv``.  This method simply passes the model's structural
-        data through.
-        """
-        if num_channels is None:
-            num_channels = [8, 3]
-        if conv_sizes is None:
-            conv_sizes = [5, 5]
-
-        neurons_to_decode = [
-            'T1', 'T2', 'T2a', 'T3',
-            'T4a', 'T4b', 'T4c', 'T4d',
-            'T5a', 'T5b', 'T5c', 'T5d',
-            'Tm1', 'Tm2', 'Tm3', 'Tm4',
-            # 'Tm5Y', 'Tm5a', 'Tm5b', 'Tm5c',
-            'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
-            # 'TmY3', 'TmY4', 'TmY9', 'TmY10', 'TmY15', 'TmY18', 'TmY5a'
-        ]
-
-        self.decoder = MotionDecoder(
-            num_channels=num_channels,
-            conv_sizes=conv_sizes,
-            neurons_to_decode=neurons_to_decode,
-            column_p_q=self.column_p_q,
+    def _initialize_readouts(self):
+        """Instantiate readout modules by class name from ``readout_utilities``."""
+        import readout_utilities
+        self._readout_modules = torch.nn.ModuleDict()
+        kwargs = dict(
             cell_types=self.cell_types,
             column_indices=self.column_indices,
+            column_p_q=self.column_p_q,
             num_neurons=self.num_neurons,
             num_columns=self.num_columns,
-            denom_eps=self.decoder_denom_eps,
             device=self.device,
             dtype=self.dtype,
+            readout_neurons=self.readout_neurons,
+            regularizer_parameters=self.regularizer_parameters,
         )
+        for name in self.readouts:
+            cls = getattr(readout_utilities, name, None)
+            if cls is None or not isinstance(cls, type):
+                raise ValueError(f"Unknown readout class: {name!r}")
+            mod = cls(**kwargs)
+            self._readout_modules[name] = mod
+
+            for reg_cls, weight in getattr(mod, '_regularizer_config', {}).items():
+                if not weight:
+                    continue
+                reg_name = f"{name}_{reg_cls.__name__}"
+                self._readout_modules[reg_name] = reg_cls(readout_name=name, weight=weight)
 
     def apply_input_conv(self, u_t, filter_state=None):
         """Apply spatial pre-filter, contrast normalization, then temporal LRU.
@@ -1030,8 +883,12 @@ class NeuralModel(torch.nn.Module, ABC):
             if record_synaptic:
                 outputs['synaptic_current'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
-        if self.has_decoder:
-            outputs['decoder'] = torch.full((num_batches, num_time, self.num_columns, 2), float('nan'), device=self.device, dtype=self.dtype)
+        for name, mod in self._readout_modules.items():
+            if getattr(mod, 'training_only', False):
+                continue
+            shape = (num_batches, num_time, self.num_columns) + mod.output_extra_dims
+            outputs[name] = torch.full(shape, float('nan'),
+                                       device=self.device, dtype=self.dtype)
 
         for t in range(num_time):
             u_t = inputs[:, t, :]
@@ -1046,8 +903,10 @@ class NeuralModel(torch.nn.Module, ABC):
 
             fr = self.firing_rate(v)
 
-            if self.has_decoder:
-                outputs['decoder'][:, t, :, :] = self.decoder(fr)
+            for name, mod in self._readout_modules.items():
+                if getattr(mod, 'training_only', False):
+                    continue
+                outputs[name][:, t, ...] = mod(fr)
 
             if record_synaptic:
                 syn_current = self.compute_synaptic_current(v)
@@ -1061,6 +920,12 @@ class NeuralModel(torch.nn.Module, ABC):
                     outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
                     if record_synaptic:
                         outputs['synaptic_current'][i][:, t, ci[valid]] = syn_current[:, ni[valid]]
+
+        if self.training:
+            for name, mod in self._readout_modules.items():
+                if getattr(mod, 'training_only', False):
+                    outputs[name] = mod(self)
+
         return {
             'outputs': outputs,
             'model_state': {'v': v.detach(), 'filter_state': filter_state},
@@ -1105,11 +970,18 @@ class NeuralModel(torch.nn.Module, ABC):
                 right_outputs[key] = {k: v[:S] for k, v in outputs[key].items()}
                 left_outputs[key] = {k: v[S:] for k, v in outputs[key].items()}
 
-        if 'decoder' in outputs:
-            right_outputs['decoder'] = outputs['decoder'][:S]
-            left_decoder = outputs['decoder'][S:].clone()
-            left_decoder[..., 0] *= -1
-            left_outputs['decoder'] = left_decoder
+        for rname, mod in self._readout_modules.items():
+            if rname not in outputs:
+                continue
+            if getattr(mod, 'training_only', False):
+                right_outputs[rname] = outputs[rname]
+                left_outputs[rname] = outputs[rname]
+                continue
+            right_outputs[rname] = outputs[rname][:S]
+            left_val = outputs[rname][S:].clone()
+            if mod.eye_asymmetric:
+                left_val = mod.flip_for_left_eye(left_val)
+            left_outputs[rname] = left_val
 
         filter_state = result['model_state']['filter_state']
         right_filter = filter_state[:S] if filter_state is not None else None
@@ -1251,26 +1123,24 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return selected_neuron_indices, selected_column_indices
 
-    def silence_neurons(self, neurons_to_silence, invert_silencing=False):
-        if len(neurons_to_silence) > 0:
-
-            if not invert_silencing:
-                print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
-                # set the input and output strength of these neurons to a small value
-                chosen_neurons = np.zeros(self.num_cell_types) == 1
-                for ns in neurons_to_silence:
-                    chosen_neurons[self.unique_cell_types == ns] = True
-            else:
-                print("\n--- WARNING silencing everything but", neurons_to_silence, '---\n')
-                # set the input and output strength of these neurons to a small value
-                chosen_neurons = np.zeros(self.num_cell_types) == 0
-                for ns in neurons_to_silence:
-                    chosen_neurons[self.unique_cell_types == ns] = False
-
-            with torch.no_grad():
-                self.output_strength_log.data[chosen_neurons] = np.log(self.silence_val)
-        else:
+    def _silencing_mask(self, neurons_to_silence, invert_silencing=False):
+        """Return a boolean mask over cell types for the neurons to silence."""
+        if not neurons_to_silence:
             print('No neurons selected for silencing')
+            return None
+
+        if not invert_silencing:
+            print("\n--- WARNING silencing neurons", neurons_to_silence, '---\n')
+            chosen = np.zeros(self.num_cell_types, dtype=bool)
+            for ns in neurons_to_silence:
+                chosen[self.unique_cell_types == ns] = True
+        else:
+            print("\n--- WARNING silencing everything but", neurons_to_silence, '---\n')
+            chosen = np.ones(self.num_cell_types, dtype=bool)
+            for ns in neurons_to_silence:
+                chosen[self.unique_cell_types == ns] = False
+
+        return chosen
 
     @classmethod
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
@@ -1374,8 +1244,16 @@ class NeuralModel(torch.nn.Module, ABC):
             **predict_kwargs,
         )
 
-        optic_flow_right = right_result['outputs']['decoder']
-        optic_flow_left = left_result['outputs']['decoder']
+        flow_key = next(
+            (k for k, m in self._readout_modules.items()
+             if getattr(m, 'predicts_flow', False) and k in right_result['outputs']),
+            None,
+        )
+        if flow_key is None:
+            raise ValueError("No flow readout configured; cannot estimate ego motion.")
+
+        optic_flow_right = right_result['outputs'][flow_key]
+        optic_flow_left = left_result['outputs'][flow_key]
         optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
         phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
@@ -1624,7 +1502,7 @@ class CurrentModel(NeuralModel):
         # Save init inputs after super().__init__() to overwrite with this class's inputs
         self._save_init_inputs()
         
-        self.max_allowed_sigma = 0.90
+        self.max_allowed_sigma = 0.95
         
         # Initialize power vector for spectral norm calculation
         power_vec_np = self.rng.standard_normal(self.num_neurons)
@@ -1649,20 +1527,22 @@ class CurrentModel(NeuralModel):
         
         self.offset = torch.full((self.num_cell_types,), offset_init, dtype=self.dtype, device=self.device)
         
-        # Initialize strength per cell type based on the inverse of fan in / out
+        # Initialize input strength per cell type based on the inverse of fan-in
         synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()
-        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
         
         synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
-        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         for cti, ct in enumerate(self.unique_cell_types):
             ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
             synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
-            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
         
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
-        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
         self.input_strength_log = torch.log(input_strength_init)
+        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
+        synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+        output_strength_init = synapses_out_per_cell_type.pow(-1 / 2)
         self.output_strength_log = torch.log(output_strength_init)
         
         # Convert to Parameters
@@ -1705,6 +1585,7 @@ class CurrentModel(NeuralModel):
         d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
         one_minus_d = 1.0 - d
 
+
         def apply_M(v):
             v_scaled = v * D_out
             y = torch.sparse.mm(A, v_scaled.unsqueeze(1)).squeeze(1)
@@ -1735,6 +1616,14 @@ class CurrentModel(NeuralModel):
         self._power_vec.copy_(x.detach())
 
         return sigma
+
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
+        chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
+        if chosen is not None:
+            with torch.no_grad():
+                self.output_strength_log.data[chosen] = np.log(self.silence_val)
+                if silence_inputs:
+                    self.input_strength_log.data[chosen] = np.log(self.silence_val)
 
     def firing_rate(self, v):
         """Convert voltage to firing rate."""
@@ -1855,7 +1744,7 @@ class ConductanceModel(NeuralModel):
         self.threshold = torch.full((self.num_cell_types,), threshold_default, dtype=self.dtype, device=self.device)
         
         # Stimulus strength (log scale) per cell type
-        stimulus_strength_init = 10.0
+        stimulus_strength_init = 1.0
         stimulus_strength_log_init = np.log(stimulus_strength_init)
         self.stimulus_strength_log = torch.full((self.num_cell_types,), stimulus_strength_log_init, dtype=self.dtype, device=self.device)
         
@@ -1876,17 +1765,11 @@ class ConductanceModel(NeuralModel):
         
         # --- Output strength: per cell type ---
         # Shape: (num_cell_types,)
-        # Initialize based on fan-out for the transmitter that each cell type expresses
         self.output_strength_log = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
-        
         for cti, ct in enumerate(self.unique_cell_types):
             ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
-            # Find which transmitter this cell type expresses
             ct_transmitter = self.cell_type_transmitters[cti]
             ri = np.where(self.unique_transmitters == ct_transmitter)[0][0]
-            
-            # Fan-out per neuron for this transmitter (sum over postsynaptic, i.e., rows)
-            # synapse_counts[ri] is (post, pre), so sum(dim=0) gives fan-out per pre-synaptic neuron
             synapses_out_per_neuron = self.synapse_counts[ri].abs().sum(dim=0).to_dense()
             fan_out = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
             self.output_strength_log[cti] = -0.5 * torch.log(fan_out)
@@ -1913,6 +1796,14 @@ class ConductanceModel(NeuralModel):
         # if init_new_model:
         #     with torch.no_grad():
         #         self.find_steady_state()
+
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
+        chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
+        if chosen is not None:
+            with torch.no_grad():
+                self.output_strength_log.data[chosen] = np.log(self.silence_val)
+                if silence_inputs:
+                    self.input_strength_log.data[:, chosen] = np.log(self.silence_val)
 
     def firing_rate(self, v):
         """Convert voltage to firing rate with threshold subtraction.
@@ -2164,7 +2055,7 @@ class CellAnnModel(NeuralModel):
             return np.log(p / (1 - p))
 
         persistence_init = 0.5
-        stimulus_strength_init = 10.0
+        stimulus_strength_init = 1.0
         offset_init = 0.0
 
         self.persistence_logit = torch.nn.Parameter(
@@ -2778,6 +2669,144 @@ class HandTunedModel(NeuralModel):
         offset_all = self.offset[self.neuron_to_type_index]
 
         # Stimulus drive
+class ArbitraryModel(NeuralModel):
+    """All-to-all model with learned cell-type-to-cell-type weight matrix.
+
+    Like CurrentModel but without connectome sparsity or sign constraints.
+    The effective connectivity A is a dense (num_neurons x num_neurons) matrix
+    parameterized by a (num_cell_types x num_cell_types) weight matrix W,
+    where A[i,j] = W[type(i), type(j)].
+
+    Dynamics: v_{t+1} = p * v_t + (1-p) * (A @ g(v_t) + b + c*u_t)
+    """
+
+    def __init__(self, *, init_new_model=True, **kwargs):
+        super().__init__(**kwargs)
+        self._save_init_inputs()
+
+        self.max_allowed_sigma = 0.95
+
+        power_vec_np = self.rng.standard_normal(self.num_neurons)
+        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
+        power_vec = power_vec / (power_vec.norm() + 1e-12)
+        self.register_buffer('_power_vec', power_vec)
+
+        def logit(p, eps=1e-6):
+            p = np.clip(p, eps, 1 - eps)
+            return np.log(p / (1 - p))
+
+        persistence_init = 0.5
+        stimulus_strength_init = 1.0
+        offset_init = 0.0
+
+        self.persistence_logit = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), logit(persistence_init),
+                       dtype=self.dtype, device=self.device)
+        )
+        self.stimulus_strength_log = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), np.log(stimulus_strength_init),
+                       dtype=self.dtype, device=self.device)
+        )
+        self.offset = torch.nn.Parameter(
+            torch.full((self.num_cell_types,), offset_init,
+                       dtype=self.dtype, device=self.device)
+        )
+
+        # Cell-type-to-cell-type weight matrix (no sign or sparsity constraints)
+        self.W = torch.nn.Parameter(
+            torch.zeros(self.num_cell_types, self.num_cell_types,
+                        dtype=self.dtype, device=self.device)
+        )
+
+        self.add_noise_to_parameters(self.init_std)
+
+        if init_new_model:
+            with torch.no_grad():
+                self.set_sigma_max()
+
+    def _apply_A(self, v, transpose=False):
+        """Efficiently compute A @ v where A[i,j] = W[type(i), type(j)].
+
+        Aggregates v by pre-synaptic cell type, multiplies by W in type-space,
+        then expands back to per-neuron. Avoids materializing the full
+        (num_neurons x num_neurons) matrix.
+        """
+        if v.dim() == 1:
+            idx = self.neuron_to_type_index
+        else:
+            idx = self.neuron_to_type_index.unsqueeze(0).expand_as(v)
+
+        v_by_type = torch.zeros(*v.shape[:-1], self.num_cell_types,
+                                device=v.device, dtype=v.dtype)
+        v_by_type.scatter_add_(-1, idx, v)
+
+        if transpose:
+            z_by_type = v_by_type @ self.W
+        else:
+            z_by_type = v_by_type @ self.W.T
+
+        return z_by_type[..., self.neuron_to_type_index]
+
+    def set_sigma_max(self):
+        """Iteratively scale W to achieve target max sigma (spectral norm)."""
+        with torch.no_grad():
+            max_scaling_iters = 100
+            rho_tolerance = 0.01
+            damping_factor = 0.3
+
+            for iter_idx in range(max_scaling_iters):
+                sigma_max = self.calc_sigma_max()
+
+                print(iter_idx, ':', sigma_max)
+                if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
+                    break
+
+                scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
+                self.W.mul_(scale_factor)
+
+    def calc_sigma_max(self, max_iter=100, eps=1e-12):
+        """Calculate the maximum singular value (spectral norm) of the dynamics matrix."""
+        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        one_minus_d = 1.0 - d
+
+        def apply_M(v):
+            return self._apply_A(v)
+
+        def apply_M_T(v):
+            return self._apply_A(v, transpose=True)
+
+        def apply_S(v):
+            return d * v + one_minus_d * apply_M(v)
+
+        def apply_S_T(v):
+            return d * v + apply_M_T(one_minus_d * v)
+
+        x = self._power_vec.clone()
+        x = x / (x.norm() + eps)
+
+        for _ in range(max_iter):
+            y = apply_S(x)
+            x = apply_S_T(y)
+            x = x / (x.norm() + eps)
+
+        y = apply_S(x)
+        sigma = y.norm()
+
+        self._power_vec.copy_(x.detach())
+
+        return sigma
+
+    def firing_rate(self, v):
+        return self.nonlinearity(v)
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
+        offset = self.offset[self.neuron_to_type_index]
+
+        fr = self.nonlinearity(v_prev)
+        z = self._apply_A(fr)
+
         stim = torch.zeros_like(v_prev)
         if stim_to_cell_mapping is None:
             stim = u_t * stimulus_strength[None, :]
@@ -2797,3 +2826,8 @@ class HandTunedModel(NeuralModel):
             -v_prev + h_nonlin + stim + offset_all[None, :]
         )
         return v_next
+
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset[None, :] + stim)
+
+        return v_next
+

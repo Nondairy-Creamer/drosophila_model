@@ -1,100 +1,76 @@
 import torch
+import neural_models as nm
+import readout_utilities as ru
 
+
+# ---------------------------------------------------------------------------
+# Primitive helpers (NaN-safe)
+# ---------------------------------------------------------------------------
 
 def nannorm(unormalized_tensor, keepdim=False, dim=None, eps=1e-6):
     return torch.nansum(torch.abs(unormalized_tensor) ** 2, dim=dim, keepdim=keepdim).sqrt().clamp_min(eps)
 
 
-def nanstd(x, dim, keepdim=False, eps=1e-6):
-    mask = ~torch.isnan(x)
-    count = mask.sum(dim=dim, keepdim=True).clamp_min(1)
-    x0 = torch.where(mask, x, 0.0)
-    mean = x0.sum(dim=dim, keepdim=True) / count
-    var = torch.where(mask, (x - mean) ** 2, 0.0).sum(dim=dim, keepdim=True) / count
-    std = var.sqrt().clamp_min(eps)
-    if keepdim:
-        return std
-    if isinstance(dim, tuple):
-        for d in sorted(dim, reverse=True):
-            std = std.squeeze(d)
-        return std
-    return std.squeeze(dim)
+# ---------------------------------------------------------------------------
+# Canonical loss primitives
+# ---------------------------------------------------------------------------
+
+def normalized_mse(pred, target, eps=1e-8):
+    """MSE divided by mean-square of target (normalized to ~0-1 range).
+
+    NaN entries in *target* (and corresponding *pred*) are excluded.
+    """
+    valid = ~torch.isnan(target) & ~torch.isnan(pred)
+    if not valid.any():
+        return pred.new_tensor(0.0)
+    p, t = pred[valid], target[valid]
+    return (p - t).pow(2).mean() / (t.pow(2).mean() + eps)
 
 
-def log_nanmean_exp(x, dim=None):
-    """Log of mean of exp, ignoring NaNs. Numerically stable."""
-    if dim is None:
-        x = x.flatten()
-        dim = 0
-    # Replace NaNs with -inf so exp(-inf) = 0
-    x_clean = torch.where(torch.isnan(x), torch.full_like(x, -float("inf")), x)
-    # Count non-NaN elements
-    n = (~torch.isnan(x)).sum(dim=dim).clamp_min(1)
-    return torch.logsumexp(x_clean, dim=dim) - torch.log(n.float())
+def cosine_loss(pred, target, eps=1e-8):
+    """Cosine distance over flattened valid entries.
+
+    Treats the full tensor as a single vector after masking out NaN and
+    near-zero-magnitude rows (when the last dim is >1).
+    """
+    pred_flat = pred.reshape(-1, pred.shape[-1]) if pred.dim() > 1 else pred.reshape(-1, 1)
+    target_flat = target.reshape(-1, target.shape[-1]) if target.dim() > 1 else target.reshape(-1, 1)
+    has_nan = torch.isnan(target_flat).any(dim=-1) | torch.isnan(pred_flat).any(dim=-1)
+    mag = target_flat.norm(dim=-1)
+    valid = (mag > eps) & ~has_nan
+    if not valid.any():
+        return pred.new_tensor(0.0)
+    p = pred_flat[valid].reshape(-1)
+    t = target_flat[valid].reshape(-1)
+    cos_sim = torch.dot(p, t) / (p.norm() * t.norm() + eps)
+    return 1.0 - cos_sim
 
 
-def corr_loss(y_true, y_hat, dim=None, eps=1e-6):
-    # Create mask of positions valid in BOTH tensors
-    valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y_true)).float()
-    valid_count = valid_mask.sum(dim=dim, keepdim=True).clamp_min(1)
-
-    # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
-    y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
-    y_true = torch.where(torch.isnan(y_true), torch.zeros_like(y_true), y_true)
-
-    # Compute means over valid positions only
-    y_hat_mean = (y_hat * valid_mask).sum(dim=dim, keepdim=True) / valid_count
-    y_true_mean = (y_true * valid_mask).sum(dim=dim, keepdim=True) / valid_count
-
-    # Center the data (mask zeros out invalid positions)
-    y_hat_centered = (y_hat - y_hat_mean) * valid_mask
-    y_true_centered = (y_true - y_true_mean) * valid_mask
-
-    # Compute std over valid positions
-    y_hat_std = (y_hat_centered.pow(2).sum(dim=dim, keepdim=True) / valid_count).sqrt().clamp_min(eps)
-    y_true_std = (y_true_centered.pow(2).sum(dim=dim, keepdim=True) / valid_count).sqrt().clamp_min(eps)
-
-    # Normalize
-    y_hat_norm = y_hat_centered / y_hat_std
-    y_true_norm = y_true_centered / y_true_std
-
-    # Compute correlation over valid positions
-    corr = (y_hat_norm * y_true_norm).sum(dim=dim, keepdim=True) / valid_count
-
-    ave_corr = torch.mean(corr)
-
-    return 1.0 - ave_corr
-
+# ---------------------------------------------------------------------------
+# Evaluation helpers (used by analysis scripts)
+# ---------------------------------------------------------------------------
 
 def cos_loss(y_true, y_hat, dim=None, eps=1e-6):
-    # Create mask of positions valid in BOTH tensors
+    """NaN-safe cosine distance: ``1 - cosine_similarity``."""
     valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y_true)).float()
 
-    # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
     y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
     y_true = torch.where(torch.isnan(y_true), torch.zeros_like(y_true), y_true)
 
-    # Apply mask so norms are computed only over valid positions
     y_hat_masked = y_hat * valid_mask
     y_true_masked = y_true * valid_mask
 
-    # Normalize (nannorm uses nansum internally, but all values are now valid)
     y_hat_norm = y_hat_masked / nannorm(y_hat_masked, dim=dim, keepdim=True).clamp_min(eps)
     y_true_norm = y_true_masked / nannorm(y_true_masked, dim=dim, keepdim=True).clamp_min(eps)
 
-    # Cosine similarity over valid positions
     cosine_sim = torch.sum(y_hat_norm * y_true_norm, dim=dim, keepdim=True)
-
-    ave_cosine_sim = torch.mean(cosine_sim)
-
-    return 1.0 - ave_cosine_sim
+    return 1.0 - torch.mean(cosine_sim)
 
 
 def mse_loss(y_true, y_hat, dim=None, eps=1e-6):
-    # Create mask of positions valid in BOTH tensors
+    """NaN-safe mean squared error."""
     valid_mask = (~torch.isnan(y_hat) & ~torch.isnan(y_true)).float()
 
-    # Replace NaN with 0 to prevent NaN gradient propagation (mask handles statistics)
     y_hat = torch.where(torch.isnan(y_hat), torch.zeros_like(y_hat), y_hat)
     y_true = torch.where(torch.isnan(y_true), torch.zeros_like(y_true), y_true)
 
@@ -104,18 +80,128 @@ def mse_loss(y_true, y_hat, dim=None, eps=1e-6):
     return torch.mean(mse)
 
 
-def combined_loss(y_true, y_hat, eps=1e-6):
-    cos_loss_val = cos_loss(y_true, y_hat, eps=eps)
-    corr_loss_val = corr_loss(y_true, y_hat, eps=eps)
-    return 0.5 * cos_loss_val + 0.5 * corr_loss_val
+# ---------------------------------------------------------------------------
+# Training loss components
+#
+# Unified interface:
+#   component_fn(model, outputs, target, train_mask, loss_start_step) -> scalar
+#
+# ``outputs`` is the dict produced by predict (readout keys + 'voltage'/
+# 'firing_rate' + optionally 'pred_rotation'/'pred_translation').
+# ``target`` is a dict with possible keys 'optic_flow', 'rotation',
+# 'translation'.
+# ---------------------------------------------------------------------------
+
+def _mask_pred_target(pred, target_flow, train_mask, loss_start_step):
+    """Apply time cropping and spatial masking, returning masked pred/target."""
+    pred_t = pred[:, loss_start_step:]
+    target_t = target_flow[:, loss_start_step:]
+    mask_t = train_mask[:, loss_start_step:]
+
+    expand_shape = pred_t.shape
+    if mask_t.ndim < pred_t.ndim:
+        mask_t = mask_t.unsqueeze(-1)
+    invalid = ~mask_t.expand(expand_shape)
+    pred_t = pred_t.clone()
+    target_t = target_t.clone()
+    pred_t[invalid] = float('nan')
+    target_t[invalid] = float('nan')
+    return pred_t, target_t
 
 
-def calc_loss_dict(loss_fn, pred, target):
-    keys = list(pred.keys())
-    num_readouts = len(keys)
+def _flow_2ch_to_4ch(flow_2ch):
+    """Decompose 2-channel flow (x, y) into 4 rectified channels (right, left, up, down).
 
-    loss = loss_fn(target[keys[0]], pred[keys[0]]) / num_readouts
-    for i in keys[1:]:
-        loss = loss + loss_fn(target[i], pred[i]) / num_readouts
+    Channels: right = clamp(x, min=0), left = clamp(-x, min=0),
+              up = clamp(y, min=0), down = clamp(-y, min=0).
+    """
+    return torch.cat([
+        flow_2ch[..., 0:1].clamp(min=0),
+        (-flow_2ch[..., 0:1]).clamp(min=0),
+        flow_2ch[..., 1:2].clamp(min=0),
+        (-flow_2ch[..., 1:2]).clamp(min=0),
+    ], dim=-1)
 
-    return loss
+
+def flow_loss(model, outputs, target, train_mask, loss_start_step):
+    """Normalized MSE between predicted flow and ground-truth optic flow.
+
+    Averages across all flow-type readouts present in *outputs*.
+    """
+    target_flow = target['optic_flow']
+    losses = []
+    for key, mod in model._readout_modules.items():
+        if getattr(mod, 'training_only', False):
+            continue
+        if not mod.predicts_flow or key not in outputs:
+            continue
+        pred_t, target_t = _mask_pred_target(outputs[key], target_flow,
+                                             train_mask, loss_start_step)
+        losses.append(normalized_mse(pred_t, target_t))
+    if not losses:
+        return target_flow.new_tensor(0.0)
+    return sum(losses) / len(losses)
+
+
+def flow_loss_4ch(model, outputs, target, train_mask, loss_start_step):
+    """Normalized MSE for 4-channel rectified flow readouts.
+
+    Decomposes the 2-channel optic flow target into 4 rectified channels
+    (right, left, up, down) and compares against readouts with
+    ``output_extra_dims == (4,)``.
+    """
+    target_flow = target['optic_flow']
+    target_4ch = _flow_2ch_to_4ch(target_flow)
+    losses = []
+    for key, mod in model._readout_modules.items():
+        if getattr(mod, 'training_only', False):
+            continue
+        if not getattr(mod, 'predicts_flow', False) or key not in outputs:
+            continue
+        if getattr(mod, 'output_extra_dims', ()) != (4,):
+            continue
+        pred_t, target_t = _mask_pred_target(outputs[key], target_4ch,
+                                             train_mask, loss_start_step)
+        losses.append(normalized_mse(pred_t, target_t))
+    if not losses:
+        return target_flow.new_tensor(0.0)
+    return sum(losses) / len(losses)
+
+
+def odometry_loss(model, outputs, target, train_mask, loss_start_step):
+    """Rotation MSE + translation cosine + integrated position terms."""
+    pred_rot = outputs['pred_rotation'][:, loss_start_step:]
+    pred_trans = outputs['pred_translation'][:, loss_start_step:]
+    target_rot = target['rotation'][:, loss_start_step:]
+    target_trans = target['translation'][:, loss_start_step:]
+
+    loss_rot_rate = normalized_mse(pred_rot, target_rot)
+    loss_trans_rate = cosine_loss(pred_trans, target_trans)
+
+    pred_rot_pos = nm.integrate_angular_velocity(pred_rot, model.dt)
+    target_rot_pos = nm.integrate_angular_velocity(target_rot, model.dt)
+    loss_rot_pos = normalized_mse(pred_rot_pos, target_rot_pos)
+
+    pred_trans_pos = nm.integrate_translational_velocity(pred_trans, pred_rot, model.dt)
+    target_trans_pos = nm.integrate_translational_velocity(target_trans, target_rot, model.dt)
+    loss_trans_pos = cosine_loss(pred_trans_pos, target_trans_pos)
+
+    return (loss_rot_rate + loss_trans_rate + loss_rot_pos + loss_trans_pos) / 4
+
+
+def motion_mag(model, outputs, target, train_mask, loss_start_step):
+    """Normalized MSE between predicted motion magnitude and ||optic_flow||."""
+    target_flow = target['optic_flow']
+    target_mag = target_flow.norm(dim=-1)           # (batch, time, cols)
+    mag_key = next(
+        (k for k, m in model._readout_modules.items()
+         if isinstance(m, ru.MotionMagReadout)),
+        None,
+    )
+    if mag_key is None:
+        return target_flow.new_tensor(0.0)
+    pred_mag = outputs[mag_key]
+    pred_t, target_t = _mask_pred_target(
+        pred_mag, target_mag, train_mask, loss_start_step)
+    return normalized_mse(pred_t, target_t)
+

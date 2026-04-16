@@ -26,7 +26,7 @@ def _set_identity_filter(model):
 
 def test_uniform_input_gives_zero_conv_output():
     """A spatially uniform input has no local contrast, so conv output should be ~0."""
-    model, _, _, _ = build_model_from_test_config(decoder_type='none', use_input_conv=True)
+    model, _, _, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
     model.eval()
     _set_identity_filter(model)
 
@@ -44,7 +44,7 @@ def test_uniform_input_gives_zero_conv_output():
 
 def test_spatial_identity_gives_zero_output():
     """With a spatial identity filter, centered = input - input = 0, so output is ~0."""
-    model, _, _, _ = build_model_from_test_config(decoder_type='none', use_input_conv=True)
+    model, _, _, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
     model.eval()
     _set_identity_filter(model)
 
@@ -63,7 +63,7 @@ def test_spatial_identity_gives_zero_output():
 
 def test_lru_step_shapes():
     """Verify the LRU step returns correct shapes and state."""
-    model, _, _, _ = build_model_from_test_config(decoder_type='none', use_input_conv=True)
+    model, _, _, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
     model.eval()
 
     batch = 3
