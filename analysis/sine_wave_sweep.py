@@ -22,7 +22,6 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-import data_utilities as du
 import neural_models as nm
 from stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave
 from analysis_utilities import input_conv_stimulus_timecourse, prepare_xt
@@ -125,7 +124,6 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
 
     stim_dt = model.dt
 
-    pre_stim_steps = int(pre_stim_time / stim_dt)
     pre_stim_steps = int(pre_stim_time / dt)
     num_sweep = len(temporal_frequencies)
 
