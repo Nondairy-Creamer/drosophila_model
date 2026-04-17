@@ -262,6 +262,21 @@ class FlowConv2Readout(HexGridReadout):
         )
 
 
+class FlowConv3Readout(HexGridReadout):
+    """Two-layer hex-grid conv decoder producing 2-D optic flow."""
+
+    output_extra_dims = (2,)
+    eye_asymmetric = True
+    predicts_flow = True
+
+    def __init__(self, *, readout_neurons=None, **kwargs):
+        super().__init__(
+            neurons_to_decode=readout_neurons,
+            num_channels=[8, 6, 3], conv_sizes=[5, 5, 5], use_denominator=True,
+            **kwargs,
+        )
+
+
 class FlowConv2Readout4ch(HexGridReadout):
     """Two-layer positive-weight hex-grid conv decoder producing 4-channel rectified flow.
 

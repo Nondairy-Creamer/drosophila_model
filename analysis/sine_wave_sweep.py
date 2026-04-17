@@ -77,22 +77,8 @@ def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity,
     return stimulus
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Sine wave velocity sweep analysis.")
-    parser.add_argument(
-        "model_folder",
-        type=str,
-        help="Path to model folder (containing model.pt and config.toml)",
-    )
-    parser.add_argument(
-        "--zero_center",
-        action="store_true",
-        help="Zero-center the stimulus.",
-    )
-
-    args = parser.parse_args()
 def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
-                        expressive=True):
+                        expressive=True, zero_center=False):
     """Run sine-wave temporal-frequency sweep and return per-cell mean rates.
 
     Args:
@@ -116,14 +102,14 @@ def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
         model.silence_neurons(silenced_neurons)
 
     try:
-        return _run_sine_wave_sweep_inner(model, output_dir, expressive)
+        return _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center)
     finally:
         if original_output_strength is not None:
             model.output_strength_log.data.copy_(original_output_strength)
             model.input_strength_log.data.copy_(original_input_strength)
 
 
-def _run_sine_wave_sweep_inner(model, output_dir, expressive):
+def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False):
     """Core sweep loop (called by :func:`run_sine_wave_sweep`)."""
 
     dt = model.dt
@@ -166,7 +152,7 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive):
                 stim_np = generate_stimulus(
                     direction, sample_phi, sample_theta,
                     wavelength, velocity, stim_dt, stim_time, pre_stim_time,
-                    zero_center=args.zero_center,
+                    zero_center=zero_center,
                 )
                 stim_list.append(stim_np)
                 index_map.append((direction, wavelength, si))
@@ -369,6 +355,10 @@ def main():
         "--output-dir", type=str, default=None,
         help="Output directory (default: <model_folder>/figures/sine_sweep)",
     )
+    parser.add_argument(
+        "--zero-center", action="store_true",
+        help="Zero-center the stimulus (map [0, 1] -> [-1, 1]).",
+    )
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
@@ -383,6 +373,7 @@ def main():
         silenced_neurons=args.silenced_neurons,
         output_dir=output_dir,
         expressive=args.expressive,
+        zero_center=args.zero_center,
     )
 
     print(f"\nDone! Computed sweep for {len(cell_results)} cell types.")
