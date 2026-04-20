@@ -22,8 +22,6 @@ from matplotlib import pyplot as plt
 
 import neural_models as nm
 
-from analysis_utilities import hex_grid_points
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -113,8 +111,8 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
     avg_per_neuron = avg_per_neuron_all[top_indices]
     conv_1_top = conv_1[:, :, top_indices]
 
-    axial_coords = nm.NeuralModelConv.hex_grid_axial_coords(decoder.conv_sizes[0])
-    grid_points = hex_grid_points(axial_coords)
+    pq_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(decoder.conv_sizes[0])
+    grid_points = nm.NeuralModelConv.pq_to_xy(pq_offsets)
     num_spatial = grid_points.shape[0]
     scatter_s = _hex_scatter_size(num_spatial)
 

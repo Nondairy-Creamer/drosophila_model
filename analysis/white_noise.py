@@ -209,15 +209,6 @@ def plot_temporal_moment_number_line(
     plt.close(fig)
 
 
-def pq_to_xy(pq):
-    """Project hex lattice (p, q) coordinates to flat (x, y) for plotting."""
-    angle_1 = np.pi / 6
-    angle_2 = 2 * np.pi / 3 + angle_1
-    basis = np.array([[np.cos(angle_1), np.cos(angle_2)],
-                      [np.sin(angle_1), np.sin(angle_2)]])
-    return (basis @ pq.T).T
-
-
 def _build_xt_profile(sta, pq_offsets):
     """Collapse 2D hex STA to a 1D horizontal profile for an x-t plot.
 
@@ -257,7 +248,7 @@ def plot_sta(sta, pq_offsets, dt, cell_type, output_path):
     xt, x_pos = _build_xt_profile(sta, pq_offsets)
     vmax = np.abs(xt).max() or 1
 
-    xy = pq_to_xy(pq_offsets.astype(np.float64))
+    xy = nm.NeuralModelConv.pq_to_xy(pq_offsets)
     peak_lag = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)[1]
     spatial_peak = sta[:, peak_lag]
     vmax_spatial = np.abs(spatial_peak).max() or 1

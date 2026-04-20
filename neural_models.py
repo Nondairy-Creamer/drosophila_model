@@ -195,6 +195,20 @@ class NeuralModelConv(torch.nn.Module):
         return np.array(coords, dtype=np.int64)
 
     @staticmethod
+    def pq_to_xy(pq: np.ndarray) -> np.ndarray:
+        """Project hex-lattice (p, q) coordinates to flat (x, y) for plotting.
+
+        Companion to ``hex_grid_pq_offsets``: applies the canonical projection
+        with basis vectors at 120 degrees apart, used everywhere we visualise
+        per-column data or convolution kernels indexed in p,q order.
+        """
+        angle_1 = np.pi / 6
+        angle_2 = 2 * np.pi / 3 + angle_1
+        basis = np.array([[np.cos(angle_1), np.cos(angle_2)],
+                          [np.sin(angle_1), np.sin(angle_2)]])
+        return (basis @ np.asarray(pq, dtype=np.float64).T).T
+
+    @staticmethod
     def compute_nearest_columns(conv_size, column_p_q):
         """Compute neighbour column indices for every column on a p,q hex lattice.
 
