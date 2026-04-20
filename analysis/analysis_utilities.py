@@ -463,7 +463,7 @@ def angular_flow_to_cartesian_xz(
     return v_x, v_z
 
 
-def flow_direction_colors(u, v, max_mag=None):
+def flow_direction_colors(u, v, max_mag=None, flip_lr=False):
     """RGBA colors encoding direction as hue and amplitude as saturation.
 
     Parameters
@@ -472,6 +472,11 @@ def flow_direction_colors(u, v, max_mag=None):
         Cartesian flow components (e.g. vx, vz from quiver).
     max_mag : float or None
         Saturation normalisation ceiling.  ``None`` → 99th percentile.
+    flip_lr : bool
+        If True, map hue as if ``u`` were negated. Use when the panel's x-axis
+        is NOT horizontally flipped but the shared colorwheel was drawn with
+        ``flip_lr=True`` (or vice versa), so that on-screen arrow direction
+        agrees with the colorwheel legend.
 
     Returns
     -------
@@ -482,7 +487,8 @@ def flow_direction_colors(u, v, max_mag=None):
 
     u = np.asarray(u, dtype=float)
     v = np.asarray(v, dtype=float)
-    angle = np.arctan2(v, u)
+    u_for_hue = -u if flip_lr else u
+    angle = np.arctan2(v, u_for_hue)
     hue = (angle / (2 * np.pi)) % 1.0
 
     mag = np.hypot(u, v)
@@ -496,16 +502,28 @@ def flow_direction_colors(u, v, max_mag=None):
     return np.concatenate([rgb, np.ones(rgb.shape[:-1] + (1,))], axis=-1), max_mag
 
 
-def update_direction_quiver(q, u, v, max_mag):
-    """Update a direction-colored quiver's geometry and colors."""
+def update_direction_quiver(q, u, v, max_mag, flip_lr=False):
+    """Update a direction-colored quiver's geometry and colors.
+
+    ``flip_lr`` only affects the color hue mapping, not arrow geometry.
+    """
     q.set_UVC(u, v)
-    colors, _ = flow_direction_colors(u, v, max_mag)
+    colors, _ = flow_direction_colors(u, v, max_mag, flip_lr=flip_lr)
     q.set_facecolor(colors)
     q.set_edgecolor(colors)
 
 
-def add_direction_colorwheel(fig, rect=None):
-    """Add a small HSV colour wheel showing the direction-to-hue mapping."""
+def add_direction_colorwheel(fig, rect=None, flip_lr=False):
+    """Add a small HSV colour wheel showing the direction-to-hue mapping.
+
+    Parameters
+    ----------
+    flip_lr : bool
+        If True, mirror the hue pattern left–right (equivalently θ → π − θ in hue
+        space) and swap east/west tick glyphs. Use when flow panels use a
+        horizontally flipped x-axis (e.g. ``setup_eye_axes`` right eye) so the
+        legend matches on-screen arrow directions.
+    """
     from matplotlib.colors import hsv_to_rgb
 
     if rect is None:
@@ -514,13 +532,18 @@ def add_direction_colorwheel(fig, rect=None):
     n = 256
     theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
     width = 2 * np.pi / n
-    hues = (theta / (2 * np.pi)) % 1.0
+    if flip_lr:
+        hues = np.mod((np.pi - theta) / (2 * np.pi), 1.0)
+        tick_labels = ['\u2190', '\u2191', '\u2192', '\u2193']  # ← ↑ → ↓
+    else:
+        hues = (theta / (2 * np.pi)) % 1.0
+        tick_labels = ['\u2192', '\u2191', '\u2190', '\u2193']  # → ↑ ← ↓
     colors = hsv_to_rgb(np.stack([hues, np.ones(n), np.ones(n)], axis=-1))
     ax_cw.bar(theta, 1, width=width, bottom=0.0, color=colors,
               edgecolor='none', linewidth=0)
     ax_cw.set_yticks([])
     ax_cw.set_xticks([0, np.pi / 2, np.pi, 3 * np.pi / 2])
-    ax_cw.set_xticklabels(['\u2192', '\u2191', '\u2190', '\u2193'], fontsize=8)
+    ax_cw.set_xticklabels(tick_labels, fontsize=8)
     ax_cw.tick_params(pad=1)
     ax_cw.grid(False)
     ax_cw.spines['polar'].set_visible(False)

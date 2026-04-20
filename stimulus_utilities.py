@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import pickle
 from pathlib import Path
@@ -10,6 +11,19 @@ import torch
 import h5py
 import numpy as np
 from scipy.sparse import csr_matrix
+
+# Full-sphere equirectangular panorama for expanding-dot: observer in uniform middle gray;
+# every direction is a pixel.  φ ∈ [−π, π] (360° azimuth), θ ∈ [0, π] colatitude from +z
+# (north pole) to −z (south pole).  W = 2H gives Δφ = Δθ in radians (equal angular step).
+EXPANDING_DOT_PANO_HEIGHT = 512
+EXPANDING_DOT_PANO_WIDTH = 1024
+EXPANDING_DOT_PANO_PHI_LIM = np.array([np.pi, -np.pi])
+EXPANDING_DOT_PANO_THETA_LIM = np.array([0.0, np.pi])
+
+# World-space defaults for ``make_expanding_dot_pano`` (centimeters, seconds).
+EXPANDING_DOT_RADIUS_CM = 5.0
+EXPANDING_DOT_D0_RANGE_CM = (30.0, 90.0)
+EXPANDING_DOT_SPEED_RANGE_CM_S = (15.0, 45.0)
 
 
 def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim,
@@ -181,6 +195,211 @@ def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
         results.append(result)
 
     return results
+
+
+def resample_time_to_length(data, n_out: int):
+    """
+    Linearly resample along time (dimension 1) to exactly ``n_out`` steps.
+
+    Used after ``interpolate_to_model_dt`` when the nominal stimulus duration
+    (``stim_time``) does not match the duration implied by the available native
+    frames (e.g. short clips upsampled to match config).
+    """
+    if n_out < 1:
+        raise ValueError("n_out must be at least 1")
+
+    was_numpy = isinstance(data, np.ndarray)
+    if was_numpy:
+        data = torch.from_numpy(data)
+
+    original_dtype = data.dtype
+    batch_size, t_in = data.shape[0], data.shape[1]
+    remaining_dims = data.shape[2:]
+
+    if t_in == n_out:
+        out = data
+    else:
+        data_flat = data.reshape(batch_size, t_in, -1).permute(0, 2, 1)
+        data_rs = torch.nn.functional.interpolate(
+            data_flat.float(),
+            size=n_out,
+            mode='linear',
+            align_corners=True,
+        ).to(dtype=original_dtype)
+        out = data_rs.permute(0, 2, 1).reshape((batch_size, n_out) + remaining_dims)
+
+    if was_numpy:
+        out = out.numpy()
+    return out
+
+
+def load_rendered_fly_view_dataset(
+    model_dt: float,
+    stim_time: float,
+    *,
+    two_eyes: bool,
+    data_path: str | Path | None = None,
+    drop_first_frame: bool = True,
+):
+    """
+    Load ``../connectome_data/rendered_fly_view_dataset.pkl``.
+
+    Columns are **block-packed**: ``[..., :n_eye]`` = all right-eye samples,
+    ``[..., n_eye:]`` = all left-eye samples (``n_eye = N // 2``).
+
+    ``forward_flows`` are in radians per video frame (see key ``flow_units`` in the file);
+    they are converted to deg/s before temporal interpolation to ``model_dt``.
+
+    Args:
+        model_dt: Model time step (seconds).
+        stim_time: Duration of each training segment (seconds).
+        two_eyes: If True, return binocular columns ``[right | left]`` plus ego-motion
+            rates derived from ``roll_pitch_yaw`` and ``positions``. If False, return
+            right-eye columns only.
+        data_path: Path to the pickle (default: ``../connectome_data/rendered_fly_view_dataset.pkl``).
+        drop_first_frame: If True, drop the first time index (matches prior flyview usage).
+
+    Returns:
+        If ``two_eyes`` is False:
+            ``(stimulus, optic_flow)`` numpy arrays, shapes
+            ``(batch, T, n_eye)`` and ``(batch, T, n_eye, 2)``.
+        If ``two_eyes`` is True:
+            ``(stimulus, optic_flow, rotation_rate, translation_rate)`` with
+            stimulus/flow ``(batch, T, 2*n_eye)`` / ``(batch, T, 2*n_eye, 2)``,
+            ``rotation_rate`` ``(batch, T, 3)`` in deg/s,
+            ``translation_rate`` ``(batch, T, 3)`` in position-units per second
+            (``np.gradient`` of ``positions`` at native ``fps``).
+    """
+    path = Path(data_path) if data_path is not None else Path('../connectome_data/rendered_fly_view_dataset.pkl')
+    if not path.exists():
+        raise FileNotFoundError(f"Rendered fly-view dataset not found: {path.resolve()}")
+
+    with open(path, 'rb') as f:
+        d = pickle.load(f)
+
+    fps = float(d['fps'])
+    stimulus_dt = 1.0 / fps
+    flow_units = d.get('flow_units', 'radians/frame')
+    if flow_units != 'radians/frame':
+        raise ValueError(
+            f"Expected forward_flows in radians/frame; got flow_units={flow_units!r}"
+        )
+
+    # rad/frame -> deg/s (constant scale before temporal resampling)
+    flow_to_deg_s = fps * (180.0 / np.pi)
+
+    n_cols = int(np.asarray(d['responses'][0]).shape[1])
+    if n_cols % 2 != 0:
+        raise ValueError(f"Expected an even column count (R|L); got {n_cols}")
+    n_eye = n_cols // 2
+
+    if two_eyes:
+        left_probe = np.asarray(d['responses'][0])[:, n_eye:]
+        if left_probe.size and float(np.nanstd(left_probe)) < 1e-6:
+            warnings.warn(
+                "rendered_fly_view_dataset.pkl: second column block is (near-)constant — "
+                "this build does not contain real left-eye samples. "
+                "Two-eye flyview will show a flat/empty left panel; use one-eye flyview "
+                "or a binocular source (e.g. drone_view).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    # Ideal native frame count for stim_time; clips may be shorter — we upsample later.
+    n_frames_requested = max(1, int(round(stim_time / stimulus_dt)))
+
+    stim_list, flow_list = [], []
+    rot_list, trans_list = [], []
+
+    for i in range(len(d['responses'])):
+        resp = np.asarray(d['responses'][i], dtype=np.float64)
+        flow = np.asarray(d['forward_flows'][i], dtype=np.float64)
+        rpy = np.asarray(d['roll_pitch_yaw'][i], dtype=np.float64)
+        pos = np.asarray(d['positions'][i], dtype=np.float64)
+
+        if resp.shape[0] != flow.shape[0]:
+            raise ValueError(f"Clip {i}: response time {resp.shape[0]} != flow time {flow.shape[0]}")
+
+        if drop_first_frame:
+            resp = resp[1:]
+            flow = flow[1:]
+            rpy = rpy[1:]
+            pos = pos[1:]
+
+        clip_len = resp.shape[0]
+        if clip_len == 0:
+            continue
+
+        bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
+        resp = np.nan_to_num(resp, nan=0.0)
+        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s
+
+        resp_r, resp_l = resp[:, :n_eye], resp[:, n_eye:]
+        flow_r, flow_l = flow_deg_s[:, :n_eye], flow_deg_s[:, n_eye:]
+        bad_r, bad_l = bad[:, :n_eye], bad[:, n_eye:]
+
+        omega = _euler_angles_to_angular_velocity(rpy, stimulus_dt)
+        trans_rate = np.gradient(pos, stimulus_dt, axis=0)
+
+        n_seg = min(clip_len, n_frames_requested)
+        if n_seg == 0:
+            continue
+        num_segments = clip_len // n_seg
+
+        for seg_idx in range(num_segments):
+            sl = slice(seg_idx * n_seg, (seg_idx + 1) * n_seg)
+
+            if two_eyes:
+                s = np.concatenate([resp_r[sl], resp_l[sl]], axis=-1)
+                f = np.concatenate([flow_r[sl], flow_l[sl]], axis=1)
+                b = np.concatenate([bad_r[sl], bad_l[sl]], axis=-1)
+            else:
+                s = resp_r[sl]
+                f = flow_r[sl]
+                b = bad_r[sl]
+
+            f = f.copy()
+            f[..., 0] *= -1.0
+            s = s.copy()
+            s[b] = 0.0
+            f = np.where(b[..., np.newaxis], 0.0, f)
+
+            stim_list.append(s[None, ...])
+            flow_list.append(f[None, ...])
+
+            if two_eyes:
+                rot_list.append(omega[sl][None, ...])
+                trans_list.append(trans_rate[sl][None, ...])
+
+    if not stim_list:
+        raise RuntimeError(
+            "No rendered fly-view clips produced segments (empty dataset?)."
+        )
+
+    stimulus = np.concatenate(stim_list, axis=0)
+    optic_flow = np.concatenate(flow_list, axis=0)
+
+    # Map native timing → model_dt, then stretch/compress time to exactly stim_time.
+    n_target = max(1, int(round(stim_time / model_dt)) + 1)
+
+    if two_eyes:
+        rotation_rate = np.concatenate(rot_list, axis=0)
+        translation_rate = np.concatenate(trans_list, axis=0)
+        stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
+        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
+        rotation_rate = interpolate_to_model_dt(rotation_rate, stimulus_dt, model_dt)
+        translation_rate = interpolate_to_model_dt(translation_rate, stimulus_dt, model_dt)
+        stimulus = resample_time_to_length(stimulus, n_target)
+        optic_flow = resample_time_to_length(optic_flow, n_target)
+        rotation_rate = resample_time_to_length(rotation_rate, n_target)
+        translation_rate = resample_time_to_length(translation_rate, n_target)
+        return stimulus, optic_flow, rotation_rate, translation_rate
+
+    stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
+    optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
+    stimulus = resample_time_to_length(stimulus, n_target)
+    optic_flow = resample_time_to_length(optic_flow, n_target)
+    return stimulus, optic_flow
 
 
 def loadmat_v73(path):
@@ -1228,6 +1447,270 @@ def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
     return pano_out, pano_y_lim, pano_x_lim
 
 
+def make_expanding_dot_pano(
+    sample_phi,
+    sample_theta,
+    object_polarity,
+    dt=0.01,
+    stim_time=1.0,
+    pre_stim_time=0.0,
+    post_stim_time=0.0,
+    *,
+    physical_radius=None,
+    approach_speed=None,
+    initial_distance=None,
+    center_phi=None,
+    center_theta=None,
+    seed=None,
+    filter_std=2.5,
+    ommatidium_sampling_matrix=None,
+):
+    """
+    Gray-field (0.5) **full-sphere** equirectangular panorama: all directions are
+    defined (observer in a uniform gray void).  Resolution is
+    ``(EXPANDING_DOT_PANO_HEIGHT, EXPANDING_DOT_PANO_WIDTH)`` with uniform angular
+    step in azimuth and colatitude over ``2π × π`` rad (full 360° by 180°).
+    Default dot direction is **uniform on the sphere** (not uniform in colatitude).
+    Angular radius follows ``alpha = atan(R / d(t))`` with ``d(t) = d0 - v t``
+    (constant ``v``).  Default world units are **centimeters** and **seconds**:
+    ``R = 5`` cm, ``d0`` uniform on ``[30, 90]`` cm, ``v`` uniform on ``[15, 45]``
+    cm/s (override with ``physical_radius`` / ``initial_distance`` /
+    ``approach_speed``).
+
+    Column samples use :func:`build_ommatidium_sampling_matrix` and ``W @
+    pano.ravel()`` each frame (same as ``process_drone``), not bilinear
+    ``map_coordinates`` like :func:`get_random_velocity_pano`.  Here ``W`` is
+    shape ``(N, H*W)`` sparse (one row per ommatidium, one column per pano pixel) —
+    not the same shape as the ``(H, W)`` image.  That matvec each timestep is why
+    this stimulus can be heavier than :func:`get_random_velocity_pano`, which only
+    **interpolates N probe locations** per frame after a rotation, even though the
+    scene content (a disk) is simpler than a full photo panorama.
+
+    Args:
+        sample_phi: (N,) azimuth (radians).
+        sample_theta: (N,) polar angle (radians).
+        object_polarity: ``'light'`` (dot brighter than gray) or ``'dark'``.
+        dt, stim_time, pre_stim_time, post_stim_time: timing (seconds).
+        physical_radius: object radius ``R`` (cm by default; must match ``d0``).
+        approach_speed: closing speed ``v`` in cm/s (default uniform 15–45). If
+            None, drawn at random.
+        initial_distance: starting distance ``d0`` in cm (default uniform 30–90).
+            If None, drawn at random.
+        center_phi, center_theta: dot center on the sphere (same spherical convention
+            as ``sample_*``). If both None, direction is drawn uniformly on ``S^2``.
+        seed: RNG seed for random draws.
+        filter_std: ommatidium Gaussian std in degrees (default 2.5); ignored if
+            ``ommatidium_sampling_matrix`` is provided.
+        ommatidium_sampling_matrix: optional precomputed ``W`` from
+            :func:`build_ommatidium_sampling_matrix` (same geometry for every trial
+            in a batch).
+
+    Returns:
+        stimulus: (T, N) in [0, 1].
+        optic_flow: (T, N, 2) zeros (no self-motion).
+        readout: (T, N) subtended solid angle (steradians) at columns whose
+            direction lies inside the dot; 0 elsewhere. For binary “dot here or
+            not”, use ``readout > 0``.
+    """
+    if object_polarity not in ('light', 'dark'):
+        raise ValueError("object_polarity must be 'light' or 'dark'")
+
+    rng = np.random.default_rng(seed)
+
+    pano_phi_lim = EXPANDING_DOT_PANO_PHI_LIM
+    pano_theta_lim = EXPANDING_DOT_PANO_THETA_LIM
+    H, W = EXPANDING_DOT_PANO_HEIGHT, EXPANDING_DOT_PANO_WIDTH
+
+    if physical_radius is None:
+        R = float(EXPANDING_DOT_RADIUS_CM)
+    else:
+        R = float(physical_radius)
+    if R <= 0:
+        raise ValueError("physical_radius must be positive")
+
+    if approach_speed is None:
+        lo, hi = EXPANDING_DOT_SPEED_RANGE_CM_S
+        v = float(rng.uniform(lo, hi))
+    else:
+        v = float(approach_speed)
+    if v <= 0:
+        raise ValueError("approach_speed must be positive")
+
+    if initial_distance is None:
+        lo, hi = EXPANDING_DOT_D0_RANGE_CM
+        d0 = float(rng.uniform(lo, hi))
+    else:
+        d0 = float(initial_distance)
+    if d0 <= 0:
+        raise ValueError("initial_distance must be positive")
+
+    if center_phi is None and center_theta is None:
+        u_dir, v_dir = rng.random(), rng.random()
+        theta0 = float(np.arccos(1.0 - 2.0 * u_dir))
+        phi0 = float(2.0 * np.pi * v_dir - np.pi)
+    else:
+        if center_phi is None:
+            phi0 = float(rng.uniform(-np.pi, np.pi))
+        else:
+            phi0 = float(center_phi)
+        if center_theta is None:
+            theta0 = float(np.arccos(1.0 - 2.0 * rng.random()))
+        else:
+            theta0 = float(center_theta)
+
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_stim_index = int(round(pre_stim_time / dt))
+    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
+    t[:pre_stim_index] = t[pre_stim_index]
+    t[post_stim_index:] = t[post_stim_index - 1]
+    t_stim = t - t[pre_stim_index]
+
+    d = np.maximum(d0 - v * t_stim, 1e-9)
+    alpha = np.arctan(R / d)
+    omega_cap = 2.0 * np.pi * (1.0 - np.cos(alpha))
+
+    # Match ``build_ommatidium_sampling_matrix`` pixel axes (inclusive endpoints).
+    theta_pixels = np.linspace(pano_theta_lim[0], pano_theta_lim[1], H)
+    phi_pixels = np.linspace(pano_phi_lim[0], pano_phi_lim[1], W)
+    theta_grid, phi_grid = np.meshgrid(theta_pixels, phi_pixels, indexing='ij')
+    cos_g = (
+        np.sin(theta_grid) * np.sin(theta0) * np.cos(phi_grid - phi0)
+        + np.cos(theta_grid) * np.cos(theta0)
+    )
+    cos_g = np.clip(cos_g, -1.0, 1.0)
+    g_grid = np.arccos(cos_g)
+
+    if object_polarity == 'light':
+        inside_val = 1.0
+    else:
+        inside_val = 0.0
+
+    num_cells = len(sample_phi)
+    stimulus = np.full((num_time, num_cells), 0.5, dtype=np.float64)
+    readout = np.zeros((num_time, num_cells), dtype=np.float64)
+
+    cos_gc = (
+        np.sin(sample_theta) * np.sin(theta0) * np.cos(sample_phi - phi0)
+        + np.cos(sample_theta) * np.cos(theta0)
+    )
+    cos_gc = np.clip(cos_gc, -1.0, 1.0)
+    g_col = np.arccos(cos_gc)
+
+    if ommatidium_sampling_matrix is not None:
+        W_eye = ommatidium_sampling_matrix
+    else:
+        W_eye = build_ommatidium_sampling_matrix(
+            (H, W),
+            pano_phi_lim,
+            pano_theta_lim,
+            sample_phi,
+            sample_theta,
+            filter_std=filter_std,
+        )
+
+    # Per-frame pano construction (avoids the (T, H, W) float64 allocation).
+    # alpha is monotone non-decreasing (frozen pre/post, growing during stim),
+    # so each frame only flips additional pixels from gray to inside_val.
+    pano_frame = np.full((H, W), 0.5, dtype=np.float64)
+    prev_mask = np.zeros_like(g_grid, dtype=bool)
+    for ti in range(num_time):
+        mask = g_grid <= alpha[ti]
+        newly_inside = mask & (~prev_mask)
+        if newly_inside.any():
+            pano_frame[newly_inside] = inside_val
+        prev_mask = mask
+
+        stimulus[ti] = np.asarray(
+            W_eye @ pano_frame.ravel(order="C"), dtype=np.float64
+        ).ravel()
+        inside_col = g_col <= alpha[ti]
+        readout[ti, inside_col] = omega_cap[ti]
+
+    optic_flow = np.zeros((num_time, num_cells, 2), dtype=np.float64)
+    return stimulus, optic_flow, readout
+
+
+def create_expanding_dot_stimulus(
+    sample_phi,
+    sample_theta,
+    *,
+    dt,
+    stim_time,
+    pre_stim_time=0.0,
+    post_stim_time=0.0,
+    seed=None,
+    num_light=50,
+    num_dark=50,
+    filter_std=2.5,
+):
+    """
+    Batch of light- and dark-polarity expanding-dot trials (see
+    :func:`make_expanding_dot_pano`).
+
+    The ommatidium matrix depends only on retina geometry (phi/theta columns) and
+    pano shape — not on dot position or polarity — so it is built **once** here and
+    reused for every trial (see ``ommatidium_sampling_matrix`` in
+    :func:`make_expanding_dot_pano`).
+
+    Returns:
+        stimulus: (num_light + num_dark, T, N) in [0, 1].
+        optic_flow: (num_light + num_dark, T, N, 2) zeros.
+    """
+    H, W_img = EXPANDING_DOT_PANO_HEIGHT, EXPANDING_DOT_PANO_WIDTH
+    W_eye = build_ommatidium_sampling_matrix(
+        (H, W_img),
+        EXPANDING_DOT_PANO_PHI_LIM,
+        EXPANDING_DOT_PANO_THETA_LIM,
+        sample_phi,
+        sample_theta,
+        filter_std=filter_std,
+    )
+
+    master_rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+
+    stim_blocks = []
+    flow_blocks = []
+    for polarity, count in (('light', num_light), ('dark', num_dark)):
+        for _ in range(count):
+            trial_seed = int(master_rng.integers(0, 2**31 - 1))
+            s, f, _ = make_expanding_dot_pano(
+                sample_phi,
+                sample_theta,
+                polarity,
+                dt=dt,
+                stim_time=stim_time,
+                pre_stim_time=pre_stim_time,
+                post_stim_time=post_stim_time,
+                seed=trial_seed,
+                ommatidium_sampling_matrix=W_eye,
+            )
+            stim_blocks.append(s[None, ...])
+            flow_blocks.append(f[None, ...])
+    return np.concatenate(stim_blocks, axis=0), np.concatenate(flow_blocks, axis=0)
+
+
+def trim_expanding_dot_config_for_max_index(config, max_index: int) -> None:
+    """
+    Reduce ``expanding_dot_num_light`` / ``expanding_dot_num_dark`` so the batch
+    is the smallest that still includes indices ``0 .. max_index`` (light trials
+    first, then dark). Mutates ``config['stimulus']`` in place.
+
+    Used by movie scripts that only need a few examples (e.g. ``--stim-index 0``)
+    without paying for the full 50+50 training batch.
+    """
+    if max_index < 0:
+        return
+    nl = int(config['stimulus'].get('expanding_dot_num_light', 50))
+    nd = int(config['stimulus'].get('expanding_dot_num_dark', 50))
+    if max_index < nl:
+        config['stimulus']['expanding_dot_num_light'] = max_index + 1
+        config['stimulus']['expanding_dot_num_dark'] = 0
+    else:
+        config['stimulus']['expanding_dot_num_light'] = nl
+        config['stimulus']['expanding_dot_num_dark'] = min(nd, max_index - nl + 1)
+
+
 def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocity_time_scale=0.25, seed=None,
                              dt=0.01, stim_time=1.0, num_repeats=5):
     """
@@ -1749,37 +2232,19 @@ def get_stimulus_one_eye(
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
         elif stim_type == 'flyview':
-            required_length = 80
-            sintel_path = Path('../connectome_data/rendered_fly_view_dataset.pkl')
-            with open(sintel_path, 'rb') as f:
-                stimulus_in = pickle.load(f)
-
-            stimulus_dt = 1 / stimulus_in['fps']
-            stimulus_list = []
-            optic_flow_list = []
-            for resp, flow in zip(stimulus_in['responses'], stimulus_in['forward_flows']):
-                stim = torch.tensor(resp[1:], device=device, dtype=dtype)
-                of = torch.tensor(flow, device=device, dtype=dtype)
-                num_segments = stim.shape[0] // required_length
-                if num_segments == 0:
-                    continue
-                for seg_idx in range(num_segments):
-                    start = seg_idx * required_length
-                    end = start + required_length
-                    stimulus_list.append(stim[start:end])
-                    optic_flow_list.append(of[start:end])
-
-            stimulus = torch.stack(stimulus_list, axis=0)
-            optic_flow = torch.stack(optic_flow_list, axis=0)
-            optic_flow[:, :, :, 0] *= -1
-
-            flow_magnitude = torch.sqrt(optic_flow[:, :, :, 0] ** 2 + optic_flow[:, :, :, 1] ** 2)
-            bad_mask = flow_magnitude > 1
-            optic_flow[bad_mask] = 0
-            stimulus[bad_mask] = 0
-
-            stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-            optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt) * 180 / np.pi / model_dt
+            if column_phi_theta is None:
+                raise Exception('flyview requires column_phi_theta input')
+            stimulus_np, optic_flow_np = load_rendered_fly_view_dataset(
+                model_dt, stim_time, two_eyes=False,
+            )
+            n_cols_expect = column_phi_theta.shape[0]
+            if stimulus_np.shape[2] != n_cols_expect:
+                raise ValueError(
+                    f"flyview right-eye columns ({stimulus_np.shape[2]}) != "
+                    f"column_phi_theta rows ({n_cols_expect})"
+                )
+            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
         elif stim_type == 'counterphase_sine':
@@ -1823,12 +2288,34 @@ def get_stimulus_one_eye(
             optic_flow = torch.tensor(np.concatenate(flow_arrays), device=device, dtype=dtype)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'expanding_dot':
+            if column_phi_theta is None:
+                raise Exception('expanding_dot requires column_phi_theta input')
+            n_light = int(config['stimulus'].get('expanding_dot_num_light', 50))
+            n_dark = int(config['stimulus'].get('expanding_dot_num_dark', 50))
+            filt = float(config['stimulus'].get('expanding_dot_filter_std', 2.5))
+            stimulus_np, optic_flow_np = create_expanding_dot_stimulus(
+                column_phi_theta[:, 0],
+                column_phi_theta[:, 1],
+                dt=model_dt,
+                stim_time=stim_time,
+                pre_stim_time=0.0,
+                post_stim_time=0.0,
+                seed=stimulus_seed,
+                num_light=n_light,
+                num_dark=n_dark,
+                filter_std=filt,
+            )
+            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}'. "
                 "Expected one of: static_sine, directional_sine, edge, random_pano, "
                 "random_sine, flow_360, sintel, flyview, full_field_step, "
-                "full_field_flicker, counterphase_sine."
+                "full_field_flicker, counterphase_sine, expanding_dot."
             )
 
         stim_list.append(stimulus)
@@ -2066,11 +2553,61 @@ def get_stimulus_two_eyes(
             observer_translation = torch.zeros((n_flicker, stimulus.shape[1], 3), device=device, dtype=dtype)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'flyview':
+            if column_phi_theta is None:
+                raise Exception('flyview requires column_phi_theta input')
+            stim_time = config['stimulus']['stim_time']
+            stimulus_np, optic_flow_np, rot_np, trans_np = load_rendered_fly_view_dataset(
+                model_dt, stim_time, two_eyes=True,
+            )
+            n_expect = 2 * column_phi_theta.shape[0]
+            if stimulus_np.shape[2] != n_expect:
+                raise ValueError(
+                    f"flyview binocular columns ({stimulus_np.shape[2]}) != "
+                    f"2 * column_phi_theta rows ({n_expect})"
+                )
+            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
+            observer_rotation = torch.tensor(rot_np, device=device, dtype=dtype)
+            observer_translation = torch.tensor(trans_np, device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
+        elif stim_type == 'expanding_dot':
+            if column_phi_theta is None:
+                raise Exception('expanding_dot requires column_phi_theta input')
+            stim_time = config['stimulus']['stim_time']
+            post_stim_time = config['stimulus']['post_stim_time']
+            stimulus_seed = config['stimulus'].get('seed', None)
+            n_light = int(config['stimulus'].get('expanding_dot_num_light', 50))
+            n_dark = int(config['stimulus'].get('expanding_dot_num_dark', 50))
+            filt = float(config['stimulus'].get('expanding_dot_filter_std', 2.5))
+            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
+            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
+            stimulus_np, optic_flow_np = create_expanding_dot_stimulus(
+                both_phi,
+                both_theta,
+                dt=model_dt,
+                stim_time=stim_time,
+                pre_stim_time=0.0,
+                post_stim_time=0.0,
+                seed=stimulus_seed,
+                num_light=n_light,
+                num_dark=n_dark,
+                filter_std=filt,
+            )
+            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
+            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
+            n_ex = stimulus.shape[0]
+            Tlen = stimulus.shape[1]
+            observer_rotation = torch.zeros((n_ex, Tlen, 3), device=device, dtype=dtype)
+            observer_translation = torch.zeros((n_ex, Tlen, 3), device=device, dtype=dtype)
+            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
+
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
-                "Expected one of: random_pano, drone_view, edge, full_field_step, "
-                "full_field_flicker, counterphase_sine."
+                "Expected one of: random_pano, drone_view, edge, flyview, full_field_step, "
+                "full_field_flicker, counterphase_sine, expanding_dot."
             )
 
         stim_list.append(stimulus)

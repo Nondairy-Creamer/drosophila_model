@@ -47,6 +47,10 @@ temporal_frequencies = [
     4,
     8,
 ]
+# expanding_dot stimulus: trials per polarity (default 50 light + 50 dark)
+expanding_dot_num_light = 50
+expanding_dot_num_dark = 50
+expanding_dot_filter_std = 2.5
 
 [data]
 connectome_folder = "../connectome_data"

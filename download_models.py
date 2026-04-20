@@ -1,5 +1,9 @@
 '''
-SCP utility for transferring model files to/from a remote server.
+Rsync utility for transferring model files to/from a remote server.
+
+Uses rsync over ssh for resumable, high-throughput transfers. Requires
+rsync on both ends (preinstalled on macOS and most Linux containers; on
+RunPod run `apt-get update && apt-get install -y rsync` if missing).
 '''
 
 import argparse
@@ -71,13 +75,42 @@ def _resolve_server(server: str) -> tuple[str, str, str, str]:
     )
 
 
+def _build_ssh_arg(port: str, identity_file: str) -> str:
+    '''
+    Build the `-e` argument for rsync that invokes ssh with throughput-tuned
+    options. Disables compression (model files are already binary/compressed)
+    and tags the connection for throughput-optimized routing.
+    '''
+    return (
+        f'ssh -p {port} -i {identity_file} '
+        '-o Compression=no '
+        '-o IPQoS=throughput '
+        '-o ServerAliveInterval=30'
+    )
+
+
+def _rsync_base(port: str, identity_file: str) -> list[str]:
+    '''
+    Standard rsync invocation:
+      -a  archive (preserve perms/times)
+      -h  human-readable sizes
+      -P  --partial + --progress (resumable + live progress)
+      --inplace  write directly to destination file (faster, less disk churn,
+                 and resumes cleanly mid-file when combined with --partial)
+    '''
+    return [
+        'rsync', '-ahP', '--inplace',
+        '-e', _build_ssh_arg(port, identity_file),
+    ]
+
+
 def scp_transfer(
     server: str,
     transfer_type: str = 'pull',
     folder: str | None = None,
 ) -> None:
     '''
-    SCP files to or from a remote server.
+    Rsync files to or from a remote server.
 
     Args:
         server: Either an IP:port string (e.g. "194.68.245.60:22050") or an
@@ -102,73 +135,75 @@ def scp_transfer(
         local_path = str(_LOCAL_MODELS_DIR) + '/'
 
     ssh_base = ['ssh', '-p', port, '-i', identity_file, f'{user}@{hostname}']
-    scp_base = ['scp', '-P', port, '-i', identity_file]
+    rsync_base = _rsync_base(port, identity_file)
 
     if transfer_type == 'pull':
         if folder:
             os.makedirs(local_path, exist_ok=True)
-            # List only files (not subdirectories) on the remote
-            list_cmd = ssh_base + [f'find {remote_path} -maxdepth 1 -type f']
-            result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
-            remote_files = [f for f in result.stdout.strip().split('\n') if f]
-            if not remote_files:
-                print("No files found in remote directory.")
-                return
-            sources = [f'{user}@{hostname}:{f}' for f in remote_files]
-            cmd = scp_base + sources + [local_path + '/']
-        else:
-            # List remote subdirectories and group by timestamp prefix
-            list_cmd = ssh_base + [f'ls -1 {remote_path}']
-            result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
-            remote_entries = [
-                e.strip().rstrip('/') for e in result.stdout.strip().split('\n') if e.strip()
-            ]
-            if not remote_entries:
-                print("No entries found in remote models directory.")
-                return
-
-            # Group by tag/timestamp prefix (strip _gpuN_runN suffix)
-            groups: dict[str, list[str]] = {}
-            for entry in remote_entries:
-                prefix = re.sub(r'_gpu\d+_run\d+$', '', entry)
-                groups.setdefault(prefix, []).append(entry)
-
-            for prefix, entries in groups.items():
-                local_ts_dir = _LOCAL_MODELS_DIR / prefix
-                os.makedirs(local_ts_dir, exist_ok=True)
-                print(f"Pulling {len(entries)} folder(s) into {local_ts_dir}/")
-                for entry in entries:
-                    remote_spec = f'{user}@{hostname}:{_REMOTE_MODELS_DIR}/{entry}'
-                    cmd = scp_base + ['-r', remote_spec, str(local_ts_dir) + '/']
-                    print(f"Running: {' '.join(cmd)}")
-                    subprocess.run(cmd, check=True)
-
+            # Pull only top-level files (skip subdirectories) from the remote folder.
+            # `-f '- */'` filter excludes any directory entries; no -r is used so
+            # rsync only walks the top level.
+            remote_spec = f'{user}@{hostname}:{remote_path}'
+            cmd = rsync_base + ['-f', '- */', remote_spec, local_path + '/']
+            print(f"Running: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
             print("Transfer complete.")
             return
 
-    elif transfer_type == 'push':
+        # No folder specified: list remote subdirs and group by tag/timestamp prefix
+        list_cmd = ssh_base + [f'ls -1 {remote_path}']
+        result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
+        remote_entries = [
+            e.strip().rstrip('/') for e in result.stdout.strip().split('\n') if e.strip()
+        ]
+        if not remote_entries:
+            print("No entries found in remote models directory.")
+            return
+
+        groups: dict[str, list[str]] = {}
+        for entry in remote_entries:
+            prefix = re.sub(r'_gpu\d+_run\d+$', '', entry)
+            groups.setdefault(prefix, []).append(entry)
+
+        for prefix, entries in groups.items():
+            local_ts_dir = _LOCAL_MODELS_DIR / prefix
+            os.makedirs(local_ts_dir, exist_ok=True)
+            print(f"Pulling {len(entries)} folder(s) into {local_ts_dir}/")
+            for entry in entries:
+                remote_spec = f'{user}@{hostname}:{_REMOTE_MODELS_DIR}/{entry}'
+                cmd = rsync_base + ['-r', remote_spec, str(local_ts_dir) + '/']
+                print(f"Running: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+
+        print("Transfer complete.")
+        return
+
+    if transfer_type == 'push':
         # Ensure remote destination directory exists
         mkdir_cmd = ssh_base + [f'mkdir -p {remote_path}']
         print(f"Ensuring remote directory exists: {remote_path}")
         subprocess.run(mkdir_cmd, check=True)
+
         if folder:
-            # Collect only files (not subdirectories) from local folder
             local_dir = Path(local_path)
             files = sorted(str(f) for f in local_dir.iterdir() if f.is_file())
             if not files:
                 print("No files found in local directory.")
                 return
             remote_spec = f'{user}@{hostname}:{remote_path}'
-            cmd = scp_base + files + [remote_spec]
+            cmd = rsync_base + files + [remote_spec]
         else:
             remote_spec = f'{user}@{hostname}:{remote_path}'
-            cmd = scp_base + ['-r', local_path, remote_spec]
-    else:
-        raise ValueError(f"transfer_type must be 'pull' or 'push', got '{transfer_type}'")
+            # Trailing slash on local_path makes rsync copy the *contents*
+            # of the models dir into the remote models dir.
+            cmd = rsync_base + ['-r', local_path, remote_spec]
 
-    print(f"Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    print("Transfer complete.")
+        print(f"Running: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+        print("Transfer complete.")
+        return
+
+    raise ValueError(f"transfer_type must be 'pull' or 'push', got '{transfer_type}'")
 
 
 def main() -> None:

@@ -77,6 +77,11 @@ def main() -> None:
     if args.stim_time is not None:
         config["stimulus"]["stim_time"] = args.stim_time
 
+    # expanding_dot: training config often requests 50 light + 50 dark; movies only
+    # need the requested --stim-index rows — trim batch so load is ~1 trial, not 100.
+    if args.stim_type == "expanding_dot" and args.stim_index is not None:
+        su.trim_expanding_dot_config_for_max_index(config, max(args.stim_index))
+
     output_folder = Path(args.output_dir) if args.output_dir else (
         Path("figures/two_eyes") if args.two_eyes else Path("figures/movie"))
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -245,13 +250,13 @@ def _make_two_eyes_input_movie(
     q_r.set_edgecolor(colors_r0)
     ax_flow_r.set_title(f"Right Eye {flow_label}")
 
-    colors_l0, _ = flow_direction_colors(flow_l_vx[0], flow_l_vz[0], flow_max_mag)
+    colors_l0, _ = flow_direction_colors(flow_l_vx[0], flow_l_vz[0], flow_max_mag, flip_lr=True)
     q_l = ax_flow_l.quiver(cell_x, cell_z, flow_l_vx[0], flow_l_vz[0], **quiver_kw)
     q_l.set_facecolor(colors_l0)
     q_l.set_edgecolor(colors_l0)
     ax_flow_l.set_title(f"Left Eye {flow_label}")
 
-    add_direction_colorwheel(fig)
+    add_direction_colorwheel(fig, flip_lr=True)
 
     rot_labels = ["roll", "pitch", "yaw"]
     trans_labels = ["x", "y", "z"]
@@ -292,7 +297,7 @@ def _make_two_eyes_input_movie(
         ax_sam_l.set_title(f"Left Eye (t={time_s:.2f}s)")
 
         update_direction_quiver(q_r, flow_r_vx[t], flow_r_vz[t], flow_max_mag)
-        update_direction_quiver(q_l, flow_l_vx[t], flow_l_vz[t], flow_max_mag)
+        update_direction_quiver(q_l, flow_l_vx[t], flow_l_vz[t], flow_max_mag, flip_lr=True)
 
         t_start = max(0, t - trail_frames + 1)
         t_slice = slice(t_start, t + 1)
