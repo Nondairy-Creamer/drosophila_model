@@ -228,7 +228,7 @@ def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
     return init_plot_for_direction
 
 
-def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0):
+def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0, stim_cmap='viridis', stim_scale_frac=0.5, stim_size_frac=0.2):
     """
     New simple interface:
       - responses_dict: dict with 5 keys (in insertion order):
@@ -262,11 +262,12 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
         except Exception:
             pass
 
+        stim_coord_scale = stim_scale_frac * scale
         coords = []
         for idx in range(len(cell_keys)):
             dx, dz = position_by_index[idx]
             coords.append((scale * cell_x + dx, scale * cell_z + dz))
-        coords.append(((0.5 * scale) * cell_x, (0.5 * scale) * cell_z))
+        coords.append((stim_coord_scale * cell_x, stim_coord_scale * cell_z))
         x_all = np.concatenate([xy[0] for xy in coords]) if coords else (scale * cell_x)
         y_all = np.concatenate([xy[1] for xy in coords]) if coords else (scale * cell_z)
         x_min, x_max = np.min(x_all), np.max(x_all)
@@ -289,7 +290,7 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
         base_ms = plt.rcParams.get("lines.markersize", 6.0)
         base_s = float(base_ms) ** 2
         s_dir = max(1.0, base_s * size_scale)
-        s_stim = max(1.0, s_dir * 0.2)
+        s_stim = max(1.0, s_dir * stim_size_frac)
 
         stim_all = responses_dict.get('stimulus', None)
         if stim_all is not None:
@@ -317,8 +318,8 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
         if stim_all is not None and num_stimuli > 0 and L > 0:
             stim_initial = stim_all[0, 0, :]
         stim_scatter = ax.scatter(
-            (0.5 * scale) * cell_x, (0.5 * scale) * cell_z,
-            c=stim_initial, cmap="viridis", norm=norm, s=s_stim,
+            stim_coord_scale * cell_x, stim_coord_scale * cell_z,
+            c=stim_initial, cmap=stim_cmap, norm=norm, s=s_stim,
             edgecolors='none', linewidths=0.0, antialiased=False,
         )
 

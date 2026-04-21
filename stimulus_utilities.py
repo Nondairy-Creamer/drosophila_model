@@ -2231,6 +2231,41 @@ def get_stimulus_one_eye(
                 optic_flow = optic_flow[:, :num_segments*final_length, :, :].reshape(num_stimuli * num_segments, final_length, num_neurons, optic_flow.shape[3])
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'drone_view':
+            if column_phi_theta is None:
+                raise Exception('drone_view requires column_phi_theta input')
+            drone_data_path = Path(config['data']['connectome_folder']) / 'drone_data_monocular.pt'
+            if not drone_data_path.exists():
+                raise FileNotFoundError(
+                    f"Monocular drone data not found: {drone_data_path}. "
+                    "Run: python drone_analysis/process_drone.py --monocular --data-dir <folder>"
+                )
+            drone_clips = torch.load(drone_data_path, weights_only=False)
+
+            in_fov = drone_clips[0]['in_fov_right']
+
+            # Each clip is kept as one full-length segment (no chopping). If
+            # clips have different lengths we truncate to the shortest so they
+            # can be stacked into a single (n_clips, T, N) tensor.
+            full_rights = []
+            for clip in drone_clips:
+                video_dt_clip = clip['video_dt']
+                right_native = clip['right'].numpy()
+                right_model = interpolate_to_model_dt(
+                    right_native[None], video_dt_clip, model_dt)[0]
+                full_rights.append(right_model)
+
+            if not full_rights:
+                raise RuntimeError(f"No clips found in {drone_data_path}.")
+            min_len = min(r.shape[0] for r in full_rights)
+            stim_right = np.stack([r[:min_len] for r in full_rights], axis=0)
+
+            stimulus = torch.tensor(stim_right, device=device, dtype=dtype)
+            optic_flow = torch.full(
+                (*stimulus.shape, 2), float('nan'), device=device, dtype=dtype)
+            train_mask = in_fov.to(device=device).unsqueeze(0).unsqueeze(0).expand(
+                stimulus.shape[0], stimulus.shape[1], -1)
+
         elif stim_type == 'flyview':
             if column_phi_theta is None:
                 raise Exception('flyview requires column_phi_theta input')
@@ -2314,7 +2349,7 @@ def get_stimulus_one_eye(
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}'. "
                 "Expected one of: static_sine, directional_sine, edge, random_pano, "
-                "random_sine, flow_360, sintel, flyview, full_field_step, "
+                "random_sine, flow_360, sintel, flyview, drone_view, full_field_step, "
                 "full_field_flicker, counterphase_sine, expanding_dot."
             )
 

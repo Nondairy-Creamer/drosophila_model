@@ -64,6 +64,7 @@ def main() -> None:
     model_dt = model.dt
     connectome_folder = Path(local_config["data"]["connectome_folder"])
     drone_data_path = connectome_folder / "drone_data.pt"
+    drone_video_dir = connectome_folder / "drone_videos"
 
     print("Loading drone clips...")
     drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))
@@ -114,6 +115,15 @@ def main() -> None:
         pred_rot_np = pred_rot[0].cpu().numpy()
         pred_trans_np = pred_trans[0].cpu().numpy()
 
+        t4_keys = ["T4a", "T4b", "T4c", "T4d"]
+        t5_keys = ["T5a", "T5b", "T5c", "T5d"]
+        fr_right = right_res["outputs"].get("firing_rate", {})
+        fr_left = left_res["outputs"].get("firing_rate", {})
+        t4_right = {k: fr_right[k][0].cpu().numpy() for k in t4_keys if k in fr_right}
+        t4_left = {k: fr_left[k][0].cpu().numpy() for k in t4_keys if k in fr_left}
+        t5_right = {k: fr_right[k][0].cpu().numpy() for k in t5_keys if k in fr_right}
+        t5_left = {k: fr_left[k][0].cpu().numpy() for k in t5_keys if k in fr_left}
+
         if args.translation:
             pred_flow_right, pred_flow_left = _subtract_rotation_flow(
                 pred_flow_right, pred_flow_left,
@@ -137,6 +147,43 @@ def main() -> None:
             model_dt, clip_idx, clip_id,
             output_dir / f"drone_integrated_clip_{clip_idx}.png",
         )
+
+        # Load raw stereo videos (TEMP: copied from drone_analysis/process_drone.py).
+        # Number of raw video frames corresponding to num_frames model steps.
+        num_video_frames = int(np.ceil(num_frames * model_dt / video_dt)) + 1
+        raw_left_path = drone_video_dir / f"left_{clip_id}.mp4"
+        raw_right_path = drone_video_dir / f"right_{clip_id}.mp4"
+        raw_left = _load_video_grayscale(raw_left_path, max_frames=num_video_frames)
+        raw_right = _load_video_grayscale(raw_right_path, max_frames=num_video_frames)
+        print(f"  Loaded raw videos: left {raw_left.shape}, right {raw_right.shape}")
+
+        dump_path = output_dir / f"drone_model_data_clip_{clip_idx}.pt"
+        dump = {
+            "clip_idx": clip_idx,
+            "clip_id": clip_id,
+            "model_dt": model_dt,
+            "video_dt": video_dt,
+            "num_frames": num_frames,
+            "raw_left_video": raw_left,
+            "raw_right_video": raw_right,
+            "left_movie": clip["left"][:num_frames],
+            "right_movie": clip["right"][:num_frames],
+            "left_model_input": left_input[0].cpu().numpy(),
+            "right_model_input": right_input[0].cpu().numpy(),
+            "in_fov_left": in_fov_left,
+            "in_fov_right": in_fov_right,
+            "pred_rotation_rate": pred_rot_np,
+            "pred_translation_rate": pred_trans_np,
+            "pred_translation_rate_scaled": pred_trans_scaled,
+            "true_rotation_rate": true_rot_rate,
+            "true_translation_rate": true_trans_rate,
+            "t4_activity_left": t4_left,
+            "t4_activity_right": t4_right,
+            "t5_activity_left": t5_left,
+            "t5_activity_right": t5_right,
+        }
+        torch.save(dump, dump_path)
+        print(f"  Saved model data dict -> {dump_path}")
 
         # Normalize translation to unit std (direction only, scale is arbitrary)
         true_std = np.std(true_trans_rate)
@@ -179,6 +226,24 @@ def main() -> None:
             model_dt=model_dt,
             flow_label=flow_label,
         )
+
+
+def _load_video_grayscale(path, max_frames=None):
+    """Load video as grayscale uint8 frames. Copied from drone_analysis/process_drone.py."""
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        if max_frames is not None and len(frames) >= max_frames:
+            break
+    cap.release()
+    if not frames:
+        raise FileNotFoundError(f"No frames read from video: {path}")
+    return np.stack(frames)
 
 
 def _save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,

@@ -105,7 +105,19 @@ def main() -> None:
     column_phi_theta = model.column_phi_theta
     N = column_phi_theta.shape[0]
 
-    frame_rate = args.fps or max(1, int((1 / model_dt) / 2))
+    # Force stimulus generation to use the model's dt and device so the resampled
+    # stimulus rate matches the movie playback rate, and device matches the model
+    # (config can specify a cuda device that doesn't exist on this machine).
+    cfg_dt = float(config['model']['dt'])
+    if abs(cfg_dt - model_dt) > 1e-9:
+        print(f"Overriding config dt {cfg_dt} -> model dt {model_dt} for stimulus generation")
+        config['model']['dt'] = model_dt
+    cfg_device = str(config['model'].get('device', ''))
+    if cfg_device != str(device):
+        print(f"Overriding config device {cfg_device!r} -> model device {str(device)!r}")
+        config['model']['device'] = str(device)
+
+    frame_rate = args.fps or max(1, int(round((1 / model_dt) / 2)))
 
     column_xyz = model.get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]

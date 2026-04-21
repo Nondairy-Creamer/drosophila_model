@@ -71,7 +71,20 @@ def main() -> None:
     model_dt = model.dt
     column_phi_theta = model.column_phi_theta
 
-    frame_rate = int(1 / model_dt)
+    # Force stimulus generation to use the model's dt and device so the resampled
+    # stimulus rate matches the movie playback rate, and device matches the model
+    # (config can specify a cuda device that doesn't exist on this machine).
+    cfg_dt = float(config['model']['dt'])
+    if abs(cfg_dt - model_dt) > 1e-9:
+        print(f"Overriding config dt {cfg_dt} -> model dt {model_dt} for stimulus generation")
+        config['model']['dt'] = model_dt
+    cfg_device = str(config['model'].get('device', ''))
+    if cfg_device != str(device):
+        print(f"Overriding config device {cfg_device!r} -> model device {str(device)!r}")
+        config['model']['device'] = str(device)
+
+    frame_rate = int(round(1 / model_dt))
+    print(f"Movie frame rate: {frame_rate} fps (model_dt={model_dt})")
 
     output_dir = Path(args.output_dir) if args.output_dir else model_folder / "movie"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,15 +104,32 @@ def main() -> None:
             args.stim_type, config, column_phi_theta)
         stimulus = stimulus[:args.num_stim].to(device=device, dtype=dtype)
 
-    output_neurons = list(set(args.input_neurons + args.cell_types))
+    t5_types = ['T5a', 'T5b', 'T5c', 'T5d']
+    output_neurons = list(set(args.input_neurons + args.cell_types + t5_types))
 
     print(f"Running model prediction ({stimulus.shape[0]} stimuli, "
           f"{stimulus.shape[1]} frames each)...")
     with torch.no_grad():
+        # First pass: throw-away run used only to obtain a warmed-up state
+        # (final voltages + input-conv filter state) at the end of the stimulus.
+        warmup = model.predict(
+            stimulus,
+            input_neurons=args.input_neurons,
+            output_neurons=output_neurons,
+        )
+        init_v = warmup['model_state']['v']
+        init_filter_state = warmup['model_state']['filter_state']
+        del warmup
+
+        # Second pass: re-run with the warmed-up state as the initial condition;
+        # this is what we render in the movie.
+        print("Re-running with warmed-up initial state for the rendered movie...")
         pred = model.predict(
             stimulus,
             input_neurons=args.input_neurons,
             output_neurons=output_neurons,
+            init_state=init_v,
+            init_filter_state=init_filter_state,
         )['outputs']['firing_rate']
 
     cell_phi = model.column_phi_theta[:, 0]
@@ -107,21 +137,46 @@ def main() -> None:
     cell_x = -np.sin(cell_theta) * np.cos(cell_phi)
     cell_z = np.cos(cell_theta)
 
-    seq_data = {}
-    for mct in args.cell_types:
-        cell_resp = pred[mct].detach().cpu().numpy()
-        cell_resp /= np.nanpercentile(cell_resp, args.color_percentile)
-        cell_resp = interp_nan_column(cell_resp, cell_phi, cell_theta)
-        seq_data[mct] = cell_resp
+    stim_np = stimulus.detach().cpu().numpy()
+    # Per-frame min-max normalize so each frame spans the full data range
+    # (the diamond scatter cmap uses Normalize(0, 1), so we map to [0, 1]).
+    frame_min = np.nanmin(stim_np, axis=-1, keepdims=True)
+    frame_max = np.nanmax(stim_np, axis=-1, keepdims=True)
+    frame_range = frame_max - frame_min
+    safe_range = np.where(frame_range > 0, frame_range, 1.0)
+    stim_np = (stim_np - frame_min) / safe_range
+    diamond_scale = 1.8
+    diamond_offset = 2.0 * diamond_scale + 0.4  # leave a small gap between center stim and panels
 
-    seq_data['stimulus'] = stimulus.detach().cpu().numpy()
+    sum_types = [(t4, t5) for t4, t5 in zip(args.cell_types, t5_types)]
+    sum_labels = [f"{t4}+{t5}" for t4, t5 in sum_types]
+    sum_save_name = "t4_plus_t5"
 
-    cell_label = "_".join(args.cell_types)
-    print(f"Creating diamond sequence movie for {cell_label}...")
-    init_scatter_diamond = make_scatter_diamond_sequence_factory(
-        seq_data, cell_x, cell_z, scale=1.8, size_scale=0.6)
-    make_movie(init_scatter_diamond, ['sequence'], output_dir, frame_rate,
-               save_name=cell_label.lower())
+    groups = [
+        (args.cell_types, args.cell_types, "_".join(args.cell_types).lower()),
+        (t5_types, t5_types, "_".join(t5_types).lower()),
+        (sum_labels, sum_types, sum_save_name),
+    ]
+
+    for label_list, source_list, save_name in groups:
+        seq_data = {}
+        for label, src in zip(label_list, source_list):
+            if isinstance(src, tuple):
+                cell_resp = sum(pred[s].detach().cpu().numpy() for s in src)
+            else:
+                cell_resp = pred[src].detach().cpu().numpy()
+            cell_resp /= np.nanpercentile(cell_resp, args.color_percentile)
+            cell_resp = interp_nan_column(cell_resp, cell_phi, cell_theta)
+            seq_data[label] = cell_resp
+        seq_data['stimulus'] = stim_np
+
+        print(f"Creating diamond sequence movie for {' '.join(label_list)}...")
+        init_scatter_diamond = make_scatter_diamond_sequence_factory(
+            seq_data, cell_x, cell_z,
+            offset=diamond_offset, scale=diamond_scale, size_scale=0.6,
+            stim_cmap='gray', stim_scale_frac=1.0, stim_size_frac=1.0)
+        make_movie(init_scatter_diamond, ['sequence'], output_dir, frame_rate,
+                   save_name=save_name)
 
     print("Done!")
 

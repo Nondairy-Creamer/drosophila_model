@@ -234,17 +234,34 @@ def _load_or_estimate_pose(clip_id, data_dir, pose_dir):
     return np.load(npz_path)
 
 
-def process_clip(clip_id, data_dir, pose_dir):
+def process_clip(clip_id, data_dir, pose_dir, monocular=False, default_fps=30.0):
     """Process a single drone clip: load videos and batch-opt pose.
 
-    Returns a dict with video tensors, rotation/translation rates,
-    and rotation/translation locations, or None on failure.
+    When ``monocular`` is True, loads only ``right_{clip_id}.mp4`` and skips
+    the left video and pose entirely; ``video_dt`` is derived from the video
+    file (falls back to ``default_fps`` if the container does not report fps),
+    and the returned dict omits ``left``/rotation/translation keys.
+
+    Returns a dict with video tensors and (in stereo mode) rotation/translation
+    rates and locations, or ``None`` on failure.
     """
     data_dir = Path(data_dir)
-    pose_dir = Path(pose_dir)
-
-    left = load_video_grayscale(data_dir / f'left_{clip_id}.mp4')
     right = load_video_grayscale(data_dir / f'right_{clip_id}.mp4')
+
+    if monocular:
+        cap = cv2.VideoCapture(str(data_dir / f'right_{clip_id}.mp4'))
+        fps = cap.get(cv2.CAP_PROP_FPS) or default_fps
+        cap.release()
+        video_dt = 1.0 / float(fps)
+        print(f'  Clip {clip_id} (monocular): {len(right)} frames ({len(right) * video_dt:.1f}s)')
+        return {
+            'right': torch.from_numpy(right),
+            'video_dt': video_dt,
+            'clip_id': clip_id,
+        }
+
+    pose_dir = Path(pose_dir)
+    left = load_video_grayscale(data_dir / f'left_{clip_id}.mp4')
 
     pose_data = _load_or_estimate_pose(clip_id, data_dir, pose_dir)
     if pose_data is None:
@@ -282,37 +299,37 @@ def process_clip(clip_id, data_dir, pose_dir):
     }
 
 
-def sample_clip(clip, W_right, W_left, in_fov_right, in_fov_left):
+def sample_clip(clip, W_right, in_fov_right, W_left=None, in_fov_left=None):
     """Spatially sample a raw clip at ommatidium locations.
 
-    Returns a new dict with 'right' and 'left' as (T, N) float32 arrays
-    in [0, 1], plus rotation/translation/video_dt/clip_id unchanged.
+    Returns a new dict with 'right' as (T, N) float32 in [0, 1] plus
+    video_dt/clip_id. If ``W_left`` and ``in_fov_left`` are provided, also
+    samples the left eye and includes rotation/translation fields when
+    present on the input clip.
     """
     T = clip['right'].shape[0]
 
     right_flat = clip['right'].numpy().reshape(T, -1).T.astype(np.float32)
     sampled_right = np.asarray(W_right.dot(right_flat)).T / 255.0
-
-    left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
-    sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
-
     sampled_right[:, ~in_fov_right] = 0.5
-    sampled_left[:, ~in_fov_left] = 0.5
 
     result = {
         'right': torch.from_numpy(sampled_right),
-        'left': torch.from_numpy(sampled_left),
-        'rotation': clip['rotation'],
-        'translation': clip['translation'],
         'video_dt': clip['video_dt'],
         'clip_id': clip['clip_id'],
         'in_fov_right': torch.from_numpy(in_fov_right.copy()),
-        'in_fov_left': torch.from_numpy(in_fov_left.copy()),
     }
-    if 'rotation_location' in clip:
-        result['rotation_location'] = clip['rotation_location']
-    if 'translation_location' in clip:
-        result['translation_location'] = clip['translation_location']
+
+    if W_left is not None and in_fov_left is not None:
+        left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
+        sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
+        sampled_left[:, ~in_fov_left] = 0.5
+        result['left'] = torch.from_numpy(sampled_left)
+        result['in_fov_left'] = torch.from_numpy(in_fov_left.copy())
+
+    for k in ('rotation', 'translation', 'rotation_location', 'translation_location'):
+        if k in clip:
+            result[k] = clip[k]
     return result
 
 
@@ -556,11 +573,14 @@ def main():
     parser.add_argument('--pose-dir', type=str, default='../connectome_data/drone_poses',
                         help='Directory with batch-opt pose .npz files from drone_pose.py')
     parser.add_argument('--output-dir', type=str, default='../connectome_data',
-                        help='Output directory for drone_data.pt')
+                        help='Output directory for the .pt file')
     parser.add_argument('--column-info', type=str, default='../connectome_data/optic_lobes_column_info.parquet',
                         help='Path to column_info parquet with phi/theta')
     parser.add_argument('--filter-std', type=float, default=2.5,
                         help='Gaussian filter std in degrees for ommatidium sampling')
+    parser.add_argument('--monocular', action='store_true',
+                        help='Process right_*.mp4 only (no left video, no pose). '
+                             'Output is saved as drone_data_monocular.pt.')
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -584,25 +604,28 @@ def main():
     print(f'Loaded {len(sample_phi)} ommatidium positions from {args.column_info}')
 
     # Discover clips from video files
-    left_ids = set()
     right_ids = set()
-    for p in data_dir.glob('left_*.mp4'):
-        try:
-            left_ids.add(int(p.stem.split('_')[1]))
-        except (ValueError, IndexError):
-            continue
     for p in data_dir.glob('right_*.mp4'):
         try:
             right_ids.add(int(p.stem.split('_')[1]))
         except (ValueError, IndexError):
             continue
-    clip_ids = sorted(left_ids & right_ids)
+    if args.monocular:
+        clip_ids = sorted(right_ids)
+    else:
+        left_ids = set()
+        for p in data_dir.glob('left_*.mp4'):
+            try:
+                left_ids.add(int(p.stem.split('_')[1]))
+            except (ValueError, IndexError):
+                continue
+        clip_ids = sorted(left_ids & right_ids)
     print(f'Found {len(clip_ids)} clips: {clip_ids}')
 
     raw_clips = []
     for clip_id in clip_ids:
         print(f'Loading clip {clip_id}...')
-        clip = process_clip(clip_id, data_dir, pose_dir)
+        clip = process_clip(clip_id, data_dir, pose_dir, monocular=args.monocular)
         if clip is not None:
             raw_clips.append(clip)
 
@@ -618,19 +641,24 @@ def main():
         (image_height, image_width), phi_right_lim, theta_lim,
         sample_phi, sample_theta, filter_std=args.filter_std,
     )
-    W_left = build_ommatidium_sampling_matrix(
-        (image_height, image_width), phi_left_lim, theta_lim,
-        -sample_phi, sample_theta, filter_std=args.filter_std,
-    )
     in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
-    in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
+
+    if args.monocular:
+        W_left, in_fov_left = None, None
+    else:
+        W_left = build_ommatidium_sampling_matrix(
+            (image_height, image_width), phi_left_lim, theta_lim,
+            -sample_phi, sample_theta, filter_std=args.filter_std,
+        )
+        in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
 
     clips = []
     for raw_clip in raw_clips:
         print(f'Sampling clip {raw_clip["clip_id"]}...')
-        clips.append(sample_clip(raw_clip, W_right, W_left, in_fov_right, in_fov_left))
+        clips.append(sample_clip(raw_clip, W_right, in_fov_right, W_left, in_fov_left))
 
-    out_path = output_dir / 'drone_data.pt'
+    out_name = 'drone_data_monocular.pt' if args.monocular else 'drone_data.pt'
+    out_path = output_dir / out_name
     torch.save(clips, out_path)
     size_mb = out_path.stat().st_size / 1e6
 
