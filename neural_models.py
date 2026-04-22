@@ -2186,21 +2186,48 @@ class CellAnnModel(NeuralModel):
                        dtype=self.dtype, device=self.device)
         )
 
-        # --- Fan-in init for sparse first-layer weights ---
-        # Match CurrentModel's input_strength_log scheme: per-pair magnitude
-        # set to 1/sqrt(fan_in_post_type) so each post-neuron receives O(1)
-        # synaptic input through the sparse layer at v=0. Broadcast across all
-        # cell_ann_depth hidden units (identical at init).
+        # --- Init sparse first-layer weights to match CurrentModel's effective
+        #     per-edge magnitude. ---
+        # CurrentModel's per-edge weight at v=0 is
+        #     count[i,j] * sign * fan_in_post^(-1/2) * fan_out_pre^(-1/2).
+        # CellAnn's per-edge weight is  exp(W_pair[p,c]) * sign  with no count
+        # term, so we fold the type-pair mean count into the init magnitude:
+        #     W_pair[p,c] = log(mean_count[p,c])
+        #                   - 0.5*log(fan_in_post[p]) - 0.5*log(fan_out_pre[c])
+        # This keeps biologically strong pathways (e.g. L2->Tm1) hot at init so
+        # signal propagates through the feed-forward path. set_sigma_max() then
+        # rescales uniformly across pairs to hit the spectral target.
         synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()
+        synapses_out_per_neuron = self.synapse_counts.abs().sum(dim=0).to_dense()
         synapses_in_per_cell_type = torch.zeros(
+            self.num_cell_types, device=self.device, dtype=self.dtype)
+        synapses_out_per_cell_type = torch.zeros(
             self.num_cell_types, device=self.device, dtype=self.dtype)
         for cti, ct in enumerate(self.unique_cell_types):
             ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
             synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+
+        # Mean |synapse count| per connected (post_type, pre_type) pair.
+        edge_abs_counts = coalesced.values().abs().to(self.dtype)
+        pair_count_sum = torch.zeros(
+            num_type_pairs, dtype=self.dtype, device=self.device)
+        pair_edge_count = torch.zeros(
+            num_type_pairs, dtype=self.dtype, device=self.device)
+        pair_count_sum.index_add_(0, edge_to_pair, edge_abs_counts)
+        pair_edge_count.index_add_(
+            0, edge_to_pair, torch.ones_like(edge_abs_counts))
+        pair_mean_count = (pair_count_sum / pair_edge_count.clamp_min(1.0)).clamp_min(1.0)
 
         pair_post_type = unique_keys // self.num_cell_types  # (num_type_pairs,)
-        pair_fan_in = synapses_in_per_cell_type[pair_post_type]
-        sparse_weights_log_init = (-0.5 * torch.log(pair_fan_in)).unsqueeze(-1)
+        pair_pre_type = unique_keys % self.num_cell_types
+        fan_in = synapses_in_per_cell_type[pair_post_type]
+        fan_out = synapses_out_per_cell_type[pair_pre_type]
+        sparse_weights_log_init = (
+            torch.log(pair_mean_count)
+            - 0.5 * torch.log(fan_in)
+            - 0.5 * torch.log(fan_out)
+        ).unsqueeze(-1)
         self.cell_ann.sparse_weights_log.data.copy_(
             sparse_weights_log_init.expand(-1, cell_ann_depth)
         )
