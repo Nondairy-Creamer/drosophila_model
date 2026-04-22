@@ -1021,10 +1021,12 @@ class NeuralModel(torch.nn.Module, ABC):
     max_allowed_sigma = 0.95
 
     def set_sigma_max(self):
-        """Iteratively scale output_strength_log to achieve target max sigma.
+        """Iteratively rescale the recurrent operator to hit ``max_allowed_sigma``.
 
-        Subclasses must implement ``calc_sigma_max`` and expose an
-        ``output_strength_log`` parameter (1D, indexed by cell type).
+        Subclasses must implement ``calc_sigma_max``. The actual rescaling step
+        is delegated to ``_apply_sigma_scale`` so subclasses can scale whatever
+        parameter controls overall recurrent gain (e.g. ``output_strength_log``
+        for the connectome-based models, ``W`` for ``ArbitraryModel``).
         """
         with torch.no_grad():
             max_scaling_iters = 100
@@ -1039,7 +1041,16 @@ class NeuralModel(torch.nn.Module, ABC):
                     break
 
                 scale_factor = (self.max_allowed_sigma / sigma_max) ** damping_factor
-                self.output_strength_log.add_(torch.log(scale_factor))
+                self._apply_sigma_scale(scale_factor)
+
+    def _apply_sigma_scale(self, scale_factor):
+        """Multiply the recurrent gain by ``scale_factor`` (in linear units).
+
+        Default: shift ``output_strength_log`` by ``log(scale_factor)``, which
+        scales every per-type output gain by ``scale_factor``. Override in
+        subclasses that parameterize recurrence differently.
+        """
+        self.output_strength_log.add_(torch.log(scale_factor))
 
     def find_steady_state(self, run_time=100, max_iter=25):
         print("Finding steady state ...")
@@ -2159,7 +2170,7 @@ class CellAnnModel(NeuralModel):
             return np.log(p / (1 - p))
 
         persistence_init = 0.5
-        stimulus_strength_init = 1.0
+        stimulus_strength_init = 10.0
         offset_init = 0.0
 
         self.persistence_logit = torch.nn.Parameter(
@@ -2175,7 +2186,108 @@ class CellAnnModel(NeuralModel):
                        dtype=self.dtype, device=self.device)
         )
 
+        # --- Fan-in init for sparse first-layer weights ---
+        # Match CurrentModel's input_strength_log scheme: per-pair magnitude
+        # set to 1/sqrt(fan_in_post_type) so each post-neuron receives O(1)
+        # synaptic input through the sparse layer at v=0. Broadcast across all
+        # cell_ann_depth hidden units (identical at init).
+        synapses_in_per_neuron = self.synapse_counts.abs().sum(dim=1).to_dense()
+        synapses_in_per_cell_type = torch.zeros(
+            self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+
+        pair_post_type = unique_keys // self.num_cell_types  # (num_type_pairs,)
+        pair_fan_in = synapses_in_per_cell_type[pair_post_type]
+        sparse_weights_log_init = (-0.5 * torch.log(pair_fan_in)).unsqueeze(-1)
+        self.cell_ann.sparse_weights_log.data.copy_(
+            sparse_weights_log_init.expand(-1, cell_ann_depth)
+        )
+
+        # --- Glorot init for the dense per-neuron layers (only used when depth>1) ---
+        # std = sqrt(2 / (in + out)). Uses self.rng so init is reproducible
+        # under the model seed, like the rest of the noise injection.
+        for k, w in enumerate(self.cell_ann.dense_weights):
+            in_size = cell_ann_depth - k
+            out_size = in_size - 1
+            std = (2.0 / (in_size + out_size)) ** 0.5
+            w_np = self.rng.normal(0.0, std, w.shape)
+            w.data.copy_(torch.tensor(w_np, dtype=w.dtype, device=w.device))
+
+        # --- Power vector for spectral-norm calc (used by set_sigma_max) ---
+        power_vec_np = self.rng.standard_normal(self.num_neurons)
+        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
+        power_vec = power_vec / (power_vec.norm() + 1e-12)
+        self.register_buffer('_power_vec', power_vec)
+
         self.add_noise_to_parameters(self.init_std)
+
+        if init_new_model:
+            with torch.no_grad():
+                self.set_sigma_max()
+
+    def _apply_sigma_scale(self, scale_factor):
+        """Scale recurrent gain by shifting all sparse_weights_log uniformly.
+
+        Shifting by log(scale_factor) multiplies every per-pair magnitude by
+        scale_factor identically across hidden units, so relative structure is
+        preserved while overall recurrent gain rescales.
+        """
+        self.cell_ann.sparse_weights_log.add_(torch.log(scale_factor))
+
+    def calc_sigma_max(self, max_iter=100, eps=1e-12):
+        """Spectral norm of the linearized one-step Jacobian.
+
+        Linearizes assuming ``cell_ann_depth == 1`` and ``f'(v) = 1`` (same
+        slope-1 convention as CurrentModel/ConductanceModel). When the actual
+        depth is >1 the dense layers and inter-layer Softplus distort this,
+        but we use it as the init-time spectral target anyway and trust that
+        training picks up the slack -- only the n=0 sparse hidden unit's
+        magnitudes feed the calculation, but ``_apply_sigma_scale`` shifts
+        every column equally so the rescaling stays well-defined.
+        """
+        sparse_idx = self.cell_ann._sparse_idx
+        edge_sign = self.cell_ann._edge_sign
+        edge_to_pair = self.cell_ann._edge_to_pair
+
+        # Effective signed weight per edge from the n=0 hidden unit.
+        edge_w = self.cell_ann.sparse_weights_log[edge_to_pair, 0].exp() * edge_sign
+        A = torch.sparse_coo_tensor(
+            sparse_idx, edge_w,
+            size=(self.num_neurons, self.num_neurons),
+            dtype=self.dtype, device=self.device,
+        ).coalesce()
+
+        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        one_minus_d = 1.0 - d
+
+        def apply_M(v):
+            return torch.sparse.mm(A, v.unsqueeze(1)).squeeze(1)
+
+        def apply_M_T(v):
+            return torch.sparse.mm(A.transpose(0, 1), v.unsqueeze(1)).squeeze(1)
+
+        def apply_S(v):
+            return d * v + one_minus_d * apply_M(v)
+
+        def apply_S_T(v):
+            return d * v + apply_M_T(one_minus_d * v)
+
+        x = self._power_vec.clone()
+        x = x / (x.norm() + eps)
+
+        for _ in range(max_iter):
+            y = apply_S(x)
+            x = apply_S_T(y)
+            x = x / (x.norm() + eps)
+
+        y = apply_S(x)
+        sigma = y.norm()
+
+        self._power_vec.copy_(x.detach())
+
+        return sigma
 
     def firing_rate(self, v):
         return self.nonlinearity(v)
@@ -2788,8 +2900,6 @@ class ArbitraryModel(NeuralModel):
         super().__init__(**kwargs)
         self._save_init_inputs()
 
-        self.max_allowed_sigma = 0.95
-
         power_vec_np = self.rng.standard_normal(self.num_neurons)
         power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
         power_vec = power_vec / (power_vec.norm() + 1e-12)
@@ -2851,22 +2961,9 @@ class ArbitraryModel(NeuralModel):
 
         return z_by_type[..., self.neuron_to_type_index]
 
-    def set_sigma_max(self):
-        """Iteratively scale W to achieve target max sigma (spectral norm)."""
-        with torch.no_grad():
-            max_scaling_iters = 100
-            rho_tolerance = 0.01
-            damping_factor = 0.3
-
-            for iter_idx in range(max_scaling_iters):
-                sigma_max = self.calc_sigma_max()
-
-                print(iter_idx, ':', sigma_max)
-                if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
-                    break
-
-                scale_factor = (self.max_allowed_sigma / sigma_max)**damping_factor
-                self.W.mul_(scale_factor)
+    def _apply_sigma_scale(self, scale_factor):
+        """Scale the recurrent gain by multiplying the cell-type weight matrix."""
+        self.W.mul_(scale_factor)
 
     def calc_sigma_max(self, max_iter=100, eps=1e-12):
         """Calculate the maximum singular value (spectral norm) of the dynamics matrix."""
@@ -2922,14 +3019,6 @@ class ArbitraryModel(NeuralModel):
                 ci = cell_idx[valid]
                 si = stim_idx[valid]
                 stim.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
-        nonlin = self._apply_activation(v_prev)
-        h = torch.sparse.mm(self.synapse_counts, nonlin.transpose(0, 1)).transpose(0, 1)
-        h_nonlin = omega * h
-        # Euler step
-        v_next = v_prev + self.dt/ tau[None, :] * (
-            -v_prev + h_nonlin + stim + offset_all[None, :]
-        )
-        return v_next
 
         v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset[None, :] + stim)
 
