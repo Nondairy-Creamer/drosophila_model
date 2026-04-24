@@ -1266,50 +1266,120 @@ class NeuralModel(torch.nn.Module, ABC):
 
         return model
 
-    def estimate_ego_motion_from_image(self, right_eye_inputs, left_eye_inputs,
+    def estimate_ego_motion_from_image(self,
+                                       right_eye_inputs=None, left_eye_inputs=None,
                                        initial_state_right=None, initial_state_left=None,
                                        initial_filter_state_right=None, initial_filter_state_left=None,
-                                       oob_columns=None, cached_mappings=None):
-        """Two-eye ego-motion pipeline.
+                                       oob_columns=None, cached_mappings=None,
+                                       eyes=('right', 'left'),
+                                       terms=('rotation', 'trans')):
+        """Ego-motion pipeline from raw eye image inputs.
 
         Args:
+            right_eye_inputs, left_eye_inputs: per-eye stimulus tensors. Each is
+                required only if the corresponding eye is listed in ``eyes``.
+            eyes: subset of {'right','left'} indicating which eyes to use.
+                Default uses both eyes (concatenated flow with mirrored phi).
+            terms: subset of {'rotation','trans'} indicating which ego-motion
+                components to estimate. Skipped components are returned as
+                zeros (shape preserved). When only ``'trans'`` is requested,
+                rotation is not subtracted from the flow before solving for
+                translation.
             cached_mappings: optional dict with 'input_mapping' and
                 'output_mapping' from a previous call's result['mappings'].
                 Skips expensive per-call recomputation of neuron index mappings.
 
         Returns:
-            (rotations, translations, right_result, left_result) where the
-            result dicts have the same structure as ``predict`` / ``predict_two_eyes``.
+            (rotations, translations, right_result, left_result). The eye
+            result dicts have the same structure as ``predict`` /
+            ``predict_two_eyes``; the result for an eye not in ``eyes`` is
+            ``None``.
         """
-        S = right_eye_inputs.shape[0]
+        eyes = tuple(eyes)
+        if not eyes or not set(eyes).issubset({'right', 'left'}):
+            raise ValueError(
+                f"`eyes` must be a non-empty subset of {{'right','left'}}, got {eyes}"
+            )
+        eye_inputs_map = {'right': right_eye_inputs, 'left': left_eye_inputs}
+        for eye in eyes:
+            if eye_inputs_map[eye] is None:
+                raise ValueError(
+                    f"`eyes` includes '{eye}' but {eye}_eye_inputs is None"
+                )
 
         predict_kwargs = {}
         if cached_mappings is not None:
             predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
             predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
 
-        right_result, left_result = self.predict_two_eyes(
-            right_eye_inputs, left_eye_inputs,
-            init_state_right=initial_state_right, init_state_left=initial_state_left,
-            init_filter_state_right=initial_filter_state_right,
-            init_filter_state_left=initial_filter_state_left,
-            **predict_kwargs,
-        )
+        two_eye = set(eyes) == {'right', 'left'}
 
-        flow_key = next(
-            (k for k, m in self._readout_modules.items()
-             if getattr(m, 'predicts_flow', False) and k in right_result['outputs']),
-            None,
-        )
-        if flow_key is None:
-            raise ValueError("No flow readout configured; cannot estimate ego motion.")
+        if two_eye:
+            S = right_eye_inputs.shape[0]
+            right_result, left_result = self.predict_two_eyes(
+                right_eye_inputs, left_eye_inputs,
+                init_state_right=initial_state_right, init_state_left=initial_state_left,
+                init_filter_state_right=initial_filter_state_right,
+                init_filter_state_left=initial_filter_state_left,
+                **predict_kwargs,
+            )
 
-        optic_flow_right = right_result['outputs'][flow_key]
-        optic_flow_left = left_result['outputs'][flow_key]
-        optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
+            flow_key = next(
+                (k for k, m in self._readout_modules.items()
+                 if getattr(m, 'predicts_flow', False) and k in right_result['outputs']),
+                None,
+            )
+            if flow_key is None:
+                raise ValueError("No flow readout configured; cannot estimate ego motion.")
 
-        phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
-        theta_tensor = self.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
+            optic_flow_right = right_result['outputs'][flow_key]
+            optic_flow_left = left_result['outputs'][flow_key]
+            optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
+
+            phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
+            theta_tensor = self.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
+        else:
+            eye = eyes[0]
+            inputs = eye_inputs_map[eye]
+            S = inputs.shape[0]
+            init_state = initial_state_right if eye == 'right' else initial_state_left
+            init_filter_state = (
+                initial_filter_state_right if eye == 'right' else initial_filter_state_left
+            )
+            result = self.predict(
+                inputs,
+                init_state=init_state, init_filter_state=init_filter_state,
+                **predict_kwargs,
+            )
+
+            flow_key = next(
+                (k for k, m in self._readout_modules.items()
+                 if getattr(m, 'predicts_flow', False) and k in result['outputs']),
+                None,
+            )
+            if flow_key is None:
+                raise ValueError("No flow readout configured; cannot estimate ego motion.")
+
+            optic_flow = result['outputs'][flow_key]
+            if eye == 'left':
+                # Match the shared coordinate frame used by predict_two_eyes:
+                # apply the same flip the two-eye path applies to the left eye.
+                mod = self._readout_modules[flow_key]
+                if mod.eye_asymmetric:
+                    optic_flow = mod.flip_for_left_eye(optic_flow.clone())
+
+            # Single-eye phi/theta in the shared coordinate frame: the left eye
+            # has its azimuthal angle mirrored, mirroring the construction at
+            # __init__ for column_phi_theta_two_eyes.
+            phi_np = self.column_phi_theta[:, 0].copy()
+            theta_np = self.column_phi_theta[:, 1].copy()
+            if eye == 'left':
+                phi_np = -phi_np
+            phi_tensor = torch.tensor(phi_np, device=self.device, dtype=optic_flow.dtype)
+            theta_tensor = torch.tensor(theta_np, device=self.device, dtype=optic_flow.dtype)
+
+            right_result = result if eye == 'right' else None
+            left_result = result if eye == 'left' else None
 
         valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
         if oob_columns is not None:
@@ -1322,7 +1392,7 @@ class NeuralModel(torch.nn.Module, ABC):
         d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
 
         rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
-            phi_valid, theta_valid, d_right, d_up
+            phi_valid, theta_valid, d_right, d_up, terms=terms,
         )
         rotations = rot_flat.reshape(S, T_len, 3)
         translations = trans_flat.reshape(S, T_len, 3)
@@ -1362,54 +1432,165 @@ class NeuralModel(torch.nn.Module, ABC):
             dt = self.dt
         return integrate_translational_velocity(v, omega_deg, dt)
 
-    def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up):
+    @staticmethod
+    def _cross_matrix(a):
+        """Skew-symmetric matrix [a]_x for ``a`` shaped (..., 3) -> (..., 3, 3)."""
+        ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
+        O = torch.zeros_like(ax)
+        return torch.stack([
+            torch.stack([   O, -az,  ay], dim=-1),
+            torch.stack([  az,   O, -ax], dim=-1),
+            torch.stack([ -ay,  ax,   O], dim=-1)
+        ], dim=-2)
+
+    @staticmethod
+    def _spherical_basis(phi, theta):
+        """Unit viewing direction ``x`` and tangent basis ``e_phi``, ``e_theta``.
+
+        Returns three (N, 3) tensors. ``e_phi`` points east (toward +phi),
+        ``e_theta`` points south (toward +theta, i.e. down).
+        """
+        x = torch.stack((
+            torch.sin(theta) * torch.cos(phi),
+            torch.sin(theta) * torch.sin(phi),
+            torch.cos(theta),
+        ), dim=1)
+        e_theta = torch.stack((
+            torch.cos(theta) * torch.cos(phi),
+            torch.cos(theta) * torch.sin(phi),
+            -torch.sin(theta),
+        ), dim=1)
+        e_phi = torch.stack((
+            -torch.sin(phi),
+            torch.cos(phi),
+            torch.zeros_like(phi),
+        ), dim=1)
+        return x, e_phi, e_theta
+
+    @classmethod
+    def _estimate_rotation_from_flow(cls, phi, theta, d_right, d_up):
+        """Solve u ≈ [x]_× Ω via normal equations.
+
+        Inputs are (T, N). Returns ``omega_star`` shape (T, 3). The rotation
+        convention follows :py:meth:`estimate_ego_motion_from_flow`.
+        """
+        x, e_phi, e_theta = cls._spherical_basis(phi, theta)
+        # u = -d_right * e_phi - d_up * e_theta (rightward = -e_phi, upward = -e_theta)
+        u = -d_right[..., None] * e_phi - d_up[..., None] * e_theta  # (T, N, 3)
+        T_len, N = d_right.shape
+        A = cls._cross_matrix(x)                  # (N, 3, 3)
+        A_flat = A.reshape(3 * N, 3)              # (3N, 3)
+        u_flat = u.reshape(T_len, 3 * N).T        # (3N, T)
+        AtA = A_flat.T @ A_flat                   # (3, 3) — constant across time
+        Atb = A_flat.T @ u_flat                   # (3, T)
+        omega_star = torch.linalg.solve(AtA, Atb).T  # (T, 3)
+        return omega_star
+
+    @classmethod
+    def _estimate_translation_from_flow(cls, phi, theta, d_right, d_up):
+        """Solve translation direction + per-point ρ from (de-rotated) flow.
+
+        Inputs are (T, N) angular flow components in the same convention as
+        :py:meth:`estimate_ego_motion_from_flow`; the caller is responsible
+        for de-rotating the flow first when rotation is also being estimated.
+        Returns ``(T_star, rho_star)`` shapes ``(T, 3)`` and ``(T, N)``.
+        """
+        x, e_phi, e_theta = cls._spherical_basis(phi, theta)
+        # Use ``v`` for the (de-rotated) translational flow in 3D.
+        v = -d_right[..., None] * e_phi - d_up[..., None] * e_theta  # (T, N, 3)
+        T_len, N = d_right.shape
+
+        # Projection matrices Π_i = I - x_i x_iᵀ — shared across time.
+        outer = x.unsqueeze(2) @ x.unsqueeze(1)                       # (N, 3, 3)
+        I = torch.eye(3, device=x.device, dtype=x.dtype).expand(N, 3, 3)
+        P = I - outer                                                  # (N, 3, 3)
+
+        # Stacked C matrix: each block = [v_i]_× Π_i; solve C T = 0 via SVD.
+        vx = cls._cross_matrix(v)                                     # (T, N, 3, 3)
+        C_blocks = vx @ P                                              # (T, N, 3, 3)
+        C = C_blocks.reshape(T_len, 3 * N, 3)                          # (T, 3N, 3)
+        _, _, Vh = torch.linalg.svd(C, full_matrices=False)            # Vh: (T, 3, 3)
+        T_dir = Vh[:, -1]                                              # (T, 3)
+
+        # Disambiguate sign via depth-positivity (see doc stage 3).
+        w_i = torch.einsum('nij,tj->tni', P, T_dir)                    # (T, N, 3)
+        v_dot_w = (v * w_i).sum(dim=-1)                                # (T, N)
+        w_norm_sq = (w_i * w_i).sum(dim=-1)                            # (T, N)
+        weighted_sign = (v_dot_w * w_norm_sq).sum(dim=-1)              # (T,)
+        sign_flip = torch.where(
+            weighted_sign > 0,
+            torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
+            torch.tensor(1.0, device=x.device, dtype=d_right.dtype),
+        )
+        T_dir = T_dir * sign_flip[:, None]
+        v_dot_w = v_dot_w * sign_flip[:, None]
+
+        # Stage 4: per-point ρ_i = ‖T‖/Z_i (positive after flip).
+        rho_star = -v_dot_w / (w_norm_sq + 1e-12)                      # (T, N)
+
+        # Stage 5: aggregate ρ_i into a scalar via median over points away
+        # from the focus of expansion (where ‖Π t̂‖² ≈ 0 is ill-conditioned).
+        focus_threshold = 0.1
+        valid = w_norm_sq > focus_threshold                            # (T, N)
+        rho_masked = torch.where(valid, rho_star, torch.full_like(rho_star, float('nan')))
+        rho_agg = torch.nanmedian(rho_masked, dim=-1).values           # (T,)
+        rho_agg = torch.where(
+            torch.isnan(rho_agg),
+            torch.nanmedian(rho_star, dim=-1).values,
+            rho_agg,
+        )
+        T_star = rho_agg[:, None] * T_dir                              # (T, 3)
+        return T_star, rho_star
+
+    def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up,
+                                      terms=('rotation', 'trans')):
         """
         Estimate ego-motion (rotation and translation) from optic flow.
-        
+
         Supports batched computation over time: if d_right and d_up have a leading
         time dimension, all time steps are solved in parallel.
-        
+
         Coordinate system:
             - +X: Forward (phi=0, theta=π/2)
-            - +Y: Left (phi=π/2, theta=π/2)  
+            - +Y: Left (phi=π/2, theta=π/2)
             - +Z: Up (theta=0)
-        
+
         Flow sign convention:
             - Positive d_right: rightward motion on retina → leftward observer rotation
             - Positive d_up: upward motion on retina → downward observer motion
-        
+
         Args:
-            phi: (N,) azimuthal angles of viewing directions  
+            phi: (N,) azimuthal angles of viewing directions
             theta: (N,) polar angles of viewing directions
             d_right: (N,) or (T, N) angular flow in phi direction (positive = rightward on retina)
             d_up: (N,) or (T, N) angular flow in theta direction (positive = upward on retina)
+            terms: subset of {'rotation','trans'} indicating which components
+                to estimate. Skipped components are returned as zeros (shape
+                preserved). When only ``'trans'`` is requested, rotation is
+                NOT subtracted from the flow before solving for translation.
+
         Returns:
             omega_star: (3,) or (T, 3) estimated rotation rate [roll, pitch, yaw]
-                in physical observer convention (positive omega_z = leftward rotation)
+                in physical observer convention (positive omega_z = leftward
+                rotation). Zeros if ``'rotation'`` is not in ``terms``.
             T_star: (3,) or (T, 3) estimated observer translational velocity,
                 T* = ρ_agg · t̂ (doc stage 5), where t̂ is the sign-disambiguated
                 unit direction (stage 3) and ρ_agg is the median of ρ_i over
                 points away from the focus of expansion (‖Π t̂‖² > 0.1).
+                Zeros if ``'trans'`` is not in ``terms``.
             rho_star: (N,) or (T, N) per-point ρ_i = ‖T‖/Z_i, the recoverable
                 translational-flow-over-depth magnitude (doc stage 4). Absolute
                 depth Z_i and absolute ‖T‖ cannot be separated from monocular
                 flow alone; only their ratio ρ_i is observable. Together with
                 t̂ this fully reconstructs the de-rotated flow:
-                v_i = -ρ_i · Π_i · t̂.
+                v_i = -ρ_i · Π_i · t̂. Zeros if ``'trans'`` is not in ``terms``.
         """
-
-        def cross_matrix(a):
-            """
-            a: (..., 3) tensor
-            returns (..., 3, 3) skew-symmetric matrix [a]_x
-            """
-            ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
-            O = torch.zeros_like(ax)
-            return torch.stack([
-                torch.stack([   O, -az,  ay], dim=-1),
-                torch.stack([  az,   O, -ax], dim=-1),
-                torch.stack([ -ay,  ax,   O], dim=-1)
-            ], dim=-2)
+        terms = tuple(terms)
+        valid_terms = {'rotation', 'trans'}
+        if not terms or not set(terms).issubset(valid_terms):
+            raise ValueError(
+                f"`terms` must be a non-empty subset of {valid_terms}, got {terms}"
+            )
 
         # Handle unbatched input: (N,) → (1, N)
         unbatched = d_right.dim() == 1
@@ -1417,93 +1598,36 @@ class NeuralModel(torch.nn.Module, ABC):
             d_right = d_right.unsqueeze(0)
             d_up = d_up.unsqueeze(0)
 
-        T, N = d_right.shape
+        T_len, N = d_right.shape
+        device, dtype = d_right.device, d_right.dtype
 
-        # === Convert to 3D viewing directions (N, 3) — shared across time ===
-        x = torch.stack((
-            torch.sin(theta)*torch.cos(phi),
-            torch.sin(theta)*torch.sin(phi),
-            torch.cos(theta)
-        ), dim=1)                              # (N, 3)
+        if 'rotation' in terms:
+            omega_star = self._estimate_rotation_from_flow(phi, theta, d_right, d_up)
+        else:
+            omega_star = torch.zeros(T_len, 3, device=device, dtype=dtype)
 
-        # === Basis vectors of sphere — shared across time ===
-        e_theta = torch.stack((
-            torch.cos(theta)*torch.cos(phi),
-            torch.cos(theta)*torch.sin(phi),
-            -torch.sin(theta)
-        ), dim=1)                              # (N, 3)
+        if 'trans' in terms:
+            if 'rotation' in terms:
+                # De-rotate flow before translation: subtract the rotational
+                # contribution u_rot = [x]_× Ω in 3D, then project back to
+                # angular components via the spherical basis.
+                x, e_phi, e_theta = self._spherical_basis(phi, theta)
+                A = self._cross_matrix(x)                              # (N, 3, 3)
+                u_rot = torch.einsum('nij,tj->tni', A, omega_star)     # (T, N, 3)
+                d_right_rot = -(u_rot * e_phi).sum(dim=-1)             # (T, N)
+                d_up_rot = -(u_rot * e_theta).sum(dim=-1)              # (T, N)
+                d_right_t = d_right - d_right_rot
+                d_up_t = d_up - d_up_rot
+            else:
+                d_right_t = d_right
+                d_up_t = d_up
+            T_star, rho_star = self._estimate_translation_from_flow(
+                phi, theta, d_right_t, d_up_t,
+            )
+        else:
+            T_star = torch.zeros(T_len, 3, device=device, dtype=dtype)
+            rho_star = torch.zeros(T_len, N, device=device, dtype=dtype)
 
-        e_phi = torch.stack((
-            -torch.sin(phi),
-            torch.cos(phi),
-            torch.zeros_like(phi)
-        ), dim=1)                              # (N, 3)
-
-        # Reconstruct 3D flow from angular components
-        # d_right is rightward on retina; rightward = -e_phi (since e_phi points left)
-        # d_up is upward on retina; upward = -e_theta (since e_theta points down)
-        u = -d_right[..., None] * e_phi - d_up[..., None] * e_theta  # (T, N, 3)
-
-        # === Rotation estimation: solve u ≈ [x]_× Ω for each time step ===
-        # Physical relationship: image motion u = -Ω × x = x × Ω = [x]_× Ω
-        # Normal equations: (A^T A) Ω = A^T u  (differentiable via torch.linalg.solve)
-        A = cross_matrix(x)                    # (N, 3, 3)
-        A_flat = A.reshape(3*N, 3)             # (3N, 3)
-        u_flat = u.reshape(T, 3*N).T           # (3N, T)
-
-        AtA = A_flat.T @ A_flat                # (3, 3) — constant across time
-        Atb = A_flat.T @ u_flat                # (3, T)
-        omega_star = torch.linalg.solve(AtA, Atb).T  # (T, 3)
-
-        # === De-rotated flow: v = u - u_rot where u_rot = [x]_× Ω ===
-        v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
-
-        # === Projection matrices Π_i = I - x_i x_iᵀ — shared across time ===
-        outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
-        I = torch.eye(3, device=x.device).expand(N, 3, 3)
-        P = I - outer                              # (N, 3, 3)
-
-        # === Construct stacked C matrix: each block = [v_i]_× Π_i ===
-        vx = cross_matrix(v)                   # (T, N, 3, 3)
-        C_blocks = vx @ P                      # (T, N, 3, 3)
-        C = C_blocks.reshape(T, 3*N, 3)        # (T, 3N, 3)
-
-        # === Solve C T = 0 via smallest singular vector (batched SVD) ===
-        _, _, Vh = torch.linalg.svd(C, full_matrices=False)  # Vh: (T, 3, 3)
-        T_dir = Vh[:, -1]                                     # (T, 3)
-
-        # === Disambiguate sign using depth positivity constraint ===
-        # Forward model after de-rotation: v = -(1/Z) Π T, with T = observer velocity.
-        # Per doc stage 3, flip T_dir if Σ (v·Π t̂) ‖Π t̂‖² > 0, which makes
-        # ρ = -(v·Π t̂)/‖Π t̂‖² ≥ 0 (depth-positivity).
-        w_i = torch.einsum('nij,tj->tni', P, T_dir)          # (T, N, 3)
-        v_dot_w = (v * w_i).sum(dim=-1)                      # (T, N)
-        w_norm_sq = (w_i * w_i).sum(dim=-1)                   # (T, N)
-        weighted_sign = (v_dot_w * w_norm_sq).sum(dim=-1)     # (T,)
-
-        sign_flip = torch.where(weighted_sign > 0,
-                                torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
-                                torch.tensor(1.0, device=x.device, dtype=d_right.dtype))
-        T_dir = T_dir * sign_flip[:, None]
-        v_dot_w = v_dot_w * sign_flip[:, None]
-
-        # Stage 4: per-point recoverable magnitude ρ_i = ‖T‖/Z_i (positive after flip)
-        rho_star = -v_dot_w / (w_norm_sq + 1e-12)  # (T, N)
-
-        # Stage 5: aggregate ρ_i into a scalar via median over points away from
-        # the focus of expansion (where ‖Π t̂‖² ≈ 0 makes ρ ill-conditioned).
-        # T_star = ρ_agg · t̂.
-        focus_threshold = 0.1
-        valid = w_norm_sq > focus_threshold                 # (T, N)
-        rho_masked = torch.where(valid, rho_star, torch.full_like(rho_star, float('nan')))
-        rho_agg = torch.nanmedian(rho_masked, dim=-1).values  # (T,)
-        # Fallback: if a frame has no points above threshold, use the global median.
-        rho_agg = torch.where(torch.isnan(rho_agg),
-                              torch.nanmedian(rho_star, dim=-1).values,
-                              rho_agg)
-        T_star = rho_agg[:, None] * T_dir                   # (T, 3)
-
-        # Squeeze back if input was unbatched
         if unbatched:
             omega_star = omega_star.squeeze(0)
             T_star = T_star.squeeze(0)
