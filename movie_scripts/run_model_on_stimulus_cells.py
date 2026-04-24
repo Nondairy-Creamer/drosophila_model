@@ -36,6 +36,17 @@ from movie_utilities import (
 )
 
 
+def _select_stim(stim, stim_index, num_stim):
+    if stim_index is None:
+        return stim[:num_stim]
+    bad = [i for i in stim_index if i < 0 or i >= stim.shape[0]]
+    if bad:
+        raise IndexError(
+            f"--stim-index {bad} out of range for stimulus with {stim.shape[0]} entries"
+        )
+    return stim[stim_index]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run model on a stimulus and visualize cell responses in diamond layout."
@@ -53,7 +64,10 @@ def main() -> None:
     parser.add_argument("--input-neurons", type=str, nargs="+", default=['L1', 'L2', 'L3'],
                         help="Input neuron types for model.predict")
     parser.add_argument("--num-stim", type=int, default=4,
-                        help="Number of stimuli to use per direction")
+                        help="Number of stimuli to use per direction (ignored if --stim-index is set)")
+    parser.add_argument("--stim-index", type=int, nargs="+", default=None,
+                        help="Specific stimulus indices to render (overrides --num-stim). "
+                             "For directional_sine, indices apply within each direction.")
     parser.add_argument("--color-percentile", type=float, default=99,
                         help="Percentile for normalizing cell responses")
     parser.add_argument("--output-dir", type=str, default=None,
@@ -91,18 +105,22 @@ def main() -> None:
 
     if args.stim_type == 'directional_sine':
         directions = args.sine_direction or ['right', 'left', 'up', 'down']
-        stim_parts = []
+        stim_parts, mask_parts = [], []
         for d in directions:
             print(f"Generating stimulus (type={args.stim_type}, direction={d})...")
-            s, _, _ = su.get_stimulus_one_eye(
+            s, _, m = su.get_stimulus_one_eye(
                 args.stim_type, config, column_phi_theta, sine_direction=d)
-            stim_parts.append(s[:args.num_stim])
+            stim_parts.append(_select_stim(s, args.stim_index, args.num_stim))
+            mask_parts.append(_select_stim(m, args.stim_index, args.num_stim))
         stimulus = torch.cat(stim_parts, dim=0).to(device=device, dtype=dtype)
+        train_mask = torch.cat(mask_parts, dim=0)
     else:
         print(f"Generating stimulus (type={args.stim_type})...")
-        stimulus, _, _ = su.get_stimulus_one_eye(
+        stimulus, _, train_mask = su.get_stimulus_one_eye(
             args.stim_type, config, column_phi_theta)
-        stimulus = stimulus[:args.num_stim].to(device=device, dtype=dtype)
+        stimulus = _select_stim(stimulus, args.stim_index, args.num_stim).to(
+            device=device, dtype=dtype)
+        train_mask = _select_stim(train_mask, args.stim_index, args.num_stim)
 
     t5_types = ['T5a', 'T5b', 'T5c', 'T5d']
     output_neurons = list(set(args.input_neurons + args.cell_types + t5_types))
@@ -138,6 +156,10 @@ def main() -> None:
     cell_z = np.cos(cell_theta)
 
     stim_np = stimulus.detach().cpu().numpy()
+    # Mask out-of-FOV columns to NaN so the hex-mosaic factory drops them
+    # (and per-frame normalization below uses only in-FOV columns).
+    train_mask_np = train_mask.detach().cpu().numpy().astype(bool)
+    stim_np = np.where(train_mask_np, stim_np, np.nan)
     # Per-frame min-max normalize so each frame spans the full data range
     # (the diamond scatter cmap uses Normalize(0, 1), so we map to [0, 1]).
     frame_min = np.nanmin(stim_np, axis=-1, keepdims=True)
@@ -174,7 +196,8 @@ def main() -> None:
         init_scatter_diamond = make_scatter_diamond_sequence_factory(
             seq_data, cell_x, cell_z,
             offset=diamond_offset, scale=diamond_scale, size_scale=0.6,
-            stim_cmap='gray', stim_scale_frac=1.0, stim_size_frac=1.0)
+            stim_cmap='gray', stim_scale_frac=1.0, stim_size_frac=1.0,
+            stim_p_q=model.column_p_q)
         make_movie(init_scatter_diamond, ['sequence'], output_dir, frame_rate,
                    save_name=save_name)
 

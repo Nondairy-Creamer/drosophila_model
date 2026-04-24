@@ -105,18 +105,18 @@ def test_varying_depth(viewing_dirs, model):
     Z = 5.0 - 2.0 * x_component
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, Z_pred = model.estimate_ego_motion_from_flow(
+    omega_pred, T_pred, rho_pred = model.estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
     T_pred_dir = _align_translation_sign(T_pred, T_true)
-    if (T_pred / T_pred.norm() + T_true).norm() < (T_pred / T_pred.norm() - T_true).norm():
-        Z_pred = -Z_pred
 
     assert (omega_pred - omega_true).norm() < 0.1
     assert (T_pred_dir - T_true).norm() < 0.1
 
-    depth_corr = torch.corrcoef(torch.stack([Z, Z_pred]))[0, 1]
+    # rho_i = ||T||/Z_i is the recoverable per-point quantity; should track 1/Z.
+    inv_z = 1.0 / Z
+    depth_corr = torch.corrcoef(torch.stack([inv_z, rho_pred]))[0, 1]
     assert depth_corr > 0.5
 
 

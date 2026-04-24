@@ -1,16 +1,16 @@
-#LyX 2.4 created this file. For more info see https://www.lyx.org/
-\lyxformat 620
+#LyX 2.3 created this file. For more info see http://www.lyx.org/
+\lyxformat 544
 \begin_document
 \begin_header
 \save_transient_properties true
 \origin unavailable
 \textclass article
 \use_default_options true
-\maintain_unincluded_children no
-\language american
+\maintain_unincluded_children false
+\language english
 \language_package default
-\inputencoding utf8
-\fontencoding auto
+\inputencoding auto
+\fontencoding global
 \font_roman "default" "default"
 \font_sans "default" "default"
 \font_typewriter "default" "default"
@@ -18,9 +18,7 @@
 \font_default_family default
 \use_non_tex_fonts false
 \font_sc false
-\font_roman_osf false
-\font_sans_osf false
-\font_typewriter_osf false
+\font_osf false
 \font_sf_scale 100 100
 \font_tt_scale 100 100
 \use_microtype false
@@ -30,8 +28,6 @@
 \output_sync 0
 \bibtex_command default
 \index_command default
-\float_placement class
-\float_alignment class
 \paperfontsize default
 \use_hyperref false
 \papersize default
@@ -48,18 +44,17 @@
 \use_package undertilde 1
 \cite_engine basic
 \cite_engine_type default
+\biblio_style plain
 \use_bibtopic false
 \use_indices false
 \paperorientation portrait
 \suppress_date false
 \justification true
 \use_refstyle 1
-\use_formatted_ref 0
 \use_minted 0
-\use_lineno 0
 \index Index
 \shortcut idx
-\color #008080
+\color #008000
 \end_index
 \secnumdepth 3
 \tocdepth 3
@@ -72,504 +67,180 @@
 \papercolumns 1
 \papersides 1
 \paperpagestyle default
-\tablestyle default
 \tracking_changes false
 \output_changes false
-\change_bars false
-\postpone_fragile_content true
 \html_math_output 0
 \html_css_as_file 0
 \html_be_strict false
-\docbook_table_output 0
-\docbook_mathml_prefix 1
 \end_header
 
 \begin_body
 
-\begin_layout Subsection*
-Problem:
+\begin_layout Title
+Ego-Motion from Optic Flow on the Sphere
+\end_layout
+
+\begin_layout Section*
+Problem
 \end_layout
 
 \begin_layout Standard
-You have a point observer that sees at a set of points along a unit sphere.
- At each of these points the observer measures the optic flow,
- but does not have access to the depth of the object.
- In this world objects can be at any depth,
- but they do not move.
- All motion is generated from self-motion of the observer.
- How can we go from this set of optic flow to the rotational and translational speed of the observer?
- To solve this,
- we will define the equation for how optic flow is generated based on an observer's self-motion and then invert it to get the self-motion from the optic flow.
-\end_layout
-
-\begin_layout Standard
-Optic flow equation:
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\mathbf{u}_{i}=-\mathbf{\Omega}\times\mathbf{x}_{i}+\frac{1}{Z_{i}}\Pi_{i}\mathbf{T},\quad i=1,...,N$
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Where for the 
-\begin_inset Formula $i$
-\end_inset
-
-th sample in visual space
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $x\mathbf{}_{i}\in\mathbb{R}^{3}$
-\end_inset
-
-,
- 
-\begin_inset Formula $||\mathbf{x}_{i}||=1$
-\end_inset
-
-:
- viewing direction
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\mathbf{u}_{i}\in\mathbb{R}^{3}$
-\end_inset
-
-,
- 
-\begin_inset Formula $\mathbf{u}_{i}\cdot\mathbf{x}_{i}=0$
-\end_inset
-
- is measured optic flow tangent to the viewing direction
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\mathbf{\Omega}\in\mathbb{R}^{3}$
-\end_inset
-
-:
- unknown angular velocity
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\mathbf{T}\in\mathbb{R}^{3}$
-\end_inset
-
-:
- unknown translation
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\mathbf{Z}_{i}>0$
-\end_inset
-
-:
- unknown depth along 
-\begin_inset Formula $x_{i}$
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\Pi_{i}:=I-\mathbf{x}_{i}\mathbf{x}_{i}^{\intercal}$
-\end_inset
-
-:
- projector onto the tangent plane at 
-\begin_inset Formula $\mathbf{x}_{i}$
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Pull out cross product into a matrix equation.
- For a vector 
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{a}=\left[\begin{array}{c}
-a_{x}\\
-a_{y}\\
-a_{z}
-\end{array}\right],\quad[\mathbf{a}]_{\times}=\left[\begin{array}{ccc}
-0 & -a_{z} & a_{y}\\
-a_{z} & 0 & -a_{x}\\
--a_{y} & a_{x} & 0
-\end{array}\right]
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Subsection*
-Algorithm
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\Omega^{*}=(A^{\intercal}A)^{-1}A^{\intercal}\mathbf{u}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-T^{*}=\sigma_{min}^{right}(C)\text{RMS}(v)
-\]
-
-\end_inset
-
- where 
-\begin_inset Formula $\sigma_{min}^{right}$
-\end_inset
-
- is admittedly poor notation which means the right hand singular vector with the smallest sigma
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-Z_{i}=\frac{||w_{i}||^{2}}{v_{i}\cdot w_{i}}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-To improve the approximations,
- numerically minimize
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\hat{\Omega},\hat{T},\{\hat{Z}_{i}\}=\arg\min_{\Omega,T,\{Z_{i}\}}\sum_{i}||u_{i}+\Omega\times x_{i}-\frac{1}{Z_{i}}\Pi_{i}T||^{2}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Where
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-A=\left[\begin{array}{c}
-[x_{1}]_{\times}\\{}
-[x_{2}]_{\times}\\
-\vdots\\{}
-[x_{N}]_{\times}
-\end{array}\right]
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\Omega^{*}=(A^{\intercal}A)^{-1}A^{\intercal}\mathbf{u}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{v}_{i}:=\mathbf{u}_{i}-[\mathbf{x}_{i}]_{\times}\Omega^{*}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-C:=\left[\begin{array}{c}
-[\mathbf{v}_{1}]_{\times}\mathbf{\Pi}_{1}\\{}
-[\mathbf{v}_{2}]_{\times}\mathbf{\Pi}_{2}\\
-\vdots\\{}
-[\mathbf{v}_{N}]_{\times}\mathbf{\Pi}_{N}
-\end{array}\right]
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-w_{i}=\Pi_{i}T^{*}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Subsection*
-Derivation
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{a}\times\mathbf{b}=[\mathbf{a}]_{\times}\mathbf{b}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{b}\times\mathbf{a}=-[\mathbf{a}]_{\times}\mathbf{b}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-So
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
--\mathbf{\Omega}\times\mathbf{x}_{i}=[\mathbf{x}_{i}]_{\times}\mathbf{\Omega}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{u}_{i}=[\mathbf{x}_{i}]_{\times}\mathbf{\Omega}+\frac{1}{Z_{i}}\Pi_{i}\mathbf{T}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-First,
- estimate rotational motion by ignoring translation.
- I believe this is valid with dense and symmetric coverage of a sphere.
- Need to check
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula $\mathbf{u}_{i}\approx[\mathbf{x}_{i}]_{\times}\mathbf{\Omega}$
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Stack the 
+A point observer samples optic flow at 
 \begin_inset Formula $N$
 \end_inset
 
- observations and the view points to make a linear equation
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-A=\left[\begin{array}{c}
-[x_{1}]_{\times}\\{}
-[x_{2}]_{\times}\\
-\vdots\\{}
-[x_{N}]_{\times}
-\end{array}\right]
-\]
-
+ viewing directions on a unit sphere.
+ Objects in the world are static; all retinal motion comes from self-motion.
+ Given the flow field, recover the observer's angular velocity 
+\begin_inset Formula $\boldsymbol{\Omega}$
 \end_inset
 
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{u}=\left[\begin{array}{c}
-\mathbf{u}_{1}\\
-\mathbf{u}_{2}\\
-\vdots\\
-\mathbf{u}_{N}
-\end{array}\right]
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\hat{\mathbf{\Omega}}=(A^{\intercal}A)^{-1}A^{\intercal}\mathbf{u}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Subtract our estimate of rotation and solve for translation
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-\mathbf{v}_{i}:=\mathbf{u}_{i}-[\mathbf{x}_{i}]_{\times}\hat{\mathbf{\Omega}}\approx\frac{1}{Z_{i}}\Pi_{i}\mathbf{T}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Which means that 
-\begin_inset Formula $v_{i}$
-\end_inset
-
- is colinear with 
-\begin_inset Formula $\mathbf{\Pi}_{i}T$
-\end_inset
-
- with constant 
-\begin_inset Formula $\frac{1}{Z_{i}}$
+ and translational velocity 
+\begin_inset Formula $\mathbf{T}$
 \end_inset
 
 .
- So
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-v_{i}\times(\Pi_{i}\mathbf{T})=\mathbf{0}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-[\mathbf{v}_{i}]_{\times}\mathbf{\Pi}_{i}\mathbf{T}=\mathbf{0}
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-C:=\left[\begin{array}{c}
-[\mathbf{v}_{1}]_{\times}\mathbf{\Pi}_{1}\\{}
-[\mathbf{v}_{2}]_{\times}\mathbf{\Pi}_{2}\\
-\vdots\\{}
-[\mathbf{v}_{N}]_{\times}\mathbf{\Pi}_{N}
-\end{array}\right]
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-\begin_inset Formula 
-\[
-CT=0
-\]
-
-\end_inset
-
-
-\end_layout
-
-\begin_layout Standard
-Since this is homogenous linear it doesn't have a unique solution,
- so find a 
-\series bold
-T
-\series default
- subject to 
-\begin_inset Formula $||\mathbf{T}||=1$
-\end_inset
-
-.
- 
-\series bold
-T
-\series default
- is the right singular vector of 
-\series bold
-C
-\series default
- corresponding to the smallest singular value.
- The singular value itself just gives the direction of motion,
- but you can give it a scale by multiplying the vector by RMS(v) which makes it proportional to T/Z
-\end_layout
-
-\begin_layout Standard
-Recover relative depths 
+ Depths 
 \begin_inset Formula $Z_{i}$
 \end_inset
 
+ and 
+\begin_inset Formula $\|\mathbf{T}\|$
+\end_inset
 
+ are coupled (doubling both leaves flow unchanged), so absolute scale is
+ unrecoverable from monocular flow alone; we recover 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+ up to an unknown positive scalar that is constant as long as the scene
+ is.
+\end_layout
+
+\begin_layout Section*
+Conventions
+\end_layout
+
+\begin_layout Standard
+Right-handed world frame: 
+\begin_inset Formula $+x$
+\end_inset
+
+ forward, 
+\begin_inset Formula $+y$
+\end_inset
+
+ left, 
+\begin_inset Formula $+z$
+\end_inset
+
+ up.
+ Positive rotations by right-hand rule: 
+\begin_inset Formula $\Omega_{x}>0$
+\end_inset
+
+ = right roll, 
+\begin_inset Formula $\Omega_{y}>0$
+\end_inset
+
+ = pitch down, 
+\begin_inset Formula $\Omega_{z}>0$
+\end_inset
+
+ = yaw left.
+\end_layout
+
+\begin_layout Standard
+Viewing directions 
+\begin_inset Formula $\mathbf{d}\in\mathbb{R}^{3}$
+\end_inset
+
+ with 
+\begin_inset Formula $\|\mathbf{d}\|=1$
+\end_inset
+
+, parameterized as
+\begin_inset Formula 
+\[
+\mathbf{d}=(\sin\theta\cos\phi,\;\sin\theta\sin\phi,\;\cos\theta),
+\]
+
+\end_inset
+
+with 
+\begin_inset Formula $\theta$
+\end_inset
+
+ polar from 
+\begin_inset Formula $+z$
+\end_inset
+
+ and 
+\begin_inset Formula $\phi$
+\end_inset
+
+ azimuth from 
+\begin_inset Formula $+x$
+\end_inset
+
+ toward 
+\begin_inset Formula $+y$
+\end_inset
+
+.
+ Tangent basis:
+\begin_inset Formula 
+\[
+\mathbf{e}_{\theta}=\partial_{\theta}\mathbf{d},\qquad\mathbf{e}_{\phi}=\frac{1}{\sin\theta}\partial_{\phi}\mathbf{d}.
+\]
+
+\end_inset
+
+Both are unit length and orthogonal; 
+\begin_inset Formula $\mathbf{e}_{\theta}$
+\end_inset
+
+ points down and 
+\begin_inset Formula $\mathbf{e}_{\phi}$
+\end_inset
+
+ left on the retina.
+\end_layout
+
+\begin_layout Standard
+Retinal flow is reported as two scalars per point: 
+\begin_inset Formula $u_{\text{right}}$
+\end_inset
+
+ and 
+\begin_inset Formula $u_{\text{up}}$
+\end_inset
+
+ (tangent velocities in arc length per time, not coordinate rates — this
+ is what T4/T5 cells measure).
+ Assembled into a 3D tangent vector:
+\begin_inset Formula 
+\[
+\mathbf{u}_{i}=-u_{\text{right},i}\mathbf{e}_{\phi,i}-u_{\text{up},i}\mathbf{e}_{\theta,i}.
+\]
+
+\end_inset
+
+The negative signs convert from retinal (right, up) to world-frame 
+\begin_inset Formula $(-\mathbf{e}_{\phi},-\mathbf{e}_{\theta})$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Section*
+Forward model
 \end_layout
 
 \begin_layout Standard
 \begin_inset Formula 
 \[
-v_{i}=\frac{1}{Z_{i}}w_{i}
+\mathbf{u}_{i}=-\boldsymbol{\Omega}\times\mathbf{d}_{i}-\frac{1}{Z_{i}}\Pi_{i}\mathbf{T},\qquad\Pi_{i}=I-\mathbf{d}_{i}\mathbf{d}_{i}^{\intercal}.
 \]
 
 \end_inset
@@ -578,9 +249,73 @@ v_{i}=\frac{1}{Z_{i}}w_{i}
 \end_layout
 
 \begin_layout Standard
+
+\series bold
+Rotation term.
+ 
+\series default
+Observer rotating at 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ sees the world counter-rotate at 
+\begin_inset Formula $-\boldsymbol{\Omega}$
+\end_inset
+
+, so viewing directions drift at 
+\begin_inset Formula $-\boldsymbol{\Omega}\times\mathbf{d}_{i}$
+\end_inset
+
+ (rigid-body velocity formula applied in the observer frame).
+ Independent of depth.
+\end_layout
+
+\begin_layout Standard
+
+\series bold
+Translation term.
+ 
+\series default
+A world point at 
+\begin_inset Formula $Z_{i}\mathbf{d}_{i}$
+\end_inset
+
+ moves at 
+\begin_inset Formula $-\mathbf{T}$
+\end_inset
+
+ relative to the observer.
+ The projector 
+\begin_inset Formula $\Pi_{i}$
+\end_inset
+
+ extracts the tangential component (radial motion is invisible — it changes
+ distance but not image location).
+ Dividing by 
+\begin_inset Formula $Z_{i}$
+\end_inset
+
+ converts 3D velocity to angular velocity on the unit sphere: near points
+ produce large flow, far points small flow.
+\end_layout
+
+\begin_layout Standard
+Using 
+\begin_inset Formula $\mathbf{a}\times\mathbf{b}=[\mathbf{a}]_{\times}\mathbf{b}$
+\end_inset
+
+ and antisymmetry, the rotation term rewrites as 
+\begin_inset Formula $[\mathbf{d}_{i}]_{\times}\boldsymbol{\Omega}$
+\end_inset
+
+, which is linear in 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ and enables least-squares:
 \begin_inset Formula 
 \[
-Z_{i}=\frac{||w_{i}||^{2}}{v_{i}\cdot w_{i}}
+\mathbf{u}_{i}=[\mathbf{d}_{i}]_{\times}\boldsymbol{\Omega}-\frac{1}{Z_{i}}\Pi_{i}\mathbf{T}.
 \]
 
 \end_inset
@@ -588,15 +323,227 @@ Z_{i}=\frac{||w_{i}||^{2}}{v_{i}\cdot w_{i}}
 
 \end_layout
 
-\begin_layout Standard
-Then refine to iron out the approximation step with a nonlinear optimizer
+\begin_layout Section*
+Algorithm
+\end_layout
+
+\begin_layout Subsection*
+1.
+ Rotation
 \end_layout
 
 \begin_layout Standard
-\begin_inset Formula $\hat{\Omega},\hat{T},\{\hat{Z}_{i}\}=\sum_{i}||u_{i}+\Omega\times x_{i}-\frac{1}{Z_{i}}\Pi_{i}T||^{2}$
+Ignore translation.
+ With dense sphere coverage and depth statistically independent of direction,
+ the translational term averages to zero in the normal equations.
+ Stack 
+\begin_inset Formula $A=[[\mathbf{d}_{1}]_{\times};\dots;[\mathbf{d}_{N}]_{\times}]\in\mathbb{R}^{3N\times3}$
 \end_inset
 
+ and 
+\begin_inset Formula $\mathbf{u}\in\mathbb{R}^{3N}$
+\end_inset
 
+:
+\begin_inset Formula 
+\[
+\boldsymbol{\Omega}^{*}=(A^{\intercal}A)^{-1}A^{\intercal}\mathbf{u}.
+\]
+
+\end_inset
+
+Depth-anisotropic scenes (walls, ground planes) bias this; an optional nonlinear
+ refinement can clean it up.
+\end_layout
+
+\begin_layout Subsection*
+2.
+ De-rotate
+\end_layout
+
+\begin_layout Standard
+\begin_inset Formula 
+\[
+\mathbf{v}_{i}:=\mathbf{u}_{i}-[\mathbf{d}_{i}]_{\times}\boldsymbol{\Omega}^{*}\approx-\frac{1}{Z_{i}}\Pi_{i}\mathbf{T}.
+\]
+
+\end_inset
+
+Both sides are tangent to 
+\begin_inset Formula $\mathbf{d}_{i}$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Subsection*
+3.
+ Translation direction via SVD
+\end_layout
+
+\begin_layout Standard
+At each point, 
+\begin_inset Formula $\mathbf{v}_{i}$
+\end_inset
+
+ is colinear with 
+\begin_inset Formula $\Pi_{i}\mathbf{T}$
+\end_inset
+
+, so their cross product vanishes:
+\begin_inset Formula 
+\[
+[\mathbf{v}_{i}]_{\times}\Pi_{i}\mathbf{T}=\mathbf{0}.
+\]
+
+\end_inset
+
+The cross product kills the unknown 
+\begin_inset Formula $1/Z_{i}$
+\end_inset
+
+, decoupling 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+ from the depths.
+ Stack:
+\begin_inset Formula 
+\[
+C=\begin{bmatrix}[\mathbf{v}_{1}]_{\times}\Pi_{1}\\
+\vdots\\{}
+[\mathbf{v}_{N}]_{\times}\Pi_{N}
+\end{bmatrix}\in\mathbb{R}^{3N\times3},\qquad C\mathbf{T}=\mathbf{0}.
+\]
+
+\end_inset
+
+Homogeneous, so solve 
+\begin_inset Formula $\min_{\|\mathbf{T}\|=1}\|C\mathbf{T}\|^{2}$
+\end_inset
+
+.
+ The minimizer is the right singular vector of 
+\begin_inset Formula $C$
+\end_inset
+
+ with the smallest singular value; call it 
+\begin_inset Formula $\hat{\mathbf{t}}$
+\end_inset
+
+.
+ Sign is unresolved (cross product is insensitive to antiparallel vs parallel)
+ — fix by enforcing depth positivity: flip 
+\begin_inset Formula $\hat{\mathbf{t}}$
+\end_inset
+
+ if 
+\begin_inset Formula $\sum_{i}(\mathbf{v}_{i}\cdot\Pi_{i}\hat{\mathbf{t}})\|\Pi_{i}\hat{\mathbf{t}}\|^{2}>0$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Subsection*
+4.
+ Scaled inverse depths
+\end_layout
+
+\begin_layout Standard
+With direction fixed, the recoverable per-point magnitude is
+\begin_inset Formula 
+\[
+\rho_{i}:=\frac{\|\mathbf{T}\|}{Z_{i}},
+\]
+
+\end_inset
+
+so the model becomes 
+\begin_inset Formula $\mathbf{v}_{i}=-\rho_{i}\Pi_{i}\hat{\mathbf{t}}$
+\end_inset
+
+.
+ Least-squares for each scalar:
+\begin_inset Formula 
+\[
+\rho_{i}=-\frac{\mathbf{v}_{i}\cdot\Pi_{i}\hat{\mathbf{t}}}{\|\Pi_{i}\hat{\mathbf{t}}\|^{2}}.
+\]
+
+\end_inset
+
+Positive 
+\begin_inset Formula $\rho_{i}$
+\end_inset
+
+ means the point is in front of the observer (guaranteed in aggregate by
+ the sign-disambiguation step).
+ Absolute 
+\begin_inset Formula $\|\mathbf{T}\|$
+\end_inset
+
+ and absolute 
+\begin_inset Formula $Z_{i}$
+\end_inset
+
+ cannot be separated without external information (stereo, IMU, known depth).
+\end_layout
+
+\begin_layout Subsection*
+5.
+ Final translation estimate
+\end_layout
+
+\begin_layout Standard
+Aggregate the 
+\begin_inset Formula $\rho_{i}$
+\end_inset
+
+ into a single scalar and multiply by the direction:
+\begin_inset Formula 
+\[
+\mathbf{T}^{*}=\rho_{\text{agg}}\cdot\hat{\mathbf{t}},\qquad\rho_{\text{agg}}=\underset{i\in\mathcal{I}}{\text{median}}\,\rho_{i},\qquad\mathcal{I}=\{i:\|\Pi_{i}\hat{\mathbf{t}}\|^{2}>\tau\}.
+\]
+
+\end_inset
+
+The filter set 
+\begin_inset Formula $\mathcal{I}$
+\end_inset
+
+ drops points near the focus of expansion, where 
+\begin_inset Formula $\Pi_{i}\hat{\mathbf{t}}\approx\mathbf{0}$
+\end_inset
+
+ makes 
+\begin_inset Formula $\rho_{i}$
+\end_inset
+
+ ill-conditioned (threshold 
+\begin_inset Formula $\tau\approx0.1$
+\end_inset
+
+ works well).
+ Median over mean because the depth distribution has a long inverse tail:
+ a single nearby point dominates the mean but moves the median negligibly.
+\end_layout
+
+\begin_layout Standard
+In a fixed environment, 
+\begin_inset Formula $\rho_{\text{agg}}=\|\mathbf{T}\|\cdot\text{median}(1/Z_{i})$
+\end_inset
+
+, and the median-depth factor is a scene-level constant approximately invariant
+ to small rotations (which permute the 
+\begin_inset Formula $\rho_{i}$
+\end_inset
+
+ values across sensors but do not change the set).
+ Therefore 
+\begin_inset Formula $\mathbf{T}^{*}(t)\propto\mathbf{T}(t)$
+\end_inset
+
+ across time while the observer stays in the same environment.
+ Absolute scale is not recovered, but relative speeds and directions are.
 \end_layout
 
 \end_body

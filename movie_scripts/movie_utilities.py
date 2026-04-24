@@ -228,7 +228,45 @@ def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
     return init_plot_for_direction
 
 
-def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0, stim_cmap='viridis', stim_scale_frac=0.5, stim_size_frac=0.2):
+def _load_flyeye_utils():
+    """Load FlyEye/utils.py directly, bypassing FlyEye/__init__.py so we don't
+    pull in optional deps (natsort, cv2) required by other FlyEye submodules."""
+    import importlib.util
+    utils_path = Path(_repo_root) / "FlyEye" / "utils.py"
+    spec = importlib.util.spec_from_file_location("flyeye_utils_local", utils_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _hex_polys_centered_to_extent(column_p_q, target_x, target_z):
+    """
+    Build hexagon polygons for ``column_p_q`` (using FlyEye's flat-hex layout),
+    centered at the origin and scaled to match the extent spanned by
+    ``target_x``/``target_z``. Returns ``(verts, scale)`` where ``verts`` is
+    an ``(N, 6, 2)`` array suitable for ``matplotlib.collections.PolyCollection``.
+    """
+    flyeye_utils = _load_flyeye_utils()
+    pixel_from_flat_hex = flyeye_utils.pixel_from_flat_hex
+    rotate_coords = flyeye_utils.rotate_coords
+    hex_vertices = flyeye_utils.hex_vertices
+
+    p = np.asarray(column_p_q[:, 0])
+    q = -np.asarray(column_p_q[:, 1])  # FlyEye convention (see visualize_stimulus.py)
+    x, y = pixel_from_flat_hex(p, q)
+    x, y = rotate_coords(x, y, -60.0)  # ROTATE_CORRECTION
+    x = x - x.mean()
+    y = y - y.mean()
+
+    target_span = max(np.ptp(target_x), np.ptp(target_z), 1e-9)
+    raw_span = max(np.ptp(x), np.ptp(y), 1e-9)
+    s = target_span / raw_span
+
+    verts = hex_vertices(x * s, y * s, size=s)  # size is radius in pixel units
+    return verts, s
+
+
+def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0, stim_cmap='viridis', stim_scale_frac=0.5, stim_size_frac=0.2, stim_p_q=None):
     """
     New simple interface:
       - responses_dict: dict with 5 keys (in insertion order):
@@ -239,6 +277,9 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
           Up at (0, +offset), Down at (0, -offset).
         'stimulus' is plotted at the center with half spatial scale and smaller markers.
       - For each stimulus index, we render its full time series, followed by 25 blank frames.
+      - If ``stim_p_q`` (an ``(N, 2)`` hex-grid coord array) is provided, the
+        center stimulus is rendered as a hexagonal mosaic via FlyEye's hex
+        layout instead of a scatter (cell panels remain scatters).
     The returned init callable conforms to make_movie: init(d, di) -> (fig, update(frame_t), num_frames).
     This factory concatenates ALL stimuli back-to-back into a single movie (with gaps),
     so the stimulus index parameter is ignored.
@@ -317,20 +358,46 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
         stim_initial = np.zeros(num_cols, dtype=float)
         if stim_all is not None and num_stimuli > 0 and L > 0:
             stim_initial = stim_all[0, 0, :]
-        stim_scatter = ax.scatter(
-            stim_coord_scale * cell_x, stim_coord_scale * cell_z,
-            c=stim_initial, cmap=stim_cmap, norm=norm, s=s_stim,
-            edgecolors='none', linewidths=0.0, antialiased=False,
-        )
+
+        if stim_p_q is not None:
+            from matplotlib.collections import PolyCollection
+            if stim_all is not None and num_stimuli > 0 and L > 0:
+                hex_valid_mask = np.any(~np.isnan(stim_all), axis=(0, 1))
+            else:
+                hex_valid_mask = np.ones(num_cols, dtype=bool)
+            hex_p_q = np.asarray(stim_p_q)[hex_valid_mask]
+            target_x = stim_coord_scale * cell_x
+            target_z = stim_coord_scale * cell_z
+            verts, _hex_scale = _hex_polys_centered_to_extent(hex_p_q, target_x, target_z)
+            stim_artist = PolyCollection(
+                verts, cmap=stim_cmap, norm=norm,
+                edgecolors='none', linewidths=0.0, antialiased=False,
+            )
+            stim_artist.set_array(stim_initial[hex_valid_mask])
+            ax.add_collection(stim_artist)
+            stim_is_hex = True
+        else:
+            hex_valid_mask = None
+            stim_artist = ax.scatter(
+                stim_coord_scale * cell_x, stim_coord_scale * cell_z,
+                c=stim_initial, cmap=stim_cmap, norm=norm, s=s_stim,
+                edgecolors='none', linewidths=0.0, antialiased=False,
+            )
+            stim_is_hex = False
 
         blanks = 25
         total_frames = num_stimuli * (L + blanks)
+
+        stim_zero = zero_vec[hex_valid_mask] if stim_is_hex else zero_vec
+
+        def _stim_frame(arr_full):
+            return arr_full[hex_valid_mask] if stim_is_hex else arr_full
 
         def update(frame_t):
             if total_frames == 0 or L == 0:
                 for sc, _arr in dir_scatters:
                     sc.set_array(zero_vec)
-                stim_scatter.set_array(zero_vec)
+                stim_artist.set_array(stim_zero)
                 return
             block = L + blanks
             stim_idx, within = divmod(frame_t, block)
@@ -344,13 +411,13 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
                     else:
                         sc.set_array(zero_vec)
                 if stim_all is not None and stim_idx < stim_all.shape[0]:
-                    stim_scatter.set_array(stim_all[stim_idx, t, :])
+                    stim_artist.set_array(_stim_frame(stim_all[stim_idx, t, :]))
                 else:
-                    stim_scatter.set_array(zero_vec)
+                    stim_artist.set_array(stim_zero)
             else:
                 for sc, _arr in dir_scatters:
                     sc.set_array(zero_vec)
-                stim_scatter.set_array(zero_vec)
+                stim_artist.set_array(stim_zero)
 
         return fig, update, total_frames
 

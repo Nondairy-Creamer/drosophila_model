@@ -1386,9 +1386,16 @@ class NeuralModel(torch.nn.Module, ABC):
         Returns:
             omega_star: (3,) or (T, 3) estimated rotation rate [roll, pitch, yaw]
                 in physical observer convention (positive omega_z = leftward rotation)
-            T_star: (3,) or (T, 3) estimated observer velocity direction, scaled by
-                RMS of translational flow
-            Z_star: (N,) or (T, N) estimated depths (positive = in front of observer)
+            T_star: (3,) or (T, 3) estimated observer translational velocity,
+                T* = ρ_agg · t̂ (doc stage 5), where t̂ is the sign-disambiguated
+                unit direction (stage 3) and ρ_agg is the median of ρ_i over
+                points away from the focus of expansion (‖Π t̂‖² > 0.1).
+            rho_star: (N,) or (T, N) per-point ρ_i = ‖T‖/Z_i, the recoverable
+                translational-flow-over-depth magnitude (doc stage 4). Absolute
+                depth Z_i and absolute ‖T‖ cannot be separated from monocular
+                flow alone; only their ratio ρ_i is observable. Together with
+                t̂ this fully reconstructs the de-rotated flow:
+                v_i = -ρ_i · Π_i · t̂.
         """
 
         def cross_matrix(a):
@@ -1451,9 +1458,6 @@ class NeuralModel(torch.nn.Module, ABC):
         # === De-rotated flow: v = u - u_rot where u_rot = [x]_× Ω ===
         v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T, N, 3)
 
-        # === Measure translation signal strength (per time step) ===
-        translation_magnitude = torch.sqrt((v**2).mean(dim=(-2, -1)).clamp(min=1e-12))
-
         # === Projection matrices Π_i = I - x_i x_iᵀ — shared across time ===
         outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
         I = torch.eye(3, device=x.device).expand(N, 3, 3)
@@ -1469,33 +1473,43 @@ class NeuralModel(torch.nn.Module, ABC):
         T_dir = Vh[:, -1]                                     # (T, 3)
 
         # === Disambiguate sign using depth positivity constraint ===
-        # Physical flow: v = -(1/Z) P T_scene where T_scene = -V_observer
-        # w = P @ T_dir. For positive depth: v·w > 0 ↔ T_dir ∝ T_scene
+        # Forward model after de-rotation: v = -(1/Z) Π T, with T = observer velocity.
+        # Per doc stage 3, flip T_dir if Σ (v·Π t̂) ‖Π t̂‖² > 0, which makes
+        # ρ = -(v·Π t̂)/‖Π t̂‖² ≥ 0 (depth-positivity).
         w_i = torch.einsum('nij,tj->tni', P, T_dir)          # (T, N, 3)
         v_dot_w = (v * w_i).sum(dim=-1)                      # (T, N)
         w_norm_sq = (w_i * w_i).sum(dim=-1)                   # (T, N)
         weighted_sign = (v_dot_w * w_norm_sq).sum(dim=-1)     # (T,)
 
-        sign_flip = torch.where(weighted_sign < 0,
+        sign_flip = torch.where(weighted_sign > 0,
                                 torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
                                 torch.tensor(1.0, device=x.device, dtype=d_right.dtype))
         T_dir = T_dir * sign_flip[:, None]
         v_dot_w = v_dot_w * sign_flip[:, None]
 
-        # Scale T by translation magnitude and negate to convert from the SVD's
-        # -V_observer convention to physical observer velocity convention.
-        T_star = -T_dir * translation_magnitude[:, None]  # (T, 3)
+        # Stage 4: per-point recoverable magnitude ρ_i = ‖T‖/Z_i (positive after flip)
+        rho_star = -v_dot_w / (w_norm_sq + 1e-12)  # (T, N)
 
-        # Depth: Z = ||w||² / (v · w) with v · w > 0 after disambiguation
-        Z_star = w_norm_sq / (v_dot_w + 1e-12)  # (T, N)
+        # Stage 5: aggregate ρ_i into a scalar via median over points away from
+        # the focus of expansion (where ‖Π t̂‖² ≈ 0 makes ρ ill-conditioned).
+        # T_star = ρ_agg · t̂.
+        focus_threshold = 0.1
+        valid = w_norm_sq > focus_threshold                 # (T, N)
+        rho_masked = torch.where(valid, rho_star, torch.full_like(rho_star, float('nan')))
+        rho_agg = torch.nanmedian(rho_masked, dim=-1).values  # (T,)
+        # Fallback: if a frame has no points above threshold, use the global median.
+        rho_agg = torch.where(torch.isnan(rho_agg),
+                              torch.nanmedian(rho_star, dim=-1).values,
+                              rho_agg)
+        T_star = rho_agg[:, None] * T_dir                   # (T, 3)
 
         # Squeeze back if input was unbatched
         if unbatched:
             omega_star = omega_star.squeeze(0)
             T_star = T_star.squeeze(0)
-            Z_star = Z_star.squeeze(0)
+            rho_star = rho_star.squeeze(0)
 
-        return omega_star, T_star, Z_star
+        return omega_star, T_star, rho_star
 
     def _sign_synapses(self):
         """
