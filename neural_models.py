@@ -1767,6 +1767,22 @@ class ConductanceModel(NeuralModel):
         rp_transmitter_init = torch.zeros(self.num_transmitters, self.num_cell_types, dtype=self.dtype, device=self.device)
         for ri, r in enumerate(self.unique_transmitters):
             rp_transmitter_init[ri, :] = rp_default[r]
+
+        # HARDCODED OVERRIDE: make GABA look excitatory (like ACH) onto L1 and L2.
+        # In the lamina, L1/L2 actually receive histaminergic (sign-inverted)
+        # input from photoreceptors, so flipping GABA's reversal potential at
+        # these targets is a quick way to test what happens when an otherwise
+        # inhibitory transmitter is treated as depolarizing on these cells.
+        if 'GABA' in self.unique_transmitters:
+            gaba_idx = int(np.where(self.unique_transmitters == 'GABA')[0][0])
+            for ct_name in ('L1', 'L2'):
+                ct_match = np.where(self.unique_cell_types == ct_name)[0]
+                if ct_match.size > 0:
+                    ct_idx = int(ct_match[0])
+                    rp_transmitter_init[gaba_idx, ct_idx] = rp_default['ACH']
+                    print(f"  [override] GABA reversal potential on {ct_name} "
+                          f"set to {rp_default['ACH']} mV (excitatory like ACH)")
+
         self.rp_transmitter = rp_transmitter_init
         
         # Leak reversal potential per cell type: (num_cell_types,)
