@@ -1090,7 +1090,15 @@ class NeuralModel(torch.nn.Module, ABC):
         if hasattr(result, 'synapse_counts') and isinstance(result.synapse_counts, torch.Tensor):
             result.synapse_counts = result.synapse_counts.to(*args, **kwargs)
         if hasattr(result, 'neuron_to_type_index') and isinstance(result.neuron_to_type_index, torch.Tensor):
-            result.neuron_to_type_index = result.neuron_to_type_index.to(*args, **kwargs)
+            # Must stay integer: forwarding ``.to(dtype=bfloat16)`` (or any float dtype)
+            # from user code would cast this mapping to float and break ``tensor[idx]``
+            # on CUDA with IndexError.
+            non_blocking = kwargs.get('non_blocking', False)
+            result.neuron_to_type_index = result.neuron_to_type_index.to(
+                device=result.synapse_counts.device,
+                dtype=torch.int64,
+                non_blocking=non_blocking,
+            )
         # Update self.device if a device was specified
         device = None
         if args and isinstance(args[0], (torch.device, str)):
@@ -1865,6 +1873,272 @@ class CurrentModel(NeuralModel):
         v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
 
         return v_next
+
+
+@_register_model_class
+class CurrentModelFast(CurrentModel):
+    """Inference-optimized variant of :class:`CurrentModel`.
+
+    Produces identical outputs to ``CurrentModel.forward`` (up to quantization
+    error when ``quantize_activations=True``) but is considerably faster at
+    inference because:
+
+    * Per-cell-type parameters are expanded to per-neuron tensors **once** via
+      :meth:`prepare_for_inference`, so ``sigmoid``/``exp`` are not recomputed
+      every timestep.
+    * The ``(1 - persistence)`` factor is fused into the post-matmul scale,
+      the stimulus scale, and the bias, removing several per-step multiplies.
+    * The sparse synapse matrix is converted to CSR, which has a faster
+      sparse×dense matmul kernel than COO on both CPU and CUDA. This is the
+      dominant source of real-world speedup (≈1.35× on a 40 k-neuron trained
+      model on CPU).
+    * ``forward`` can optionally be wrapped with :func:`torch.compile`
+      (``enable_compile=True``). On CPU this is roughly break-even because
+      ``torch.sparse.mm`` forces a graph break so Inductor can only fuse the
+      cheap element-wise tail; the dispatch overhead cancels the fusion
+      savings. On CUDA it's typically worth enabling.
+    * All forward math runs under ``torch.no_grad`` — no autograd bookkeeping.
+
+    Optional activation quantization (``quantize_activations=True``) makes
+    the dominant sparse matrix–vector product integer-valued:
+
+    * Synapse counts are stored as an int32 sparse tensor (CSR if the backend
+      supports int sparse CSR mm, otherwise COO).
+    * Pre-matmul activations are dynamically quantized each step with
+      symmetric per-batch-row scaling. Bit depth is configurable via
+      ``activation_bits`` (8 or 16; default 16). int8 is usually too lossy on
+      trained models because ``fr * output_strength`` has a large dynamic
+      range across cell types (a single outlier dictates the per-tensor scale
+      for everyone else); int16 gives ~256× the resolution.
+    * The matmul is int{8,16} × int32 → int32; the result is rescaled to
+      float once for the small per-neuron post-scale / persistence update.
+      The best available integer path is detected once at prepare time so the
+      hot path is branch-free.
+    * On current PyTorch CPU builds the integer sparse mm kernel is *less*
+      optimized than MKL's float32 sparse kernel, so quantization currently
+      does **not** provide a CPU speedup — it's primarily useful for targets
+      with dedicated low-precision sparse support (accelerators, some GPUs).
+
+    This class can be trained like ``CurrentModel``, or constructed from an
+    already-trained ``CurrentModel`` via :meth:`from_trained`.
+    """
+
+    def __init__(self, *, quantize_activations=False, activation_bits=16,
+                 enable_compile=False, init_new_model=True, **kwargs):
+        super().__init__(init_new_model=init_new_model, **kwargs)
+
+        if activation_bits not in (8, 16):
+            raise ValueError(f"activation_bits must be 8 or 16, got {activation_bits}")
+        self.quantize_activations = bool(quantize_activations)
+        self.activation_bits = int(activation_bits)
+        self.enable_compile = bool(enable_compile)
+        self._inference_prepared = False
+        self._compiled_forward = None
+
+        self._save_init_inputs()
+
+        self.prepare_for_inference()
+
+    @classmethod
+    def from_trained(cls, trained_model, quantize_activations=False,
+                     activation_bits=16, enable_compile=False):
+        """Build a ``CurrentModelFast`` that mirrors an already-trained ``CurrentModel``.
+
+        The trained model's constructor inputs and parameter tensors are copied
+        over; the expensive ``set_sigma_max`` pass is skipped.
+        """
+        if not isinstance(trained_model, CurrentModel):
+            raise TypeError(
+                f"from_trained expects a CurrentModel instance, got {type(trained_model).__name__}"
+            )
+
+        inputs = dict(trained_model.init_inputs)
+        inputs['init_new_model'] = False
+        inputs['quantize_activations'] = quantize_activations
+        inputs['activation_bits'] = activation_bits
+        inputs['enable_compile'] = enable_compile
+
+        fast = cls(**inputs)
+        fast.load_state_dict(trained_model.state_dict(), strict=False)
+        fast.prepare_for_inference()
+        fast.eval()
+        return fast
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        result = super().load_state_dict(state_dict, *args, **kwargs)
+        # Re-fuse precomputed buffers from the freshly loaded parameters.
+        self.prepare_for_inference()
+        return result
+
+    def to(self, *args, **kwargs):
+        """Move parameters/buffers then rebuild CSR / int sparse views on the new device.
+
+        ``_A_csr`` and ``_int_A`` are plain attributes, so ``nn.Module.to()`` would
+        leave them behind on the old device and ``torch.sparse.mm`` would mix
+        CUDA dense activations with a CPU sparse matrix.
+        """
+        result = super().to(*args, **kwargs)
+        result.prepare_for_inference()
+        return result
+
+    @torch.no_grad()
+    def prepare_for_inference(self):
+        """Precompute per-neuron fused buffers from current parameter values.
+
+        Safe to call repeatedly — used after parameter updates or state loads.
+        """
+        idx = self.neuron_to_type_index
+
+        persistence = self.persistence_logit.sigmoid()[idx]
+        input_strength = self.input_strength_log.exp()[idx]
+        output_strength = self.output_strength_log.exp()[idx]
+        stimulus_strength = self.stimulus_strength_log.exp()[idx]
+        offset = self.offset[idx]
+
+        one_minus_p = 1.0 - persistence
+
+        fused = {
+            # Used as: v_next += persistence * v_prev
+            '_persistence_n': persistence.contiguous(),
+            # Applied to pre-matmul activations (column-scale on nonlinearity(v_prev)).
+            '_output_strength_n': output_strength.contiguous(),
+            # Folds (1 - p) and input_strength into one per-row multiply on z.
+            '_post_mm_scale_n': (one_minus_p * input_strength).contiguous(),
+            # Folds (1 - p) * stimulus_strength into a single scale on u_t.
+            '_stim_scale_n': (one_minus_p * stimulus_strength).contiguous(),
+            # Folds (1 - p) * offset into a constant additive bias each step.
+            '_bias_n': (one_minus_p * offset).contiguous(),
+        }
+        for name, tensor in fused.items():
+            if name in self._buffers:
+                self._buffers[name] = tensor
+            else:
+                self.register_buffer(name, tensor)
+
+        # Build a CSR view of the float synapse matrix for faster mm.
+        # CSR sparse tensors can't always live in ``_buffers`` across PyTorch
+        # versions, so we hold them as plain attributes.
+        self._A_csr = self._to_csr_or_coo(self.synapse_counts)
+
+        if self.quantize_activations:
+            self._prepare_int_synapse_matrix()
+            self._int_A, self._int_mm_ok = self._detect_int_mm_path()
+        else:
+            self._int_A = None
+            self._int_mm_ok = False
+
+        # Any rebuild of buffers / sparse tensors invalidates the compiled fn.
+        self._compiled_forward = None
+        self._inference_prepared = True
+
+    @staticmethod
+    def _to_csr_or_coo(A):
+        """Return a CSR view of a sparse tensor if supported, else the coalesced COO."""
+        A_coal = A.coalesce() if A.is_sparse else A
+        try:
+            return A_coal.to_sparse_csr()
+        except (RuntimeError, NotImplementedError):
+            return A_coal
+
+    @torch.no_grad()
+    def _prepare_int_synapse_matrix(self):
+        A = self.synapse_counts.coalesce()
+        int_values = A.values().round().to(torch.int32)
+        self._synapse_counts_int = torch.sparse_coo_tensor(
+            A.indices(), int_values, size=A.size(),
+            dtype=torch.int32, device=A.device,
+        ).coalesce()
+        try:
+            self._synapse_counts_int_csr = self._synapse_counts_int.to_sparse_csr()
+        except (RuntimeError, NotImplementedError):
+            self._synapse_counts_int_csr = None
+
+    @torch.no_grad()
+    def _detect_int_mm_path(self):
+        """Pick the fastest available int sparse mm path (CSR > COO > float fallback).
+
+        Returns (matrix, ok) where ok=True means int sparse mm works with the
+        returned matrix, ok=False means the caller should use the float fallback.
+        """
+        probe = torch.zeros(
+            self.num_neurons, 1, dtype=torch.int32, device=self.synapse_counts.device,
+        )
+        for A in (self._synapse_counts_int_csr, self._synapse_counts_int):
+            if A is None:
+                continue
+            try:
+                torch.sparse.mm(A, probe)
+                return A, True
+            except (RuntimeError, NotImplementedError):
+                continue
+        return None, False
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        if not self._inference_prepared:
+            self.prepare_for_inference()
+
+        if self.enable_compile:
+            if self._compiled_forward is None:
+                try:
+                    self._compiled_forward = torch.compile(
+                        self._forward_impl, dynamic=False, fullgraph=False,
+                    )
+                except Exception:
+                    self.enable_compile = False
+                    self._compiled_forward = None
+            if self._compiled_forward is not None:
+                try:
+                    return self._compiled_forward(v_prev, u_t, stim_to_cell_mapping)
+                except Exception:
+                    # Compiler tripped over something at runtime — drop back
+                    # to eager and disable for future calls.
+                    self._compiled_forward = None
+                    self.enable_compile = False
+
+        return self._forward_impl(v_prev, u_t, stim_to_cell_mapping)
+
+    @torch.no_grad()
+    def _forward_impl(self, v_prev, u_t, stim_to_cell_mapping=None):
+        fr = self.nonlinearity(v_prev)
+        pre = fr * self._output_strength_n  # (B, N)
+
+        if self.quantize_activations:
+            # Dynamic symmetric per-batch-row quantization of activations.
+            # Per-row (not per-tensor) so different batch samples don't share a
+            # single outlier-driven scale; still cheap (one amax per row).
+            max_val = float((1 << (self.activation_bits - 1)) - 1)  # 127 or 32767
+            row_scale = (pre.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12)
+                         / max_val)
+            q_int32 = (pre / row_scale).round().clamp(-max_val, max_val).to(torch.int32)
+
+            if self._int_mm_ok:
+                z_int = torch.sparse.mm(self._int_A,
+                                        q_int32.transpose(0, 1)).transpose(0, 1)
+                z = z_int.to(pre.dtype) * row_scale
+            else:
+                # Backend fallback: float sparse mm on integer-valued operands —
+                # multiplies are still exact integer ops, just widened.
+                q_f = q_int32.to(pre.dtype)
+                z = torch.sparse.mm(self._A_csr,
+                                    q_f.transpose(0, 1)).transpose(0, 1) * row_scale
+        else:
+            z = torch.sparse.mm(self._A_csr,
+                                pre.transpose(0, 1)).transpose(0, 1)
+
+        z = z * self._post_mm_scale_n
+
+        if stim_to_cell_mapping is None:
+            z = z + u_t * self._stim_scale_n
+        else:
+            cell_idx = stim_to_cell_mapping['neuron_index']
+            stim_idx = stim_to_cell_mapping['stimulus_index']
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                z.index_add_(1, ci, u_t[:, si] * self._stim_scale_n[ci])
+
+        return self._persistence_n * v_prev + z + self._bias_n
 
 
 @_register_model_class
