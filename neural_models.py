@@ -1101,6 +1101,26 @@ class NeuralModel(torch.nn.Module, ABC):
             result.device = device
         return result
 
+    @staticmethod
+    def _csr_row_indices(csr):
+        """Expand crow_indices into a per-nnz row index tensor."""
+        crow = csr.crow_indices()
+        n_rows = csr.size(0)
+        return torch.repeat_interleave(
+            torch.arange(n_rows, device=crow.device), crow.diff()
+        )
+
+    def _csr_abs_row_col_sums(self, csr):
+        """Return ``(|row|.sum, |col|.sum)`` for a CSR tensor as dense vectors."""
+        col = csr.col_indices()
+        row = self._csr_row_indices(csr)
+        abs_vals = csr.values().abs()
+        row_sum = torch.zeros(csr.size(0), device=self.device, dtype=self.dtype)
+        col_sum = torch.zeros(csr.size(1), device=self.device, dtype=self.dtype)
+        row_sum.index_add_(0, row, abs_vals)
+        col_sum.index_add_(0, col, abs_vals)
+        return row_sum, col_sum
+
     def _collect_extra_state(self):
         """Collect non-parameter, non-buffer state for serialization.
 
@@ -1661,7 +1681,6 @@ class NeuralModel(torch.nn.Module, ABC):
         Modifies self.synapse_counts and self.synapse_counts_coo in-place.
         """
         sc = self.synapse_counts
-        crow = sc.crow_indices()
         col = sc.col_indices()
 
         pre_neuron_indices = col.cpu().numpy()
@@ -1681,12 +1700,10 @@ class NeuralModel(torch.nn.Module, ABC):
         synapse_sign_tensor = torch.tensor(synapse_sign, device=self.device, dtype=self.dtype)
         signed_values = sc.values() * synapse_sign_tensor
         self.synapse_counts = torch.sparse_csr_tensor(
-            crow, col, signed_values, size=sc.size(),
+            sc.crow_indices(), col, signed_values, size=sc.size(),
         )
 
-        row = torch.repeat_interleave(
-            torch.arange(self.num_neurons, device=self.device), crow.diff()
-        )
+        row = self._csr_row_indices(sc)
         self.synapse_counts_coo = np.column_stack([
             col.cpu().numpy(),
             row.cpu().numpy(),
@@ -1975,9 +1992,9 @@ class ConductanceModel(NeuralModel):
         synapses_in_per_neuron = torch.zeros(self.num_neurons, dtype=self.dtype, device=self.device)
         synapses_out_per_neuron = torch.zeros(self.num_neurons, dtype=self.dtype, device=self.device)
         for s in self.synapse_counts:
-            s_coo = s.to_sparse_coo()
-            synapses_in_per_neuron = synapses_in_per_neuron + s_coo.abs().sum(dim=1).to_dense()
-            synapses_out_per_neuron = synapses_out_per_neuron + s_coo.abs().sum(dim=0).to_dense()
+            r, c = self._csr_abs_row_col_sums(s)
+            synapses_in_per_neuron = synapses_in_per_neuron + r
+            synapses_out_per_neuron = synapses_out_per_neuron + c
         
         in_log_per_ct = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
         out_log_per_ct = torch.zeros(self.num_cell_types, dtype=self.dtype, device=self.device)
@@ -2318,7 +2335,7 @@ class CellAnnModel(NeuralModel):
         self._save_init_inputs()
 
         # --- Extract sparsity pattern and biological sign ---
-        sc_coo = self.synapse_counts.to_sparse_coo().coalesce()
+        sc_coo = self.synapse_counts.to_sparse_coo()
         sparse_indices = sc_coo.indices()
         edge_sign = torch.sign(sc_coo.values())
 
@@ -2680,12 +2697,9 @@ class HandTunedModel(NeuralModel):
            in the matrix (after NT signing and manual flips).
         """
         sc = self.synapse_counts
-        crow = sc.crow_indices()
         col_indices = sc.col_indices()
         values = sc.values()
-        row_indices = torch.repeat_interleave(
-            torch.arange(self.num_neurons, device=self.device), crow.diff()
-        )
+        row_indices = self._csr_row_indices(sc)
 
         # Per-presynaptic-cell-type amplification
         if hasattr(self, '_synapse_amplification'):
@@ -2708,7 +2722,7 @@ class HandTunedModel(NeuralModel):
 
         normalized_values = values / row_abs_sums[row_indices]
         self.synapse_counts = torch.sparse_csr_tensor(
-            crow, col_indices, normalized_values, size=sc.size(),
+            sc.crow_indices(), col_indices, normalized_values, size=sc.size(),
         )
 
     # ------------------------------------------------------------------
@@ -2834,11 +2848,8 @@ class HandTunedModel(NeuralModel):
             return
 
         sc = self.synapse_counts
-        crow = sc.crow_indices()
         pre_n = sc.col_indices()
-        post_n = torch.repeat_interleave(
-            torch.arange(self.num_neurons, device=self.device), crow.diff()
-        )
+        post_n = self._csr_row_indices(sc)
         values = sc.values().clone()
 
         pre_types = self.neuron_to_type_index[pre_n]
@@ -2849,7 +2860,7 @@ class HandTunedModel(NeuralModel):
         values = torch.where(mask, values * fac, values)
 
         self.synapse_counts = torch.sparse_csr_tensor(
-            crow, pre_n, values, size=sc.size(),
+            sc.crow_indices(), pre_n, values, size=sc.size(),
         )
 
         self.synapse_counts_coo = np.column_stack([
@@ -2876,19 +2887,17 @@ class HandTunedModel(NeuralModel):
 
         neuron_mask = self.neuron_to_type_index == idx  # (num_neurons,)
 
-        post_n_template = torch.arange(self.num_neurons, device=self.device)
         for sc_attr in ('synapse_counts', '_raw_synapse_counts'):
             sc = getattr(self, sc_attr)
-            crow = sc.crow_indices()
             pre_n = sc.col_indices()
-            post_n = torch.repeat_interleave(post_n_template, crow.diff())
+            post_n = self._csr_row_indices(sc)
             values = sc.values().clone()
 
             hit = neuron_mask[post_n] | neuron_mask[pre_n]
             values[hit] = 0.0
 
             setattr(self, sc_attr, torch.sparse_csr_tensor(
-                crow, pre_n, values, size=sc.size(),
+                sc.crow_indices(), pre_n, values, size=sc.size(),
             ))
 
         # Re-normalize so remaining neurons' weights still sum to 1
@@ -3045,7 +3054,7 @@ class HandTunedModel(NeuralModel):
 
         nonlin = self._apply_activation(v)
 
-        sc = self.synapse_counts.to_sparse_coo().coalesce()
+        sc = self.synapse_counts.to_sparse_coo()
         sc_idx = sc.indices()
         sc_val = sc.values()
 
