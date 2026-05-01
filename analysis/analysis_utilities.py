@@ -551,6 +551,166 @@ def add_direction_colorwheel(fig, rect=None, flip_lr=False):
 
 
 # ---------------------------------------------------------------------------
+# Eye-view helpers (single source of truth for per-eye flow rendering)
+# ---------------------------------------------------------------------------
+#
+# Physical model
+# --------------
+# The figure observer sits at the origin of the fly's body frame and looks
+# toward the eye being shown:
+#
+#   Right eye panel: observer looks toward -Y. Screen-right = -X (posterior),
+#       screen-left = +X (anterior). Implementation: x-axis xlim is flipped;
+#       cell positions used for projection are right-eye (cell_x, cell_y, cell_z).
+#   Left eye panel:  observer looks toward +Y. Screen-right = +X (anterior),
+#       screen-left  = -X (posterior). Implementation: normal x-axis; cell
+#       positions used for projection are left-eye (cell_x, -cell_y, cell_z),
+#       because the left eye's columns physically live at phi_l = -phi_r.
+#
+# Color hue (screen-relative): in every panel hue 0 ("→") means the arrow
+# points right ON SCREEN. Because the right-eye axis is flipped, the right-eye
+# color call uses ``flip_lr=True`` and the left-eye uses ``flip_lr=False``.
+# A single shared "→ ↑ ← ↓" wheel (``flip_lr=False``) per figure suffices.
+# ---------------------------------------------------------------------------
+
+
+_VALID_EYES = ("right", "left")
+
+
+def _check_eye(eye):
+    if eye not in _VALID_EYES:
+        raise ValueError(f"eye must be one of {_VALID_EYES}, got {eye!r}")
+
+
+def eye_cell_y(cell_y, eye):
+    """Return the eye-correct ``cell_y`` for projecting flow.
+
+    Right eye: ``cell_y`` unchanged. Left eye: ``-cell_y`` (columns mirrored
+    across the y axis since ``phi_l = -phi_r``).
+    """
+    _check_eye(eye)
+    return cell_y if eye == "right" else -cell_y
+
+
+def eye_color_flip(eye):
+    """Whether color hue should be flipped left/right for this eye panel.
+
+    True for the right eye (whose x-axis is flipped on screen), False for the
+    left eye. Use as the ``flip_lr`` argument to
+    :func:`flow_direction_colors` / :func:`update_direction_quiver`.
+    """
+    _check_eye(eye)
+    return eye == "right"
+
+
+def project_eye_flow(angular_flow, cell_x, cell_y, cell_z, eye):
+    """Project an eye's angular flow ``(u_right, u_up)`` to Cartesian ``(v_x, v_z)``.
+
+    Wraps :func:`angular_flow_to_cartesian_xz` and applies the eye-correct
+    ``cell_y`` mirroring so callers never need to remember the convention.
+
+    Parameters
+    ----------
+    angular_flow : (..., N, 2) array — channel 0 is u_right, channel 1 is u_up.
+    cell_x, cell_y, cell_z : (N,) right-eye Cartesian coordinates on the unit
+        sphere (as returned by ``model.get_column_xyz()``).
+    eye : 'right' or 'left'.
+    """
+    _check_eye(eye)
+    return angular_flow_to_cartesian_xz(
+        angular_flow[..., 0], angular_flow[..., 1],
+        cell_x, eye_cell_y(cell_y, eye), cell_z,
+    )
+
+
+def prepare_eye_quiver(angular_flow, cell_x, cell_y, cell_z, eye):
+    """Project flow for an eye and return everything needed for quiver rendering.
+
+    Returns
+    -------
+    vx, vz : (T, N) Cartesian flow components, NaN replaced with 0.
+    mag : (T, N) magnitude, NaN replaced with 0.
+    flow_norm : matplotlib Normalize for colormaps (0 .. 99th-percentile mag).
+    arrow_scale : float, suitable for ``quiver(scale=1/arrow_scale, ...)``.
+    """
+    import matplotlib.colors as mcolors
+
+    vx, vz = project_eye_flow(angular_flow, cell_x, cell_y, cell_z, eye)
+    mag = np.hypot(vx, vz)
+    finite_mag = mag[np.isfinite(mag)]
+    max_mag = (float(np.percentile(finite_mag, 99))
+               if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
+    flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
+    arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
+
+    vx = np.nan_to_num(vx, nan=0.0)
+    vz = np.nan_to_num(vz, nan=0.0)
+    mag = np.nan_to_num(mag, nan=0.0)
+    return vx, vz, mag, flow_norm, arrow_scale
+
+
+def setup_eye_axis(ax, cell_x, cell_z, eye, x_margin=None, z_margin=None):
+    """Configure a single eye panel's xlim/ylim/aspect.
+
+    The right eye gets a flipped x-axis so screen-right = -X (posterior);
+    the left eye uses a normal x-axis so screen-right = +X (anterior).
+    """
+    _check_eye(eye)
+    if x_margin is None:
+        x_margin = 0.1 * (cell_x.max() - cell_x.min())
+    if z_margin is None:
+        z_margin = 0.1 * (cell_z.max() - cell_z.min())
+    if eye == "right":
+        ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
+    else:
+        ax.set_xlim(cell_x.min() - x_margin, cell_x.max() + x_margin)
+    ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
+    ax.set_aspect("equal")
+
+
+def setup_eye_axes(ax_left, ax_right, cell_x, cell_z, x_margin=None, z_margin=None):
+    """Configure a paired (left, right) eye panel. Thin wrapper around
+    :func:`setup_eye_axis`."""
+    setup_eye_axis(ax_left, cell_x, cell_z, "left",
+                   x_margin=x_margin, z_margin=z_margin)
+    setup_eye_axis(ax_right, cell_x, cell_z, "right",
+                   x_margin=x_margin, z_margin=z_margin)
+
+
+def eye_quiver_colors(vx, vz, max_mag, eye):
+    """Color hues for an eye panel's quiver, screen-direction-consistent."""
+    return flow_direction_colors(vx, vz, max_mag, flip_lr=eye_color_flip(eye))
+
+
+def init_eye_quiver(ax, cell_x, cell_z, vx0, vz0, max_mag, eye, **quiver_kw):
+    """Create a quiver on ``ax`` with eye-correct color hues.
+
+    ``quiver_kw`` is forwarded to ``ax.quiver`` (e.g. ``angles``,
+    ``scale_units``, ``scale``, ``width``).
+    """
+    q = ax.quiver(cell_x, cell_z, vx0, vz0, **quiver_kw)
+    colors, _ = eye_quiver_colors(vx0, vz0, max_mag, eye)
+    q.set_facecolor(colors)
+    q.set_edgecolor(colors)
+    return q
+
+
+def update_eye_quiver(q, vx, vz, max_mag, eye):
+    """Update a quiver's geometry and eye-correct colors."""
+    update_direction_quiver(q, vx, vz, max_mag, flip_lr=eye_color_flip(eye))
+
+
+def add_eye_colorwheel(fig, rect=None):
+    """Add the standard screen-direction colorwheel ("→ ↑ ← ↓") for eye panels.
+
+    One wheel per figure is sufficient because :func:`eye_quiver_colors`
+    already rotates the per-eye hue mapping so that "→" always points right
+    on screen, regardless of which eye panel you're looking at.
+    """
+    return add_direction_colorwheel(fig, rect=rect, flip_lr=False)
+
+
+# ---------------------------------------------------------------------------
 # Movie creation helpers
 # ---------------------------------------------------------------------------
 
@@ -567,8 +727,9 @@ def make_flow_comparison_movie(
     stim_name: str = "",
     filtered_stimulus: np.ndarray | None = None,
     mask: np.ndarray | None = None,
+    eye: str = "right",
 ) -> None:
-    """Create a flow comparison movie.
+    """Create a single-eye flow comparison movie.
 
     When *pred_flow* is provided, creates a 2x2 layout (stimulus, true flow,
     filtered stimulus, predicted flow).  When *pred_flow* is ``None``, creates
@@ -579,9 +740,9 @@ def make_flow_comparison_movie(
     stimulus : (time, columns)
     true_flow : (time, columns, 2) — angular flow ``(u_right, u_up)``
     pred_flow : (time, columns, 2) or None
-    cell_x, cell_y, cell_z : (columns,) Cartesian coords on unit sphere.
-        When *cell_y* is provided the angular flow is properly projected to
-        Cartesian ``(v_x, v_z)`` for the quiver arrows.
+    cell_x, cell_y, cell_z : (columns,) right-eye Cartesian coordinates on the
+        unit sphere (as returned by ``model.get_column_xyz()``). The eye-correct
+        ``cell_y`` mirroring is handled internally based on ``eye``.
     output_path : Path for .mp4 output
     frame_rate : frames per second
     stim_name : label shown in the stimulus panel title
@@ -589,6 +750,8 @@ def make_flow_comparison_movie(
         input filter.  Shown in the bottom-left panel when provided.
     mask : (time, columns) bool or None — True = valid, False = masked
         (shown yellow).
+    eye : 'right' or 'left' — which eye this single-eye view represents.
+        Controls the axis flip and color hue convention.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -609,28 +772,16 @@ def make_flow_comparison_movie(
             rgba[~mask_t] = _MASK_COLOR
         return rgba
 
-    # Project angular flow (u_right, u_up) to Cartesian (v_x, v_z) for the x-z plotting plane
-    true_flow_vx, true_flow_vz = angular_flow_to_cartesian_xz(
-        true_flow[:, :, 0], true_flow[:, :, 1],
-        cell_x, cell_y, cell_z,
-    )
-
-    _, true_max_mag = flow_direction_colors(
-        np.nan_to_num(true_flow_vx, nan=0.0),
-        np.nan_to_num(true_flow_vz, nan=0.0),
-    )
+    true_flow_vx, true_flow_vz, _, true_norm, true_arrow_scale = prepare_eye_quiver(
+        true_flow, cell_x, cell_y, cell_z, eye)
+    true_max_mag = true_norm.vmax
 
     has_pred = pred_flow is not None
     has_filtered = filtered_stimulus is not None
     if has_pred:
-        pred_flow_vx, pred_flow_vz = angular_flow_to_cartesian_xz(
-            pred_flow[:, :, 0], pred_flow[:, :, 1],
-            cell_x, cell_y, cell_z,
-        )
-        _, pred_max_mag = flow_direction_colors(
-            np.nan_to_num(pred_flow_vx, nan=0.0),
-            np.nan_to_num(pred_flow_vz, nan=0.0),
-        )
+        pred_flow_vx, pred_flow_vz, _, pred_norm, pred_arrow_scale = prepare_eye_quiver(
+            pred_flow, cell_x, cell_y, cell_z, eye)
+        pred_max_mag = pred_norm.vmax
         fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100)
         ax_stim, ax_true = axes[0, 0], axes[0, 1]
         ax_bottom_left = axes[1, 0]
@@ -640,7 +791,6 @@ def make_flow_comparison_movie(
             1, 2, figsize=(12.8, 5.12), dpi=100
         )
 
-    # Set up the bottom-left panel
     if has_pred and has_filtered:
         filt_min, filt_max = np.nanmin(filtered_stimulus), np.nanmax(filtered_stimulus)
         filt_norm = mcolors.Normalize(vmin=filt_min, vmax=filt_max)
@@ -648,17 +798,17 @@ def make_flow_comparison_movie(
         ax_bottom_left.axis("off")
         ax_bottom_left.set_title("(reserved)")
 
-    x_margin = 0.1 * (cell_x.max() - cell_x.min())
-    z_margin = 0.1 * (cell_z.max() - cell_z.min())
-
     plot_axes = [ax_stim, ax_true] + ([ax_pred] if has_pred else [])
     if has_pred and has_filtered:
         plot_axes.append(ax_bottom_left)
+    # Anatomical x-axis label depends on the eye (axis-flip orientation).
+    if eye == "right":
+        xlabel = "x (anterior ← → posterior)"
+    else:
+        xlabel = "x (posterior ← → anterior)"
     for ax in plot_axes:
-        ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
-        ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
-        ax.set_aspect("equal")
-        ax.set_xlabel("x (anterior ← → posterior)")
+        setup_eye_axis(ax, cell_x, cell_z, eye)
+        ax.set_xlabel(xlabel)
         ax.set_ylabel("z (ventral ↔ dorsal)")
 
     mask_0 = mask[0] if mask is not None else None
@@ -673,7 +823,6 @@ def make_flow_comparison_movie(
     ax_stim.set_title(title_label)
     fig.colorbar(sc_stim, ax=ax_stim, label="intensity")
 
-    # Filtered stimulus scatter plot (bottom-left)
     sc_filt = None
     if has_pred and has_filtered:
         sc_filt = ax_bottom_left.scatter(
@@ -686,38 +835,23 @@ def make_flow_comparison_movie(
         ax_bottom_left.set_title("Filtered Stimulus")
         fig.colorbar(sc_filt, ax=ax_bottom_left, label="intensity")
 
-    true_arrow_scale = 0.2 / true_max_mag if true_max_mag > 0 else 1.0
-
-    true_flow_vx = np.nan_to_num(true_flow_vx, nan=0.0)
-    true_flow_vz = np.nan_to_num(true_flow_vz, nan=0.0)
-
-    true_colors_0, _ = flow_direction_colors(true_flow_vx[0, :], true_flow_vz[0, :], true_max_mag)
-    q_true = ax_true.quiver(
-        cell_x, cell_z,
-        true_flow_vx[0, :], true_flow_vz[0, :],
-        angles="xy", scale_units="xy",
-        scale=1 / true_arrow_scale, width=0.003,
+    quiver_kw = dict(angles="xy", scale_units="xy", width=0.003)
+    q_true = init_eye_quiver(
+        ax_true, cell_x, cell_z,
+        true_flow_vx[0, :], true_flow_vz[0, :], true_max_mag, eye,
+        scale=1 / true_arrow_scale, **quiver_kw,
     )
-    q_true.set_facecolor(true_colors_0)
-    q_true.set_edgecolor(true_colors_0)
     ax_true.set_title("True Optic Flow")
 
     if has_pred:
-        pred_arrow_scale = 0.2 / pred_max_mag if pred_max_mag > 0 else 1.0
-        pred_flow_vx = np.nan_to_num(pred_flow_vx, nan=0.0)
-        pred_flow_vz = np.nan_to_num(pred_flow_vz, nan=0.0)
-        pred_colors_0, _ = flow_direction_colors(pred_flow_vx[0, :], pred_flow_vz[0, :], pred_max_mag)
-        q_pred = ax_pred.quiver(
-            cell_x, cell_z,
-            pred_flow_vx[0, :], pred_flow_vz[0, :],
-            angles="xy", scale_units="xy",
-            scale=1 / pred_arrow_scale, width=0.003,
+        q_pred = init_eye_quiver(
+            ax_pred, cell_x, cell_z,
+            pred_flow_vx[0, :], pred_flow_vz[0, :], pred_max_mag, eye,
+            scale=1 / pred_arrow_scale, **quiver_kw,
         )
-        q_pred.set_facecolor(pred_colors_0)
-        q_pred.set_edgecolor(pred_colors_0)
         ax_pred.set_title("Predicted Optic Flow")
 
-    add_direction_colorwheel(fig)
+    add_eye_colorwheel(fig)
 
     plt.tight_layout()
 
@@ -734,10 +868,12 @@ def make_flow_comparison_movie(
             if sc_filt is not None:
                 sc_filt.set_facecolors(_masked_rgba(filtered_stimulus[t, :], mask_t, gray_cmap, filt_norm))
 
-            update_direction_quiver(q_true, true_flow_vx[t, :], true_flow_vz[t, :], true_max_mag)
+            update_eye_quiver(q_true, true_flow_vx[t, :], true_flow_vz[t, :],
+                              true_max_mag, eye)
 
             if has_pred:
-                update_direction_quiver(q_pred, pred_flow_vx[t, :], pred_flow_vz[t, :], pred_max_mag)
+                update_eye_quiver(q_pred, pred_flow_vx[t, :], pred_flow_vz[t, :],
+                                  pred_max_mag, eye)
 
             frame_title = (
                 f"Stimulus ({stim_name}) frame {t+1}/{num_time}"
@@ -763,11 +899,12 @@ def make_stimulus_flow_movie(
     frame_rate: int,
     cell_y: np.ndarray = None,
     mask: np.ndarray | None = None,
+    eye: str = "right",
 ) -> None:
     """Create a 1x2 movie: stimulus intensity + true optic flow.
 
     Thin wrapper around :func:`make_flow_comparison_movie` with no predicted
-    flow panel.
+    flow panel. ``eye`` selects the per-eye axis flip / color hue convention.
     """
     make_flow_comparison_movie(
         stimulus=stimulus,
@@ -779,6 +916,7 @@ def make_stimulus_flow_movie(
         output_path=output_path,
         frame_rate=frame_rate,
         mask=mask,
+        eye=eye,
     )
 
 

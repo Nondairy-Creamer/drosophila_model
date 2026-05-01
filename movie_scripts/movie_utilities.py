@@ -2,8 +2,10 @@
 Shared utilities for movie scripts.
 
 Provides:
-  - Movie rendering helpers (masked_rgba, setup_eye_axes, prepare_flow_quiver,
-    write_movie, ylim_from_data)
+  - Movie rendering helpers (masked_rgba, setup_eye_axes, write_movie,
+    ylim_from_data). Per-eye flow rendering helpers are re-exported from
+    analysis_utilities (prepare_eye_quiver, init_eye_quiver, update_eye_quiver,
+    add_eye_colorwheel, ...).
   - Scatter/quiver factory functions for the factory-based movie pipeline
   - Re-exports from analysis_utilities (fig_to_rgb, angular_flow_to_cartesian_xz,
     get_flow_key, make_flow_comparison_movie, make_stimulus_flow_movie)
@@ -30,6 +32,17 @@ from analysis_utilities import (
     flow_direction_colors,
     update_direction_quiver,
     add_direction_colorwheel,
+    # Eye-view single-source-of-truth helpers
+    eye_cell_y,
+    eye_color_flip,
+    project_eye_flow,
+    prepare_eye_quiver,
+    setup_eye_axis,
+    setup_eye_axes as _setup_eye_axes_canonical,
+    eye_quiver_colors,
+    init_eye_quiver,
+    update_eye_quiver,
+    add_eye_colorwheel,
 )
 
 _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
@@ -61,49 +74,14 @@ def masked_rgba(values, mask, cmap=None, norm=None):
 
 
 def setup_eye_axes(ax_left, ax_right, cell_x, cell_z, x_margin=None, z_margin=None):
-    """Configure a pair of left/right eye axes with mirrored x-limits."""
-    if x_margin is None:
-        x_margin = 0.1 * (cell_x.max() - cell_x.min())
-    if z_margin is None:
-        z_margin = 0.1 * (cell_z.max() - cell_z.min())
-    for ax, flip in [(ax_left, False), (ax_right, True)]:
-        if flip:
-            ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
-        else:
-            ax.set_xlim(cell_x.min() - x_margin, cell_x.max() + x_margin)
-        ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
-        ax.set_aspect("equal")
+    """Configure a pair of left/right eye axes (canonical convention).
 
-
-def prepare_flow_quiver(angular_flow, cell_x, cell_y, cell_z):
-    """Project angular flow to Cartesian (vx, vz) and compute normalization.
-
-    Parameters
-    ----------
-    angular_flow : (T, N, 2) — angular flow (u_right, u_up)
-    cell_x, cell_y, cell_z : (N,)
-
-    Returns
-    -------
-    vx, vz : (T, N) Cartesian flow components (NaN replaced with 0)
-    mag : (T, N) magnitude (NaN replaced with 0)
-    flow_norm : Normalize for colormap
-    arrow_scale : float for quiver scale parameter
+    Thin wrapper around the canonical
+    :func:`analysis_utilities.setup_eye_axes` (re-exported here under
+    ``_setup_eye_axes_canonical``) so existing call sites keep working.
     """
-    vx, vz = angular_flow_to_cartesian_xz(
-        angular_flow[:, :, 0], angular_flow[:, :, 1], cell_x, cell_y, cell_z,
-    )
-    mag = np.hypot(vx, vz)
-    finite_mag = mag[np.isfinite(mag)]
-    max_mag = (np.percentile(finite_mag, 99)
-               if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
-    flow_norm = mcolors.Normalize(vmin=0.0, vmax=max_mag)
-    arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
-
-    vx = np.nan_to_num(vx, nan=0.0)
-    vz = np.nan_to_num(vz, nan=0.0)
-    mag = np.nan_to_num(mag, nan=0.0)
-    return vx, vz, mag, flow_norm, arrow_scale
+    _setup_eye_axes_canonical(ax_left, ax_right, cell_x, cell_z,
+                              x_margin=x_margin, z_margin=z_margin)
 
 
 def write_movie(fig, update_fn, num_frames, output_path, frame_rate, log_every=50):

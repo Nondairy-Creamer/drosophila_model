@@ -29,10 +29,11 @@ import stimulus_utilities as su
 
 from analysis_utilities import (
     fig_to_rgb,
-    angular_flow_to_cartesian_xz,
-    flow_direction_colors,
-    update_direction_quiver,
-    add_direction_colorwheel,
+    prepare_eye_quiver,
+    setup_eye_axis,
+    init_eye_quiver,
+    update_eye_quiver,
+    add_eye_colorwheel,
 )
 
 
@@ -443,27 +444,21 @@ def _make_movie(
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
     # --- Flow projection & colour scale ---
-    flow_vx_r, flow_vz_r = angular_flow_to_cartesian_xz(
-        pred_flow_right[:, :, 0], pred_flow_right[:, :, 1], cell_x, cell_y, cell_z,
-    )
-    flow_vx_l, flow_vz_l = angular_flow_to_cartesian_xz(
-        pred_flow_left[:, :, 0], pred_flow_left[:, :, 1], cell_x, cell_y, cell_z,
-    )
-    mag_r = np.hypot(flow_vx_r, flow_vz_r)
-    mag_l = np.hypot(flow_vx_l, flow_vz_l)
+    # Per-eye projection (cell_y mirroring for the left eye) is encapsulated in
+    # the eye_view helpers; see analysis_utilities.py for the convention.
+    flow_vx_r, flow_vz_r, _, _, _ = prepare_eye_quiver(
+        pred_flow_right, cell_x, cell_y, cell_z, "right")
+    flow_vx_l, flow_vz_l, _, _, _ = prepare_eye_quiver(
+        pred_flow_left, cell_x, cell_y, cell_z, "left")
 
-    all_vx = np.concatenate([flow_vx_r.ravel(), flow_vx_l.ravel()])
-    all_vz = np.concatenate([flow_vz_r.ravel(), flow_vz_l.ravel()])
-    _, max_mag = flow_direction_colors(
-        np.nan_to_num(all_vx, nan=0.0), np.nan_to_num(all_vz, nan=0.0))
+    all_mag = np.hypot(
+        np.concatenate([flow_vx_r.ravel(), flow_vx_l.ravel()]),
+        np.concatenate([flow_vz_r.ravel(), flow_vz_l.ravel()]),
+    )
+    finite_mag = all_mag[np.isfinite(all_mag)]
+    max_mag = (float(np.percentile(finite_mag, 99))
+               if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
     arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
-
-    flow_vx_r = np.nan_to_num(flow_vx_r, nan=0.0)
-    flow_vz_r = np.nan_to_num(flow_vz_r, nan=0.0)
-    flow_vx_l = np.nan_to_num(flow_vx_l, nan=0.0)
-    flow_vz_l = np.nan_to_num(flow_vz_l, nan=0.0)
-    mag_r = np.nan_to_num(mag_r, nan=0.0)
-    mag_l = np.nan_to_num(mag_l, nan=0.0)
 
     # --- Figure setup: 3 rows x 2 cols ---
     fig, axes = plt.subplots(3, 2, figsize=(12.8, 12.8), dpi=100,
@@ -472,20 +467,8 @@ def _make_movie(
     ax_flow_l, ax_flow_r = axes[1]
     ax_rot, ax_trans = axes[2]
 
-    x_margin = 0.1 * (cell_x.max() - cell_x.min())
-    z_margin = 0.1 * (cell_z.max() - cell_z.min())
-
-    def _setup_eye_axes(ax_left, ax_right):
-        for ax, flip in [(ax_left, False), (ax_right, True)]:
-            if flip:
-                ax.set_xlim(cell_x.max() + x_margin, cell_x.min() - x_margin)
-            else:
-                ax.set_xlim(cell_x.min() - x_margin, cell_x.max() + x_margin)
-            ax.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
-            ax.set_aspect("equal")
-
-    # Row 0: stimulus
-    _setup_eye_axes(ax_stim_l, ax_stim_r)
+    setup_eye_axis(ax_stim_l, cell_x, cell_z, "left")
+    setup_eye_axis(ax_stim_r, cell_x, cell_z, "right")
     sc_stim_l = ax_stim_l.scatter(
         cell_x, cell_z, c=_masked_rgba(stimulus_left[0], in_fov_left, stim_norm),
         s=90, edgecolors="none")
@@ -495,20 +478,18 @@ def _make_movie(
     ax_stim_l.set_title("Left Eye (stimulus)")
     ax_stim_r.set_title("Right Eye (stimulus)")
 
-    # Row 1: predicted flow
-    _setup_eye_axes(ax_flow_l, ax_flow_r)
+    setup_eye_axis(ax_flow_l, cell_x, cell_z, "left")
+    setup_eye_axis(ax_flow_r, cell_x, cell_z, "right")
     quiver_kw = dict(angles="xy", scale_units="xy", scale=1 / arrow_scale, width=0.003)
-    colors_l0, _ = flow_direction_colors(flow_vx_l[0], flow_vz_l[0], max_mag)
-    colors_r0, _ = flow_direction_colors(flow_vx_r[0], flow_vz_r[0], max_mag)
-    q_left = ax_flow_l.quiver(cell_x, cell_z, flow_vx_l[0], flow_vz_l[0], **quiver_kw)
-    q_left.set_facecolor(colors_l0)
-    q_left.set_edgecolor(colors_l0)
-    q_right = ax_flow_r.quiver(cell_x, cell_z, flow_vx_r[0], flow_vz_r[0], **quiver_kw)
-    q_right.set_facecolor(colors_r0)
-    q_right.set_edgecolor(colors_r0)
+    q_left = init_eye_quiver(
+        ax_flow_l, cell_x, cell_z,
+        flow_vx_l[0], flow_vz_l[0], max_mag, "left", **quiver_kw)
+    q_right = init_eye_quiver(
+        ax_flow_r, cell_x, cell_z,
+        flow_vx_r[0], flow_vz_r[0], max_mag, "right", **quiver_kw)
     ax_flow_l.set_title(f"Left Eye ({flow_label})")
     ax_flow_r.set_title(f"Right Eye ({flow_label})")
-    add_direction_colorwheel(fig)
+    add_eye_colorwheel(fig)
 
     # Row 2: rotation and translation (true vs predicted)
     rot_labels = ["roll", "pitch", "yaw"]
@@ -556,8 +537,8 @@ def _make_movie(
             sc_stim_l.set_facecolors(_masked_rgba(stimulus_left[t], in_fov_left, stim_norm))
             sc_stim_r.set_facecolors(_masked_rgba(stimulus_right[t], in_fov_right, stim_norm))
 
-            update_direction_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag)
-            update_direction_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag)
+            update_eye_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag, "left")
+            update_eye_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag, "right")
 
             time_s = t * model_dt
             ax_stim_l.set_title(f"Left Eye (t={time_s:.2f}s)")

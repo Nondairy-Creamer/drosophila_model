@@ -33,16 +33,16 @@ import neural_models as nm
 
 from movie_utilities import (
     masked_rgba,
-    setup_eye_axes,
-    prepare_flow_quiver,
     write_movie,
     compute_filtered,
     fig_to_rgb,
     get_flow_key,
     make_flow_comparison_movie,
-    flow_direction_colors,
-    update_direction_quiver,
-    add_direction_colorwheel,
+    prepare_eye_quiver,
+    setup_eye_axis,
+    init_eye_quiver,
+    update_eye_quiver,
+    add_eye_colorwheel,
 )
 
 
@@ -167,6 +167,7 @@ def _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
         cell_x, cell_y, cell_z,
         out_path, frame_rate,
         filtered_stimulus=filtered_stim_np,
+        eye="right",
     )
 
 
@@ -233,12 +234,18 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
         filt_max = max(np.nanmax(filtered_left_np), np.nanmax(filtered_right_np))
         filt_norm = mcolors.Normalize(vmin=filt_min, vmax=filt_max)
 
-    flow_vx_r, flow_vz_r, mag_r, _, _ = prepare_flow_quiver(pred_flow_right[:num_frames], cell_x, cell_y, cell_z)
-    flow_vx_l, flow_vz_l, mag_l, _, _ = prepare_flow_quiver(pred_flow_left[:num_frames], cell_x, cell_y, cell_z)
+    flow_vx_r, flow_vz_r, _, _, _ = prepare_eye_quiver(
+        pred_flow_right[:num_frames], cell_x, cell_y, cell_z, "right")
+    flow_vx_l, flow_vz_l, _, _, _ = prepare_eye_quiver(
+        pred_flow_left[:num_frames], cell_x, cell_y, cell_z, "left")
 
-    all_vx = np.concatenate([flow_vx_r.ravel(), flow_vx_l.ravel()])
-    all_vz = np.concatenate([flow_vz_r.ravel(), flow_vz_l.ravel()])
-    _, max_mag = flow_direction_colors(all_vx, all_vz)
+    all_mag = np.hypot(
+        np.concatenate([flow_vx_r.ravel(), flow_vx_l.ravel()]),
+        np.concatenate([flow_vz_r.ravel(), flow_vz_l.ravel()]),
+    )
+    finite_mag = all_mag[np.isfinite(all_mag)]
+    max_mag = (float(np.percentile(finite_mag, 99))
+               if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
     arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
 
     fig, axes = plt.subplots(num_rows, 2, figsize=(12.8, 5.12 * num_rows), dpi=100)
@@ -248,7 +255,8 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
     mask_r_0 = mask_right[0] if mask_right is not None else None
 
     ax_stim_l, ax_stim_r = axes[cur_row, 0], axes[cur_row, 1]
-    setup_eye_axes(ax_stim_l, ax_stim_r, cell_x, cell_z)
+    setup_eye_axis(ax_stim_l, cell_x, cell_z, "left")
+    setup_eye_axis(ax_stim_r, cell_x, cell_z, "right")
     sc_stim_l = ax_stim_l.scatter(cell_x, cell_z,
         c=masked_rgba(stimulus_left[0], mask_l_0, gray_cmap, stim_norm), s=90, edgecolors="none")
     sc_stim_r = ax_stim_r.scatter(cell_x, cell_z,
@@ -262,7 +270,8 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
     sc_filt_l = sc_filt_r = None
     if has_filtered:
         ax_filt_l, ax_filt_r = axes[cur_row, 0], axes[cur_row, 1]
-        setup_eye_axes(ax_filt_l, ax_filt_r, cell_x, cell_z)
+        setup_eye_axis(ax_filt_l, cell_x, cell_z, "left")
+        setup_eye_axis(ax_filt_r, cell_x, cell_z, "right")
         sc_filt_l = ax_filt_l.scatter(cell_x, cell_z,
             c=masked_rgba(filtered_left_np[0], mask_l_0, gray_cmap, filt_norm), s=90, edgecolors="none")
         sc_filt_r = ax_filt_r.scatter(cell_x, cell_z,
@@ -274,19 +283,18 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
         cur_row += 1
 
     ax_flow_l, ax_flow_r = axes[cur_row, 0], axes[cur_row, 1]
-    setup_eye_axes(ax_flow_l, ax_flow_r, cell_x, cell_z)
+    setup_eye_axis(ax_flow_l, cell_x, cell_z, "left")
+    setup_eye_axis(ax_flow_r, cell_x, cell_z, "right")
     quiver_kw = dict(angles="xy", scale_units="xy", scale=1 / arrow_scale, width=0.003)
-    colors_l0, _ = flow_direction_colors(flow_vx_l[0], flow_vz_l[0], max_mag)
-    colors_r0, _ = flow_direction_colors(flow_vx_r[0], flow_vz_r[0], max_mag)
-    q_left = ax_flow_l.quiver(cell_x, cell_z, flow_vx_l[0], flow_vz_l[0], **quiver_kw)
-    q_left.set_facecolor(colors_l0)
-    q_left.set_edgecolor(colors_l0)
-    q_right = ax_flow_r.quiver(cell_x, cell_z, flow_vx_r[0], flow_vz_r[0], **quiver_kw)
-    q_right.set_facecolor(colors_r0)
-    q_right.set_edgecolor(colors_r0)
+    q_left = init_eye_quiver(
+        ax_flow_l, cell_x, cell_z,
+        flow_vx_l[0], flow_vz_l[0], max_mag, "left", **quiver_kw)
+    q_right = init_eye_quiver(
+        ax_flow_r, cell_x, cell_z,
+        flow_vx_r[0], flow_vz_r[0], max_mag, "right", **quiver_kw)
     ax_flow_l.set_title("Left Eye (predicted flow)")
     ax_flow_r.set_title("Right Eye (predicted flow)")
-    add_direction_colorwheel(fig)
+    add_eye_colorwheel(fig)
 
     plt.tight_layout()
 
@@ -298,8 +306,8 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
         if sc_filt_l is not None:
             sc_filt_l.set_facecolors(masked_rgba(filtered_left_np[t], mask_l_t, gray_cmap, filt_norm))
             sc_filt_r.set_facecolors(masked_rgba(filtered_right_np[t], mask_r_t, gray_cmap, filt_norm))
-        update_direction_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag)
-        update_direction_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag)
+        update_eye_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag, "left")
+        update_eye_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag, "right")
         title = f"frame {t + 1}/{num_frames}"
         axes[0, 0].set_title(f"Left Eye (stimulus) {title}")
         axes[0, 1].set_title(f"Right Eye (stimulus) {title}")
