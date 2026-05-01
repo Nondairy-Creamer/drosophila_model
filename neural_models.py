@@ -1733,9 +1733,13 @@ class CurrentModel(NeuralModel):
         
         self.offset = torch.full((self.num_cell_types,), offset_init, dtype=self.dtype, device=self.device)
         
-        # Initialize input strength per cell type based on the inverse of fan-in
-        sc_coo = self.synapse_counts.to_sparse_coo()
-        synapses_in_per_neuron = sc_coo.abs().sum(dim=1).to_dense()
+        # Initialize input strength per cell type based on the inverse of fan-in.
+        # CSR row-sums come for free from the structure: we already have
+        # crow_indices (cumulative nnz per row) and values, no need to
+        # reduce a sparse tensor.
+        synapses_in_per_neuron, synapses_out_per_neuron = self._csr_abs_row_col_sums(
+            self.synapse_counts
+        )
 
         synapses_in_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         for cti, ct in enumerate(self.unique_cell_types):
@@ -1744,7 +1748,6 @@ class CurrentModel(NeuralModel):
 
         input_strength_init = synapses_in_per_cell_type.pow(-1 / 2)
         self.input_strength_log = torch.log(input_strength_init)
-        synapses_out_per_neuron = sc_coo.abs().sum(dim=0).to_dense()
         synapses_out_per_cell_type = torch.zeros(self.num_cell_types, device=self.device, dtype=self.dtype)
         for cti, ct in enumerate(self.unique_cell_types):
             ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
@@ -2676,11 +2679,13 @@ class HandTunedModel(NeuralModel):
            ``_positive_amplification``): scales synapses by their actual sign
            in the matrix (after NT signing and manual flips).
         """
-        sc = self.synapse_counts.to_sparse_coo().coalesce()
-        indices = sc.indices()
+        sc = self.synapse_counts
+        crow = sc.crow_indices()
+        col_indices = sc.col_indices()
         values = sc.values()
-        row_indices = indices[0]
-        col_indices = indices[1]
+        row_indices = torch.repeat_interleave(
+            torch.arange(self.num_neurons, device=self.device), crow.diff()
+        )
 
         # Per-presynaptic-cell-type amplification
         if hasattr(self, '_synapse_amplification'):
@@ -2702,10 +2707,9 @@ class HandTunedModel(NeuralModel):
         row_abs_sums.clamp_(min=1.0)
 
         normalized_values = values / row_abs_sums[row_indices]
-        self.synapse_counts = torch.sparse_coo_tensor(
-            indices, normalized_values, sc.size(),
-            dtype=self.dtype, device=self.device,
-        ).coalesce().to_sparse_csr()
+        self.synapse_counts = torch.sparse_csr_tensor(
+            crow, col_indices, normalized_values, size=sc.size(),
+        )
 
     # ------------------------------------------------------------------
     # Cell-type lookup helpers
@@ -2829,12 +2833,14 @@ class HandTunedModel(NeuralModel):
         if pre_ti is None or post_ti is None:
             return
 
-        sc = self.synapse_counts.to_sparse_coo().coalesce()
-        indices = sc.indices()
+        sc = self.synapse_counts
+        crow = sc.crow_indices()
+        pre_n = sc.col_indices()
+        post_n = torch.repeat_interleave(
+            torch.arange(self.num_neurons, device=self.device), crow.diff()
+        )
         values = sc.values().clone()
 
-        post_n = indices[0]
-        pre_n = indices[1]
         pre_types = self.neuron_to_type_index[pre_n]
         post_types = self.neuron_to_type_index[post_n]
         mask = (pre_types == pre_ti) & (post_types == post_ti)
@@ -2842,14 +2848,13 @@ class HandTunedModel(NeuralModel):
         fac = torch.as_tensor(factor, device=values.device, dtype=values.dtype)
         values = torch.where(mask, values * fac, values)
 
-        self.synapse_counts = torch.sparse_coo_tensor(
-            indices, values, size=sc.size(),
-            dtype=self.dtype, device=self.device,
-        ).coalesce().to_sparse_csr()
+        self.synapse_counts = torch.sparse_csr_tensor(
+            crow, pre_n, values, size=sc.size(),
+        )
 
         self.synapse_counts_coo = np.column_stack([
-            indices[1].cpu().numpy(),
-            indices[0].cpu().numpy(),
+            pre_n.cpu().numpy(),
+            post_n.cpu().numpy(),
             values.detach().cpu().numpy(),
         ])
 
@@ -2871,20 +2876,20 @@ class HandTunedModel(NeuralModel):
 
         neuron_mask = self.neuron_to_type_index == idx  # (num_neurons,)
 
+        post_n_template = torch.arange(self.num_neurons, device=self.device)
         for sc_attr in ('synapse_counts', '_raw_synapse_counts'):
-            sc = getattr(self, sc_attr).to_sparse_coo().coalesce()
-            indices = sc.indices()
+            sc = getattr(self, sc_attr)
+            crow = sc.crow_indices()
+            pre_n = sc.col_indices()
+            post_n = torch.repeat_interleave(post_n_template, crow.diff())
             values = sc.values().clone()
 
-            post_n = indices[0]
-            pre_n = indices[1]
             hit = neuron_mask[post_n] | neuron_mask[pre_n]
             values[hit] = 0.0
 
-            setattr(self, sc_attr, torch.sparse_coo_tensor(
-                indices, values, size=sc.size(),
-                dtype=self.dtype, device=self.device,
-            ).coalesce().to_sparse_csr())
+            setattr(self, sc_attr, torch.sparse_csr_tensor(
+                crow, pre_n, values, size=sc.size(),
+            ))
 
         # Re-normalize so remaining neurons' weights still sum to 1
         self._renormalize_from_raw()
