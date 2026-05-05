@@ -1,6 +1,9 @@
 from logging import warning
 import platform
+import queue
 import subprocess
+import threading
+import time
 import warnings
 import torch
 import numpy as np
@@ -3639,4 +3642,532 @@ class ArbitraryModel(NeuralModel):
         v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset[None, :] + stim)
 
         return v_next
+
+
+# ---------------------------------------------------------------------------
+# Threaded streaming ego-motion pipeline
+# ---------------------------------------------------------------------------
+
+
+class _LockedTimer:
+    """Context manager: time a block and accumulate ms into ``store[key]``.
+
+    Same semantics as the in-line ``time.perf_counter`` profiling used in
+    ``analysis/model_timing.py``, but safe to call from multiple threads
+    when they share a dict (writes are guarded by ``lock``). Both
+    ``store`` and ``lock`` may be ``None``: in that case timing is a no-op
+    (zero overhead).
+    """
+
+    __slots__ = ("store", "key", "device", "lock", "_t0", "_is_cuda")
+
+    def __init__(self, store, key, device, lock):
+        self.store = store
+        self.key = key
+        self.device = device
+        self.lock = lock
+
+    def __enter__(self):
+        if self.store is None:
+            return self
+        self._is_cuda = (
+            self.device is not None
+            and getattr(self.device, 'type', None) == 'cuda'
+        )
+        if self._is_cuda:
+            torch.cuda.synchronize(self.device)
+        self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.store is None:
+            return False
+        if self._is_cuda:
+            torch.cuda.synchronize(self.device)
+        ms = (time.perf_counter() - self._t0) * 1000.0
+        if self.lock is not None:
+            with self.lock:
+                self.store[self.key] = self.store.get(self.key, 0.0) + ms
+        else:
+            self.store[self.key] = self.store.get(self.key, 0.0) + ms
+        return False
+
+
+class PipelinedEgoMotionEstimator:
+    """Two-stage threaded pipeline for streaming ego-motion estimation.
+
+    Splits the per-frame work in
+    :py:meth:`NeuralModel.estimate_ego_motion_from_image` across two
+    threads so frame *N+1* can start its recurrent dynamics while
+    frame *N* is still being decoded:
+
+    * **Stage 1** (calling thread, ``submit()``): ``input_conv`` →
+      ``forward`` step → optional ``layer_norm`` → ``firing_rate``.
+      Sequential because the recurrent state ``v`` depends on the
+      previous frame. On a Raspberry Pi with
+      ``CurrentModelFast(sparse_impl='auto')`` this dominates per-frame
+      cost (~25 ms/frame).
+
+    * **Stage 2** (worker thread): flow readout → flow concat /
+      valid-mask → ``estimate_ego_motion_from_flow``. Stateless given
+      the firing rates, so frame *N*'s stage 2 runs in parallel with
+      frame *N+1*'s stage 1. Costs ~7 ms/frame on Pi.
+
+    Once the pipeline is filled, throughput is
+    ``1 / max(stage1, stage2)``. End-to-end latency for any single
+    frame is the sum of stage times (same as the serial path), so
+    threading doesn't add a full frame of latency — only one queue
+    handoff (~tens of µs).
+
+    Worker exceptions are propagated to the caller through ``get()``.
+
+    Architecture compatibility:
+        Discovers the flow readout once at construction time by
+        scanning ``model._readout_modules`` for the first module with
+        ``predicts_flow=True``. Uses
+        ``mod.flip_for_left_eye(...)`` to flip the left-eye output, so
+        the pipeline matches the serial path's coordinate frame for
+        any readout subclass (``FlowConv2Readout``,
+        ``FlowConv2Readout4ch``, etc.).
+
+    Notes:
+        Currently CPU only. On CUDA the queue handoff would need
+        explicit stream synchronization to be correct.
+
+    Example:
+        >>> with PipelinedEgoMotionEstimator(model) as est:
+        ...     est.reset(S=1)
+        ...     for right_frame, left_frame in stream:
+        ...         est.submit(right_frame, left_frame)
+        ...         while True:
+        ...             try:
+        ...                 rot, trans = est.get(timeout=0.0)
+        ...             except queue.Empty:
+        ...                 break
+
+    Args:
+        model: A :class:`NeuralModel` instance with at least one readout
+            module that has ``predicts_flow=True``.
+        queue_depth: Maximum number of in-flight ``(frame_id, fr)``
+            handoffs between stages. ``2`` is plenty: stage 2 is
+            ~3.5x faster than stage 1 so the queue rarely fills.
+    """
+
+    def __init__(self, model, *, queue_depth=2):
+        flow_key = next(
+            (k for k, m in model._readout_modules.items()
+             if getattr(m, 'predicts_flow', False)
+             and not getattr(m, 'training_only', False)),
+            None,
+        )
+        if flow_key is None:
+            raise ValueError(
+                "PipelinedEgoMotionEstimator requires a model with a flow "
+                "readout (predicts_flow=True). Got model with readout "
+                f"modules {list(model._readout_modules.keys())}."
+            )
+        self.model = model
+        self._flow_key = flow_key
+        self._flow_mod = model._readout_modules[flow_key]
+        self.device = getattr(model, 'device', None) or torch.device('cpu')
+        if getattr(self.device, 'type', None) == 'cuda':
+            warnings.warn(
+                "PipelinedEgoMotionEstimator on CUDA hands tensors across "
+                "threads without explicit stream sync; correctness has not "
+                "been validated. CPU is the supported target.",
+                RuntimeWarning, stacklevel=2,
+            )
+        self._queue_depth = queue_depth
+        self._stop_evt = threading.Event()
+        self._fr_q: queue.Queue = queue.Queue(maxsize=queue_depth)
+        self._out_q: queue.Queue = queue.Queue(maxsize=queue_depth)
+        self._thread = None
+        self._worker_exc = None
+
+        self._v = None
+        self._filter_state = None
+        self._stim_to_cell_mapping = None
+        self._oob_columns = None
+        self._S = None
+
+        self._frame_id = 0
+        self._n_in_flight = 0
+        self._next_get_idx = 0
+
+        self._breakdown = None
+        self._lock = threading.Lock()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        return False
+
+    def start(self) -> None:
+        """Spin up the stage-2 worker thread (idempotent)."""
+        if self._thread is not None:
+            return
+        self._stop_evt.clear()
+        self._worker_exc = None
+        self._thread = threading.Thread(
+            target=self._stage2_loop, name='ego-stage2', daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Signal the worker to exit and join it (idempotent)."""
+        if self._thread is None:
+            return
+        self._stop_evt.set()
+        try:
+            self._fr_q.put_nowait(None)
+        except queue.Full:
+            try:
+                self._fr_q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._fr_q.put_nowait(None)
+            except queue.Full:
+                pass
+        self._thread.join(timeout=2.0)
+        self._thread = None
+
+    def reset(self, *, S=1, init_state_right=None, init_state_left=None,
+              init_filter_state_right=None, init_filter_state_left=None,
+              input_neurons=('L1', 'L2', 'L3'),
+              cached_mappings=None, oob_columns=None,
+              breakdown_timings=None) -> None:
+        """Reset recurrent state for a new stimulus sequence.
+
+        Drains any pending pipeline items from the previous sequence,
+        sets up the input neuron→column mapping (or reuses one from
+        ``cached_mappings``), and initializes the per-eye recurrent
+        state (defaults to the model's steady state).
+
+        Args:
+            S: Number of stimuli per eye in the upcoming sequence. The
+                model's internal batch is ``2 * S`` (right then left).
+            init_state_right / init_state_left: Optional per-eye
+                recurrent state ``(S, num_neurons)``. ``None`` →
+                broadcast steady state.
+            init_filter_state_right / init_filter_state_left: Optional
+                input-conv complex filter state. ``None`` → fresh state
+                on the first frame.
+            input_neurons: List of cell-type names for stimulus
+                injection, or a precomputed ``stim_to_cell_mapping``
+                dict (e.g. from ``cached_mappings['input_mapping']``).
+            cached_mappings: Optional dict ``{'input_mapping': {...}}``
+                to skip the per-call mapping construction. Same shape
+                as the ``mappings`` field returned by ``predict``.
+            oob_columns: Optional ``(2 * num_columns,)`` bool tensor of
+                columns to mask out (e.g. outside the camera FOV).
+                Used in stage 2 every frame.
+            breakdown_timings: Optional dict; cumulative per-stage
+                millis are added under ``stage1::*`` (main thread) and
+                ``stage2::*`` (worker). The same dict can be reused
+                across ``reset()`` calls to accumulate across sequences.
+        """
+        self._drain_queues()
+
+        self._S = int(S)
+        self._frame_id = 0
+        self._n_in_flight = 0
+        self._next_get_idx = 0
+
+        if cached_mappings is not None and 'input_mapping' in cached_mappings:
+            self._stim_to_cell_mapping = cached_mappings['input_mapping']
+        elif isinstance(input_neurons, dict):
+            self._stim_to_cell_mapping = input_neurons
+        else:
+            valid_neurons = [
+                n for n in input_neurons if n in self.model.unique_cell_types
+            ]
+            ni, ci = self.model.get_shared_columns(valid_neurons)
+            self._stim_to_cell_mapping = {
+                'neuron_index': torch.tensor(
+                    ni, device=self.model.device, dtype=torch.int64,
+                ),
+                'stimulus_index': torch.tensor(
+                    ci, device=self.model.device, dtype=torch.int64,
+                ),
+            }
+
+        if init_state_right is not None and init_state_left is not None:
+            self._v = torch.cat([init_state_right, init_state_left], dim=0)
+        else:
+            self._v = (
+                self.model.steady_state.unsqueeze(0)
+                .expand(2 * self._S, -1).clone()
+            )
+
+        if (init_filter_state_right is not None
+                and init_filter_state_left is not None):
+            self._filter_state = torch.cat(
+                [init_filter_state_right, init_filter_state_left], dim=0,
+            )
+        else:
+            self._filter_state = None
+
+        self._oob_columns = oob_columns
+        self._breakdown = breakdown_timings
+
+    def submit(self, right_frame, left_frame) -> int:
+        """Run stage 1 in the calling thread; hand off firing rates to stage 2.
+
+        Args:
+            right_frame: ``(S, num_input_columns)`` or
+                ``(S, 1, num_input_columns)`` input current for the
+                right eye at the current time step.
+            left_frame: Same shape, left eye.
+
+        Returns:
+            The frame id assigned to this frame (matches the order of
+            results returned by ``get()``).
+
+        Raises:
+            RuntimeError: If the stage 2 worker has died.
+            queue.Full: If the handoff queue is full and stays full for
+                a long time (caller is producing faster than stage 2
+                can consume; ``queue_depth`` should normally absorb
+                this).
+        """
+        if self._worker_exc is not None:
+            raise RuntimeError(
+                "Stage 2 worker raised an exception"
+            ) from self._worker_exc
+        if self._S is None:
+            raise RuntimeError("Call reset() before submit().")
+
+        if right_frame.dim() == 3:
+            right_frame = right_frame[:, 0, :]
+        if left_frame.dim() == 3:
+            left_frame = left_frame[:, 0, :]
+
+        bt = self._breakdown
+        lock = self._lock
+        device = self.device
+        model = self.model
+        with torch.no_grad():
+            with _LockedTimer(bt, 'stage1::cat_inputs', device, lock):
+                u_t = torch.cat([right_frame, left_frame], dim=0)
+
+            if model.use_input_conv:
+                with _LockedTimer(bt, 'stage1::input_conv', device, lock):
+                    u_t, self._filter_state = model.apply_input_conv(
+                        u_t, self._filter_state,
+                    )
+
+            with _LockedTimer(bt, 'stage1::forward', device, lock):
+                v = model(self._v, u_t, self._stim_to_cell_mapping)
+
+            if model.use_layer_norm:
+                with _LockedTimer(bt, 'stage1::layer_norm', device, lock):
+                    v = model.layer_norm(v)
+
+            with _LockedTimer(bt, 'stage1::firing_rate', device, lock):
+                fr = model.firing_rate(v)
+
+            self._v = v
+
+        frame_id = self._frame_id
+        self._frame_id += 1
+        # Block (with the queue's own lock) if the worker is behind.
+        # Queue depth provides natural backpressure; we don't time-out
+        # so callers see the exact stage-2 stall.
+        self._fr_q.put((frame_id, fr))
+        self._n_in_flight += 1
+        return frame_id
+
+    def get(self, timeout=None):
+        """Pull the next available ego-motion result (FIFO, in submit order).
+
+        Returns:
+            ``(rotations, translations)``: Each ``(S, 1, 3)`` tensors
+            for the single time step that was submitted. Re-stack along
+            ``dim=1`` to get the full ``(S, T, 3)`` trajectory.
+
+        Raises:
+            queue.Empty: If ``timeout`` elapses with no result.
+            RuntimeError: If the stage 2 worker has died.
+        """
+        if self._worker_exc is not None:
+            raise RuntimeError(
+                "Stage 2 worker raised an exception"
+            ) from self._worker_exc
+        item = self._out_q.get(timeout=timeout)
+        if isinstance(item, BaseException):
+            raise item
+        frame_id, rot, trans = item
+        self._n_in_flight -= 1
+        self._next_get_idx += 1
+        return rot, trans
+
+    def n_in_flight(self) -> int:
+        """Number of submitted frames whose result has not yet been ``get()``-d."""
+        return self._n_in_flight
+
+    def run_full(self, right_eye_inputs, left_eye_inputs, *,
+                 init_state_right=None, init_state_left=None,
+                 init_filter_state_right=None, init_filter_state_left=None,
+                 input_neurons=('L1', 'L2', 'L3'),
+                 cached_mappings=None, oob_columns=None,
+                 breakdown_timings=None):
+        """Run a whole stimulus sequence through the pipeline.
+
+        Mirrors :py:meth:`NeuralModel.estimate_ego_motion_from_image`'s
+        signature for easy A/B comparison. Auto-starts the worker
+        thread if not already running and tears it down on exit.
+
+        Args:
+            right_eye_inputs / left_eye_inputs: ``(S, T, num_columns)``.
+            (other args): See :py:meth:`reset`.
+
+        Returns:
+            ``(rotations, translations)`` each ``(S, T, 3)``.
+        """
+        if right_eye_inputs.shape != left_eye_inputs.shape:
+            raise ValueError(
+                f"right and left input shapes must match, got "
+                f"{tuple(right_eye_inputs.shape)} and "
+                f"{tuple(left_eye_inputs.shape)}"
+            )
+        S, T, _ = right_eye_inputs.shape
+
+        own_thread = self._thread is None
+        if own_thread:
+            self.start()
+        try:
+            self.reset(
+                S=S,
+                init_state_right=init_state_right,
+                init_state_left=init_state_left,
+                init_filter_state_right=init_filter_state_right,
+                init_filter_state_left=init_filter_state_left,
+                input_neurons=input_neurons,
+                cached_mappings=cached_mappings,
+                oob_columns=oob_columns,
+                breakdown_timings=breakdown_timings,
+            )
+
+            dtype = self.model.dtype
+            rotations = torch.empty(S, T, 3, device=self.device, dtype=dtype)
+            translations = torch.empty(S, T, 3, device=self.device, dtype=dtype)
+
+            n_pulled = 0
+            for t in range(T):
+                self.submit(right_eye_inputs[:, t], left_eye_inputs[:, t])
+                # Drain any results that are ready without blocking the
+                # producer; this keeps the queue from filling up and
+                # back-pressuring stage 1.
+                while self._n_in_flight > self._queue_depth:
+                    rot, trans = self.get()
+                    rotations[:, n_pulled] = rot.squeeze(1)
+                    translations[:, n_pulled] = trans.squeeze(1)
+                    n_pulled += 1
+
+            while n_pulled < T:
+                rot, trans = self.get()
+                rotations[:, n_pulled] = rot.squeeze(1)
+                translations[:, n_pulled] = trans.squeeze(1)
+                n_pulled += 1
+        finally:
+            if own_thread:
+                self.stop()
+
+        return rotations, translations
+
+    def _drain_queues(self) -> None:
+        for q in (self._fr_q, self._out_q):
+            while True:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _stage2_loop(self) -> None:
+        """Worker: pull (frame_id, fr) and run readout + ego-motion solve."""
+        try:
+            while not self._stop_evt.is_set():
+                item = self._fr_q.get()
+                if item is None:
+                    return
+                frame_id, fr = item
+                bt = self._breakdown
+                lock = self._lock
+                device = self.device
+                model = self.model
+                flow_mod = self._flow_mod
+                S = self._S
+                with torch.no_grad():
+                    with _LockedTimer(bt, 'stage2::readout', device, lock):
+                        flow = flow_mod(fr)  # [2S, num_columns, F]
+
+                    with _LockedTimer(bt, 'stage2::cat_decoders', device, lock):
+                        right_flow = flow[:S]
+                        # Match predict_two_eyes: flip left eye if the
+                        # readout is eye-asymmetric (FlowConv2Readout
+                        # negates channel 0; FlowConv2Readout4ch swaps
+                        # 0/1).
+                        left_flow = flow[S:].clone()
+                        if getattr(flow_mod, 'eye_asymmetric', False):
+                            left_flow = flow_mod.flip_for_left_eye(left_flow)
+                        # Concat along the column dim → [S, 2N, F]
+                        optic_flow = torch.cat(
+                            [right_flow, left_flow], dim=1,
+                        )
+
+                    with _LockedTimer(bt, 'stage2::valid_mask', device, lock):
+                        phi = self.model.column_phi_theta_two_eyes[0].to(
+                            dtype=optic_flow.dtype,
+                        )
+                        theta = self.model.column_phi_theta_two_eyes[1].to(
+                            dtype=optic_flow.dtype,
+                        )
+                        # Mirrors estimate_ego_motion_from_image's
+                        # validity check: NaN-guard + caller-supplied
+                        # OOB mask. After the readout's einsum→linear
+                        # change the NaN guard is vacuous (zero-filled
+                        # column features produce finite flow), but it
+                        # remains as a safety net.
+                        valid = (
+                            ~torch.isnan(optic_flow[0, :, 0])
+                            & ~torch.isnan(optic_flow[0, :, 1])
+                        )
+                        if self._oob_columns is not None:
+                            valid = valid & ~self._oob_columns
+                        phi_v = phi[valid]
+                        theta_v = theta[valid]
+
+                    with _LockedTimer(bt, 'stage2::index_and_reshape', device, lock):
+                        d_right = optic_flow[:, valid, 0]  # [S, K]
+                        d_up = optic_flow[:, valid, 1]      # [S, K]
+
+                    with _LockedTimer(
+                        bt, 'stage2::estimate_ego_motion_from_flow', device, lock,
+                    ):
+                        rot, trans, _ = model.estimate_ego_motion_from_flow(
+                            phi_v, theta_v, d_right, d_up,
+                        )
+                        rot = rot.unsqueeze(1)    # [S, 1, 3]
+                        trans = trans.unsqueeze(1)
+
+                self._out_q.put((frame_id, rot, trans))
+        except BaseException as exc:
+            self._worker_exc = exc
+            try:
+                self._out_q.put_nowait(exc)
+            except queue.Full:
+                # If the consumer isn't reading we still need to surface
+                # the exception. Drop the oldest item to make room.
+                try:
+                    self._out_q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._out_q.put_nowait(exc)
+                except queue.Full:
+                    pass
 
