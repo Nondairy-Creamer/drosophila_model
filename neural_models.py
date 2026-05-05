@@ -2101,19 +2101,25 @@ class CurrentModelFast(CurrentModel):
         # tensors can't always live in ``_buffers`` across PyTorch versions,
         # so we hold them as plain attributes.
         impl = self.sparse_impl
-        A_coal = self.synapse_counts.coalesce()
+        A = self.synapse_counts
         if impl == 'csr':
-            self._A_csr = self._to_csr_or_coo(A_coal)
+            # If it's already CSR (the case after the recent COO→CSR conversion
+            # in NeuralModel.__init__), reuse directly. Otherwise convert.
+            if getattr(A.layout, 'name', '') == 'sparse_csr' or A.is_sparse_csr:
+                self._A_csr = A
+            else:
+                self._A_csr = self._to_csr_or_coo(A)
             self._A_rows = self._A_cols = self._A_vals = None
         elif impl == 'coo':
-            self._A_csr = A_coal
+            self._A_csr = A.to_sparse_coo().coalesce() if A.is_sparse_csr else A.coalesce()
             self._A_rows = self._A_cols = self._A_vals = None
         elif impl == 'scatter':
             self._A_csr = None
-            indices = A_coal.indices()
+            A_coo = A.to_sparse_coo().coalesce() if A.is_sparse_csr else A.coalesce()
+            indices = A_coo.indices()
             self._A_rows = indices[0].contiguous()
             self._A_cols = indices[1].contiguous()
-            self._A_vals = A_coal.values().contiguous()
+            self._A_vals = A_coo.values().contiguous()
         else:
             raise ValueError(f"unknown sparse_impl: {impl!r}")
 
