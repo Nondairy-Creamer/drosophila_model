@@ -1,17 +1,30 @@
 """Smoke test: serial vs pipelined ego-motion match (on a real checkpoint).
 
-Loads the 100hz drone checkpoint, builds a CurrentModelFast (sparse_impl='auto'
-== 'csr' on macOS), and runs both paths on a short slice of cell inputs.
+Loads the 100hz drone checkpoint, builds a CurrentModelFast (sparse_impl
+selected by ``_auto_select_sparse_impl`` for the host: 'csr' on macOS /
+x86 Linux, 'scatter' on Linux ARM / Raspberry Pi), and runs both paths
+on a short slice of cell inputs.
 
-Run from the repo root:
+Run from the repo root with either:
     uv run python tests/test_pipelined_egomotion.py
+    uv run tests/test_pipelined_egomotion.py
 """
 from __future__ import annotations
 
+import os
+import sys
 import time
-import torch
 
-from neural_models import (
+# Make `neural_models` importable when invoked as a script (from the
+# repo root or from anywhere with --project), without relying on the
+# caller setting PYTHONPATH.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import torch  # noqa: E402
+
+from neural_models import (  # noqa: E402
     CurrentModelFast,
     NeuralModel,
     PipelinedEgoMotionEstimator,
@@ -20,8 +33,11 @@ from neural_models import (
 
 def main() -> None:
     torch.manual_seed(0)
-    ckpt = '100hz_best_drone_clayton/model.pt'
-    cell_inputs_path = '100hz_best_drone_clayton/cell_inputs.pt'
+    # Resolve relative to the repo root so this works from any cwd.
+    ckpt = os.path.join(_REPO_ROOT, '100hz_best_drone_clayton', 'model.pt')
+    cell_inputs_path = os.path.join(
+        _REPO_ROOT, '100hz_best_drone_clayton', 'cell_inputs.pt',
+    )
 
     print(f"loading {ckpt} ...")
     base = NeuralModel.load(ckpt, device='cpu', dtype='float32', freeze_params=True)
