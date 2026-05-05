@@ -1,4 +1,5 @@
 from logging import warning
+import platform
 import subprocess
 import warnings
 import torch
@@ -1888,10 +1889,12 @@ class CurrentModelFast(CurrentModel):
       every timestep.
     * The ``(1 - persistence)`` factor is fused into the post-matmul scale,
       the stimulus scale, and the bias, removing several per-step multiplies.
-    * The sparse synapse matrix is converted to CSR, which has a faster
-      sparse×dense matmul kernel than COO on both CPU and CUDA. This is the
-      dominant source of real-world speedup (≈1.35× on a 40 k-neuron trained
-      model on CPU).
+    * The sparse synapse matmul backend is selectable via ``sparse_impl``
+      (default ``'auto'``). On x86 / Apple Silicon the CSR path
+      (``torch.sparse.mm`` against a CSR view) is fastest; on Linux ARM /
+      Raspberry Pi a hand-rolled gather + ``index_add_`` (``'scatter'``) is
+      ~2.7x faster than CSR because the MKL/Accelerate sparse kernel isn't
+      available there.
     * ``forward`` can optionally be wrapped with :func:`torch.compile`
       (``enable_compile=True``). On CPU this is roughly break-even because
       ``torch.sparse.mm`` forces a graph break so Inductor can only fuse the
@@ -1923,15 +1926,37 @@ class CurrentModelFast(CurrentModel):
     already-trained ``CurrentModel`` via :meth:`from_trained`.
     """
 
+    SPARSE_IMPLS = ('auto', 'csr', 'coo', 'scatter')
+
     def __init__(self, *, quantize_activations=False, activation_bits=16,
-                 enable_compile=False, init_new_model=True, **kwargs):
+                 enable_compile=False, sparse_impl='auto',
+                 init_new_model=True, **kwargs):
         super().__init__(init_new_model=init_new_model, **kwargs)
 
         if activation_bits not in (8, 16):
             raise ValueError(f"activation_bits must be 8 or 16, got {activation_bits}")
+        if sparse_impl not in self.SPARSE_IMPLS:
+            raise ValueError(
+                f"sparse_impl must be one of {self.SPARSE_IMPLS}, got {sparse_impl!r}"
+            )
         self.quantize_activations = bool(quantize_activations)
         self.activation_bits = int(activation_bits)
         self.enable_compile = bool(enable_compile)
+        # ``sparse_impl`` selects the synapse matmul backend:
+        #   'auto'    - pick at construction time based on architecture: 'csr'
+        #               on x86 (MKL-backed sparse mm is well-tuned), 'scatter'
+        #               on Linux ARM / Raspberry Pi (no MKL; gather + index_add_
+        #               is 2-3x faster there than torch.sparse.mm). This is the
+        #               default and the right choice for both deployment shapes.
+        #   'csr'     - torch.sparse.mm with CSR layout (best on x86 with MKL).
+        #   'coo'     - torch.sparse.mm with coalesced COO (matches CSR on ARM
+        #               without the conversion).
+        #   'scatter' - hand-rolled gather + index_add_ on the COO triplet.
+        #               Bypasses torch.sparse.mm's dispatch entirely; on Linux
+        #               ARM this can be ~2.7x faster than CSR.
+        if sparse_impl == 'auto':
+            sparse_impl = self._auto_select_sparse_impl()
+        self.sparse_impl = sparse_impl
         self._inference_prepared = False
         self._compiled_forward = None
 
@@ -1939,9 +1964,36 @@ class CurrentModelFast(CurrentModel):
 
         self.prepare_for_inference()
 
+    @staticmethod
+    def _auto_select_sparse_impl():
+        """Pick the best ``sparse_impl`` for the current OS + CPU.
+
+        The sparse-mm kernel quality depends on which BLAS backend PyTorch
+        is built against:
+
+        * Linux/Windows/macOS x86_64 : MKL-backed ``torch.sparse.mm`` (CSR)
+          is the fastest path.
+        * macOS arm64 (Apple Silicon) : Accelerate-backed sparse mm is
+          well-tuned; CSR wins by ~12% over scatter at typical nnz.
+        * Linux ARM / aarch64 (Raspberry Pi, Jetson, AWS Graviton) :
+          PyTorch's sparse mm fallback has no tuned backend; the hand-rolled
+          scatter (``index_select`` + ``index_add_``) path is ~2.7x faster
+          than CSR / COO on these targets.
+
+        ``'auto'`` picks ``'scatter'`` only for Linux ARM (the case where it
+        wins by a wide margin) and ``'csr'`` everywhere else.
+        """
+        machine = (platform.machine() or '').lower()
+        system = (platform.system() or '').lower()
+        is_arm = machine.startswith('arm') or machine.startswith('aarch')
+        if system == 'linux' and is_arm:
+            return 'scatter'
+        return 'csr'
+
     @classmethod
     def from_trained(cls, trained_model, quantize_activations=False,
-                     activation_bits=16, enable_compile=False):
+                     activation_bits=16, enable_compile=False,
+                     sparse_impl='auto'):
         """Build a ``CurrentModelFast`` that mirrors an already-trained ``CurrentModel``.
 
         The trained model's constructor inputs and parameter tensors are copied
@@ -1957,6 +2009,7 @@ class CurrentModelFast(CurrentModel):
         inputs['quantize_activations'] = quantize_activations
         inputs['activation_bits'] = activation_bits
         inputs['enable_compile'] = enable_compile
+        inputs['sparse_impl'] = sparse_impl
 
         fast = cls(**inputs)
         fast.load_state_dict(trained_model.state_dict(), strict=False)
@@ -1971,11 +2024,13 @@ class CurrentModelFast(CurrentModel):
         return result
 
     def to(self, *args, **kwargs):
-        """Move parameters/buffers then rebuild CSR / int sparse views on the new device.
+        """Move parameters/buffers then rebuild sparse views on the new device.
 
-        ``_A_csr`` and ``_int_A`` are plain attributes, so ``nn.Module.to()`` would
-        leave them behind on the old device and ``torch.sparse.mm`` would mix
-        CUDA dense activations with a CPU sparse matrix.
+        ``_A_csr``, ``_A_rows/_cols/_vals``, and ``_int_A`` are plain
+        attributes, so ``nn.Module.to()`` would leave them behind on the old
+        device and the synapse matmul would mix CUDA dense activations with
+        a CPU sparse matrix. ``prepare_for_inference()`` rebuilds them from
+        ``self.synapse_counts`` (which ``super().to()`` does move correctly).
         """
         result = super().to(*args, **kwargs)
         result.prepare_for_inference()
@@ -2015,10 +2070,25 @@ class CurrentModelFast(CurrentModel):
             else:
                 self.register_buffer(name, tensor)
 
-        # Build a CSR view of the float synapse matrix for faster mm.
-        # CSR sparse tensors can't always live in ``_buffers`` across PyTorch
-        # versions, so we hold them as plain attributes.
-        self._A_csr = self._to_csr_or_coo(self.synapse_counts)
+        # Build the synapse matmul state matching ``self.sparse_impl``. Sparse
+        # tensors can't always live in ``_buffers`` across PyTorch versions,
+        # so we hold them as plain attributes.
+        impl = self.sparse_impl
+        A_coal = self.synapse_counts.coalesce()
+        if impl == 'csr':
+            self._A_csr = self._to_csr_or_coo(A_coal)
+            self._A_rows = self._A_cols = self._A_vals = None
+        elif impl == 'coo':
+            self._A_csr = A_coal
+            self._A_rows = self._A_cols = self._A_vals = None
+        elif impl == 'scatter':
+            self._A_csr = None
+            indices = A_coal.indices()
+            self._A_rows = indices[0].contiguous()
+            self._A_cols = indices[1].contiguous()
+            self._A_vals = A_coal.values().contiguous()
+        else:
+            raise ValueError(f"unknown sparse_impl: {impl!r}")
 
         if self.quantize_activations:
             self._prepare_int_synapse_matrix()
@@ -2073,6 +2143,28 @@ class CurrentModelFast(CurrentModel):
                 continue
         return None, False
 
+    def _scatter_sparse_mm(self, v):
+        """Compute ``A @ v.T`` (transposed back) via gather + index_add_.
+
+        Mathematically identical to ``torch.sparse.mm(A, v.T).T`` for the
+        synapse matrix ``A`` of shape ``(N, N)``: each non-zero
+        ``(post=row, pre=col, weight=val)`` contributes
+        ``z[:, row] += val * v[:, col]``. The advantage over
+        ``torch.sparse.mm`` on Linux ARM is that ``index_select`` and
+        ``index_add_`` map to tighter, more vectorized kernels than the
+        sparse mm fallback path that lacks an MKL backend.
+
+        Args:
+            v: ``(B, N)`` activations to be multiplied by the synapse matrix.
+
+        Returns:
+            ``(B, N)`` post-synaptic contributions.
+        """
+        contrib = v.index_select(1, self._A_cols) * self._A_vals.unsqueeze(0)
+        z = torch.zeros_like(v)
+        z.index_add_(1, self._A_rows, contrib)
+        return z
+
     def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
         if not self._inference_prepared:
             self.prepare_for_inference()
@@ -2115,6 +2207,11 @@ class CurrentModelFast(CurrentModel):
                 z_int = torch.sparse.mm(self._int_A,
                                         q_int32.transpose(0, 1)).transpose(0, 1)
                 z = z_int.to(pre.dtype) * row_scale
+            elif self.sparse_impl == 'scatter':
+                # Hand-rolled int-quant scatter path: still float storage
+                # for the gather product, but exact integer multiplies.
+                q_f = q_int32.to(pre.dtype)
+                z = self._scatter_sparse_mm(q_f) * row_scale
             else:
                 # Backend fallback: float sparse mm on integer-valued operands —
                 # multiplies are still exact integer ops, just widened.
@@ -2122,8 +2219,11 @@ class CurrentModelFast(CurrentModel):
                 z = torch.sparse.mm(self._A_csr,
                                     q_f.transpose(0, 1)).transpose(0, 1) * row_scale
         else:
-            z = torch.sparse.mm(self._A_csr,
-                                pre.transpose(0, 1)).transpose(0, 1)
+            if self.sparse_impl == 'scatter':
+                z = self._scatter_sparse_mm(pre)
+            else:
+                z = torch.sparse.mm(self._A_csr,
+                                    pre.transpose(0, 1)).transpose(0, 1)
 
         z = z * self._post_mm_scale_n
 
