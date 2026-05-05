@@ -124,11 +124,17 @@ class HexGridReadout(torch.nn.Module):
         )
 
     def _extract_column_features(self, v):
-        """``(batch, num_neurons)`` -> ``(batch, num_columns, num_types)``."""
+        """``(batch, num_neurons)`` -> ``(batch, num_columns, num_types)``.
+
+        Columns where a given neuron type doesn't exist get a 0 (rather than
+        ``NaN``).  Downstream :class:`NeuralModelConv` layers can then assume
+        NaN-free inputs and skip a per-conv ``torch.where(isnan, ...)`` pass,
+        which is a noticeable cost for short-stride convs at every timestep.
+        """
         valid = self.column_to_decoder_neurons >= 0
         safe = self.column_to_decoder_neurons.clamp(min=0)
         features = v[:, safe]
-        return features.masked_fill(~valid.unsqueeze(0), float('nan'))
+        return features.masked_fill(~valid.unsqueeze(0), 0.0)
 
     def flip_for_left_eye(self, x):
         """Transform readout output for left-eye convention.

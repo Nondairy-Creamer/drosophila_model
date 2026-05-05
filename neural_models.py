@@ -84,9 +84,14 @@ class NeuralModelConv(torch.nn.Module):
     """Hex-grid spatial convolution layer.
 
     Gathers per-column features from hex-grid neighbours, applies a learned
-    weight tensor via einsum, and adds a bias.  Missing neighbours (boundary
-    columns marked ``-1``) and ``NaN`` input features (e.g. absent neuron
-    types) are zeroed out before the contraction.
+    weight tensor as a flat ``F.linear``, and adds a bias.  Missing neighbours
+    (boundary columns marked ``-1``) are zeroed out before the contraction.
+
+    Inputs are assumed to be NaN-free.  Callers that might produce NaN
+    (e.g. column features for cell types that don't exist in every column)
+    must zero them out *once* before invoking this layer rather than relying
+    on a per-conv ``torch.where(isnan, ...)`` pass; the upstream readouts
+    do this in :meth:`HexGridReadout._extract_column_features`.
     """
 
     def __init__(self, in_features, out_features, conv_size, column_p_q,
@@ -97,6 +102,22 @@ class NeuralModelConv(torch.nn.Module):
         self.register_buffer(
             'nearest_column_indices',
             torch.tensor(nearest_column_indices, device=device, dtype=torch.int64),
+        )
+        # Pre-bake the index-clamp and the (negated) valid mask used in forward.
+        # ``_safe_idx`` replaces -1 sentinels with 0 so the gather indexes a
+        # real column (its contribution is then zeroed by ``masked_fill``).
+        # Both are non-persistent: deterministic functions of the persistent
+        # ``nearest_column_indices`` buffer, so they're rebuilt at __init__
+        # rather than written to / loaded from checkpoints.
+        self.register_buffer(
+            '_safe_idx',
+            self.nearest_column_indices.clamp(min=0).contiguous(),
+            persistent=False,
+        )
+        self.register_buffer(
+            '_invalid_mask_4d',
+            (self.nearest_column_indices < 0).unsqueeze(0).unsqueeze(-1).contiguous(),
+            persistent=False,
         )
         num_nearest = nearest_column_indices.shape[1]
         self.weight = torch.nn.Parameter(
@@ -116,8 +137,7 @@ class NeuralModelConv(torch.nn.Module):
         Args:
             x: ``(..., num_columns, in_features)`` or ``(..., num_columns)``
                when ``in_features == 1``.  Arbitrary leading dimensions are
-               preserved.  May contain ``NaN`` for missing features (they
-               are replaced with 0).
+               preserved.  Inputs must be NaN-free; see the class docstring.
 
         Returns:
             ``(..., num_columns, out_features)`` or ``(..., num_columns)``
@@ -130,23 +150,27 @@ class NeuralModelConv(torch.nn.Module):
         leading = x.shape[:-2]
         x_flat = x.reshape(-1, x.shape[-2], x.shape[-1])
 
-        safe_idx = self.nearest_column_indices.clamp(min=0)
-        valid_mask = self.nearest_column_indices >= 0
-
-        gathered = x_flat[:, safe_idx]
-        gathered = gathered.masked_fill(~valid_mask.unsqueeze(0).unsqueeze(-1), 0.0)
-        gathered = torch.where(torch.isnan(gathered),
-                               torch.zeros_like(gathered), gathered)
+        gathered = x_flat[:, self._safe_idx]
+        gathered = gathered.masked_fill(self._invalid_mask_4d, 0.0)
 
         if self.positive_weights:
+            valid_mask = self.nearest_column_indices >= 0
             w = self.weight.exp()
             # Per-column normalization: divide by sum of valid weights so they sum to 1
-            w_sum = torch.einsum('cn,knf->ck', valid_mask.float(), w).clamp(min=1e-8)
+            w_sum = torch.einsum('cn,knf->ck', valid_mask.to(w.dtype), w).clamp(min=1e-8)
             out = torch.einsum('scnf,knf->sck', gathered, w) / w_sum.unsqueeze(0)
+            if self.bias is not None:
+                out = out + self.bias.view(1, 1, -1)
         else:
-            out = torch.einsum('scnf,knf->sck', gathered, self.weight)
-        if self.bias is not None:
-            out = out + self.bias.view(1, 1, -1)
+            # 'scnf,knf->sck' is a flat F.linear: (S, C, N*F) @ weight.T
+            # where weight is reshaped to (K, N*F). F.linear hits the BLAS
+            # gemm path (Accelerate / OpenBLAS / MKL) which is well-tuned on
+            # both ARM and x86, while einsum falls back to a generic loop.
+            S, C, N, F = gathered.shape
+            K = self.weight.shape[0]
+            g_flat = gathered.reshape(S, C, N * F)
+            w_flat = self.weight.reshape(K, N * F)
+            out = torch.nn.functional.linear(g_flat, w_flat, self.bias)
         out = out.reshape(*leading, out.shape[-2], out.shape[-1])
         if squeeze_features:
             out = out.squeeze(-1)
