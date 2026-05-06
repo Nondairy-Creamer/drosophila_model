@@ -260,6 +260,9 @@ class StereoOpticFlowEstimator:
         filter_std_deg: float = 2.5,
         use_fast_model: bool = True,
         sparse_impl: str = 'auto',
+        pipelined: bool = False,
+        queue_depth: int = 2,
+        input_neurons: tuple[str, ...] = ('L1', 'L2', 'L3'),
         verbose: bool = True,
     ) -> None:
         """Streaming stereo optic-flow / ego-motion estimator.
@@ -286,6 +289,28 @@ class StereoOpticFlowEstimator:
                 when wrapping. ``'auto'`` picks the best per-host
                 backend (``'csr'`` on x86 / Apple Silicon, ``'scatter'``
                 on Linux ARM / Raspberry Pi).
+            pipelined: When ``True``, route ``step()`` through
+                :class:`PipelinedEgoMotionEstimator` so that stage 2
+                (decoder + ego-motion solve) of frame *N* runs on a
+                worker thread in parallel with stage 1 (recurrent
+                dynamics) of frame *N+1*.  This reduces the per-frame
+                wall-clock budget on the calling thread to
+                ``~max(stage1, stage2)`` (≈25 ms on a Raspberry Pi)
+                at the cost of **one frame of latency**: each
+                ``step()`` returns the ego-motion for the frame
+                submitted one call earlier, and the very first
+                ``step()`` after init returns zeros (its own result
+                is delivered on the next call).  Per-eye mean flow is
+                not computed in this mode; the returned
+                ``right_avg_flow`` / ``left_avg_flow`` are zeros
+                (downstream callers in the realtime loop ignore these).
+            queue_depth: Forwarded to ``PipelinedEgoMotionEstimator``.
+                Default ``2`` is enough headroom even when stage 2 is
+                slightly slower than expected.
+            input_neurons: Stimulus injection cell types passed to the
+                pipelined estimator's ``reset(input_neurons=...)`` on
+                the first frame.  Matches the default the model uses
+                in the serial path.
             verbose: Print the chosen backend at construction time.
         """
         self.model_path = resolve_existing_path(model_path)
@@ -326,6 +351,38 @@ class StereoOpticFlowEstimator:
         self.phi_left_deg = tuple(phi_left_deg)
         self.theta_deg = tuple(theta_deg)
         self.filter_std_deg = float(filter_std_deg)
+
+        self._input_neurons = tuple(input_neurons)
+        self._pipelined_mode = bool(pipelined)
+        self._queue_depth = int(queue_depth)
+        self._pipelined_est: nm.PipelinedEgoMotionEstimator | None = None
+        self._pipelined_started = False
+        self._pipelined_first_frame = True
+        if self._pipelined_mode:
+            try:
+                self._pipelined_est = nm.PipelinedEgoMotionEstimator(
+                    self.model, queue_depth=self._queue_depth,
+                )
+            except (AttributeError, ValueError) as exc:
+                # Model has no flow readout (e.g. an older config) —
+                # fall back to serial rather than crashing the runtime.
+                if verbose:
+                    print(
+                        f"[StereoOpticFlowEstimator] pipelined mode "
+                        f"unavailable ({exc!r}); falling back to serial."
+                    )
+                self._pipelined_mode = False
+                self._pipelined_est = None
+            else:
+                if verbose:
+                    print(
+                        f"[StereoOpticFlowEstimator] pipelined=True "
+                        f"(queue_depth={self._queue_depth}, +1 frame latency)"
+                    )
+
+        # Recurrent state owned by the serial path. The pipelined estimator
+        # owns its own copy of these so the four ``initial_*`` slots stay
+        # ``None`` when ``self._pipelined_mode`` is True.
         self.initial_state_right = None
         self.initial_state_left = None
         self.initial_filter_state_right = None
@@ -369,6 +426,17 @@ class StereoOpticFlowEstimator:
             np.concatenate([~self._in_fov_right, ~self._in_fov_left]),
             device=self.model.device,
         )
+
+        if self._pipelined_mode and self._pipelined_est is not None:
+            self._pipelined_est.start()
+            self._pipelined_est.reset(
+                S=1,
+                input_neurons=list(self._input_neurons),
+                oob_columns=self._oob_columns,
+            )
+            self._pipelined_started = True
+            self._pipelined_first_frame = True
+
         self._initialized = True
 
     def step(
@@ -376,6 +444,27 @@ class StereoOpticFlowEstimator:
         left_frame: np.ndarray,
         right_frame: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Process one stereo pair, return ego-motion + per-eye mean flow.
+
+        In the default serial mode, the returned values are for the
+        frame just submitted.  In ``pipelined=True`` mode, the very
+        first call still returns its own result (paying full latency
+        once), and every subsequent call returns the *previous* frame's
+        ego-motion while stage 1 of the current frame runs inline.
+        Per-eye mean flow is zero-filled in the pipelined path because
+        the threaded worker doesn't surface it.
+
+        Args:
+            left_frame: BGR or grayscale uint8 image, left camera.
+            right_frame: BGR or grayscale uint8 image, right camera.
+
+        Returns:
+            ``(ego_rotation_np, ego_translation_np,
+              right_avg_flow_np, left_avg_flow_np)``.  Rotation /
+            translation are ``(3,)`` float64 arrays; per-eye mean flow
+            is ``(2,)`` float64 (``[d_right, d_up]``) in the serial
+            path and zeros in the pipelined path.
+        """
         if not self._initialized:
             self.initialize(left_frame, right_frame)
 
@@ -389,6 +478,15 @@ class StereoOpticFlowEstimator:
             device=self.model.device, dtype=self.model.dtype
         )
 
+        if self._pipelined_mode and self._pipelined_est is not None:
+            return self._step_pipelined(visual_stimulus_right, visual_stimulus_left)
+        return self._step_serial(visual_stimulus_right, visual_stimulus_left)
+
+    def _step_serial(
+        self,
+        visual_stimulus_right: torch.Tensor,
+        visual_stimulus_left: torch.Tensor,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         with torch.no_grad():
             ego_rotation, ego_translation, right_res, left_res = self.model.estimate_ego_motion_from_image(
                 visual_stimulus_right,
@@ -427,6 +525,63 @@ class StereoOpticFlowEstimator:
         right_avg_flow_np = right_avg_flow_np.detach().cpu().numpy().astype(np.float64)
         left_avg_flow_np = left_avg_flow_np.detach().cpu().numpy().astype(np.float64)
         return ego_rotation_np, ego_translation_np, right_avg_flow_np, left_avg_flow_np
+
+    def _step_pipelined(
+        self,
+        visual_stimulus_right: torch.Tensor,
+        visual_stimulus_left: torch.Tensor,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Pipelined step: returns the *previous* frame's ego-motion.
+
+        Stage 1 (recurrent dynamics) runs inline on the calling thread;
+        stage 2 (decoder + ego-motion solve) for the same frame is
+        kicked off on the worker thread and is consumed by the *next*
+        call.  This is what gives us throughput ≈ ``1 / max(stage1, stage2)``
+        instead of ``1 / (stage1 + stage2)``.
+
+        The very first call therefore has nothing to return (the
+        pipeline is empty) and emits zeros; every subsequent call
+        emits the ego-motion for the frame submitted one step earlier.
+        Callers that can't tolerate the one-frame lag should use the
+        serial path (``pipelined=False``).
+        """
+        assert self._pipelined_est is not None  # for the type-checker
+        # Stage 1 (recurrent dynamics) runs synchronously on this thread;
+        # stage 2 of this frame runs on the worker in parallel with the
+        # caller's next stage 1. Crucially we do NOT get() this frame's
+        # result here — that would drain the pipeline back to serial.
+        self._pipelined_est.submit(visual_stimulus_right, visual_stimulus_left)
+
+        zeros2 = np.zeros(2, dtype=np.float64)
+        if self._pipelined_first_frame:
+            # Pipeline is empty: nothing to pull. Report zeros and let
+            # the next call pick up this frame's result.
+            self._pipelined_first_frame = False
+            return (
+                np.zeros(3, dtype=np.float64),
+                np.zeros(3, dtype=np.float64),
+                zeros2,
+                zeros2,
+            )
+
+        # get() returns the result of the PREVIOUS frame's submission.
+        rot, trans = self._pipelined_est.get()
+        rot_np = rot[0, 0].detach().cpu().numpy().astype(np.float64)
+        trans_np = trans[0, 0].detach().cpu().numpy().astype(np.float64)
+        return rot_np, trans_np, zeros2, zeros2
+
+    def close(self) -> None:
+        """Stop the pipelined worker thread (idempotent)."""
+        if self._pipelined_est is not None:
+            self._pipelined_est.stop()
+            self._pipelined_started = False
+
+    def __enter__(self) -> "StereoOpticFlowEstimator":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
 
 
 def save_integrated_pose_figure(

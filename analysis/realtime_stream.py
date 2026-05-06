@@ -499,6 +499,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--pipelined",
+        action="store_true",
+        help=(
+            "Run the model through PipelinedEgoMotionEstimator: stage 1 "
+            "(recurrent dynamics) of frame N runs in parallel with stage 2 "
+            "(decoder + ego-motion solve) of frame N-1. This drops the "
+            "per-frame budget on the calling thread to ~max(stage1, stage2) "
+            "(≈25 ms on a Pi) at the cost of one frame of latency in the "
+            "published ego-motion. Per-eye mean flow is not surfaced in "
+            "this mode (and is not used downstream)."
+        ),
+    )
+    parser.add_argument(
+        "--queue-depth",
+        type=int,
+        default=2,
+        help=(
+            "Queue depth for --pipelined. Default 2 leaves enough "
+            "headroom even when stage 2 runs slightly slower than stage 1; "
+            "increase only if you observe submit() blocking in the logs."
+        ),
+    )
+    parser.add_argument(
         "--fov-right-deg",
         type=float,
         nargs=2,
@@ -584,6 +607,8 @@ def main() -> int:
         filter_std_deg=args.filter_std,
         use_fast_model=(not args.no_fast_model),
         sparse_impl=args.sparse_impl,
+        pipelined=args.pipelined,
+        queue_depth=args.queue_depth,
     )
 
     left_cap = None
@@ -823,6 +848,10 @@ def main() -> int:
             frame_index += 1
 
     finally:
+        try:
+            estimator.close()
+        except Exception:
+            pass
         if udp_sock is not None:
             udp_sock.close()
         if left_cap is not None:
