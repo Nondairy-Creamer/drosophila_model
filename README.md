@@ -2,6 +2,8 @@
 
 Training and analysis of connectome-constrained models of the *Drosophila* optic lobe. Models use synapse-level connectivity from the FlyWire connectome to define network architecture, then learn synaptic weights and dynamics that reproduce motion vision computations (optic flow / ego-motion estimation).
 
+For real-time streaming on a Raspberry Pi 5 (CSI cameras, 30 Hz, UDP-publishing ego-motion), see [README-rpi.md](README-rpi.md).
+
 ## Quick Start
 
 Train a single model:
