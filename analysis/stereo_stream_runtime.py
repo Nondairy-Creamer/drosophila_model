@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import queue
 import socket
 import struct
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -289,24 +291,34 @@ class StereoOpticFlowEstimator:
                 when wrapping. ``'auto'`` picks the best per-host
                 backend (``'csr'`` on x86 / Apple Silicon, ``'scatter'``
                 on Linux ARM / Raspberry Pi).
-            pipelined: When ``True``, route ``step()`` through
-                :class:`PipelinedEgoMotionEstimator` so that stage 2
-                (decoder + ego-motion solve) of frame *N* runs on a
-                worker thread in parallel with stage 1 (recurrent
-                dynamics) of frame *N+1*.  This reduces the per-frame
-                wall-clock budget on the calling thread to
-                ``~max(stage1, stage2)`` (≈25 ms on a Raspberry Pi)
-                at the cost of **one frame of latency**: each
-                ``step()`` returns the ego-motion for the frame
-                submitted one call earlier, and the very first
-                ``step()`` after init returns zeros (its own result
-                is delivered on the next call).  Per-eye mean flow is
-                not computed in this mode; the returned
-                ``right_avg_flow`` / ``left_avg_flow`` are zeros
-                (downstream callers in the realtime loop ignore these).
-            queue_depth: Forwarded to ``PipelinedEgoMotionEstimator``.
-                Default ``2`` is enough headroom even when stage 2 is
-                slightly slower than expected.
+            pipelined: When ``True``, route ``step()`` through a
+                fully asynchronous three-thread pipeline:
+
+                * **Main thread** (``step()``): camera I/O, image
+                  sampling, mailbox push, latest-result drain. Never
+                  blocks on the model.
+                * **Stage-1 worker**: recurrent dynamics. Always
+                  processes the freshest frame in its single-slot
+                  mailbox; older frames that haven't been picked up
+                  are silently overwritten ("drop oldest").
+                * **Stage-2 worker** (inside
+                  :class:`PipelinedEgoMotionEstimator`): flow readout
+                  + ego-motion solve. Runs in parallel with stage 1 of
+                  the next frame.
+
+                Each thread runs as soon as its inputs are available,
+                so a slow stage 2 never holds up stage 1 (and vice
+                versa). ``step()`` returns the most recently completed
+                ego-motion result; if the model is too slow to finish
+                a frame within the inter-frame interval, the returned
+                estimate is based on a slightly older frame, but the
+                main loop's cadence is unaffected. Per-eye mean flow
+                is not surfaced in this mode (downstream callers in
+                the realtime loop ignore it) and is returned as zeros.
+            queue_depth: Forwarded to ``PipelinedEgoMotionEstimator``
+                (the firing-rates handoff between stage 1 and stage 2).
+                Default ``2`` absorbs minor stage-2 jitter without
+                back-pressuring stage 1.
             input_neurons: Stimulus injection cell types passed to the
                 pipelined estimator's ``reset(input_neurons=...)`` on
                 the first frame.  Matches the default the model uses
@@ -357,7 +369,22 @@ class StereoOpticFlowEstimator:
         self._queue_depth = int(queue_depth)
         self._pipelined_est: nm.PipelinedEgoMotionEstimator | None = None
         self._pipelined_started = False
-        self._pipelined_first_frame = True
+
+        # Streaming-mode plumbing: stage 1 runs on its own worker thread
+        # so step() never blocks on the model. The main thread shoves
+        # each freshly sampled (right, left) pair into a single-slot
+        # mailbox (drop-oldest); the stage-1 worker pops it, runs the
+        # recurrent step, and hands firing rates to the existing stage-2
+        # worker inside PipelinedEgoMotionEstimator. Completed
+        # ego-motion results are drained out of the stage-2 output queue
+        # by the main thread and cached as ``_latest_result``.
+        self._stage1_in: queue.Queue | None = None
+        self._stage1_thread: threading.Thread | None = None
+        self._stage1_stop_evt: threading.Event | None = None
+        self._latest_result_lock = threading.Lock()
+        self._latest_result: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._n_results_seen = 0
+
         if self._pipelined_mode:
             try:
                 self._pipelined_est = nm.PipelinedEgoMotionEstimator(
@@ -377,7 +404,8 @@ class StereoOpticFlowEstimator:
                 if verbose:
                     print(
                         f"[StereoOpticFlowEstimator] pipelined=True "
-                        f"(queue_depth={self._queue_depth}, +1 frame latency)"
+                        f"(queue_depth={self._queue_depth}, async stage-1+stage-2 "
+                        f"workers; step() is non-blocking, returns latest result)"
                     )
 
         # Recurrent state owned by the serial path. The pipelined estimator
@@ -435,7 +463,22 @@ class StereoOpticFlowEstimator:
                 oob_columns=self._oob_columns,
             )
             self._pipelined_started = True
-            self._pipelined_first_frame = True
+
+            # Single-slot drop-oldest mailbox between main thread and
+            # stage-1 worker. ``maxsize=1`` means the worker always
+            # picks up the freshest input; older frames that haven't
+            # been picked up are silently overwritten.
+            self._stage1_in = queue.Queue(maxsize=1)
+            self._stage1_stop_evt = threading.Event()
+            with self._latest_result_lock:
+                self._latest_result = None
+            self._n_results_seen = 0
+            self._stage1_thread = threading.Thread(
+                target=self._stage1_loop,
+                name='stereo-stage1',
+                daemon=True,
+            )
+            self._stage1_thread.start()
 
         self._initialized = True
 
@@ -531,47 +574,130 @@ class StereoOpticFlowEstimator:
         visual_stimulus_right: torch.Tensor,
         visual_stimulus_left: torch.Tensor,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Pipelined step: returns the *previous* frame's ego-motion.
+        """Async streaming step: non-blocking, returns the latest finished result.
 
-        Stage 1 (recurrent dynamics) runs inline on the calling thread;
-        stage 2 (decoder + ego-motion solve) for the same frame is
-        kicked off on the worker thread and is consumed by the *next*
-        call.  This is what gives us throughput ≈ ``1 / max(stage1, stage2)``
-        instead of ``1 / (stage1 + stage2)``.
+        Drops the freshly sampled stereo pair into the stage-1
+        worker's single-slot mailbox (overwriting any input the worker
+        hasn't grabbed yet), drains all completed ego-motion results
+        out of the stage-2 output queue into ``_latest_result``, and
+        returns whatever result was most recently produced.
 
-        The very first call therefore has nothing to return (the
-        pipeline is empty) and emits zeros; every subsequent call
-        emits the ego-motion for the frame submitted one step earlier.
-        Callers that can't tolerate the one-frame lag should use the
-        serial path (``pipelined=False``).
+        Each thread runs as soon as its inputs are ready:
+
+        * **Main thread** (this method): camera I/O, image sampling,
+          mailbox push, result drain, return. Wall-clock dominated by
+          ``cv2`` operations; the model contributes nothing here.
+        * **Stage-1 worker** (``_stage1_loop``): pulls the latest
+          mailbox entry, runs ``input_conv`` → forward → ``firing_rate``,
+          hands firing rates to stage 2.
+        * **Stage-2 worker** (inside :class:`PipelinedEgoMotionEstimator`):
+          pulls firing rates, runs flow readout + ego-motion solve.
+
+        If stage 1 is mid-step when a new frame arrives, the new frame
+        sits in the mailbox and is picked up the moment stage 1
+        finishes — no synchronization with stage 2 is required because
+        firing rates flow through a separate queue.
+
+        Returns:
+            ``(rot, trans, zeros2, zeros2)``. The per-eye mean flow
+            slots are zero-filled because the threaded path doesn't
+            surface them (and downstream callers ignore them). When
+            no result has finished yet (the very first few ms after
+            startup), zeros are returned.
         """
-        assert self._pipelined_est is not None  # for the type-checker
-        # Stage 1 (recurrent dynamics) runs synchronously on this thread;
-        # stage 2 of this frame runs on the worker in parallel with the
-        # caller's next stage 1. Crucially we do NOT get() this frame's
-        # result here — that would drain the pipeline back to serial.
-        self._pipelined_est.submit(visual_stimulus_right, visual_stimulus_left)
+        assert self._stage1_in is not None
+        assert self._pipelined_est is not None
+
+        # Mailbox push: drop the previous unread entry so stage 1 always
+        # sees the newest inputs. Single-producer (this thread) so the
+        # try/except dance is race-free.
+        item = (visual_stimulus_right, visual_stimulus_left)
+        try:
+            self._stage1_in.put_nowait(item)
+        except queue.Full:
+            try:
+                self._stage1_in.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._stage1_in.put_nowait(item)
+            except queue.Full:
+                pass
+
+        # Drain everything stage 2 has finished since last step(); keep
+        # only the most recent (rot, trans). Non-blocking.
+        while True:
+            try:
+                rot, trans = self._pipelined_est.get(timeout=0.0)
+            except queue.Empty:
+                break
+            with self._latest_result_lock:
+                self._latest_result = (rot, trans)
+                self._n_results_seen += 1
 
         zeros2 = np.zeros(2, dtype=np.float64)
-        if self._pipelined_first_frame:
-            # Pipeline is empty: nothing to pull. Report zeros and let
-            # the next call pick up this frame's result.
-            self._pipelined_first_frame = False
+        with self._latest_result_lock:
+            latest = self._latest_result
+        if latest is None:
             return (
                 np.zeros(3, dtype=np.float64),
                 np.zeros(3, dtype=np.float64),
                 zeros2,
                 zeros2,
             )
-
-        # get() returns the result of the PREVIOUS frame's submission.
-        rot, trans = self._pipelined_est.get()
+        rot, trans = latest
         rot_np = rot[0, 0].detach().cpu().numpy().astype(np.float64)
         trans_np = trans[0, 0].detach().cpu().numpy().astype(np.float64)
         return rot_np, trans_np, zeros2, zeros2
 
+    def _stage1_loop(self) -> None:
+        """Worker: pop the latest mailbox entry and submit it to stage 2.
+
+        Sleeping on ``self._stage1_in.get(timeout=...)`` lets us still
+        notice ``_stage1_stop_evt`` if the camera stops producing.
+        """
+        assert self._stage1_in is not None
+        assert self._stage1_stop_evt is not None
+        assert self._pipelined_est is not None
+        try:
+            while not self._stage1_stop_evt.is_set():
+                try:
+                    item = self._stage1_in.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if item is None:  # shutdown sentinel
+                    return
+                visual_right, visual_left = item
+                # PipelinedEgoMotionEstimator.submit() runs stage 1
+                # inline (on this thread) and hands fr to stage 2.
+                # Backpressure from stage 2 is absorbed by the queue
+                # depth in the underlying estimator.
+                self._pipelined_est.submit(visual_right, visual_left)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[StereoOpticFlowEstimator] stage-1 worker died: {exc!r}")
+            raise
+
     def close(self) -> None:
-        """Stop the pipelined worker thread (idempotent)."""
+        """Stop both workers and drain queues (idempotent)."""
+        # Tell stage 1 to exit and unblock its mailbox wait.
+        if self._stage1_stop_evt is not None:
+            self._stage1_stop_evt.set()
+        if self._stage1_in is not None:
+            try:
+                self._stage1_in.put_nowait(None)
+            except queue.Full:
+                try:
+                    self._stage1_in.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._stage1_in.put_nowait(None)
+                except queue.Full:
+                    pass
+        if self._stage1_thread is not None:
+            self._stage1_thread.join(timeout=2.0)
+            self._stage1_thread = None
+        # Now stop the underlying stage-2 worker.
         if self._pipelined_est is not None:
             self._pipelined_est.stop()
             self._pipelined_started = False
