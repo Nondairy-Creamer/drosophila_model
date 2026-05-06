@@ -502,13 +502,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--pipelined",
         action="store_true",
         help=(
-            "Run the model through PipelinedEgoMotionEstimator: stage 1 "
-            "(recurrent dynamics) of frame N runs in parallel with stage 2 "
-            "(decoder + ego-motion solve) of frame N-1. This drops the "
-            "per-frame budget on the calling thread to ~max(stage1, stage2) "
-            "(≈25 ms on a Pi) at the cost of one frame of latency in the "
-            "published ego-motion. Per-eye mean flow is not surfaced in "
-            "this mode (and is not used downstream)."
+            "Run the model through a fully asynchronous 3-thread "
+            "pipeline: main thread (camera I/O + image sampling), "
+            "stage-1 worker (recurrent dynamics), stage-2 worker "
+            "(decoder + ego-motion solve). step() never blocks on the "
+            "model and returns the most recently completed result, so "
+            "the main loop holds 30 Hz cadence even when the model "
+            "takes >33 ms per frame. Per-eye mean flow is not surfaced "
+            "in this mode (and is not used downstream)."
         ),
     )
     parser.add_argument(
@@ -516,9 +517,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help=(
-            "Queue depth for --pipelined. Default 2 leaves enough "
-            "headroom even when stage 2 runs slightly slower than stage 1; "
-            "increase only if you observe submit() blocking in the logs."
+            "Stage-1 → stage-2 firing-rate handoff queue depth used by "
+            "--pipelined. Default 2 absorbs minor stage-2 jitter "
+            "without back-pressuring stage 1. The main → stage-1 "
+            "mailbox is always single-slot drop-oldest."
         ),
     )
     parser.add_argument(
