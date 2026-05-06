@@ -180,8 +180,8 @@ class LatestStereoFrame:
 
 
 def stereo_capture_loop(
-    left_cap: cv2.VideoCapture,
-    right_cap: cv2.VideoCapture,
+    left_cap,
+    right_cap,
     loop_videos: bool,
     left_mode: str,
     right_mode: str,
@@ -205,7 +205,14 @@ def stereo_capture_loop(
         latest_frame.close(exc)
 
 
-def configure_low_latency_capture(cap: cv2.VideoCapture) -> None:
+def configure_low_latency_capture(cap) -> None:
+    """Best-effort: minimize OpenCV's internal buffering for live cameras.
+
+    No-op for backends (e.g. picamera2) that don't honor the
+    ``CAP_PROP_BUFFERSIZE`` knob; those manage their own queues
+    internally and ``capture_array()`` already returns the latest
+    frame.
+    """
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
@@ -492,13 +499,31 @@ def build_parser() -> argparse.ArgumentParser:
             "then publish filtered AprilTag pose plus ego-motion over UDP."
         )
     )
-    parser.add_argument("--left-src", type=str, default="0", help="Left camera index or video path.")
-    parser.add_argument("--right-src", type=str, default="1", help="Right camera index or video path.")
+    parser.add_argument(
+        "--left-src", type=str, default="0",
+        help=(
+            "Left source: V4L2 camera index ('0'), video path "
+            "('left.mp4'), or picamera2 CSI camera ('picam:0' or "
+            "just '0' with --source-mode picamera2)."
+        ),
+    )
+    parser.add_argument(
+        "--right-src", type=str, default="1",
+        help="Right source. Same syntax as --left-src.",
+    )
     parser.add_argument(
         "--source-mode",
-        choices=("auto", "camera", "video"),
+        choices=("auto", "camera", "video", "picamera2"),
         default="auto",
-        help="Interpret the sources as cameras, videos, or infer automatically.",
+        help=(
+            "How to interpret --left-src / --right-src. 'auto' "
+            "(default): paths starting with 'picam:' use picamera2, "
+            "integer strings use V4L2, existing file paths use video. "
+            "'camera' forces V4L2 (USB / generic webcam). 'video' "
+            "forces a video file. 'picamera2' forces the Raspberry "
+            "Pi CSI / libcamera path; sources may be bare integers "
+            "(camera index) or 'picam:N' URIs."
+        ),
     )
     parser.add_argument("--loop-videos", action="store_true", help="Loop video files when they end.")
     parser.add_argument("--camera-width", type=int, default=None, help="Requested camera width.")

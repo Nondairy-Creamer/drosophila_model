@@ -39,7 +39,7 @@ def resolve_existing_path(path_str: str | Path) -> Path:
     raise FileNotFoundError(f"File not found: {path}")
 
 
-def robust_read(cap: cv2.VideoCapture) -> tuple[bool, np.ndarray | None]:
+def robust_read(cap) -> tuple[bool, np.ndarray | None]:
     ok, frame = cap.read()
     if ok and frame is not None:
         return True, frame
@@ -55,11 +55,147 @@ def robust_read(cap: cv2.VideoCapture) -> tuple[bool, np.ndarray | None]:
 def infer_source_mode(src: str, source_mode: str) -> str:
     if source_mode != "auto":
         return source_mode
+    if src.startswith("picam:"):
+        return "picamera2"
     if src.isdigit():
         return "camera"
     if Path(src).exists():
         return "video"
     return "camera"
+
+
+class _Picamera2Capture:
+    """``cv2.VideoCapture``-compatible adapter around picamera2.
+
+    On Raspberry Pi OS Bookworm, CSI cameras don't enumerate as V4L2
+    devices in a way OpenCV likes; the supported library is
+    ``picamera2`` (which sits on top of ``libcamera``). This adapter
+    exposes just enough of the ``cv2.VideoCapture`` API to let the
+    rest of this module — ``read_source_frame``, ``stereo_capture_loop``,
+    ``configure_low_latency_capture``, ``get_nominal_dt`` — keep
+    working without per-backend branching.
+
+    Frames are returned in BGR order (cv2-compatible) by using
+    picamera2's quirky ``"RGB888"`` format string, which is documented
+    to yield BGR ndarrays for OpenCV interop.
+
+    ``set()`` is a no-op (size/fps are configured at construction
+    time); ``get()`` answers FPS / width / height for the dt-inference
+    paths and returns ``0`` for other props.
+
+    Install on Pi (no uv): ::
+
+        sudo apt install python3-picamera2 python3-libcamera
+        python3 -m venv --system-site-packages .venv
+        source .venv/bin/activate
+        pip install -e .
+    """
+
+    def __init__(
+        self,
+        picamera2_cls,
+        camera_num: int,
+        width: int | None,
+        height: int | None,
+        fps: float | None,
+    ) -> None:
+        cam = picamera2_cls(camera_num=int(camera_num))
+        size = (int(width or 640), int(height or 480))
+        cfg = cam.create_video_configuration(
+            main={"size": size, "format": "RGB888"},
+        )
+        if fps is not None and fps > 0.0:
+            us = int(round(1_000_000.0 / float(fps)))
+            controls = dict(cfg.get("controls", {}))
+            controls["FrameDurationLimits"] = (us, us)
+            cfg["controls"] = controls
+        cam.configure(cfg)
+        cam.start()
+        self._cam = cam
+        self._opened = True
+        self._size = size
+        self._fps = float(fps) if fps else 0.0
+        self._camera_num = int(camera_num)
+
+    def isOpened(self) -> bool:
+        return self._opened
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        if not self._opened:
+            return False, None
+        try:
+            arr = self._cam.capture_array("main")
+        except Exception:
+            return False, None
+        if arr is None:
+            return False, None
+        return True, arr
+
+    def grab(self) -> bool:
+        return self._opened
+
+    def retrieve(self) -> tuple[bool, np.ndarray | None]:
+        return self.read()
+
+    def get(self, prop: int) -> float:
+        if prop == cv2.CAP_PROP_FPS:
+            return self._fps
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(self._size[0])
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(self._size[1])
+        return 0.0
+
+    def set(self, prop: int, value: float) -> bool:  # noqa: ARG002 - cv2 API parity
+        return False
+
+    def release(self) -> None:
+        if not self._opened:
+            return
+        try:
+            self._cam.stop()
+        except Exception:
+            pass
+        try:
+            self._cam.close()
+        except Exception:
+            pass
+        self._opened = False
+
+
+def _open_picamera2_capture(
+    camera_num: int,
+    width: int | None,
+    height: int | None,
+    fps: float | None,
+) -> _Picamera2Capture:
+    try:
+        # Lazy-imported because picamera2 is Pi-only and not in the
+        # general dev environment. The type: ignore silences pyright's
+        # "could not be resolved" on hosts without it installed.
+        from picamera2 import Picamera2  # type: ignore[import-not-found]  # noqa: PLC0415
+    except ImportError as exc:
+        raise RuntimeError(
+            "picamera2 is required for source-mode 'picamera2' but is "
+            "not importable. On Raspberry Pi OS Bookworm: "
+            "`sudo apt install python3-picamera2 python3-libcamera`, "
+            "then create your venv with system-site-packages access: "
+            "`python3 -m venv --system-site-packages .venv`. "
+            "(uv users: `uv venv --system-site-packages`.)"
+        ) from exc
+    return _Picamera2Capture(Picamera2, camera_num, width, height, fps)
+
+
+def _parse_picam_camera_num(src: str) -> int:
+    """Extract camera index from either a bare integer string or 'picam:N'."""
+    s = str(src).strip()
+    if s.startswith("picam:"):
+        s = s.split(":", 1)[1]
+    if not s.isdigit():
+        raise ValueError(
+            f"picamera2 source must be an integer or 'picam:N', got {src!r}"
+        )
+    return int(s)
 
 
 def open_source(
@@ -68,7 +204,15 @@ def open_source(
     camera_width: int | None,
     camera_height: int | None,
     camera_fps: float | None,
-) -> tuple[cv2.VideoCapture, str, str]:
+):
+    """Open a stereo source. Returns ``(cap, mode, label)``.
+
+    ``cap`` is either a real ``cv2.VideoCapture`` (for ``video`` /
+    ``camera`` modes) or a :class:`_Picamera2Capture` adapter (for
+    ``picamera2`` mode). Both expose the same surface that
+    :func:`robust_read`, :func:`read_source_frame`, and
+    :func:`stereo_capture_loop` need.
+    """
     resolved_mode = infer_source_mode(src, source_mode)
 
     if resolved_mode == "video":
@@ -77,6 +221,15 @@ def open_source(
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video source: {path}")
         return cap, resolved_mode, str(path)
+
+    if resolved_mode == "picamera2":
+        camera_num = _parse_picam_camera_num(src)
+        cap = _open_picamera2_capture(
+            camera_num, camera_width, camera_height, camera_fps,
+        )
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open picamera2 source: picam:{camera_num}")
+        return cap, resolved_mode, f"picam:{camera_num}"
 
     cap_src = int(src) if src.isdigit() else src
     cap = cv2.VideoCapture(cap_src, cv2.CAP_V4L2)
@@ -97,7 +250,7 @@ def open_source(
 
 
 def read_source_frame(
-    cap: cv2.VideoCapture,
+    cap,
     loop_videos: bool,
     source_mode: str,
 ) -> tuple[bool, np.ndarray | None]:
@@ -113,8 +266,8 @@ def read_source_frame(
 
 
 def get_nominal_dt(
-    left_cap: cv2.VideoCapture,
-    right_cap: cv2.VideoCapture,
+    left_cap,
+    right_cap,
     left_mode: str,
     right_mode: str,
     fixed_dt: float | None,
