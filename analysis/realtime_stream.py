@@ -80,8 +80,42 @@ def finite_age_s(value: float | None, fallback: float = 1e9) -> float:
     return max(0.0, value_f)
 
 
+def make_empty_apriltag_state(tag_id: int = -1) -> dict[str, Any]:
+    """Default AprilTag state dict shaped like the one from AprilTagDirectTracker.
+
+    Used when AprilTag tracking is disabled so build_state_message and
+    the display overlay can keep their existing shape without the
+    consumer having to special-case the no-tag case.
+    """
+    return {
+        "tag_id": int(tag_id),
+        "detected": 0,
+        "used_hold": 0,
+        "fresh": False,
+        "age_s": 0.0,
+        "pose_err": 0.0,
+        "pos_m": [0.0, 0.0, 0.0],
+        "rpy_deg": [0.0, 0.0, 0.0],
+        "center_px": [0.0, 0.0],
+        "filtered": False,
+    }
+
+
+def make_empty_fusion() -> dict[str, Any]:
+    """Default fused-pose dict matching tracker.step's filtered_fusion."""
+    return {
+        "available": False,
+        "source": "none",
+        "contributors": [],
+        "pos_m": [0.0, 0.0, 0.0],
+        "rpy_deg": [0.0, 0.0, 0.0],
+        "pos_delta_m": 0.0,
+        "yaw_delta_deg": 0.0,
+    }
+
+
 def build_display_state(apr: ModuleType, state: dict[str, Any], pose_source: str) -> dict[str, Any]:
-    if hasattr(apr, "build_display_state"):
+    if apr is not None and hasattr(apr, "build_display_state"):
         return apr.build_display_state(state, pose_source)
 
     if pose_source == "filtered" and bool(state.get("filtered", False)):
@@ -570,6 +604,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_APRILTAG_MODULE_PATH,
         help="Path to the existing apriltag_pose.py implementation to reuse.",
     )
+    parser.add_argument(
+        "--no-apriltag",
+        action="store_true",
+        help=(
+            "Skip the AprilTag pose / Kalman-fusion path entirely. Useful "
+            "when running on a host that doesn't have apriltag_pose.py and "
+            "you only care about optic flow / ego-motion. The UDP message "
+            "still includes empty 'states' / 'fusion' fields so downstream "
+            "consumers don't break. AprilTag is also auto-disabled if "
+            "--apriltag-module-path doesn't exist on disk."
+        ),
+    )
     parser.add_argument("--left-yaml", type=str, default="pinhole_calib_left.yaml")
     parser.add_argument("--right-yaml", type=str, default="pinhole_calib_right.yaml")
     parser.add_argument("--rect-alpha", type=float, default=0.0)
@@ -599,7 +645,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
 
-    apr = load_module_from_path("apriltag_pose_direct", args.apriltag_module_path)
+    enable_apriltag = not args.no_apriltag
+    if enable_apriltag and not Path(args.apriltag_module_path).expanduser().exists():
+        print(
+            f"AprilTag module not found at {args.apriltag_module_path}; "
+            "running without AprilTag pose tracking. Pass an explicit "
+            "--apriltag-module-path or --no-apriltag to silence this warning."
+        )
+        enable_apriltag = False
+
+    apr: ModuleType | None = None
+    if enable_apriltag:
+        apr = load_module_from_path("apriltag_pose_direct", args.apriltag_module_path)
     estimator = StereoOpticFlowEstimator(
         model_path=args.model,
         device=args.device,
@@ -715,7 +772,7 @@ def main() -> int:
                     break
                 source_frame_index = frame_index
 
-            if tracker is None:
+            if enable_apriltag and tracker is None:
                 tracker = AprilTagDirectTracker(apr, args, left_frame, right_frame)
                 print(
                     "AprilTag tracker initialized "
@@ -739,7 +796,24 @@ def main() -> int:
                 _left_avg_flow_np,
             ) = estimator.step(left_frame, right_frame)
             flow_t1 = time.perf_counter()
-            state_l, state_r, filtered_fusion, extras, april_timings_ms = tracker.step(left_frame, right_frame, wall_time_s)
+            if tracker is not None:
+                state_l, state_r, filtered_fusion, extras, april_timings_ms = tracker.step(
+                    left_frame, right_frame, wall_time_s,
+                )
+            else:
+                # AprilTag disabled: empty fields keep the UDP schema stable
+                # without paying the rectify / detect / Kalman cost.
+                state_l = make_empty_apriltag_state(args.tag_id_left if args.tag_id_left is not None else -1)
+                state_r = make_empty_apriltag_state(args.tag_id_right if args.tag_id_right is not None else -1)
+                filtered_fusion = make_empty_fusion()
+                extras = {"left_vis": left_frame, "right_vis": right_frame}
+                april_timings_ms = {
+                    "rectify_ms": 0.0,
+                    "apriltag_left_ms": 0.0,
+                    "apriltag_right_ms": 0.0,
+                    "kalman_fusion_ms": 0.0,
+                    "apriltag_total_ms": 0.0,
+                }
             msg = build_state_message(
                 state_l,
                 state_r,
@@ -810,37 +884,49 @@ def main() -> int:
             if args.display:
                 vis_l = extras["left_vis"].copy()
                 vis_r = extras["right_vis"].copy()
-                display_l = build_display_state(apr, state_l, args.draw_pose_source)
-                display_r = build_display_state(apr, state_r, args.draw_pose_source)
-                if args.draw_pose_source == "filtered" and filtered_fusion.get("available", False):
-                    display_fusion = filtered_fusion
-                    display_fusion_mode = "filtered"
-                else:
-                    display_fusion = apr.fuse_states(
+                if enable_apriltag and apr is not None and tracker is not None:
+                    display_l = build_display_state(apr, state_l, args.draw_pose_source)
+                    display_r = build_display_state(apr, state_r, args.draw_pose_source)
+                    if args.draw_pose_source == "filtered" and filtered_fusion.get("available", False):
+                        display_fusion = filtered_fusion
+                        display_fusion_mode = "filtered"
+                    else:
+                        display_fusion = apr.fuse_states(
+                            state_l,
+                            state_r,
+                            args.max_cam_age_s,
+                            args.max_fuse_pos_delta_m,
+                            args.max_fuse_yaw_delta_deg,
+                        )
+                        display_fusion_mode = "raw"
+
+                    if hasattr(apr, "draw_state_axes"):
+                        apr.draw_state_axes(vis_l, tracker.new_k_l, display_l, "LEFT", args.pose_tag_size_left)
+                        apr.draw_state_axes(vis_r, tracker.new_k_r, display_r, "RIGHT", args.pose_tag_size_right)
+
+                    overlay_debug(
+                        vis_l,
+                        vis_r,
+                        display_l,
+                        display_r,
                         state_l,
                         state_r,
-                        args.max_cam_age_s,
-                        args.max_fuse_pos_delta_m,
-                        args.max_fuse_yaw_delta_deg,
+                        display_fusion,
+                        display_fusion_mode,
+                        ego_rotation_np,
+                        ego_translation_np,
                     )
-                    display_fusion_mode = "raw"
-
-                if hasattr(apr, "draw_state_axes"):
-                    apr.draw_state_axes(vis_l, tracker.new_k_l, display_l, "LEFT", args.pose_tag_size_left)
-                    apr.draw_state_axes(vis_r, tracker.new_k_r, display_r, "RIGHT", args.pose_tag_size_right)
-
-                overlay_debug(
-                    vis_l,
-                    vis_r,
-                    display_l,
-                    display_r,
-                    state_l,
-                    state_r,
-                    display_fusion,
-                    display_fusion_mode,
-                    ego_rotation_np,
-                    ego_translation_np,
-                )
+                else:
+                    # AprilTag disabled: paint just the ego-motion readout.
+                    text_lines = [
+                        f"ego rot:   {ego_rotation_np[0]:+.2f} {ego_rotation_np[1]:+.2f} {ego_rotation_np[2]:+.2f}",
+                        f"ego trans: {ego_translation_np[0]:+.2f} {ego_translation_np[1]:+.2f} {ego_translation_np[2]:+.2f}",
+                    ]
+                    for i, line in enumerate(text_lines):
+                        cv2.putText(
+                            vis_l, line, (10, 25 + 22 * i),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA,
+                        )
                 canvas = cv2.hconcat([vis_l, vis_r])
                 cv2.imshow("direct_stereo_optic_flow_apriltag", canvas)
                 key = cv2.waitKey(1) & 0xFF
