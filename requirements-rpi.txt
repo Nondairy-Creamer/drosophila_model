@@ -1,0 +1,52 @@
+# Raspberry Pi (CPU, aarch64) requirements for the streaming inference path.
+#
+# Install workflow on Raspberry Pi OS Bookworm (Python 3.11+):
+#
+#   sudo apt install python3-picamera2 python3-libcamera
+#   cd ~/code/drosophila_model
+#   python3 -m venv --system-site-packages .venv
+#   source .venv/bin/activate
+#   pip install -r requirements-rpi.txt
+#
+# The --system-site-packages flag is what lets the venv see the
+# apt-installed picamera2 / libcamera bindings, which can't be
+# pip-installed because they wrap C libraries shipped only via apt.
+# Sanity-check after activation:
+#
+#   python -c "from picamera2 import Picamera2; print(Picamera2.global_camera_info())"
+#
+# Then run the realtime streamer:
+#
+#   python analysis/realtime_stream.py \
+#       --model models/model_with_inputs/model.pt \
+#       --pipelined --no-apriltag \
+#       --source-mode picamera2 --left-src 0 --right-src 1 \
+#       --device cpu
+#
+# This requirements file is deliberately minimal and CPU-only:
+#   * No torchvision / torchaudio (unused on the streaming path).
+#   * No CUDA index URL: the default PyPI torch wheels for Linux
+#     aarch64 are already CPU-only, so plain `pip install torch`
+#     works on the Pi without any --index-url override.
+#   * No tomli / tomli-w: Bookworm's Python 3.11 has stdlib tomllib,
+#     and the streaming path doesn't write configs.
+#   * No matplotlib / pandas / pyarrow / imageio / imageio-ffmpeg /
+#     av / gdown / debugpy / pytest: only needed for training /
+#     analysis / dev workflows.
+#
+# Optional extras (uncomment as needed):
+#   # pupil-apriltags    # Only if you re-enable AprilTag tracking.
+#                        # AprilTag auto-disables when its module
+#                        # path isn't found on disk and there's also
+#                        # an explicit --no-apriltag flag, so most
+#                        # users won't need this on the Pi.
+#
+# picamera2 itself is intentionally NOT listed here because it must
+# be apt-installed to pull in the libcamera C bindings; pip-installing
+# picamera2 produces a non-functional install on Bookworm.
+
+torch
+numpy
+scipy
+h5py
+opencv-python
