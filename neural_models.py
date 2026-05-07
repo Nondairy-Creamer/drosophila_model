@@ -575,13 +575,7 @@ class NeuralModel(torch.nn.Module, ABC):
         self.num_transmitters = len(self.unique_transmitters)
         self.column_indices = column_indices
         self.column_phi_theta = column_phi_theta
-        left_phi_theta = column_phi_theta.copy()
-        left_phi_theta[:, 0] = -left_phi_theta[:, 0]
-        two_eye = np.concatenate((column_phi_theta, left_phi_theta), axis=0)
-        self.column_phi_theta_two_eyes = (
-            torch.tensor(two_eye[:, 0], device=self.device),
-            torch.tensor(two_eye[:, 1], device=self.device),
-        )
+        self.column_phi_theta_two_eyes = self._build_column_phi_theta_two_eyes(column_phi_theta)
         self.column_p_q = column_p_q
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
         self.register_buffer('steady_state', torch.zeros(self.num_neurons, device=self.device, dtype=self.dtype))
@@ -633,6 +627,22 @@ class NeuralModel(torch.nn.Module, ABC):
         y = radius * np.sin(theta) * np.sin(phi)
         z = radius * np.cos(theta)
         return np.stack((x, y, z), axis=1)
+
+    def _build_column_phi_theta_two_eyes(self, column_phi_theta):
+        """Build the (phi, theta) tuple covering both eyes for two-eye predict.
+
+        Default (single-eye connectome): mirror the right eye's phi to
+        synthesize the left eye, then concatenate along the column axis.
+        Subclasses whose connectome already contains both eyes (e.g.
+        ``WholeBrainCurrentModel``) override this to skip the mirror.
+        """
+        left_phi_theta = column_phi_theta.copy()
+        left_phi_theta[:, 0] = -left_phi_theta[:, 0]
+        two_eye = np.concatenate((column_phi_theta, left_phi_theta), axis=0)
+        return (
+            torch.tensor(two_eye[:, 0], device=self.device),
+            torch.tensor(two_eye[:, 1], device=self.device),
+        )
 
     @staticmethod
     def _preprocess_connectome(synapse_counts_coo, root_ids, cell_types,
@@ -1865,6 +1875,102 @@ class CurrentModel(NeuralModel):
         v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset_all_neurons[None, :])
 
         return v_next
+
+@_register_model_class
+class WholeBrainCurrentModel(CurrentModel):
+    """``CurrentModel`` variant for a connectome containing both eyes.
+
+    The synapse matrix already includes both hemispheres' neurons (with
+    non-overlapping ``column_indices``: right eye in ``0..C-1``, left eye
+    in ``C..2C-1``). Stimulus inputs are a single ``(B, T, 2*C)`` tensor
+    covering both eyes; one ``predict()`` call drives the whole brain.
+
+    Per-cell-type parameters (``persistence_logit``, ``input_strength_log``,
+    ``output_strength_log``, ``stimulus_strength_log``, ``offset``) are
+    shared across hemispheres exactly as in ``CurrentModel`` because they
+    are indexed by ``neuron_to_type_index`` and L1 (etc.) on either side
+    has the same cell-type label.
+
+    Differences from ``CurrentModel`` / ``NeuralModel``:
+    * ``column_phi_theta`` is taken as-is (already ``2*C`` entries with the
+      true viewing direction per eye); no left-eye phi mirroring.
+    * ``predict_two_eyes`` is disabled — both eyes go through ``predict()``.
+    * ``estimate_ego_motion_from_image`` runs a single forward pass over
+      the full ``(B, T, 2*C)`` input and never applies ``flip_for_left_eye``.
+    """
+
+    def _build_column_phi_theta_two_eyes(self, column_phi_theta):
+        return (
+            torch.tensor(column_phi_theta[:, 0], device=self.device),
+            torch.tensor(column_phi_theta[:, 1], device=self.device),
+        )
+
+    def predict_two_eyes(self, *args, **kwargs):
+        raise NotImplementedError(
+            "WholeBrainCurrentModel runs both eyes in a single predict() "
+            "call. Pass a single (B, T, 2*C) input to predict() instead."
+        )
+
+    def estimate_ego_motion_from_image(self, inputs, *,
+                                       initial_state=None,
+                                       initial_filter_state=None,
+                                       oob_columns=None,
+                                       cached_mappings=None,
+                                       terms=('rotation', 'trans')):
+        """Single-pass ego-motion from a both-eyes ``(B, T, 2*C)`` stimulus.
+
+        Returns ``(rotations, translations, result)`` where ``result`` is
+        the dict produced by ``predict()`` (analogous to the per-eye result
+        dicts returned by the parent's two-eye implementation, but for the
+        whole brain at once).
+        """
+        predict_kwargs = {}
+        if cached_mappings is not None:
+            predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
+            predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
+
+        S = inputs.shape[0]
+        result = self.predict(
+            inputs,
+            init_state=initial_state, init_filter_state=initial_filter_state,
+            **predict_kwargs,
+        )
+
+        flow_key = next(
+            (k for k, m in self._readout_modules.items()
+             if getattr(m, 'predicts_flow', False) and k in result['outputs']),
+            None,
+        )
+        if flow_key is None:
+            raise ValueError("No flow readout configured; cannot estimate ego motion.")
+
+        optic_flow = result['outputs'][flow_key]
+        # column_phi_theta already covers both eyes with their true viewing
+        # directions; no mirroring or flip_for_left_eye needed.
+        phi_tensor = torch.tensor(
+            self.column_phi_theta[:, 0], device=self.device, dtype=optic_flow.dtype,
+        )
+        theta_tensor = torch.tensor(
+            self.column_phi_theta[:, 1], device=self.device, dtype=optic_flow.dtype,
+        )
+
+        valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
+        if oob_columns is not None:
+            valid_mask = valid_mask & ~oob_columns
+        phi_valid = phi_tensor[valid_mask]
+        theta_valid = theta_tensor[valid_mask]
+
+        T_len = optic_flow.shape[1]
+        d_right = optic_flow[:, :, valid_mask, 0].reshape(S * T_len, -1)
+        d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
+
+        rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
+            phi_valid, theta_valid, d_right, d_up, terms=terms,
+        )
+        rotations = rot_flat.reshape(S, T_len, 3)
+        translations = trans_flat.reshape(S, T_len, 3)
+
+        return rotations, translations, result
 
 
 @_register_model_class
