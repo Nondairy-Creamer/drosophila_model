@@ -3241,4 +3241,3 @@ class ArbitraryModel(NeuralModel):
         v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (z + offset[None, :] + stim)
 
         return v_next
-

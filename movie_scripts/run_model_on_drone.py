@@ -52,6 +52,8 @@ def main() -> None:
                         help="Output directory (default: <model_folder>/drone_flow_movie)")
     parser.add_argument("--translation", action="store_true",
                         help="Plot rotation-adjusted (translation-only) flow instead of full flow")
+    parser.add_argument("--depth", action="store_true",
+                        help="Add a row showing estimated per-column depth (1/ρ) heatmap")
     args = parser.parse_args()
 
     model_path = Path(args.model_folder)
@@ -124,6 +126,16 @@ def main() -> None:
         t4_left = {k: fr_left[k][0].cpu().numpy() for k in t4_keys if k in fr_left}
         t5_right = {k: fr_right[k][0].cpu().numpy() for k in t5_keys if k in fr_right}
         t5_left = {k: fr_left[k][0].cpu().numpy() for k in t5_keys if k in fr_left}
+
+        nearness_right = None
+        nearness_left = None
+        if args.depth:
+            nearness_right, nearness_left = _estimate_depth_per_column(
+                model, right_res, left_res, decoder_key, oob, num_frames, N,
+            )
+            nearness_right, nearness_left = _mask_pole_columns(
+                nearness_right, nearness_left, pred_trans_np, model.column_phi_theta,
+            )
 
         if args.translation:
             pred_flow_right, pred_flow_left = _subtract_rotation_flow(
@@ -226,6 +238,8 @@ def main() -> None:
             step=step,
             model_dt=model_dt,
             flow_label=flow_label,
+            nearness_left=nearness_left,
+            nearness_right=nearness_right,
         )
 
 
@@ -360,6 +374,81 @@ def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
     print(f"  Saved integrated figure → {output_path}")
 
 
+def _estimate_depth_per_column(model, right_res, left_res, decoder_key,
+                               oob, num_frames, N):
+    """Run the ego-motion solver to recover per-column ρ_i = ‖T‖/Z_i (nearness),
+    and return it split per eye.
+
+    Columns excluded by the valid mask (NaN flow or out-of-FOV) are NaN.
+
+    Returns:
+        nearness_right, nearness_left: (T, N) numpy arrays of ρ_i ∝ 1/Z_i.
+    """
+    optic_flow_right = right_res["outputs"][decoder_key]   # (1, T, N, 2)
+    optic_flow_left = left_res["outputs"][decoder_key]
+    optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)  # (1, T, 2N, 2)
+
+    phi = model.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
+    theta = model.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
+
+    valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
+    if oob is not None:
+        valid_mask = valid_mask & ~oob
+
+    d_right = optic_flow[0, :num_frames, :, 0][:, valid_mask]
+    d_up = optic_flow[0, :num_frames, :, 1][:, valid_mask]
+
+    with torch.no_grad():
+        _, _, rho_valid = model.estimate_ego_motion_from_flow(
+            phi[valid_mask], theta[valid_mask], d_right, d_up,
+        )
+
+    rho_full = torch.full(
+        (num_frames, 2 * N), float("nan"),
+        device=rho_valid.device, dtype=rho_valid.dtype,
+    )
+    rho_full[:, valid_mask] = rho_valid
+    rho_np = rho_full.cpu().numpy()
+    return rho_np[:, :N], rho_np[:, N:]
+
+
+def _mask_pole_columns(nearness_right, nearness_left, pred_trans,
+                       column_phi_theta, threshold=0.1):
+    """NaN-out columns within the focus of expansion/contraction cone.
+
+    Mirrors the per-frame mask used inside ``_estimate_translation_from_flow``
+    when aggregating ρ into a scalar: drops columns where
+    ``‖Π_i t̂‖² = 1 - (x_i · t̂)² ≤ threshold``.
+
+    Args:
+        nearness_right, nearness_left: (T, N) numpy arrays of ρ per eye.
+        pred_trans: (T, 3) predicted translation; only its direction is used.
+        column_phi_theta: (N, 2) right-eye column [phi, theta].
+        threshold: same default (0.1) as the algorithm's internal mask.
+    """
+    phi_r = column_phi_theta[:, 0]
+    theta = column_phi_theta[:, 1]
+    phi_l = -phi_r
+
+    def _viewdir(phi):
+        return np.stack([np.sin(theta) * np.cos(phi),
+                         np.sin(theta) * np.sin(phi),
+                         np.cos(theta)], axis=-1)
+    x_r = _viewdir(phi_r)
+    x_l = _viewdir(phi_l)
+
+    norm = np.linalg.norm(pred_trans, axis=-1, keepdims=True)
+    t_hat = pred_trans / np.where(norm > 1e-12, norm, 1.0)
+
+    cos_r = np.einsum('ni,ti->tn', x_r, t_hat)
+    cos_l = np.einsum('ni,ti->tn', x_l, t_hat)
+    valid_r = (1.0 - cos_r ** 2) > threshold
+    valid_l = (1.0 - cos_l ** 2) > threshold
+
+    return (np.where(valid_r, nearness_right, np.nan),
+            np.where(valid_l, nearness_left, np.nan))
+
+
 def _subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
     """Subtract rotation-induced flow, returning translation-only angular flow.
 
@@ -417,6 +506,7 @@ def _make_movie(
     output_path, frame_rate, step, model_dt,
     trail_sec=5.0,
     flow_label="predicted flow",
+    nearness_left=None, nearness_right=None,
 ):
     import matplotlib
     matplotlib.use("Agg")
@@ -431,12 +521,42 @@ def _make_movie(
 
     _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
     gray_cmap = plt.cm.gray
+    show_nearness = nearness_left is not None and nearness_right is not None
 
     def _masked_rgba(values, mask, norm):
         rgba = gray_cmap(norm(values))
         if mask is not None:
             rgba[~mask] = _MASK_COLOR
         return rgba
+
+    def _nearness_rgba(values, mask, norm):
+        valid = mask & np.isfinite(values)
+        rgba = np.empty((values.shape[0], 4))
+        rgba[:] = gray_cmap(norm(values))
+        rgba[~valid] = _MASK_COLOR
+        return rgba
+
+    def _nearness_norm_for_frame(t):
+        """Per-frame Normalize shared by both eyes, computed from finite,
+        in-FOV ρ values across both eyes."""
+        if not show_nearness:
+            return None
+        vL, vR = nearness_left[t], nearness_right[t]
+        mL = in_fov_left & np.isfinite(vL)
+        mR = in_fov_right & np.isfinite(vR)
+        parts = []
+        if mL.any():
+            parts.append(vL[mL])
+        if mR.any():
+            parts.append(vR[mR])
+        if parts:
+            v = np.concatenate(parts)
+            vmin, vmax = float(v.min()), float(v.max())
+        else:
+            vmin, vmax = 0.0, 1.0
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+        return mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     # --- Stimulus colour scale ---
     stim_min = min(np.nanmin(stimulus_left), np.nanmin(stimulus_right))
@@ -460,12 +580,20 @@ def _make_movie(
                if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
     arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
 
-    # --- Figure setup: 3 rows x 2 cols ---
-    fig, axes = plt.subplots(3, 2, figsize=(12.8, 12.8), dpi=100,
-                             gridspec_kw={"height_ratios": [3, 3, 2]})
-    ax_stim_l, ax_stim_r = axes[0]
-    ax_flow_l, ax_flow_r = axes[1]
-    ax_rot, ax_trans = axes[2]
+    # --- Figure setup: 3 (or 4 with nearness) rows x 2 cols ---
+    if show_nearness:
+        fig, axes = plt.subplots(4, 2, figsize=(12.8, 16.0), dpi=100,
+                                 gridspec_kw={"height_ratios": [3, 3, 3, 2]})
+        ax_stim_l, ax_stim_r = axes[0]
+        ax_flow_l, ax_flow_r = axes[1]
+        ax_near_l, ax_near_r = axes[2]
+        ax_rot, ax_trans = axes[3]
+    else:
+        fig, axes = plt.subplots(3, 2, figsize=(12.8, 12.8), dpi=100,
+                                 gridspec_kw={"height_ratios": [3, 3, 2]})
+        ax_stim_l, ax_stim_r = axes[0]
+        ax_flow_l, ax_flow_r = axes[1]
+        ax_rot, ax_trans = axes[2]
 
     setup_eye_axis(ax_stim_l, cell_x, cell_z, "left")
     setup_eye_axis(ax_stim_r, cell_x, cell_z, "right")
@@ -490,6 +618,25 @@ def _make_movie(
     ax_flow_l.set_title(f"Left Eye ({flow_label})")
     ax_flow_r.set_title(f"Right Eye ({flow_label})")
     add_eye_colorwheel(fig)
+
+    if show_nearness:
+        setup_eye_axis(ax_near_l, cell_x, cell_z, "left")
+        setup_eye_axis(ax_near_r, cell_x, cell_z, "right")
+        near_norm0 = _nearness_norm_for_frame(0)
+        sc_near_l = ax_near_l.scatter(
+            cell_x, cell_z, c=_nearness_rgba(nearness_left[0], in_fov_left, near_norm0),
+            s=90, edgecolors="none")
+        sc_near_r = ax_near_r.scatter(
+            cell_x, cell_z, c=_nearness_rgba(nearness_right[0], in_fov_right, near_norm0),
+            s=90, edgecolors="none")
+        ax_near_l.set_title("Left Eye (nearness ρ ∝ 1/Z)")
+        ax_near_r.set_title("Right Eye (nearness ρ ∝ 1/Z)")
+        near_sm = plt.cm.ScalarMappable(cmap=gray_cmap, norm=near_norm0)
+        near_sm.set_array([])
+        near_cbar = fig.colorbar(
+            near_sm, ax=ax_near_r, location="right",
+            shrink=0.85, pad=0.02, label="ρ ∝ 1/Z",
+        )
 
     # Row 2: rotation and translation (true vs predicted)
     rot_labels = ["roll", "pitch", "yaw"]
@@ -539,6 +686,13 @@ def _make_movie(
 
             update_eye_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag, "left")
             update_eye_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag, "right")
+
+            if show_nearness:
+                near_norm = _nearness_norm_for_frame(t)
+                sc_near_l.set_facecolors(_nearness_rgba(nearness_left[t], in_fov_left, near_norm))
+                sc_near_r.set_facecolors(_nearness_rgba(nearness_right[t], in_fov_right, near_norm))
+                near_sm.set_clim(vmin=near_norm.vmin, vmax=near_norm.vmax)
+                near_sm.changed()
 
             time_s = t * model_dt
             ax_stim_l.set_title(f"Left Eye (t={time_s:.2f}s)")
