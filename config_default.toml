@@ -61,11 +61,12 @@ expanding_dot_filter_std = 2.5
 
 [data]
 connectome_folder = "../connectome_data"
-fly_eye = "right"
-use_intrinsic = false
+# Eye coverage used by format_connectome_data.py when projecting hex columns
+# onto the sphere (Lambert-azimuthal max angle = pi/2 * hemisphere_coverage).
 hemisphere_coverage = 0.85
 normalize_rows = false
 synapse_count_threshold = 0
+# Cell types removed by format_connectome_data.py before baking the bundle.
 neurons_to_exclude = ['R1-6', 'R7', 'R8']
 excitatory_nt = [
     "ACH",

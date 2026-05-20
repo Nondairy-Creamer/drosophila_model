@@ -35,24 +35,24 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
     config["model"]["use_input_conv"] = use_input_conv
 
     connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
-    cell_info_df = pd.read_parquet(connectome_folder / "optic_lobes_cell_info.parquet")
-    synapse_counts_df = pd.read_parquet(connectome_folder / "optic_lobes_synapse_counts.parquet")
-    column_info_df = pd.read_parquet(connectome_folder / "optic_lobes_column_info.parquet")
+    cell_info_df = pd.read_parquet(connectome_folder / "cell_info.parquet")
+    synapses_df = pd.read_parquet(connectome_folder / "synapses.parquet")
 
     input_neurons = ["L1", "L2", "L3"]
     output_neurons = ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]
 
     if len(config["model"]["use_connectome_subset"]) > 0:
-        cell_info_df, synapse_counts_df = du.get_connectome_subset(
-            cell_info_df, synapse_counts_df, config["model"]["use_connectome_subset"]
+        cell_info_df, synapses_df = du.get_connectome_subset(
+            cell_info_df, synapses_df, config["model"]["use_connectome_subset"]
         )
         input_neurons = [i for i in input_neurons if i in config["model"]["use_connectome_subset"]]
         output_neurons = [i for i in output_neurons if i in config["model"]["use_connectome_subset"]]
 
     connectome = cl.load_connectome_from_dataframes(
-        cell_info_df, column_info_df, synapse_counts_df,
+        cell_info_df, synapses_df,
         areas=config["model"]["areas"],
         side=config["model"]["side"],
+        connectome_folder=str(connectome_folder),
     )
 
     model_class = nm.compose_model_class(

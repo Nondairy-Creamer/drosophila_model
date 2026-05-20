@@ -36,7 +36,7 @@ z = cos(theta)
 
 The model is of the **right eye** only. The right eye covers the right half
 of visual space (phi < 0). Column positions are stored as `(phi, theta)` in
-`optic_lobes_column_info.parquet` and represent right-eye viewing directions.
+`area_extras/optic_lobe_columns.parquet` and represent right-eye viewing directions.
 
 The **left eye** is the mirror image of the right eye. Its viewing directions
 are at `(-phi, theta)` — the same polar angle but with negated azimuth.

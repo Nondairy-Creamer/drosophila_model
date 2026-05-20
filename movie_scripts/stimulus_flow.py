@@ -88,7 +88,7 @@ def main() -> None:
 
     frame_rate = args.fps if args.fps else int(round(1.0 / config['model']['dt']))
 
-    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+    column_info_df = pd.read_parquet(connectome_folder / 'area_extras' / 'optic_lobe_columns.parquet')
     column_phi_theta = column_info_df[['phi', 'theta']].to_numpy()
 
     phi = column_phi_theta[:, 0]

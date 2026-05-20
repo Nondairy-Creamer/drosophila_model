@@ -574,8 +574,8 @@ def main():
                         help='Directory with batch-opt pose .npz files from drone_pose.py')
     parser.add_argument('--output-dir', type=str, default='../connectome_data',
                         help='Output directory for the .pt file')
-    parser.add_argument('--column-info', type=str, default='../connectome_data/optic_lobes_column_info.parquet',
-                        help='Path to column_info parquet with phi/theta')
+    parser.add_argument('--column-info', type=str, default='../connectome_data/area_extras/optic_lobe_columns.parquet',
+                        help='Path to optic-lobe column extras parquet with phi/theta')
     parser.add_argument('--filter-std', type=float, default=2.5,
                         help='Gaussian filter std in degrees for ommatidium sampling')
     parser.add_argument('--monocular', action='store_true',

@@ -597,6 +597,7 @@ class ConnectomeModel(BaseRnn):
         cdata = connectome
         self.areas = list(cdata.areas)
         self.side = cdata.side
+        self.connectome_folder = cdata.connectome_folder
 
         # Store the resolved ConnectomeData in init_inputs so saved
         # checkpoints are self-contained (no parquet path required to reload).
@@ -605,12 +606,14 @@ class ConnectomeModel(BaseRnn):
 
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
         (
-            root_ids, cell_types, neurotransmitters, column_indices,
-            area_per_neuron, side_per_neuron, synapse_counts_coo,
+            root_ids, cell_types, neurotransmitters,
+            area_per_neuron, side_per_neuron, per_neuron_extras,
+            synapse_counts_coo,
         ) = self._preprocess_connectome(
             cdata.synapse_counts_coo, cdata.root_ids, cdata.cell_types,
-            cdata.neurotransmitters, cdata.column_indices,
+            cdata.neurotransmitters,
             cdata.area_per_neuron, cdata.side_per_neuron,
+            cdata.per_neuron_extras,
             valid_neurotransmitters, count_threshold,
         )
 
@@ -627,13 +630,15 @@ class ConnectomeModel(BaseRnn):
         self.unique_transmitters = np.unique(self.transmitters)
         self.num_transmitters = len(self.unique_transmitters)
 
-        self.column_indices = column_indices
-        self.column_phi_theta = cdata.column_phi_theta
-        self.column_p_q = cdata.column_p_q
-        self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
-
         self.area_per_neuron = area_per_neuron
         self.side_per_neuron = side_per_neuron
+        # Universal per-neuron extras forwarded from the bundle. The
+        # optic-lobe column index lives here; future areas may add their own.
+        self.per_neuron_extras = per_neuron_extras
+        self.column_indices_per_neuron = per_neuron_extras.get(
+            'column_index',
+            np.full(self.num_neurons, np.nan),
+        )
 
         self.register_buffer(
             'steady_state',
@@ -669,11 +674,53 @@ class ConnectomeModel(BaseRnn):
                 device=self.device, dtype=self.dtype,
             )
 
+        # Regions read their own area_extras and own per-area geometry (e.g.
+        # OpticLobeRegion.column_phi_theta / column_p_q). Build them before
+        # readouts + input_conv because those legacy components ask the model
+        # for column_p_q / column_phi_theta, which delegate to the optic-lobe
+        # region via @property.
+        self.regions = regions_mod.build_regions(self)
+
         self._initialize_readouts()
         if self.use_input_conv:
+            if self.column_p_q is None:
+                raise RuntimeError(
+                    "use_input_conv=True requires the 'optic_lobe' region; "
+                    "either include 'optic_lobe' in areas or disable use_input_conv."
+                )
             self._initialize_input_conv(self.column_p_q)
 
-        self.regions = regions_mod.build_regions(self)
+    # ------------------------------------------------------------------
+    # Visual-column delegators (currently sourced from OpticLobeRegion)
+    # ------------------------------------------------------------------
+
+    @property
+    def column_phi_theta(self):
+        """``(num_columns, 2)`` (phi, theta) per column, or None.
+
+        Delegates to ``self.regions['optic_lobe']`` for backward-compat with
+        analysis scripts and the visual readouts.
+        """
+        region = self.regions.get('optic_lobe') if hasattr(self, 'regions') else None
+        return region.column_phi_theta if region is not None else None
+
+    @property
+    def column_p_q(self):
+        """``(num_columns, 2)`` hex p,q coords per column, or None."""
+        region = self.regions.get('optic_lobe') if hasattr(self, 'regions') else None
+        return region.column_p_q if region is not None else None
+
+    @property
+    def column_indices(self):
+        """``(num_neurons,)`` per-neuron column index (NaN where unassigned)."""
+        return self.column_indices_per_neuron
+
+    @property
+    def num_columns(self):
+        region = self.regions.get('optic_lobe') if hasattr(self, 'regions') else None
+        if region is None:
+            return 0
+        return len(region.column_indices)
 
     # ------------------------------------------------------------------
     # Connectome preprocessing
@@ -681,8 +728,9 @@ class ConnectomeModel(BaseRnn):
 
     @staticmethod
     def _preprocess_connectome(synapse_counts_coo, root_ids, cell_types,
-                               neurotransmitters, column_indices,
+                               neurotransmitters,
                                area_per_neuron, side_per_neuron,
+                               per_neuron_extras,
                                valid_neurotransmitters, count_threshold):
         """Filter the raw connectome and convert root IDs to matrix indices.
 
@@ -692,9 +740,9 @@ class ConnectomeModel(BaseRnn):
           3. Remove connections involving removed neurons.
           4. Remove neurons with no remaining connections.
 
-        All per-neuron arrays (including ``area_per_neuron`` and
-        ``side_per_neuron``) are reduced in lockstep. ``synapse_counts_coo``
-        is rewritten from root-ID space into matrix-index space.
+        All per-neuron arrays (including everything in ``per_neuron_extras``)
+        are reduced in lockstep. ``synapse_counts_coo`` is rewritten from
+        root-ID space into matrix-index space.
         """
         import pandas as pd
 
@@ -722,17 +770,20 @@ class ConnectomeModel(BaseRnn):
         root_ids = root_ids[valid_neurons]
         cell_types = cell_types[valid_neurons]
         neurotransmitters = neurotransmitters[valid_neurons]
-        column_indices = column_indices[valid_neurons]
         area_per_neuron = area_per_neuron[valid_neurons]
         side_per_neuron = side_per_neuron[valid_neurons]
+        per_neuron_extras = {
+            k: np.asarray(v)[valid_neurons] for k, v in per_neuron_extras.items()
+        }
 
         root_id_index = pd.Index(root_ids)
         pre_idx = root_id_index.get_indexer(synapse_counts_coo[:, 0])
         post_idx = root_id_index.get_indexer(synapse_counts_coo[:, 1])
         synapse_counts_coo = np.column_stack([pre_idx, post_idx, synapse_counts_coo[:, 2]])
 
-        return (root_ids, cell_types, neurotransmitters, column_indices,
-                area_per_neuron, side_per_neuron, synapse_counts_coo)
+        return (root_ids, cell_types, neurotransmitters,
+                area_per_neuron, side_per_neuron, per_neuron_extras,
+                synapse_counts_coo)
 
     # ------------------------------------------------------------------
     # Readouts

@@ -98,7 +98,7 @@ def main() -> None:
     output_folder = Path(args.output_dir)
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    column_info_df = pd.read_parquet(connectome_folder / "optic_lobes_column_info.parquet")
+    column_info_df = pd.read_parquet(connectome_folder / "area_extras" / "optic_lobe_columns.parquet")
     column_phi_theta = column_info_df[["phi", "theta"]].to_numpy()
 
     model_dt = config["model"]["dt"]

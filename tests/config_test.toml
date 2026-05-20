@@ -43,8 +43,6 @@ temporal_frequencies = [
 
 [data]
 connectome_folder = "../connectome_data"
-fly_eye = "right"
-use_intrinsic = false
 hemisphere_coverage = 0.85
 normalize_rows = false
 neurons_to_exclude = ['R1-6', 'R7', 'R8']

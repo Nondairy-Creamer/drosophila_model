@@ -1,23 +1,28 @@
-"""Standardized connectome loaders.
+"""Load slices of the canonical connectome bundle.
 
-Single entry point :func:`load_connectome` reads the connectome parquet bundle,
-filters by ``areas`` (e.g. ``['optic_lobe']``) and ``side`` (``'right'`` /
-``'left'`` / ``'both'``), and returns a :class:`ConnectomeData` dataclass
-holding everything :class:`neural_models.ConnectomeModel` needs to set itself
-up — including ``area_per_neuron`` and ``side_per_neuron`` arrays so the model
-can register one :class:`regions.RegionView` per requested area.
+The bundle is produced once by :mod:`format_connectome_data` and stored under
+``config['data']['connectome_folder']``:
 
-The brain is bilaterally symmetric, so ``side`` is a model-wide filter
-(applies to every bilateral region, not just the optic lobe).
+- ``cell_info.parquet`` — universal per-neuron table (``root_id, type,
+  neurotransmitter, area, side`` plus optional area-specific per-neuron
+  columns such as ``column_index``).
+- ``synapses.parquet`` — universal directed edges (``pre_root_id,
+  post_root_id, synapse_counts, nt_type``).
+- ``area_extras/<area>_*.parquet`` — per-area geometry / lookups, owned and
+  loaded by the corresponding :class:`regions.RegionView` subclass.
 
-Callers that already have the parquet ``DataFrame`` objects in memory (e.g.
-analysis scripts that filter to a subset of cell types first) can skip the
-parquet round-trip and use :func:`load_connectome_from_dataframes` instead.
+:func:`load_connectome` reads ``cell_info.parquet`` + ``synapses.parquet``,
+filters by ``areas`` and ``side``, and returns a :class:`ConnectomeData`
+payload. The model and regions stay anatomy-agnostic about the bundle layout;
+any per-neuron column on ``cell_info.parquet`` outside the core set is
+forwarded verbatim via :attr:`ConnectomeData.per_neuron_extras` so that
+regions can claim what they need (e.g. ``OpticLobeRegion`` reads
+``column_index``).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -27,43 +32,44 @@ import pandas as pd
 import data_utilities as du
 
 
-# Default mapping from cell-info row to area, used when the parquet doesn't yet
-# carry an explicit 'area' column. The current bundle is entirely optic-lobe
-# right hemisphere, so every neuron gets ``'optic_lobe'`` by default. When the
-# whole-brain bundle lands and adds an 'area' column, this fallback becomes a
-# no-op.
-_DEFAULT_AREA = 'optic_lobe'
+_CORE_CELL_INFO_COLS = ('root_id', 'type', 'neurotransmitter', 'area', 'side')
 
 
 @dataclass
 class ConnectomeData:
-    """Standard connectome payload consumed by :class:`ConnectomeModel`.
+    """Universal connectome payload consumed by :class:`ConnectomeModel`.
+
+    Anatomy-agnostic: holds only fields that make sense for every brain area.
+    Per-area geometry (e.g. optic-lobe ``column_phi_theta``) is loaded by the
+    corresponding :class:`regions.RegionView` subclass straight from the
+    on-disk bundle at ``connectome_folder / 'area_extras'``.
 
     Fields:
         synapse_counts_coo: ``(E, 3)`` int64 — ``[pre_root_id, post_root_id, count]``.
         root_ids: ``(N,)`` int64 — per-neuron root IDs.
-        cell_types: ``(N,)`` object/str — per-neuron cell type label.
-        neurotransmitters: ``(N,)`` object/str.
-        column_indices: ``(N,)`` float — column index per neuron (NaN allowed).
-        column_phi_theta: ``(num_columns, 2)`` float — ``(phi, theta)`` per column.
-        column_p_q: optional ``(num_columns, 2)`` int64 — hex p,q coords.
-        area_per_neuron: ``(N,)`` object/str — area name each neuron belongs to.
-        side_per_neuron: ``(N,)`` object/str — ``'right'`` / ``'left'`` / ``'central'``.
+        cell_types: ``(N,)`` str — per-neuron cell type label.
+        neurotransmitters: ``(N,)`` str.
+        area_per_neuron: ``(N,)`` str — area name each neuron belongs to.
+        side_per_neuron: ``(N,)`` str — ``'right'`` / ``'left'`` / etc.
+        per_neuron_extras: dict of non-core per-neuron columns from
+            ``cell_info.parquet`` (each value an ``(N,)`` array aligned with
+            ``root_ids``). Today the only entry is ``'column_index'`` for
+            optic-lobe neurons.
         areas: list of area names actually present (input filter).
         side: side filter applied at load (``'right'`` / ``'left'`` / ``'both'``).
+        connectome_folder: bundle path; regions use it to find ``area_extras``.
     """
 
     synapse_counts_coo: np.ndarray
     root_ids: np.ndarray
     cell_types: np.ndarray
     neurotransmitters: np.ndarray
-    column_indices: np.ndarray
-    column_phi_theta: np.ndarray
-    column_p_q: Optional[np.ndarray]
     area_per_neuron: np.ndarray
     side_per_neuron: np.ndarray
-    areas: list[str]
-    side: str
+    per_neuron_extras: dict[str, np.ndarray] = field(default_factory=dict)
+    areas: list[str] = field(default_factory=list)
+    side: str = 'both'
+    connectome_folder: str = ''
 
 
 def load_connectome(
@@ -72,68 +78,63 @@ def load_connectome(
     side: str = 'both',
     connectome_folder: Optional[str] = None,
 ) -> ConnectomeData:
-    """Load a multi-area slice of the connectome.
+    """Load a multi-area slice of the canonical connectome bundle.
 
     Args:
         areas: Area names to include, e.g. ``['optic_lobe']`` or
             ``['optic_lobe', 'antenna_lobe']``. Matched against the ``area``
-            column of ``*_cell_info.parquet`` (defaulted to ``'optic_lobe'``
-            when the column is absent).
-        side: ``'right'`` / ``'left'`` / ``'both'`` — filters bilateral regions
-            by the ``side`` column. ``'both'`` keeps every side, including
-            non-bilateral (e.g. central-brain) neurons.
+            column of ``cell_info.parquet``.
+        side: ``'right'`` / ``'left'`` / ``'both'``. Filters bilateral
+            regions by the ``side`` column. ``'both'`` keeps every side,
+            including non-bilateral (e.g. central-brain) neurons.
         connectome_folder: Override the data folder. Defaults to
             ``config['data']['connectome_folder']``.
     """
-    if not areas:
-        raise ValueError("`areas` must be a non-empty list of area names.")
-    if side not in ('right', 'left', 'both'):
-        raise ValueError(f"side must be 'right'|'left'|'both', got {side!r}")
-
     if connectome_folder is None:
         connectome_folder = du.load_config()['data']['connectome_folder']
     folder = Path(connectome_folder)
 
-    cell_info_df, column_info_df, synapse_counts_df = _read_parquets(folder)
+    cell_info_df = pd.read_parquet(folder / 'cell_info.parquet')
+    synapses_df = pd.read_parquet(folder / 'synapses.parquet')
 
     return load_connectome_from_dataframes(
-        cell_info_df, column_info_df, synapse_counts_df,
-        areas=areas, side=side,
+        cell_info_df, synapses_df,
+        areas=areas, side=side, connectome_folder=str(folder),
     )
 
 
 def load_connectome_from_dataframes(
     cell_info_df: pd.DataFrame,
-    column_info_df: pd.DataFrame,
-    synapse_counts_df: pd.DataFrame,
+    synapses_df: pd.DataFrame,
     *,
     areas: list[str],
     side: str = 'both',
+    connectome_folder: str = '',
 ) -> ConnectomeData:
-    """Filter pre-loaded parquet DataFrames by ``areas`` + ``side`` and wrap them
-    into a :class:`ConnectomeData`.
+    """Build a :class:`ConnectomeData` from already-loaded DataFrames.
 
-    Useful for analysis scripts that already filtered cell types via
-    ``data_utilities.get_connectome_subset`` before calling this.
+    Useful for analysis scripts that filtered cell types via
+    :func:`data_utilities.get_connectome_subset` before calling this.
+    ``connectome_folder`` should still point at the on-disk bundle so that
+    region subclasses can find their ``area_extras`` files.
     """
     if not areas:
         raise ValueError("`areas` must be a non-empty list of area names.")
     if side not in ('right', 'left', 'both'):
         raise ValueError(f"side must be 'right'|'left'|'both', got {side!r}")
-
-    cell_info_df = cell_info_df.copy()
-
-    if 'area' not in cell_info_df.columns:
-        cell_info_df['area'] = _DEFAULT_AREA
-    if 'side' not in cell_info_df.columns:
-        cell_info_df['side'] = 'right'
+    for col in _CORE_CELL_INFO_COLS:
+        if col not in cell_info_df.columns:
+            raise ValueError(
+                f"cell_info is missing required column {col!r}. "
+                f"Re-run format_connectome_data.py to regenerate the bundle."
+            )
 
     area_mask = cell_info_df['area'].isin(areas)
     if side == 'both':
         side_mask = np.ones(len(cell_info_df), dtype=bool)
     else:
-        # Keep matched bilateral side + anything labelled as non-lateralised.
-        side_mask = cell_info_df['side'].isin([side, 'central', None])
+        # Keep matched bilateral side plus anything non-lateralised.
+        side_mask = cell_info_df['side'].isin([side, 'central', 'left,right', None])
     keep = area_mask & side_mask
     if not keep.any():
         raise ValueError(
@@ -144,12 +145,16 @@ def load_connectome_from_dataframes(
     cell_info_df = cell_info_df[keep].reset_index(drop=True)
 
     kept_ids = set(cell_info_df['root_id'].to_numpy().tolist())
-    syn = synapse_counts_df
-    syn = syn[syn['pre_root_id'].isin(kept_ids) & syn['post_root_id'].isin(kept_ids)]
+    syn = synapses_df[
+        synapses_df['pre_root_id'].isin(kept_ids)
+        & synapses_df['post_root_id'].isin(kept_ids)
+    ]
 
-    column_p_q = None
-    if 'p' in column_info_df.columns and 'q' in column_info_df.columns:
-        column_p_q = column_info_df[['p', 'q']].to_numpy()
+    extras = {
+        col: cell_info_df[col].to_numpy()
+        for col in cell_info_df.columns
+        if col not in _CORE_CELL_INFO_COLS
+    }
 
     return ConnectomeData(
         synapse_counts_coo=syn[
@@ -158,23 +163,10 @@ def load_connectome_from_dataframes(
         root_ids=cell_info_df['root_id'].to_numpy(),
         cell_types=cell_info_df['type'].to_numpy(),
         neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
-        column_indices=cell_info_df['column_index'].to_numpy(),
-        column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
-        column_p_q=column_p_q,
         area_per_neuron=cell_info_df['area'].to_numpy(),
         side_per_neuron=cell_info_df['side'].to_numpy(),
+        per_neuron_extras=extras,
         areas=list(areas),
         side=side,
+        connectome_folder=connectome_folder,
     )
-
-
-def _read_parquets(folder: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Read the three connectome parquet files from ``folder``.
-
-    The current bundle uses the ``optic_lobes_*`` prefix. When the whole-brain
-    bundle lands with a different naming, add the dispatch here.
-    """
-    cell_info_df = pd.read_parquet(folder / 'optic_lobes_cell_info.parquet')
-    column_info_df = pd.read_parquet(folder / 'optic_lobes_column_info.parquet')
-    synapse_counts_df = pd.read_parquet(folder / 'optic_lobes_synapse_counts.parquet')
-    return cell_info_df, column_info_df, synapse_counts_df

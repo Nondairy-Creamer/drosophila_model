@@ -1,22 +1,27 @@
 """Region views: per-anatomical-area handles into a :class:`ConnectomeModel`.
 
-A region is a named subset of the model's neurons/columns that exposes
-area-specific operations. The model itself stays anatomy-agnostic; adding a
-new brain area means adding a new ``RegionView`` subclass and registering it
-under its area name. A single ``ConnectomeModel`` may host any combination of
-regions, picked at construction by the config ``areas`` list.
+A region is a named subset of the model's neurons that exposes area-specific
+operations *and* owns any area-specific on-disk data. The model itself stays
+anatomy-agnostic; adding a new brain area means adding a new
+``RegionView`` subclass, registering it under its area name, and (if the area
+has geometry) shipping an ``area_extras/<name>_*.parquet`` file that the
+region's ``_load_extras`` reads at construction time.
+
+A single ``ConnectomeModel`` may host any combination of regions, picked at
+construction by the config ``areas`` list.
 
 ``OpticLobeRegion`` covers both the single-eye case (mirror trick) and the
-two-eye case (column slicing) with the same API — chosen by the ``side``
-parameter handed to it at model build time (``'right'`` / ``'left'`` /
-``'both'``).
+two-eye case (column slicing) with the same API, chosen by the ``side``
+parameter the loader applied (``'right'`` / ``'left'`` / ``'both'``).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 
 if TYPE_CHECKING:
@@ -26,37 +31,37 @@ if TYPE_CHECKING:
 class RegionView:
     """A named subset of neurons inside a :class:`ConnectomeModel`.
 
-    Holds index arrays that select the region's neurons / columns out of the
-    model's flat tensors. Subclasses add area-specific methods.
-
     Attributes:
         name: Area name (e.g. ``'optic_lobe'``).
         model: Back-reference to the owning ``ConnectomeModel``.
         cell_indices: ``(N_r,)`` int64 — neuron indices into the model's flat
             ``num_neurons`` axis.
-        column_indices: ``(C_r,)`` int64 — column indices into the model's
-            ``num_columns`` axis (de-duplicated; ``-1``/``NaN`` columns dropped).
-        side: ``'right'`` / ``'left'`` / ``'both'`` — which sides of the
-            bilateral region are represented in this slice of the connectome.
+        side: ``'right'`` / ``'left'`` / ``'both'`` — sides of this bilateral
+            region represented in the loaded slice.
         num_sides: 1 if a single hemisphere was loaded, 2 if both.
     """
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
-                 cell_indices: np.ndarray, column_indices: np.ndarray,
-                 side: str):
+                 cell_indices: np.ndarray, side: str):
         if side not in ('right', 'left', 'both'):
             raise ValueError(f"side must be 'right'|'left'|'both', got {side!r}")
         self.name = name
         self.model = model
         self.cell_indices = cell_indices
-        self.column_indices = column_indices
         self.side = side
         self.num_sides = 2 if side == 'both' else 1
+        self._load_extras(Path(model.connectome_folder) / 'area_extras')
+
+    def _load_extras(self, extras_dir: Path) -> None:
+        """Override to read this region's ``area_extras/<name>_*.parquet`` file.
+
+        Default is a no-op for areas that don't need per-element geometry.
+        """
+        pass
 
     def __repr__(self):
         return (f"{type(self).__name__}(name={self.name!r}, side={self.side!r}, "
-                f"num_cells={len(self.cell_indices)}, "
-                f"num_columns={len(self.column_indices)})")
+                f"num_cells={len(self.cell_indices)})")
 
 
 # ---------------------------------------------------------------------------
@@ -65,38 +70,46 @@ class RegionView:
 
 
 class OpticLobeRegion(RegionView):
-    """Optic-lobe region; supports 1- or 2-eye operations with one API.
+    """Optic-lobe region. Owns the hex-grid column geometry.
 
-    Constructed with ``side`` = ``'right'`` / ``'left'`` / ``'both'`` reflecting
-    what the loader pulled in. ``predict_two_eyes`` and
-    ``estimate_ego_motion_from_image`` automatically pick the right
-    implementation:
+    On construction reads ``area_extras/optic_lobe_columns.parquet`` and
+    populates:
 
-    - ``num_sides == 1``: model only has one eye's columns. Two-eye operations
-      batch both inputs through the same column space (concat along batch),
-      and the left-eye flow readout is mirror-flipped to a shared frame.
-    - ``num_sides == 2``: model has both eyes' columns natively. Inputs are
-      stacked along the column axis and a single forward pass returns flow
-      for both eyes; outputs are split by column slicing.
+    - ``column_indices``: ``(C_r,)`` int64 — unique column indices present in
+      this slice of the connectome (de-duped from the per-neuron column index).
+    - ``column_phi_theta``: ``(C_r, 2)`` float — ``(phi, theta)`` per column,
+      ordered to match ``column_indices``.
+    - ``column_p_q``: ``(C_r, 2)`` int — hex lattice coords per column.
+    - ``column_phi_theta_two_eyes``: torch tensors used by
+      :meth:`predict_two_eyes` and :meth:`estimate_ego_motion_from_image`.
+      Single-side host mirrors phi for a virtual second eye; two-side host
+      uses native columns directly.
 
-    ``num_eyes`` is exposed as an alias for ``num_sides`` since the optic
-    lobe maps 1:1 onto eyes.
+    ``num_eyes`` is an alias for ``num_sides`` since the optic lobe maps 1:1
+    onto eyes.
     """
 
-    def __init__(self, *, name: str, model: 'ConnectomeModel',
-                 cell_indices: np.ndarray, column_indices: np.ndarray,
-                 side: str):
-        super().__init__(name=name, model=model,
-                         cell_indices=cell_indices, column_indices=column_indices,
-                         side=side)
+    def _load_extras(self, extras_dir: Path) -> None:
+        model = self.model
 
-        column_phi_theta = model.column_phi_theta
+        # Region-local set of unique column indices (drop NaNs from neurons
+        # without a column assignment, like the boundary cell types).
+        col_per_neuron = model.column_indices_per_neuron[self.cell_indices]
+        col_vals = col_per_neuron[~np.isnan(col_per_neuron)]
+        self.column_indices = np.unique(col_vals).astype(np.int64)
+
+        columns_df = pd.read_parquet(extras_dir / 'optic_lobe_columns.parquet')
+        columns_df = columns_df.set_index('column_index').loc[self.column_indices]
+
+        self.column_phi_theta = columns_df[['phi', 'theta']].to_numpy()
+        self.column_p_q = columns_df[['p', 'q']].to_numpy().astype(np.int64)
+
         if self.num_sides == 1:
-            mirror = column_phi_theta.copy()
+            mirror = self.column_phi_theta.copy()
             mirror[:, 0] = -mirror[:, 0]
-            two_eye = np.concatenate((column_phi_theta, mirror), axis=0)
+            two_eye = np.concatenate((self.column_phi_theta, mirror), axis=0)
         else:
-            two_eye = column_phi_theta
+            two_eye = self.column_phi_theta
         self.column_phi_theta_two_eyes = (
             torch.tensor(two_eye[:, 0], device=model.device),
             torch.tensor(two_eye[:, 1], device=model.device),
@@ -269,8 +282,8 @@ class OpticLobeRegion(RegionView):
                 if mod.eye_asymmetric:
                     optic_flow = mod.flip_for_left_eye(optic_flow.clone())
 
-            phi_np = model.column_phi_theta[:, 0].copy()
-            theta_np = model.column_phi_theta[:, 1].copy()
+            phi_np = self.column_phi_theta[:, 0].copy()
+            theta_np = self.column_phi_theta[:, 1].copy()
             if eye == 'left':
                 phi_np = -phi_np
             phi_tensor = torch.tensor(phi_np, device=model.device, dtype=optic_flow.dtype)
@@ -304,9 +317,9 @@ class OpticLobeRegion(RegionView):
 
 
 class AntennaLobeRegion(RegionView):
-    """Placeholder antenna-lobe region. Add olfactory-specific methods here
-    (glomerulus accessors, odor-response analysis) when antenna-lobe data
-    lands and the modeling work begins.
+    """Placeholder antenna-lobe region. Add olfactory-specific methods and
+    ``_load_extras`` to read e.g. ``area_extras/antenna_lobe_glomeruli.parquet``
+    when antenna-lobe data lands and modeling work begins.
     """
 
 
@@ -324,11 +337,9 @@ REGION_REGISTRY: dict[str, type[RegionView]] = {
 def build_regions(model: 'ConnectomeModel') -> dict[str, RegionView]:
     """Instantiate one ``RegionView`` per area present in ``model``'s connectome.
 
-    Uses ``model.area_per_neuron`` to assign neuron indices to areas, derives
-    each area's column index set from ``model.column_indices``, and constructs
-    the region class registered for that area name. Every region receives the
-    ``side`` filter the loader applied (``model.side``) so single-vs-both
-    hemisphere behaviour is uniform across regions.
+    Uses ``model.area_per_neuron`` to assign neuron indices to each registered
+    area. Each region's ``__init__`` calls ``_load_extras`` to ingest its own
+    on-disk data from ``model.connectome_folder/area_extras/``.
     """
     regions: dict[str, RegionView] = {}
     for area in sorted(set(model.area_per_neuron)):
@@ -338,13 +349,9 @@ def build_regions(model: 'ConnectomeModel') -> dict[str, RegionView]:
 
         cell_mask = (model.area_per_neuron == area)
         cell_idx = np.flatnonzero(cell_mask).astype(np.int64)
-        col_vals = model.column_indices[cell_mask]
-        col_vals = col_vals[~np.isnan(col_vals)]
-        col_idx = np.unique(col_vals).astype(np.int64)
 
         regions[area] = cls(
             name=area, model=model,
-            cell_indices=cell_idx, column_indices=col_idx,
-            side=model.side,
+            cell_indices=cell_idx, side=model.side,
         )
     return regions

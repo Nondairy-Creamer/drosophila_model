@@ -59,11 +59,42 @@ side          = 'right'                # 'right' | 'left' | 'both'
 ```
 
 The loader (`connectome_loading.load_connectome(areas=..., side=...)`) filters
-rows of the master parquet by these two fields, builds the
-`ConnectomeData`, and returns it for the model constructor to consume. The
-brain is bilaterally symmetric, so `side` is a model-wide filter that applies
-to every bilateral region (optic lobe, antenna lobe, mushroom body, …) — not
-just the eyes.
+rows of the master bundle by these two fields, builds the `ConnectomeData`,
+and returns it for the model constructor to consume. The brain is bilaterally
+symmetric, so `side` is a model-wide filter that applies to every bilateral
+region (optic lobe, antenna lobe, mushroom body, …) — not just the eyes.
+
+## Data layout
+
+The connectome bundle is baked once by `format_connectome_data.py` and lives
+under `config['data']['connectome_folder']`:
+
+```
+<connectome_folder>/
+├── cell_info.parquet                 # universal, one row per neuron
+│     columns: root_id, type, neurotransmitter, area, side, column_index
+│     (column_index = NaN for neurons without a hex-grid assignment)
+├── synapses.parquet                  # universal, one row per directed edge
+│     columns: pre_root_id, post_root_id, synapse_counts, nt_type
+└── area_extras/
+    └── optic_lobe_columns.parquet    # owned by OpticLobeRegion._load_extras
+          columns: column_index, phi, theta, p, q, x, y, z
+```
+
+Universal fields land on `ConnectomeData`; anything outside the core set
+(today: only `column_index`) is forwarded verbatim through
+`ConnectomeData.per_neuron_extras`. Per-area geometry is loaded by the
+corresponding `RegionView` subclass from `area_extras/`, so the model itself
+stays anatomy-agnostic. Visual-column accessors (`model.column_phi_theta`,
+`model.column_p_q`) are convenience `@property` delegators that pass through
+to `model.regions['optic_lobe']`.
+
+To add an area (e.g. antenna lobe):
+1. Append a section to `format_connectome_data.py` that writes more rows to
+   `cell_info.parquet` / `synapses.parquet` with `area = '<name>'` and (if
+   needed) `area_extras/<name>_*.parquet` files.
+2. Subclass `RegionView` in `regions.py`, override `_load_extras` to read
+   those files, and register it in `REGION_REGISTRY`.
 
 ---
 
@@ -73,17 +104,25 @@ Abstract base class for connectome-constrained recurrent neural networks. Handle
 
 ### Construction
 
-All constructor arguments are keyword-only. The main data inputs are:
+`ConnectomeModel` takes a single `connectome: ConnectomeData` (built via
+`connectome_loading.load_connectome(areas, side)`). The dataclass holds:
 
-| Argument | Description |
+| Field | Description |
 |---|---|
 | `synapse_counts_coo` | `(E, 3)` int64 array — `[pre_root_id, post_root_id, count]` per synapse |
 | `root_ids` | `(N,)` int64 array of neuron root IDs |
 | `cell_types` | `(N,)` string array of cell type labels |
 | `neurotransmitters` | `(N,)` string array of neurotransmitter labels per neuron |
-| `column_indices` | `(N,)` float array of column assignments (NaN = unassigned) |
-| `column_phi_theta` | `(C, 2)` array of column angular positions (azimuth, polar) |
-| `column_p_q` | `(C, 2)` int array of hex-lattice coordinates (needed for convolutions) |
+| `area_per_neuron` | `(N,)` string array of area names |
+| `side_per_neuron` | `(N,)` string array, one of `'right'`/`'left'`/`'central'` |
+| `per_neuron_extras` | dict of non-core per-neuron columns from `cell_info.parquet` (today: `'column_index'` only) |
+| `areas` | input filter |
+| `side` | input filter |
+| `connectome_folder` | path used by `RegionView._load_extras` to find `area_extras/` |
+
+Visual-column accessors (`model.column_phi_theta`, `model.column_p_q`,
+`model.num_columns`) are convenience `@property` delegators sourced from
+`model.regions['optic_lobe']` when that region is present.
 
 Key configuration arguments:
 

@@ -64,15 +64,14 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     side = config['model']['side']
 
     if len(config['model']['use_connectome_subset']) > 0:
-        # Connectome subset: load the parquet bundle, filter via DataFrame, then
-        # apply the areas/side filter through load_connectome_from_dataframes.
+        # Connectome subset: load the bundle, filter via DataFrame, then apply
+        # the areas/side filter through load_connectome_from_dataframes.
         connectome_folder = Path(config['data']['connectome_folder'])
-        cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-        synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-        column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+        cell_info_df = pd.read_parquet(connectome_folder / 'cell_info.parquet')
+        synapses_df = pd.read_parquet(connectome_folder / 'synapses.parquet')
 
-        cell_info_df, synapse_counts_df = du.get_connectome_subset(
-            cell_info_df, synapse_counts_df, config['model']['use_connectome_subset']
+        cell_info_df, synapses_df = du.get_connectome_subset(
+            cell_info_df, synapses_df, config['model']['use_connectome_subset']
         )
         input_neurons = [i for i in input_neurons if i in config['model']['use_connectome_subset']]
         output_neurons_direction = [
@@ -82,8 +81,9 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         output_neurons = [i for i in output_neurons if i in config['model']['use_connectome_subset']]
 
         connectome = cl.load_connectome_from_dataframes(
-            cell_info_df, column_info_df, synapse_counts_df,
+            cell_info_df, synapses_df,
             areas=areas, side=side,
+            connectome_folder=str(connectome_folder),
         )
     else:
         connectome = cl.load_connectome(

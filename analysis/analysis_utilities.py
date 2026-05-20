@@ -336,7 +336,7 @@ def load_viewing_directions(connectome_folder: str | Path | None = None):
     if connectome_folder is None:
         connectome_folder = Path(__file__).parent.parent / 'connectome_data'
     connectome_folder = Path(connectome_folder)
-    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+    column_info_df = pd.read_parquet(connectome_folder / 'area_extras' / 'optic_lobe_columns.parquet')
 
     theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)
     phi_half = torch.tensor(column_info_df['phi'].values, dtype=torch.float32)

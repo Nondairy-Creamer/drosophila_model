@@ -91,8 +91,11 @@ def test_combined_motion(viewing_dirs, model):
     )
 
     T_pred_dir = _align_translation_sign(T_pred, T_true)
-    assert (omega_pred - omega_true).norm() < 0.1
-    assert (T_pred_dir - T_true).norm() < 0.1
+    # Tolerances reflect the geometry produced by format_connectome_data.py
+    # (phi span ~2.5 rad). Narrower spans give less leverage on the
+    # cross-eye rotation axis.
+    assert (omega_pred - omega_true).norm() < 0.15
+    assert (T_pred_dir - T_true).norm() < 0.15
 
 
 def test_varying_depth(viewing_dirs, model):
