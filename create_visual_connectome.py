@@ -90,7 +90,7 @@ assert np.all(visual_neurons_indices >= 0), "Some model_root_ids not found in vi
 visual_neurons_df = visual_neurons_df.iloc[visual_neurons_indices]
 
 # save the root IDs and synapse counts to a data frame
-# the conversion from root IDs to matrix indices is done in NeuralModel.__init__
+# the conversion from root IDs to matrix indices is done in BaseRnn.__init__
 # root IDs are already int64, synapse_counts needs conversion from float64 to int64
 synapse_counts_df = pd.DataFrame({
     'pre_root_id': presynaptic_ids,

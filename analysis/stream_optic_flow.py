@@ -352,7 +352,7 @@ def main() -> int:
 
     model_path = resolve_existing_path(args.model)
     print(f"Loading model from {model_path}...")
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
     model.eval()
 
     if args.log_path is not None:

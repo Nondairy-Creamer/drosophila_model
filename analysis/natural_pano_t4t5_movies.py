@@ -45,7 +45,7 @@ def _exponential_highpass(block, dt, tau):
     return out
 
 
-def _aligned_column_geometry(model: nm.NeuralModel, n_cols: int):
+def _aligned_column_geometry(model: nm.BaseRnn, n_cols: int):
     """``column_phi_theta`` rows vs ``num_columns`` can differ by one; align for scatter/interp."""
     pt = np.asarray(model.column_phi_theta)
     if pt.shape[0] > n_cols:
@@ -158,7 +158,7 @@ def main() -> None:
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
-    model = nm.NeuralModel.load(model_folder / "model.pt")
+    model = nm.BaseRnn.load(model_folder / "model.pt")
 
     dt = model.dt
     print(f"dt: {dt}")

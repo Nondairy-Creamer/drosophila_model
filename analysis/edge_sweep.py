@@ -117,7 +117,7 @@ def main():
 
     model_folder = Path(args.model_folder)
     model_config = du.load_config(model_folder / "config.toml")
-    model = nm.NeuralModel.load(model_folder / "model.pt")
+    model = nm.BaseRnn.load(model_folder / "model.pt")
 
     dt = model_config["model"]["dt"]
     sample_phi = model.column_phi_theta[:, 0]

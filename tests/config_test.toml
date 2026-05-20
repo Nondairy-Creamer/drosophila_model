@@ -1,5 +1,6 @@
 [model]
-model_type = 'CurrentModel'
+model_type = 'OpticLobeRightRnn'
+dynamics_type = 'CurrentDynamics'
 device = "cpu"
 dtype = "float32"
 use_layer_norm = true

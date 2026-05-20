@@ -141,7 +141,7 @@ def run_drone_sweep(
     local_config = du.load_config()
 
     print(f"Loading model from {model_path}...")
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
     model.eval()
 
     model_dt = model.dt

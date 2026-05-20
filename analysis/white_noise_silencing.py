@@ -99,7 +99,7 @@ def main():
     model_folder = model_path.parent if model_path.is_file() else model_path
 
     print(f'Loading model from {model_path}...')
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
     model.eval()
 
     output_root = (Path(args.output_dir) if args.output_dir

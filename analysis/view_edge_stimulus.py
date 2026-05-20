@@ -151,7 +151,7 @@ def main():
 
     # ── Load model ────────────────────────────────────────────────────
     print(f"Loading model from {args.model} …")
-    model = nm.NeuralModel.load(args.model)
+    model = nm.BaseRnn.load(args.model)
     print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, "
           f"omega={model.get_omega():.4f}")
 

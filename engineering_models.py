@@ -5,24 +5,19 @@ still convolve over the columnar hex lattice using
 :class:`neural_models.NeuralModelConv` -- but they have no neurons,
 synapses, or recurrent dynamics.  Each forward pass is a pure
 feed-forward map over a fixed temporal window of input frames.
+
+Sister to :class:`neural_models.BaseRnn` rather than a subclass: ``ConvModel``
+shares only save/load infrastructure via :class:`SerializableModel`, since
+its stateless feed-forward semantics don't match the RNN's per-timestep
+``predict`` loop.
 """
 
 import torch
 
-from neural_models import NeuralModelConv
+from neural_models import NeuralModelConv, SerializableModel
 
 
-MODEL_CLASS_REGISTRY = {}
-
-
-def _register_model_class(model_cls):
-    """Register engineering model class for checkpoint dispatch."""
-    MODEL_CLASS_REGISTRY[model_cls.__name__] = model_cls
-    return model_cls
-
-
-@_register_model_class
-class ConvModel(torch.nn.Module):
+class ConvModel(SerializableModel, torch.nn.Module):
     """Stack of hex-grid convolutions over the last ``num_input_frames`` frames.
 
     Stateless: the caller supplies the temporal window (newest frame
@@ -56,6 +51,8 @@ class ConvModel(torch.nn.Module):
 
         if column_p_q is None:
             raise ValueError("ConvModel requires column_p_q for hex convolutions.")
+
+        self._save_init_inputs()
 
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype

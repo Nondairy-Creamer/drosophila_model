@@ -173,32 +173,23 @@ activation_overrides = {ct: 'relu' for ct in T4_types + T5_types}
 
 # ── Load connectome ───────────────────────────────────────────────────
 config = du.load_config('config.toml')
-connectome_folder = Path(config['data']['connectome_folder'])
+import connectome_loading as cl
+connectome = cl.load_connectome(
+    config['model'].get('connectome', 'optic_lobe_right'),
+    connectome_folder=config['data']['connectome_folder'],
+)
 
-cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-
-# raw synapse counts
-synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-# no R1-6 to R1-6
-#synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts_no_r16_to_r16.parquet')
+HandTunedModel = nm.compose_model_class('HandTunedDynamics', 'OpticLobeRightRnn')
 
 for name, operations in model_configs.items():
     print(f'Creating model: {name}')
     print(f'Operations: {operations}')
-    model = nm.HandTunedModel(
-        synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),
-        root_ids=cell_info_df['root_id'].to_numpy(),
-        cell_types=cell_info_df['type'].to_numpy(),
-        neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
-        column_indices=cell_info_df['column_index'].to_numpy(),
-        column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
-        column_p_q=column_info_df[['p', 'q']].to_numpy(),
+    model = HandTunedModel(
+        connectome=connectome,
         nonlinearity='Tanh',
         count_threshold=config['model']['synapse_count_threshold'],
         use_layer_norm=False,
         use_input_conv=False,
-        decoder_type='none',
         device=device,
         dtype=dtype,
         dt=dt,

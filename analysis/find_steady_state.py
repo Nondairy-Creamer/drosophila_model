@@ -29,7 +29,7 @@ def main() -> None:
     model_pt = model_path / "model.pt" if model_path.is_dir() else model_path
 
     print(f"Loading model from {model_pt} ...")
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
 
     model.find_steady_state(max_iter=25)
 

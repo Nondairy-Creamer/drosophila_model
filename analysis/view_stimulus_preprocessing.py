@@ -92,7 +92,7 @@ def main():
 
     # ── Load model (for geometry and dt only) ─────────────────────────
     print(f"Loading model from {args.model} …")
-    model = nm.NeuralModel.load(args.model)
+    model = nm.BaseRnn.load(args.model)
     sample_phi = model.column_phi_theta[:, 0]
     sample_theta = model.column_phi_theta[:, 1]
     dt = model.dt

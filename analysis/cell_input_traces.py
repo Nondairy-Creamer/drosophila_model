@@ -37,6 +37,7 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
 import data_utilities as du
+import dynamics_models as dm
 import neural_models as nm
 from stimulus_utilities import make_lr_edge, make_ud_edge, make_lr_sine_wave, make_ud_sine_wave
 
@@ -151,7 +152,7 @@ def generate_stimulus_sine(
     return sine_wave[None, :, :]
 
 
-def shared_columns_sorted_by_phi(model: nm.NeuralModel, input_cols: np.ndarray) -> List[int]:
+def shared_columns_sorted_by_phi(model: nm.BaseRnn, input_cols: np.ndarray) -> List[int]:
     """L1/L2/L3 shared column ids sorted by azimuth φ then column index."""
     uc = np.unique(input_cols).astype(int)
     phi_all = model.column_phi_theta[:, 0]
@@ -160,7 +161,7 @@ def shared_columns_sorted_by_phi(model: nm.NeuralModel, input_cols: np.ndarray) 
     return [t[0] for t in keyed]
 
 
-def neuron_index_at_column(model: nm.NeuralModel, column_id: int, cell_type: str) -> int:
+def neuron_index_at_column(model: nm.BaseRnn, column_id: int, cell_type: str) -> int:
     """Neuron index of *cell_type* at *column_id* (deterministic if multiple: smallest index)."""
     mask = (model.cell_types == cell_type) & (model.column_indices == column_id)
     hits = np.where(mask)[0]
@@ -172,7 +173,7 @@ def neuron_index_at_column(model: nm.NeuralModel, column_id: int, cell_type: str
 
 
 def resolve_same_column_t4_t5(
-    model: nm.NeuralModel,
+    model: nm.BaseRnn,
     input_cols: np.ndarray,
     column_offset: int,
 ) -> Tuple[int, int, int, int, int]:
@@ -194,7 +195,7 @@ def resolve_same_column_t4_t5(
     return col, t4_idx, t5_idx, middle_k, n
 
 
-def presynaptic_indices_all(model: nm.NeuralModel, post_idx: int) -> List[Tuple[str, int]]:
+def presynaptic_indices_all(model: nm.BaseRnn, post_idx: int) -> List[Tuple[str, int]]:
     """Return (cell_type, pre_neuron_index) for each unique presynaptic neuron onto *post_idx* (full COO)."""
     coo = model.synapse_counts_coo
     on_post = coo[coo[:, 1] == post_idx]
@@ -211,7 +212,7 @@ def presynaptic_indices_all(model: nm.NeuralModel, post_idx: int) -> List[Tuple[
     return out
 
 
-def trace_for_neuron(pred: dict, model: nm.NeuralModel, cell_type: str, neuron_idx: int) -> np.ndarray:
+def trace_for_neuron(pred: dict, model: nm.BaseRnn, cell_type: str, neuron_idx: int) -> np.ndarray:
     """Firing-rate time series (time,) for one neuron, from predict outputs."""
     ci = model.column_indices[neuron_idx]
     if np.isnan(ci):
@@ -220,9 +221,9 @@ def trace_for_neuron(pred: dict, model: nm.NeuralModel, cell_type: str, neuron_i
     return pred["firing_rate"][cell_type][0, :, col].detach().cpu().numpy()
 
 
-def _synapse_weight_post_pre(model: nm.NeuralModel, post_idx: int, pre_idx: int) -> float:
+def _synapse_weight_post_pre(model: nm.BaseRnn, post_idx: int, pre_idx: int) -> float:
     """Signed sparse weight W[post, pre] (same layout as ``torch.sparse.mm`` in ``forward``)."""
-    if isinstance(model, nm.ConductanceModel):
+    if isinstance(model, dm.ConductanceDynamics):
         nt = model.transmitters[pre_idx]
         ri = int(np.where(model.unique_transmitters == nt)[0][0])
         w = model.synapse_counts[ri]
@@ -237,17 +238,17 @@ def _synapse_weight_post_pre(model: nm.NeuralModel, post_idx: int, pre_idx: int)
     return float(val[m].sum().cpu().item())
 
 
-def postsynaptic_input_gain(model: nm.NeuralModel, post_idx: int) -> float:
+def postsynaptic_input_gain(model: nm.BaseRnn, post_idx: int) -> float:
     """Single scalar g_in for the postsynaptic neuron, applied to every presynaptic path."""
     with torch.no_grad():
         nti = model.neuron_to_type_index
         exp_in = model.input_strength_log.exp()
-        if isinstance(model, nm.ConductanceModel):
+        if isinstance(model, dm.ConductanceDynamics):
             return float(exp_in[:, nti[post_idx]].mean().cpu().item())
         return float(exp_in[nti[post_idx]].cpu().item())
 
 
-def postsynaptic_offset(model: nm.NeuralModel, post_idx: int) -> float:
+def postsynaptic_offset(model: nm.BaseRnn, post_idx: int) -> float:
     """Per-cell-type bias *b* in ``z + b``; 0 if the model has no ``offset``."""
     if not hasattr(model, "offset"):
         return 0.0
@@ -256,7 +257,7 @@ def postsynaptic_offset(model: nm.NeuralModel, post_idx: int) -> float:
         return float(model.offset[cti].cpu().item())
 
 
-def postsynaptic_persistence(model: nm.NeuralModel, post_idx: int) -> float:
+def postsynaptic_persistence(model: nm.BaseRnn, post_idx: int) -> float:
     """ρ = sigmoid(persistence_logit) for this cell type. If absent, return 0 so ``(1-ρ)=1``."""
     if not hasattr(model, "persistence_logit"):
         return 0.0
@@ -265,13 +266,13 @@ def postsynaptic_persistence(model: nm.NeuralModel, post_idx: int) -> float:
         return float(model.persistence_logit.sigmoid()[cti].cpu().item())
 
 
-def presynaptic_output_gain(model: nm.NeuralModel, pre_idx: int) -> float:
+def presynaptic_output_gain(model: nm.BaseRnn, pre_idx: int) -> float:
     """g_out for the presynaptic neuron’s cell type."""
     with torch.no_grad():
         return float(model.output_strength_log.exp()[model.neuron_to_type_index[pre_idx]].cpu().item())
 
 
-def presynaptic_path_scale(model: nm.NeuralModel, pre_idx: int, post_idx: int) -> float:
+def presynaptic_path_scale(model: nm.BaseRnn, pre_idx: int, post_idx: int) -> float:
     """``W(post,pre) * g_out(pre) * g_in(post)`` — no per-presynapse input row."""
     w = _synapse_weight_post_pre(model, post_idx, pre_idx)
     g_out = presynaptic_output_gain(model, pre_idx)
@@ -308,7 +309,7 @@ def run_t4_input_traces(
     *,
     stim_type: str,
     model_folder: Path,
-    model: nm.NeuralModel,
+    model: nm.BaseRnn,
     model_config: dict,
     column_offset: int,
     min_trace_peak: float,
@@ -851,7 +852,7 @@ def main() -> None:
 
     model_folder = Path(args.model_folder)
     model_config = du.load_config(model_folder / "config.toml")
-    model = nm.NeuralModel.load(model_folder / "model.pt")
+    model = nm.BaseRnn.load(model_folder / "model.pt")
 
     run_t4_input_traces(
         stim_type=args.stim_type,

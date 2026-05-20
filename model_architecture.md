@@ -6,7 +6,7 @@ Overview of the neural model classes in `neural_models.py`.
 
 ```
 torch.nn.Module
-├── NeuralModel (ABC)          Base class — connectome-constrained RNN
+├── BaseRnn (ABC)          Base class — connectome-constrained RNN
 │   ├── CurrentModel           Current-based synapse model
 │   └── ConductanceModel       Conductance-based synapse model
 ├── NeuralModelConv            Hex-grid spatial convolution
@@ -17,7 +17,7 @@ torch.nn.Module
 
 ---
 
-## NeuralModel (base class)
+## BaseRnn (base class)
 
 Abstract base class for connectome-constrained recurrent neural networks. Handles everything shared between synapse model variants: connectome ingestion, input processing, output decoding, simulation, serialization, and ego-motion estimation.
 
@@ -82,7 +82,7 @@ Subclasses must implement:
 |---|---|
 | `predict(inputs, ...)` | Run the full simulation loop. Returns per-cell-type voltage/firing-rate traces, optional decoder output, and final state. |
 | `find_steady_state(...)` | Iterate the model with zero input until state converges; stores result in `self.steady_state`. |
-| `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` dispatches to the correct subclass via `MODEL_CLASS_REGISTRY`. |
+| `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` re-composes the concrete class from the saved `model_type` (anatomy) and `dynamics_type` (mixin) strings via `compose_model_class`. |
 | `silence_neurons(names)` | Zero the input and output strength of specified cell types (for lesion experiments). |
 | `get_shared_columns(neuron_list)` | Find columns that contain all specified cell types; returns neuron and column index arrays. |
 | `estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline: run both eyes through the model, decode optic flow, then solve for rotation and translation. |

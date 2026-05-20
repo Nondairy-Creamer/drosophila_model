@@ -8,6 +8,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+import connectome_loading as cl
 import data_utilities as du
 import neural_models as nm
 
@@ -48,17 +49,18 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
         input_neurons = [i for i in input_neurons if i in config["model"]["use_connectome_subset"]]
         output_neurons = [i for i in output_neurons if i in config["model"]["use_connectome_subset"]]
 
-    model_type = config["model"].get("model_type")
-    model_class = getattr(nm, model_type)
+    connectome = cl.load_connectome_from_dataframes(
+        cell_info_df, column_info_df, synapse_counts_df,
+        name='optic_lobe_right', is_single_eye=True,
+    )
+
+    model_class = nm.compose_model_class(
+        dynamics_type=config["model"]["dynamics_type"],
+        model_type=config["model"]["model_type"],
+    )
 
     model = model_class(
-        synapse_counts_coo=synapse_counts_df[["pre_root_id", "post_root_id", "synapse_counts"]].to_numpy(),
-        root_ids=cell_info_df["root_id"].to_numpy(),
-        cell_types=cell_info_df["type"].to_numpy(),
-        neurotransmitters=cell_info_df["neurotransmitter"].to_numpy(),
-        column_indices=cell_info_df["column_index"].to_numpy(),
-        column_phi_theta=column_info_df[["phi", "theta"]].to_numpy(),
-        column_p_q=column_info_df[["p", "q"]].to_numpy(),
+        connectome=connectome,
         nonlinearity=config["model"]["nonlinearity"],
         count_threshold=config["model"]["synapse_count_threshold"],
         device=config["model"]["device"],

@@ -134,7 +134,7 @@ def main():
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
-    model = nm.NeuralModel.load(model_folder / "model_init.pt")
+    model = nm.BaseRnn.load(model_folder / "model_init.pt")
     model.eval()
 
     output_dir = (Path(args.output_dir) if args.output_dir

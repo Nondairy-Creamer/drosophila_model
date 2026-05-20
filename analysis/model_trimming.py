@@ -30,7 +30,7 @@ loss_threshold = 1.10  # Stop when loss increases to 110% of starting value (10%
 
 # --- Load the model ---
 print("Loading model...")
-model = nm.NeuralModel.load(model_path)
+model = nm.BaseRnn.load(model_path)
 device = model.device
 print('running on', device)
 dtype = model.dtype
@@ -135,7 +135,7 @@ print(f"Eligible cell types for silencing: {len(candidates)}")
 def evaluate_silencing(count):
     """Silence the `count` least-important candidates and return the loss ratio."""
     silenced = candidates[:count]
-    model_copy = nm.NeuralModel.load(model_path)
+    model_copy = nm.BaseRnn.load(model_path)
     model_copy.silence_neurons(silenced, invert_silencing=False)
     with torch.no_grad():
         loss = compute_loss(model_copy, stimulus).item()

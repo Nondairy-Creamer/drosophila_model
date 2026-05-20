@@ -105,7 +105,7 @@ def main() -> None:
 
     # --- Load inputs and targets ---
     print(f"Loading model from {model_path} ...")
-    model = nm.NeuralModel.load(model_path, device=args.device)
+    model = nm.BaseRnn.load(model_path, device=args.device)
     model.eval()
     device = model.device
 

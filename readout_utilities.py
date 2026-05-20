@@ -1,4 +1,4 @@
-"""Readout and regularizer modules for NeuralModel.
+"""Readout and regularizer modules for BaseRnn.
 
 **Readouts** are ``torch.nn.Module`` subclasses with two class-level attributes:
 
@@ -13,7 +13,7 @@ input and return a scalar loss term.  They are skipped when the model is in
 eval mode.
 
 Both are listed in the config ``readouts`` key and discovered automatically by
-``NeuralModel`` — no registry to update.
+``BaseRnn`` — no registry to update.
 """
 
 import numpy as np

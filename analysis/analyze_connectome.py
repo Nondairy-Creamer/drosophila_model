@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import numpy as np
 import pandas as pd
 import data_utilities as du
+import connectome_loading as cl
 from matplotlib import pyplot as plt
 import neural_models as nm
 
@@ -13,19 +14,13 @@ import neural_models as nm
 # Load configuration from TOML file
 config = du.load_config()
 
-# --- Initialize a CurrentModel from parquet data ---
-connectome_folder = Path(config['data']['connectome_folder'])
-cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-
-model = nm.CurrentModel(
-    synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),
-    root_ids=cell_info_df['root_id'].to_numpy(),
-    cell_types=cell_info_df['type'].to_numpy(),
-    neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
-    column_indices=cell_info_df['column_index'].to_numpy(),
-    column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
+# --- Initialize a current-based model from the standardised connectome loader ---
+ModelClass = nm.compose_model_class('CurrentDynamics', 'OpticLobeRightRnn')
+model = ModelClass(
+    connectome=cl.load_connectome(
+        config['model'].get('connectome', 'optic_lobe_right'),
+        connectome_folder=config['data']['connectome_folder'],
+    ),
     device='cpu',
     init_new_model=False,  # Skip steady state finding for analysis
 )

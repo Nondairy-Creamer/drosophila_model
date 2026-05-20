@@ -61,7 +61,7 @@ def main() -> None:
     local_config = du.load_config()
 
     print(f"Loading model from {model_path}...")
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
     model.eval()
 
     model_dt = model.dt
@@ -452,7 +452,7 @@ def _mask_pole_columns(nearness_right, nearness_left, pred_trans,
 def _subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
     """Subtract rotation-induced flow, returning translation-only angular flow.
 
-    Uses the same decomposition as NeuralModel.estimate_ego_motion_from_flow:
+    Uses the same decomposition as BaseRnn.estimate_ego_motion_from_flow:
         u_rot = x × omega
         d_right_rot = -(u_rot · e_phi),  d_up_rot = -(u_rot · e_theta)
 

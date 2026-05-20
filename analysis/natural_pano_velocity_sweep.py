@@ -125,7 +125,7 @@ def main():
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
-    model = nm.NeuralModel.load(model_folder / "model.pt")
+    model = nm.BaseRnn.load(model_folder / "model.pt")
 
     dt = model.dt
     print(f"dt: {dt}")

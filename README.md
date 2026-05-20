@@ -28,7 +28,7 @@ Both scripts read parameters from `config.toml` (lives in the `connectome_data` 
 | `run_model.py` | Entry point — loads config, builds model, generates stimulus, runs training loop |
 | `submit_runs.py` | Multi-GPU launcher — distributes `run_model.py` jobs across GPUs with different seeds |
 | `continue_training.py` | Resume training from a saved checkpoint |
-| `neural_models.py` | Model definitions (`NeuralModel`, `CurrentModel`, etc.) — connectome-constrained RNNs with decoders (see [model_architecture.md](model_architecture.md)) |
+| `neural_models.py` | Model definitions (`BaseRnn`, `CurrentModel`, etc.) — connectome-constrained RNNs with decoders (see [model_architecture.md](model_architecture.md)) |
 | `training_utilities.py` | Training loop, gradient updates, checkpointing |
 | `loss_functions.py` | Loss functions (MSE, correlation, cosine, combined) |
 | `stimulus_utilities.py` | Stimulus generation — random panoramas, sine gratings, drone footage, optic flow computation |

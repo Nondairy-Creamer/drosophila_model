@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 import plotting_utilities as pu
 import neural_models as nm
+import connectome_loading as cl
 import data_utilities as du
 from datetime import datetime
 import training_utilities as tu
@@ -54,27 +55,46 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         model_save_folder = Path('models/' + timestamp)
     model_save_folder.mkdir(parents=True, exist_ok=True)
 
-    # --- load in connectivity and cell info data ---
-    connectome_folder = Path(config['data']['connectome_folder'])
-    cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
-    synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
-    column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
-
-    # first generate the information about the columns - their location and ID
-    # we'll use the columns that have all our input and output neurons
+    # --- pick input/output neurons for the configured connectome subset ---
     input_neurons = ['L1', 'L2', 'L3']
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
     if len(config['model']['use_connectome_subset']) > 0:
-        cell_info_df, synapse_counts_df = du.get_connectome_subset(cell_info_df, synapse_counts_df, config['model']['use_connectome_subset'])
+        # Connectome subset: load the parquet bundle, filter via DataFrame, then
+        # wrap into a standard ConnectomeData. (load_connectome doesn't know
+        # about subsets.)
+        connectome_folder = Path(config['data']['connectome_folder'])
+        cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
+        synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
+        column_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_column_info.parquet')
+
+        cell_info_df, synapse_counts_df = du.get_connectome_subset(
+            cell_info_df, synapse_counts_df, config['model']['use_connectome_subset']
+        )
         input_neurons = [i for i in input_neurons if i in config['model']['use_connectome_subset']]
-        output_neurons_direction = [output_neurons_direction[i] for i in range(len(output_neurons)) if output_neurons[i] in config['model']['use_connectome_subset']]
+        output_neurons_direction = [
+            output_neurons_direction[i] for i in range(len(output_neurons))
+            if output_neurons[i] in config['model']['use_connectome_subset']
+        ]
         output_neurons = [i for i in output_neurons if i in config['model']['use_connectome_subset']]
 
-    # Get model class from config
-    model_type = config['model'].get('model_type')
-    ModelClass = getattr(nm, model_type)
+        connectome = cl.load_connectome_from_dataframes(
+            cell_info_df, column_info_df, synapse_counts_df,
+            name=config['model'].get('connectome', 'optic_lobe_right'),
+            is_single_eye=True,
+        )
+    else:
+        connectome = cl.load_connectome(
+            config['model'].get('connectome', 'optic_lobe_right'),
+            connectome_folder=config['data']['connectome_folder'],
+        )
+
+    # Get model class from config: compose dynamics + anatomy at runtime.
+    ModelClass = nm.compose_model_class(
+        dynamics_type=config['model']['dynamics_type'],
+        model_type=config['model']['model_type'],
+    )
     
     # Get current git commit hash for provenance tracking
     commit_hash = mu.get_git_commit_hash()
@@ -85,7 +105,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     if model_path is not None:
         model_file = Path(model_path) / 'model.pt'
         print(f"Loading existing model from {model_file}")
-        model = nm.NeuralModel.load(model_file, device=str(device), freeze_params=False)
+        model = nm.BaseRnn.load(model_file, device=str(device), freeze_params=False)
         model.add_noise_to_parameters(model.init_std * 0.1)
         if model.dt != dt:
             print(f"Using model dt={model.dt} (config had dt={dt})")
@@ -93,13 +113,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             config['model']['dt'] = dt
     else:
         model = ModelClass(
-            synapse_counts_coo=synapse_counts_df[['pre_root_id', 'post_root_id', 'synapse_counts']].to_numpy(),
-            root_ids=cell_info_df['root_id'].to_numpy(),
-            cell_types=cell_info_df['type'].to_numpy(),
-            neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
-            column_indices=cell_info_df['column_index'].to_numpy(),
-            column_phi_theta=column_info_df[['phi', 'theta']].to_numpy(),
-            column_p_q=column_info_df[['p', 'q']].to_numpy(),
+            connectome=connectome,
             nonlinearity=config['model']['nonlinearity'],
             count_threshold=config['model']['synapse_count_threshold'],
             use_layer_norm=config['model']['use_layer_norm'],

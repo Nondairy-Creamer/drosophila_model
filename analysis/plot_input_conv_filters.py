@@ -55,7 +55,7 @@ def main() -> None:
 
     model_path = Path(args.model_folder)
     model_pt = model_path / "model.pt" if model_path.is_dir() else model_path
-    model = nm.NeuralModel.load(model_pt, device="cpu")
+    model = nm.BaseRnn.load(model_pt, device="cpu")
     if not model.use_input_conv:
         raise ValueError("Model does not have input convolution enabled.")
 

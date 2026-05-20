@@ -81,7 +81,7 @@ def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
     """Run sine-wave temporal-frequency sweep and return per-cell mean rates.
 
     Args:
-        model: A loaded ``NeuralModel`` (already on the desired device and
+        model: A loaded ``BaseRnn`` (already on the desired device and
             in eval mode).
         silenced_neurons: Optional list of neuron names to silence.
             ``output_strength_log`` is saved and restored automatically.
@@ -360,7 +360,7 @@ def main():
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
-    model = nm.NeuralModel.load(model_folder / "model.pt")
+    model = nm.BaseRnn.load(model_folder / "model.pt")
     model.eval()
 
     output_dir = (Path(args.output_dir) if args.output_dir

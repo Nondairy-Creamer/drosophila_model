@@ -84,9 +84,9 @@ def prepare_xt(
 
 
 def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
-    """Apply :meth:`~neural_models.NeuralModel.apply_input_conv` at each time step.
+    """Apply :meth:`~neural_models.BaseRnn.apply_input_conv` at each time step.
 
-    Matches the input path inside :meth:`~neural_models.NeuralModel.predict` when
+    Matches the input path inside :meth:`~neural_models.BaseRnn.predict` when
     ``use_input_conv`` is True (spatial pre-filter, local contrast norm, temporal LRU).
 
     If ``model.use_input_conv`` is False, returns *inputs* unchanged.
@@ -190,7 +190,7 @@ def _apply_config_overrides(config: dict, overrides: dict | None) -> dict:
 
 
 def predict_optic_flow(
-    model: nm.NeuralModel, stimulus: torch.Tensor
+    model: nm.BaseRnn, stimulus: torch.Tensor
 ) -> torch.Tensor:
     """Run the model and return predicted optic flow."""
     flow_key = get_flow_key(model)
@@ -221,7 +221,7 @@ def run_model_on_stimuli(
     model_path = Path(model_path)
     model_folder = model_path.parent if model_path.is_file() else model_path
     config = du.load_config(model_folder / "config.toml")
-    model = nm.NeuralModel.load(model_path, device=device)
+    model = nm.BaseRnn.load(model_path, device=device)
 
     column_phi_theta = model.column_phi_theta
     column_xyz = model.get_column_xyz()

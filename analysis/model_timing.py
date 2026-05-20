@@ -58,7 +58,7 @@ def main() -> None:
 
     # --- Load model ---
     print(f"Loading model from {model_path}...")
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
     if args.device is not None:
         model = model.to(torch.device(args.device))
     device = model.device

@@ -314,7 +314,7 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
     """Run white noise STA analysis on *model* and return extracted filters.
 
     Args:
-        model: A loaded ``NeuralModel`` instance (already on the desired
+        model: A loaded ``BaseRnn`` instance (already on the desired
             device and in eval mode).
         cell_types: List of cell type names to analyse. Defaults to
             ``DEFAULT_CELL_TYPES``.
@@ -599,7 +599,7 @@ def main():
     model_folder = model_path.parent if model_path.is_file() else model_path
 
     print(f'Loading model from {model_path}...')
-    model = nm.NeuralModel.load(model_path)
+    model = nm.BaseRnn.load(model_path)
     model.eval()
 
     output_dir = (Path(args.output_dir) if args.output_dir

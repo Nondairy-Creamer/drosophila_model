@@ -12,7 +12,7 @@ import model_utilities as mu
 
 # Load the model
 model_folder = Path('models/20260126_131210')
-model = nm.NeuralModel.load(model_folder / 'model.pt', device='cpu')
+model = nm.BaseRnn.load(model_folder / 'model.pt', device='cpu')
 
 # Compute average connections between cell types
 ave_con = mu.compute_average_connections(model)

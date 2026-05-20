@@ -60,7 +60,7 @@ def main() -> None:
 
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
-    model = nm.NeuralModel.load(model_path, device=args.device)
+    model = nm.BaseRnn.load(model_path, device=args.device)
 
     # Collect hex-grid readouts to analyze
     decoders = {}
