@@ -15,10 +15,11 @@ import neural_models as nm
 config = du.load_config()
 
 # --- Initialize a current-based model from the standardised connectome loader ---
-ModelClass = nm.compose_model_class('CurrentDynamics', 'OpticLobeRightRnn')
+ModelClass = nm.compose_model_class('CurrentDynamics')
 model = ModelClass(
     connectome=cl.load_connectome(
-        config['model'].get('connectome', 'optic_lobe_right'),
+        areas=config['model']['areas'],
+        side=config['model']['side'],
         connectome_folder=config['data']['connectome_folder'],
     ),
     device='cpu',

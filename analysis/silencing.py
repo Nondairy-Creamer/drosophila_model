@@ -46,7 +46,7 @@ def compute_loss(model, cell_inputs, target, train_mask, config):
             N = cell_inputs.shape[2] // 2
             oob = ~train_mask.any(dim=1).any(dim=0)
             pred_rot, pred_trans, right_res, left_res = \
-                model.estimate_ego_motion_from_image(
+                model.regions['optic_lobe'].estimate_ego_motion_from_image(
                     cell_inputs[:, :, :N], cell_inputs[:, :, N:], oob_columns=oob)
             outputs = {}
             for key in right_res['outputs']:

@@ -1,6 +1,7 @@
 import torch
 
 import neural_models as nm
+import model_layers as ml
 from test_model_factory import build_model_from_test_config
 
 
@@ -12,7 +13,7 @@ def _set_identity_filter(model):
     """
     with torch.no_grad():
         model.input_spatial_conv.weight.fill_(-100.0)
-        pq_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.input_conv_size_x)
+        pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.input_conv_size_x)
         for i, (dp, dq) in enumerate(pq_offsets):
             if dp == 0 and dq == 0:
                 model.input_spatial_conv.weight[0, i, 0] = 0.0

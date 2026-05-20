@@ -20,6 +20,7 @@ import torch
 
 import data_utilities as du
 import neural_models as nm
+import ego_motion as em
 import stimulus_utilities as su
 
 
@@ -81,14 +82,14 @@ def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
     true_rot, pred_rot = np.asarray(true_rot), np.asarray(pred_rot)
     true_trans, pred_trans = np.asarray(true_trans), np.asarray(pred_trans)
 
-    true_rot_int = nm.integrate_angular_velocity(
+    true_rot_int = em.integrate_angular_velocity(
         torch.tensor(true_rot, dtype=torch.float64), model_dt).numpy()
-    pred_rot_int = nm.integrate_angular_velocity(
+    pred_rot_int = em.integrate_angular_velocity(
         torch.tensor(pred_rot, dtype=torch.float64), model_dt).numpy()
-    true_pos = nm.integrate_translational_velocity(
+    true_pos = em.integrate_translational_velocity(
         torch.tensor(true_trans, dtype=torch.float64),
         torch.tensor(true_rot, dtype=torch.float64), model_dt).numpy()
-    pred_pos = nm.integrate_translational_velocity(
+    pred_pos = em.integrate_translational_velocity(
         torch.tensor(pred_trans, dtype=torch.float64),
         torch.tensor(pred_rot, dtype=torch.float64), model_dt).numpy()
 
@@ -184,7 +185,7 @@ def run_drone_sweep(
 
         print(f"  Running model...")
         with torch.no_grad():
-            pred_rot, pred_trans, _, _ = model.estimate_ego_motion_from_image(
+            pred_rot, pred_trans, _, _ = model.regions['optic_lobe'].estimate_ego_motion_from_image(
                 right_input, left_input, oob_columns=oob,
             )
 

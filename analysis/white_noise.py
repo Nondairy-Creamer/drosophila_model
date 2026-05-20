@@ -36,6 +36,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 import neural_models as nm
+import model_layers as ml
 
 # ── Stimulus parameters ─────────────────────────────────────────────
 STIM_DURATION_S = 20.0     # stimulus duration (seconds)
@@ -248,7 +249,7 @@ def plot_sta(sta, pq_offsets, dt, cell_type, output_path):
     xt, x_pos = _build_xt_profile(sta, pq_offsets)
     vmax = np.abs(xt).max() or 1
 
-    xy = nm.NeuralModelConv.pq_to_xy(pq_offsets)
+    xy = ml.HexGridConv.pq_to_xy(pq_offsets)
     peak_lag = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)[1]
     spatial_peak = sta[:, peak_lag]
     vmax_spatial = np.abs(spatial_peak).max() or 1
@@ -380,10 +381,10 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
                 * CONTRAST_STD + 0.5)
 
     # ── Hex neighbor structure ───────────────────────────────────────
-    nearest = nm.NeuralModelConv.compute_nearest_columns(
+    nearest = ml.HexGridConv.compute_nearest_columns(
         filter_size, model.column_p_q,
     )
-    pq_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(filter_size)
+    pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(filter_size)
     print(f'Filter size {filter_size}: {pq_offsets.shape[0]} spatial offsets, '
           f'{num_lags} temporal lags')
 

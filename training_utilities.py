@@ -116,7 +116,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 left_batch = inputs_batch[:, :, N:]
                 oob = ~train_mask_batch.any(dim=1).any(dim=0)
                 pred_rot, pred_trans, right_res, left_res = \
-                    model.estimate_ego_motion_from_image(
+                    model.regions['optic_lobe'].estimate_ego_motion_from_image(
                         right_batch, left_batch, oob_columns=oob)
 
                 outputs = {}

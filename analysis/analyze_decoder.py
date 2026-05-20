@@ -21,6 +21,7 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
 import neural_models as nm
+import model_layers as ml
 
 
 def main() -> None:
@@ -111,8 +112,8 @@ def analyze_readout(decoder, readout_name, output_dir, prefix, top_n):
     avg_per_neuron = avg_per_neuron_all[top_indices]
     conv_1_top = conv_1[:, :, top_indices]
 
-    pq_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(decoder.conv_sizes[0])
-    grid_points = nm.NeuralModelConv.pq_to_xy(pq_offsets)
+    pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(decoder.conv_sizes[0])
+    grid_points = ml.HexGridConv.pq_to_xy(pq_offsets)
     num_spatial = grid_points.shape[0]
     scatter_s = _hex_scatter_size(num_spatial)
 

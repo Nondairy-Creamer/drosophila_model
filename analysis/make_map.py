@@ -34,6 +34,7 @@ from scipy.spatial import cKDTree
 
 import data_utilities as du
 import neural_models as nm
+import ego_motion as em
 import stimulus_utilities as su
 
 
@@ -115,7 +116,7 @@ def main() -> None:
           f"running model on {num_frames} frames, N={N}...")
     with torch.no_grad():
         pred_rot, pred_trans, right_res, left_res = (
-            model.estimate_ego_motion_from_image(
+            model.regions['optic_lobe'].estimate_ego_motion_from_image(
                 right_input, left_input, oob_columns=oob,
             )
         )
@@ -133,8 +134,8 @@ def main() -> None:
         axis=1,
     ).astype(np.float64)                                            # (T, 2N)
 
-    phi_2e = model.column_phi_theta_two_eyes[0].cpu().numpy()
-    theta_2e = model.column_phi_theta_two_eyes[1].cpu().numpy()
+    phi_2e = model.regions['optic_lobe'].column_phi_theta_two_eyes[0].cpu().numpy()
+    theta_2e = model.regions['optic_lobe'].column_phi_theta_two_eyes[1].cpu().numpy()
     x_2e = np.stack([
         np.sin(theta_2e) * np.cos(phi_2e),
         np.sin(theta_2e) * np.sin(phi_2e),
@@ -246,8 +247,8 @@ def _per_column_rho(model, right_res, left_res, oob, num_frames):
     optic_flow_left = left_res["outputs"][decoder_key]
     optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
-    phi = model.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
-    theta = model.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
+    phi = model.regions['optic_lobe'].column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
+    theta = model.regions['optic_lobe'].column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
 
     valid_mask = (
         ~torch.isnan(optic_flow[0, 0, :, 0])
@@ -283,8 +284,8 @@ def _integrate_pose(omega_deg, T_vec, dt):
     """
     omega_t = torch.tensor(omega_deg, dtype=torch.float64)
     T_t = torch.tensor(T_vec, dtype=torch.float64)
-    rot = nm.integrate_angular_velocity(omega_t, dt).numpy()
-    pos = nm.integrate_translational_velocity(T_t, omega_t, dt).numpy()
+    rot = em.integrate_angular_velocity(omega_t, dt).numpy()
+    pos = em.integrate_translational_velocity(T_t, omega_t, dt).numpy()
     return {"rot": rot, "pos": pos}
 
 
@@ -299,7 +300,7 @@ def _integrate_rotmats_pos(omega_deg, T_vec, dt):
     omega = torch.tensor(omega_deg, dtype=torch.float64)
     v = torch.tensor(T_vec, dtype=torch.float64)
     rotvec_rad = omega * (np.pi / 180) * dt
-    R_inc = nm._rodrigues(rotvec_rad)  # (T, 3, 3)
+    R_inc = em._rodrigues(rotvec_rad)  # (T, 3, 3)
 
     T_len = omega.shape[0]
     R = torch.eye(3, dtype=torch.float64)

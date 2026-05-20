@@ -25,6 +25,7 @@ import torch
 
 import data_utilities as du
 import neural_models as nm
+import ego_motion as em
 import stimulus_utilities as su
 
 from analysis_utilities import (
@@ -108,7 +109,7 @@ def main() -> None:
 
         print(f"Clip {clip_idx} (id={clip_id}): running model on {num_frames} frames, N={N}...")
         with torch.no_grad():
-            pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
+            pred_rot, pred_trans, right_res, left_res = model.regions['optic_lobe'].estimate_ego_motion_from_image(
                 right_input, left_input, oob_columns=oob,
             )
 
@@ -333,11 +334,11 @@ def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
     true_trans_t = torch.tensor(true_trans, dtype=torch.float64)
     pred_trans_t = torch.tensor(pred_trans, dtype=torch.float64)
 
-    true_rot_int = nm.integrate_angular_velocity(true_rot_t, model_dt).numpy()
-    pred_rot_int = nm.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
-    true_pos = nm.integrate_translational_velocity(
+    true_rot_int = em.integrate_angular_velocity(true_rot_t, model_dt).numpy()
+    pred_rot_int = em.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
+    true_pos = em.integrate_translational_velocity(
         true_trans_t, true_rot_t, model_dt).numpy()
-    pred_pos = nm.integrate_translational_velocity(
+    pred_pos = em.integrate_translational_velocity(
         pred_trans_t, pred_rot_t, model_dt).numpy()
 
     T = true_rot.shape[0]
@@ -388,8 +389,8 @@ def _estimate_depth_per_column(model, right_res, left_res, decoder_key,
     optic_flow_left = left_res["outputs"][decoder_key]
     optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)  # (1, T, 2N, 2)
 
-    phi = model.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
-    theta = model.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
+    phi = model.regions['optic_lobe'].column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
+    theta = model.regions['optic_lobe'].column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
 
     valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
     if oob is not None:

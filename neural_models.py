@@ -1,28 +1,36 @@
 """Connectome-based recurrent neural models.
 
-The class hierarchy splits orthogonally along *anatomy* (which connectome) and
-*dynamics* (Current / Conductance / CellAnn / HandTuned / Arbitrary):
+The class hierarchy is::
 
     SerializableModel               (mixin: save/load)
     BaseRnn(SerializableModel, ...) (RNN training/eval scaffolding, no connectome)
-    ConnectomeRnn(BaseRnn)          (loads a connectome; whole-brain ego-motion)
-    OpticLobeRightRnn(ConnectomeRnn)(single-eye extras: two-eye predict + flip)
+    ConnectomeModel(BaseRnn)        (loads a multi-area connectome; owns regions)
 
-Dynamics live in :mod:`dynamics_models` as mixins. Concrete models are composed
-at runtime via :func:`compose_model_class`, which takes the dynamics-mixin name
-and the anatomy-class name and returns a new class that mixes them together::
+Dynamics live in :mod:`dynamics_models` as mixins. Anatomy-region-specific
+operations (e.g. optic-lobe two-eye prediction) live on
+:class:`regions.RegionView` subclasses, registered onto ``self.regions`` at
+construction based on the requested ``areas``. The model itself stays
+anatomy-agnostic — adding a new brain area means adding a new region class,
+not a new model subclass.
 
-    ModelClass = compose_model_class('CurrentDynamics', 'OpticLobeRightRnn')
-    model = ModelClass(connectome='optic_lobe_right', ...)
+Concrete models are composed at runtime via :func:`compose_model_class`, which
+takes the dynamics-mixin name and returns a class that mixes ``ConnectomeModel``
+with that dynamics::
 
-Config files name the two axes separately::
+    ModelClass = compose_model_class('CurrentDynamics')
+    cdata = connectome_loading.load_connectome(['optic_lobe'], side='right')
+    model = ModelClass(connectome=cdata, ...)
+
+Config files name the dynamics + areas + side::
 
     [model]
-    model_type    = 'OpticLobeRightRnn'   # anatomy
-    dynamics_type = 'CurrentDynamics'     # dynamics
+    model_type    = 'ConnectomeModel'   # only valid value today
+    dynamics_type = 'CurrentDynamics'
+    areas         = ['optic_lobe']
+    side          = 'right'             # 'right' | 'left' | 'both'
 
-Saved checkpoints carry both strings so ``BaseRnn.load`` can re-compose the
-class on load.
+Saved checkpoints carry the dynamics string so ``BaseRnn.load`` can re-compose
+the class on load.
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ from connectome_loading import (
     load_connectome,
     load_connectome_from_dataframes,
 )
+from model_layers import CellTypeLayerNorm, HexGridConv, TemporalLRU
+import regions as regions_mod
 
 
 # ---------------------------------------------------------------------------
@@ -222,381 +232,6 @@ class SerializableModel:
 
 
 # ---------------------------------------------------------------------------
-# Shared submodules: CellTypeLayerNorm, NeuralModelConv, TemporalLRU
-# ---------------------------------------------------------------------------
-
-
-class CellTypeLayerNorm(torch.nn.Module):
-    """LayerNorm with weight and bias shared per cell type instead of per neuron.
-
-    Stores one weight (in log space, so always positive) and one bias per cell
-    type, and expands them to per-neuron via a neuron-to-type index mapping
-    before applying.
-    """
-
-    def __init__(self, num_cell_types, neuron_to_type_index, eps=1e-5, device=None, dtype=None):
-        super().__init__()
-        self.num_cell_types = num_cell_types
-        self.eps = eps
-        self.register_buffer('neuron_to_type_index', neuron_to_type_index)
-        init_weight = 1.0
-        init_weights = np.full(num_cell_types, np.log(init_weight))
-        self.weight_log = torch.nn.Parameter(
-            torch.tensor(init_weights, device=device, dtype=dtype)
-        )
-        self.bias = torch.nn.Parameter(torch.zeros(num_cell_types, device=device, dtype=dtype))
-
-    def forward(self, x):
-        idx = self.neuron_to_type_index
-        batch_shape = x.shape[:-1]
-        num_neurons = x.shape[-1]
-        x_flat = x.reshape(-1, num_neurons)
-        B = x_flat.shape[0]
-        idx_expanded = idx.unsqueeze(0).expand(B, -1)
-        type_sum = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
-        type_sum.scatter_add_(1, idx_expanded, x_flat)
-        type_count = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
-        type_count.scatter_add_(1, idx_expanded, torch.ones_like(x_flat))
-        type_count = type_count.clamp(min=1)
-        type_mean = type_sum / type_count
-        neuron_mean = type_mean.gather(1, idx_expanded)
-        type_var_sum = torch.zeros(B, self.num_cell_types, device=x.device, dtype=x.dtype)
-        type_var_sum.scatter_add_(1, idx_expanded, (x_flat - neuron_mean) ** 2)
-        type_var = type_var_sum / type_count
-        neuron_var = type_var.gather(1, idx_expanded)
-        x_norm_flat = (x_flat - neuron_mean) / torch.sqrt(neuron_var + self.eps)
-        x_norm = x_norm_flat.reshape(x.shape)
-        w = self.weight_log.exp()[idx]
-        b = self.bias[idx]
-        return x_norm * w + b
-
-    def extra_repr(self):
-        return f'num_cell_types={self.num_cell_types}, eps={self.eps}'
-
-
-class NeuralModelConv(torch.nn.Module):
-    """Hex-grid spatial convolution layer.
-
-    Gathers per-column features from hex-grid neighbours, applies a learned
-    weight tensor via ``einsum``, and adds a bias. Missing neighbours (boundary
-    columns marked ``-1``) and ``NaN`` input features (e.g. absent neuron
-    types) are zeroed out before the contraction.
-    """
-
-    def __init__(self, in_features, out_features, conv_size, column_p_q,
-                 device=None, dtype=None, positive_weights=False, use_bias=True):
-        super().__init__()
-        self.positive_weights = positive_weights
-        nearest_column_indices = self.compute_nearest_columns(conv_size, column_p_q)
-        self.register_buffer(
-            'nearest_column_indices',
-            torch.tensor(nearest_column_indices, device=device, dtype=torch.int64),
-        )
-        num_nearest = nearest_column_indices.shape[1]
-        self.weight = torch.nn.Parameter(
-            torch.zeros(out_features, num_nearest, in_features,
-                        device=device, dtype=dtype)
-        )
-        if use_bias:
-            self.bias = torch.nn.Parameter(
-                torch.zeros(out_features, device=device, dtype=dtype)
-            )
-        else:
-            self.bias = None
-
-    def forward(self, x):
-        squeeze_features = x.dim() >= 1 and x.shape[-1] != self.weight.shape[-1]
-        if squeeze_features:
-            x = x.unsqueeze(-1)
-
-        leading = x.shape[:-2]
-        x_flat = x.reshape(-1, x.shape[-2], x.shape[-1])
-
-        safe_idx = self.nearest_column_indices.clamp(min=0)
-        valid_mask = self.nearest_column_indices >= 0
-
-        gathered = x_flat[:, safe_idx]
-        gathered = gathered.masked_fill(~valid_mask.unsqueeze(0).unsqueeze(-1), 0.0)
-        gathered = torch.where(torch.isnan(gathered),
-                               torch.zeros_like(gathered), gathered)
-
-        if self.positive_weights:
-            w = self.weight.exp()
-            w_sum = torch.einsum('cn,knf->ck', valid_mask.float(), w).clamp(min=1e-8)
-            out = torch.einsum('scnf,knf->sck', gathered, w) / w_sum.unsqueeze(0)
-        else:
-            out = torch.einsum('scnf,knf->sck', gathered, self.weight)
-        if self.bias is not None:
-            out = out + self.bias.view(1, 1, -1)
-        out = out.reshape(*leading, out.shape[-2], out.shape[-1])
-        if squeeze_features:
-            out = out.squeeze(-1)
-        return out
-
-    @staticmethod
-    def hex_grid_axial_coords(conv_size: int) -> np.ndarray:
-        """Return axial (q, r) coordinates for a flat-top hex grid."""
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-        radius = conv_size // 2
-        coords = []
-        for r in range(-radius, radius + 1):
-            q_min = max(-radius, -r - radius)
-            q_max = min(radius, -r + radius)
-            for q in range(q_min, q_max + 1):
-                coords.append((q, r))
-        return np.array(coords, dtype=np.int64)
-
-    @staticmethod
-    def hex_grid_points(conv_size: int) -> np.ndarray:
-        """Return flat-top hex grid points centered at (0,0)."""
-        axial = NeuralModelConv.hex_grid_axial_coords(conv_size).astype(np.float64)
-        q, r = axial[:, 0], axial[:, 1]
-        return np.stack([1.5 * q, np.sqrt(3.0) * (r + 0.5 * q)], axis=1)
-
-    @staticmethod
-    def hex_grid_pq_offsets(conv_size: int) -> np.ndarray:
-        """Return ``(dp, dq)`` offsets in the connectome's p,q lattice."""
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-        radius = conv_size // 2
-        coords = []
-        for dp in range(-radius, radius + 1):
-            for dq in range(-radius, radius + 1):
-                if max(abs(dp), abs(dq), abs(dp - dq)) <= radius:
-                    coords.append((dp, dq))
-        return np.array(coords, dtype=np.int64)
-
-    @staticmethod
-    def pq_to_xy(pq: np.ndarray) -> np.ndarray:
-        """Project hex-lattice (p, q) coordinates to flat (x, y) for plotting."""
-        angle_1 = np.pi / 6
-        angle_2 = 2 * np.pi / 3 + angle_1
-        basis = np.array([[np.cos(angle_1), np.cos(angle_2)],
-                          [np.sin(angle_1), np.sin(angle_2)]])
-        return (basis @ np.asarray(pq, dtype=np.float64).T).T
-
-    @staticmethod
-    def compute_nearest_columns(conv_size, column_p_q):
-        """Compute neighbour column indices for every column on a p,q hex lattice."""
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-        if column_p_q is None:
-            raise ValueError("column_p_q is required for convolution.")
-
-        pq_offsets = NeuralModelConv.hex_grid_pq_offsets(conv_size)
-        num_grid_points = pq_offsets.shape[0]
-        p = column_p_q[:, 0].astype(np.int64)
-        q = column_p_q[:, 1].astype(np.int64)
-        num_columns = len(p)
-        pq_to_col = {(p[i], q[i]): i for i in range(num_columns)}
-
-        result = np.full((num_columns, num_grid_points), -1, dtype=np.int64)
-        for col_idx in range(num_columns):
-            pc, qc = p[col_idx], q[col_idx]
-            for gi in range(num_grid_points):
-                key = (pc + pq_offsets[gi, 0], qc + pq_offsets[gi, 1])
-                if key in pq_to_col:
-                    result[col_idx, gi] = pq_to_col[key]
-        return result
-
-
-class TemporalLRU(torch.nn.Module):
-    """Temporal filter via complex diagonal linear recurrence.
-
-    Each of the *N* modes is a damped oscillator whose frequency and damping
-    are independently learnable. The per-timestep update is::
-
-        z_k(t) = a_k * z_k(t-1) + b_k * u(t)      (complex state)
-        y(t)   = sum_k Re(c_k * z_k(t))  + d * u(t) (real output)
-
-    where ``a_k = exp(-gamma_k + i*omega_k)`` with ``gamma_k > 0`` for stability.
-    """
-
-    _COMPLEX_DTYPE = {torch.float32: torch.complex64, torch.float64: torch.complex128}
-
-    def __init__(self, num_modes=4, dt=0.01, device='cpu', dtype='float32'):
-        super().__init__()
-        self.num_modes = num_modes
-        self.dt = dt
-        pt_dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
-
-        self.log_gamma = torch.nn.Parameter(
-            torch.zeros(num_modes, device=device, dtype=pt_dtype)
-        )
-        self.logit_omega = torch.nn.Parameter(
-            torch.zeros(num_modes, device=device, dtype=pt_dtype)
-        )
-        self.b_re = torch.nn.Parameter(
-            torch.randn(num_modes, device=device, dtype=pt_dtype) * 0.1
-        )
-        self.b_im = torch.nn.Parameter(
-            torch.zeros(num_modes, device=device, dtype=pt_dtype)
-        )
-        self.c_re = torch.nn.Parameter(
-            torch.randn(num_modes, device=device, dtype=pt_dtype) * 0.1
-        )
-        self.c_im = torch.nn.Parameter(
-            torch.zeros(num_modes, device=device, dtype=pt_dtype)
-        )
-        self.log_d = torch.nn.Parameter(
-            torch.zeros(1, device=device, dtype=pt_dtype)
-        )
-
-    @property
-    def gamma(self):
-        return self.log_gamma.exp()
-
-    @property
-    def omega(self):
-        return torch.sigmoid(self.logit_omega) * np.pi
-
-    def poles(self):
-        return torch.exp(torch.complex(-self.gamma * self.dt, self.omega))
-
-    def step(self, u_t, state=None):
-        cdtype = self._COMPLEX_DTYPE[u_t.dtype]
-        a = self.poles()
-        b = torch.complex(self.b_re, self.b_im)
-        c = torch.complex(self.c_re, self.c_im)
-
-        if state is None:
-            state = torch.zeros(
-                u_t.shape[0], self.num_modes, u_t.shape[1],
-                dtype=cdtype, device=u_t.device,
-            )
-
-        u_cx = u_t.to(cdtype)
-        new_state = a[None, :, None] * state + b[None, :, None] * u_cx[:, None, :]
-        y_t = (c[None, :, None] * new_state).real.sum(dim=1) + self.log_d.exp() * u_t
-        return y_t, new_state
-
-    def impulse_response(self, num_t=20):
-        a = self.poles()
-        cb = torch.complex(self.c_re, self.c_im) * torch.complex(self.b_re, self.b_im)
-        h = torch.zeros(num_t, device=a.device, dtype=a.real.dtype)
-        n = torch.arange(num_t, device=a.device, dtype=a.real.dtype)
-        a_n = a[:, None] ** n[None, :]
-        h[:] = (cb[:, None] * a_n).real.sum(dim=0)
-        h[0] = h[0] + self.log_d.exp()
-        return h
-
-    def impulse_response_components(self, num_t=20):
-        a = self.poles()
-        cb = torch.complex(self.c_re, self.c_im) * torch.complex(self.b_re, self.b_im)
-        n = torch.arange(num_t, device=a.device, dtype=a.real.dtype)
-        a_n = a[:, None] ** n[None, :]
-        modes = (cb[:, None] * a_n).real
-        feedthrough = self.log_d.exp()
-        return modes, feedthrough
-
-
-# ---------------------------------------------------------------------------
-# Ego-motion math helpers (rotation integration; standalone)
-# ---------------------------------------------------------------------------
-
-
-def _rodrigues(rotvec):
-    """Rotation vectors (axis * angle, radians) to rotation matrices.
-
-    Uses Taylor expansions for ``sin(theta)/theta`` and ``(1-cos(theta))/theta^2``
-    at small angles to avoid catastrophic cancellation in the backward pass.
-    """
-    theta_sq = (rotvec * rotvec).sum(dim=-1, keepdim=True)
-
-    x, y, z = rotvec[..., 0], rotvec[..., 1], rotvec[..., 2]
-    O = torch.zeros_like(x)
-    K = torch.stack([
-        torch.stack([O, -z, y], dim=-1),
-        torch.stack([z, O, -x], dim=-1),
-        torch.stack([-y, x, O], dim=-1),
-    ], dim=-2)
-
-    small = (theta_sq < 1e-6).squeeze(-1)
-    safe_sq = theta_sq.clamp(min=1e-24)
-    theta = safe_sq.sqrt()
-
-    sinc = torch.where(small.unsqueeze(-1), 1 - theta_sq / 6, torch.sin(theta) / theta)
-    cosc = torch.where(small.unsqueeze(-1), 0.5 - theta_sq / 24, (1 - torch.cos(theta)) / safe_sq)
-
-    sinc = sinc.unsqueeze(-1)
-    cosc = cosc.unsqueeze(-1)
-    I = torch.eye(3, device=rotvec.device, dtype=rotvec.dtype)
-    return I + sinc * K + cosc * (K @ K)
-
-
-def _rotmat_to_rotvec(R):
-    """Rotation matrices to rotation vectors (axis * angle, radians)."""
-    v = torch.stack([
-        R[..., 2, 1] - R[..., 1, 2],
-        R[..., 0, 2] - R[..., 2, 0],
-        R[..., 1, 0] - R[..., 0, 1],
-    ], dim=-1)
-
-    sin_angle = (v * v).sum(dim=-1).clamp(min=1e-24).sqrt() / 2
-    cos_angle = (R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2] - 1) / 2
-
-    angle = torch.atan2(sin_angle, cos_angle)
-
-    angle_sq = angle * angle
-    scale_small = 0.5 + angle_sq / 12
-    scale_large = angle / (2 * sin_angle)
-    scale = torch.where(sin_angle.abs() < 1e-4, scale_small, scale_large)
-
-    return v * scale.unsqueeze(-1)
-
-
-def integrate_angular_velocity(omega_deg, dt):
-    """Integrate angular velocity to cumulative orientation via SO(3) composition."""
-    squeeze = omega_deg.dim() == 2
-    if squeeze:
-        omega_deg = omega_deg.unsqueeze(0)
-
-    rotvec_rad = omega_deg * (np.pi / 180) * dt
-    R_inc = _rodrigues(rotvec_rad)
-
-    B, T = omega_deg.shape[:2]
-    I = torch.eye(3, device=omega_deg.device, dtype=omega_deg.dtype)
-    R = I.unsqueeze(0).expand(B, -1, -1).clone()
-    rotvecs = []
-    for t in range(T):
-        R = R_inc[:, t] @ R
-        rotvecs.append(_rotmat_to_rotvec(R))
-    result = torch.stack(rotvecs, dim=1) * (180 / np.pi)
-
-    if squeeze:
-        result = result.squeeze(0)
-    return result
-
-
-def integrate_translational_velocity(v, omega_deg, dt):
-    """Integrate body-frame translational velocity to world-frame position."""
-    squeeze = v.dim() == 2
-    if squeeze:
-        v = v.unsqueeze(0)
-        omega_deg = omega_deg.unsqueeze(0)
-
-    rotvec_rad = omega_deg * (np.pi / 180) * dt
-    R_inc = _rodrigues(rotvec_rad)
-
-    B, T = v.shape[:2]
-    I = torch.eye(3, device=v.device, dtype=v.dtype)
-    R = I.unsqueeze(0).expand(B, -1, -1).clone()
-    pos = torch.zeros(B, 3, device=v.device, dtype=v.dtype)
-    positions = []
-    for t in range(T):
-        R = R_inc[:, t] @ R
-        v_world = (R @ v[:, t, :, None]).squeeze(-1)
-        pos = pos + v_world * dt
-        positions.append(pos.clone())
-    result = torch.stack(positions, dim=1)
-
-    if squeeze:
-        result = result.squeeze(0)
-    return result
-
-
-# ---------------------------------------------------------------------------
 # BaseRnn: connectome-agnostic RNN training / eval scaffolding
 # ---------------------------------------------------------------------------
 
@@ -607,7 +242,7 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     Owns ``predict``, ``set_sigma_max``, ``find_steady_state``,
     ``add_noise_to_parameters``, save/load, and the static ego-motion math.
     All connectome-specific state (synapse matrix, cell types, columns) lives
-    on :class:`ConnectomeRnn` so a hypothetical non-connectome RNN can sit
+    on :class:`ConnectomeModel` so a hypothetical non-connectome RNN can sit
     alongside it.
 
     Concrete subclasses (via the dynamics mixins) supply:
@@ -670,11 +305,11 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     # ------------------------------------------------------------------
 
     def _initialize_input_conv(self, column_p_q):
-        """Set up input convolution using NeuralModelConv + TemporalLRU.
+        """Set up input convolution using HexGridConv + TemporalLRU.
 
         Pipeline: pre-filter -> local contrast normalisation -> temporal LRU.
         The pre-filter is a learned spatial conv applied before contrast
-        normalisation. Called from :class:`ConnectomeRnn` once column_p_q is
+        normalisation. Called from :class:`ConnectomeModel` once column_p_q is
         known.
         """
         if self.conv_size_x % 2 == 0:
@@ -686,24 +321,24 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
 
         self.input_conv_size_x = self.conv_size_x
 
-        self.input_pre_conv = NeuralModelConv(
+        self.input_pre_conv = HexGridConv(
             in_features=1, out_features=1, conv_size=self.input_pre_conv_size,
             column_p_q=column_p_q, device=self.device, dtype=self.dtype,
             positive_weights=True, use_bias=False,
         )
-        pq_offsets_pre = NeuralModelConv.hex_grid_pq_offsets(self.input_pre_conv_size)
+        pq_offsets_pre = HexGridConv.hex_grid_pq_offsets(self.input_pre_conv_size)
         with torch.no_grad():
             self.input_pre_conv.weight.fill_(-10.0)
             for i, (dp, dq) in enumerate(pq_offsets_pre):
                 if dp == 0 and dq == 0:
                     self.input_pre_conv.weight[0, i, 0] = 0.0
 
-        self.input_spatial_conv = NeuralModelConv(
+        self.input_spatial_conv = HexGridConv(
             in_features=1, out_features=1, conv_size=self.conv_size_x,
             column_p_q=column_p_q, device=self.device, dtype=self.dtype,
             positive_weights=True, use_bias=False,
         )
-        pq_offsets = NeuralModelConv.hex_grid_pq_offsets(self.conv_size_x)
+        pq_offsets = HexGridConv.hex_grid_pq_offsets(self.conv_size_x)
         with torch.no_grad():
             self.input_spatial_conv.weight.fill_(-10.0)
             for i, (dp, dq) in enumerate(pq_offsets):
@@ -762,16 +397,6 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     # ------------------------------------------------------------------
     # Static ego-motion math (no connectome refs)
     # ------------------------------------------------------------------
-
-    def integrate_angular_velocity(self, omega_deg, dt=None):
-        if dt is None:
-            dt = self.dt
-        return integrate_angular_velocity(omega_deg, dt)
-
-    def integrate_translational_velocity(self, v, omega_deg, dt=None):
-        if dt is None:
-            dt = self.dt
-        return integrate_translational_velocity(v, omega_deg, dt)
 
     @staticmethod
     def _cross_matrix(a):
@@ -936,22 +561,20 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
 
 
 # ---------------------------------------------------------------------------
-# ConnectomeRnn: loads a connectome and runs the predict() loop
+# ConnectomeModel: loads a multi-area connectome and runs the predict() loop
 # ---------------------------------------------------------------------------
 
 
-class ConnectomeRnn(BaseRnn):
-    """``BaseRnn`` augmented with a connectome.
+class ConnectomeModel(BaseRnn):
+    """``BaseRnn`` augmented with a multi-area connectome.
 
-    Loads connectome data via :func:`connectome_loading.load_connectome` (or
-    accepts a pre-loaded :class:`ConnectomeData`, or raw kwargs for backward
-    compatibility), filters / signs / indexes the synapse matrix, and
-    initialises the input conv pipeline + readouts.
-
-    The default behaviour assumes a whole-brain connectome — no left-eye
-    mirroring; ``estimate_ego_motion_from_image`` runs a single pass over the
-    full ``(B, T, num_columns)`` input. :class:`OpticLobeRightRnn` overrides
-    the eye-flip behaviour for single-eye connectomes.
+    Takes a pre-loaded :class:`ConnectomeData` (built via
+    :func:`connectome_loading.load_connectome` with the desired ``areas`` /
+    ``side`` filters), preprocesses it (synapse-count threshold +
+    neurotransmitter filter), then registers one
+    :class:`regions.RegionView` per area in ``self.regions``. Area-specific
+    operations (e.g. ``predict_two_eyes`` for the optic lobe) live on those
+    region objects — the model itself stays anatomy-agnostic.
     """
 
     def __init__(self, *,
@@ -965,9 +588,15 @@ class ConnectomeRnn(BaseRnn):
         self.inhibitory_nt = inhibitory_nt
         self.count_threshold = count_threshold
 
-        cdata = self._resolve_connectome(connectome)
-        self.connectome_name = cdata.name
-        self.is_single_eye = cdata.is_single_eye
+        if not isinstance(connectome, ConnectomeData):
+            raise TypeError(
+                f"`connectome` must be a ConnectomeData (build it via "
+                f"connectome_loading.load_connectome(areas=..., side=...)). "
+                f"Got {type(connectome).__name__}."
+            )
+        cdata = connectome
+        self.areas = list(cdata.areas)
+        self.side = cdata.side
 
         # Store the resolved ConnectomeData in init_inputs so saved
         # checkpoints are self-contained (no parquet path required to reload).
@@ -977,10 +606,11 @@ class ConnectomeRnn(BaseRnn):
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
         (
             root_ids, cell_types, neurotransmitters, column_indices,
-            synapse_counts_coo,
+            area_per_neuron, side_per_neuron, synapse_counts_coo,
         ) = self._preprocess_connectome(
             cdata.synapse_counts_coo, cdata.root_ids, cdata.cell_types,
             cdata.neurotransmitters, cdata.column_indices,
+            cdata.area_per_neuron, cdata.side_per_neuron,
             valid_neurotransmitters, count_threshold,
         )
 
@@ -999,11 +629,11 @@ class ConnectomeRnn(BaseRnn):
 
         self.column_indices = column_indices
         self.column_phi_theta = cdata.column_phi_theta
-        self.column_phi_theta_two_eyes = self._build_column_phi_theta_two_eyes(
-            cdata.column_phi_theta
-        )
         self.column_p_q = cdata.column_p_q
         self.num_columns = np.unique(column_indices[~np.isnan(column_indices)]).size
+
+        self.area_per_neuron = area_per_neuron
+        self.side_per_neuron = side_per_neuron
 
         self.register_buffer(
             'steady_state',
@@ -1043,25 +673,16 @@ class ConnectomeRnn(BaseRnn):
         if self.use_input_conv:
             self._initialize_input_conv(self.column_p_q)
 
-    # ------------------------------------------------------------------
-    # Connectome resolution & preprocessing
-    # ------------------------------------------------------------------
+        self.regions = regions_mod.build_regions(self)
 
-    @staticmethod
-    def _resolve_connectome(connectome):
-        """Coerce ``connectome`` (str tag or :class:`ConnectomeData`) into ConnectomeData."""
-        if isinstance(connectome, ConnectomeData):
-            return connectome
-        if isinstance(connectome, str):
-            return load_connectome(connectome)
-        raise TypeError(
-            f"`connectome` must be a str tag or ConnectomeData, "
-            f"got {type(connectome).__name__}"
-        )
+    # ------------------------------------------------------------------
+    # Connectome preprocessing
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _preprocess_connectome(synapse_counts_coo, root_ids, cell_types,
                                neurotransmitters, column_indices,
+                               area_per_neuron, side_per_neuron,
                                valid_neurotransmitters, count_threshold):
         """Filter the raw connectome and convert root IDs to matrix indices.
 
@@ -1071,13 +692,15 @@ class ConnectomeRnn(BaseRnn):
           3. Remove connections involving removed neurons.
           4. Remove neurons with no remaining connections.
 
-        Returns the filtered ``(root_ids, cell_types, neurotransmitters,
-        column_indices, synapse_counts_coo)`` where the COO now stores matrix
-        indices instead of root IDs.
+        All per-neuron arrays (including ``area_per_neuron`` and
+        ``side_per_neuron``) are reduced in lockstep. ``synapse_counts_coo``
+        is rewritten from root-ID space into matrix-index space.
         """
         import pandas as pd
 
         neurotransmitters = np.array(neurotransmitters)
+        area_per_neuron = np.array(area_per_neuron)
+        side_per_neuron = np.array(side_per_neuron)
         assert root_ids.dtype == np.int64, 'root_ids must have dtype np.int64'
         assert synapse_counts_coo.dtype == np.int64, \
             'synapse_counts_coo must have dtype np.int64'
@@ -1100,24 +723,16 @@ class ConnectomeRnn(BaseRnn):
         cell_types = cell_types[valid_neurons]
         neurotransmitters = neurotransmitters[valid_neurons]
         column_indices = column_indices[valid_neurons]
+        area_per_neuron = area_per_neuron[valid_neurons]
+        side_per_neuron = side_per_neuron[valid_neurons]
 
         root_id_index = pd.Index(root_ids)
         pre_idx = root_id_index.get_indexer(synapse_counts_coo[:, 0])
         post_idx = root_id_index.get_indexer(synapse_counts_coo[:, 1])
         synapse_counts_coo = np.column_stack([pre_idx, post_idx, synapse_counts_coo[:, 2]])
 
-        return root_ids, cell_types, neurotransmitters, column_indices, synapse_counts_coo
-
-    # ------------------------------------------------------------------
-    # Two-eye phi/theta: whole-brain default (no mirroring)
-    # ------------------------------------------------------------------
-
-    def _build_column_phi_theta_two_eyes(self, column_phi_theta):
-        """Default: connectome already contains both eyes; pass through."""
-        return (
-            torch.tensor(column_phi_theta[:, 0], device=self.device),
-            torch.tensor(column_phi_theta[:, 1], device=self.device),
-        )
+        return (root_ids, cell_types, neurotransmitters, column_indices,
+                area_per_neuron, side_per_neuron, synapse_counts_coo)
 
     # ------------------------------------------------------------------
     # Readouts
@@ -1432,289 +1047,32 @@ class ConnectomeRnn(BaseRnn):
         print('steady state not found after', max_iter, 'iterations')
         self.steady_state.copy_(final_state.detach().squeeze(0))
 
-    # ------------------------------------------------------------------
-    # Whole-brain ego-motion from image (single forward pass)
-    # ------------------------------------------------------------------
-
-    def estimate_ego_motion_from_image(self, inputs, *,
-                                       initial_state=None,
-                                       initial_filter_state=None,
-                                       oob_columns=None,
-                                       cached_mappings=None,
-                                       terms=('rotation', 'trans')):
-        """Single-pass ego-motion from a both-eyes ``(B, T, num_columns)`` stimulus.
-
-        Returns ``(rotations, translations, result)`` where ``result`` is the
-        dict produced by ``predict()``. For single-eye connectomes, use
-        :class:`OpticLobeRightRnn`'s override which handles two-eye batching
-        and the left-eye flip.
-        """
-        predict_kwargs = {}
-        if cached_mappings is not None:
-            predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
-            predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
-
-        S = inputs.shape[0]
-        result = self.predict(
-            inputs,
-            init_state=initial_state, init_filter_state=initial_filter_state,
-            **predict_kwargs,
-        )
-
-        flow_key = next(
-            (k for k, m in self._readout_modules.items()
-             if getattr(m, 'predicts_flow', False) and k in result['outputs']),
-            None,
-        )
-        if flow_key is None:
-            raise ValueError("No flow readout configured; cannot estimate ego motion.")
-
-        optic_flow = result['outputs'][flow_key]
-        phi_tensor = torch.tensor(
-            self.column_phi_theta[:, 0], device=self.device, dtype=optic_flow.dtype,
-        )
-        theta_tensor = torch.tensor(
-            self.column_phi_theta[:, 1], device=self.device, dtype=optic_flow.dtype,
-        )
-
-        valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
-        if oob_columns is not None:
-            valid_mask = valid_mask & ~oob_columns
-        phi_valid = phi_tensor[valid_mask]
-        theta_valid = theta_tensor[valid_mask]
-
-        T_len = optic_flow.shape[1]
-        d_right = optic_flow[:, :, valid_mask, 0].reshape(S * T_len, -1)
-        d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
-
-        rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
-            phi_valid, theta_valid, d_right, d_up, terms=terms,
-        )
-        rotations = rot_flat.reshape(S, T_len, 3)
-        translations = trans_flat.reshape(S, T_len, 3)
-
-        return rotations, translations, result
-
-
 # ---------------------------------------------------------------------------
-# OpticLobeRightRnn: single-eye extras (mirror + two-eye predict + flip)
+# Dynamic class composition: dynamics x ConnectomeModel
 # ---------------------------------------------------------------------------
 
 
-class OpticLobeRightRnn(ConnectomeRnn):
-    """``ConnectomeRnn`` specialised for a single right-eye optic lobe connectome.
-
-    Adds:
-      - left-eye phi mirroring when building ``column_phi_theta_two_eyes``
-      - ``predict_two_eyes`` that batches both eyes into one forward pass
-      - a two-eye-aware ``estimate_ego_motion_from_image``
-    """
-
-    def _build_column_phi_theta_two_eyes(self, column_phi_theta):
-        """Mirror the right eye's phi to synthesise the left eye."""
-        left_phi_theta = column_phi_theta.copy()
-        left_phi_theta[:, 0] = -left_phi_theta[:, 0]
-        two_eye = np.concatenate((column_phi_theta, left_phi_theta), axis=0)
-        return (
-            torch.tensor(two_eye[:, 0], device=self.device),
-            torch.tensor(two_eye[:, 1], device=self.device),
-        )
-
-    def predict_two_eyes(self, inputs_right, inputs_left,
-                         init_state_right=None, init_state_left=None,
-                         init_filter_state_right=None, init_filter_state_left=None,
-                         **kwargs):
-        """Run ``predict`` with both eyes batched into a single forward pass.
-
-        Concatenates right and left inputs along the batch dimension, runs
-        ``predict`` once, then splits and returns separate result dicts. The
-        left-eye flow readout has its horizontal component flipped via
-        ``flip_for_left_eye`` so both eyes share a consistent frame.
-        """
-        S = inputs_right.shape[0]
-        both = torch.cat([inputs_right, inputs_left], dim=0)
-
-        init_state = None
-        if init_state_right is not None and init_state_left is not None:
-            init_state = torch.cat([init_state_right, init_state_left], dim=0)
-
-        init_filter_state = None
-        if init_filter_state_right is not None and init_filter_state_left is not None:
-            init_filter_state = torch.cat([init_filter_state_right, init_filter_state_left], dim=0)
-
-        result = self.predict(
-            both, init_state=init_state,
-            init_filter_state=init_filter_state, **kwargs,
-        )
-
-        outputs = result['outputs']
-        right_outputs = {}
-        left_outputs = {}
-
-        for key in ('voltage', 'firing_rate', 'synaptic_current'):
-            if key in outputs:
-                right_outputs[key] = {k: v[:S] for k, v in outputs[key].items()}
-                left_outputs[key] = {k: v[S:] for k, v in outputs[key].items()}
-
-        for rname, mod in self._readout_modules.items():
-            if rname not in outputs:
-                continue
-            if getattr(mod, 'training_only', False):
-                right_outputs[rname] = outputs[rname]
-                left_outputs[rname] = outputs[rname]
-                continue
-            right_outputs[rname] = outputs[rname][:S]
-            left_val = outputs[rname][S:].clone()
-            if mod.eye_asymmetric:
-                left_val = mod.flip_for_left_eye(left_val)
-            left_outputs[rname] = left_val
-
-        filter_state = result['model_state']['filter_state']
-        right_filter = filter_state[:S] if filter_state is not None else None
-        left_filter = filter_state[S:] if filter_state is not None else None
-
-        right_result = {
-            'outputs': right_outputs,
-            'model_state': {'v': result['model_state']['v'][:S], 'filter_state': right_filter},
-            'mappings': result['mappings'],
-        }
-        left_result = {
-            'outputs': left_outputs,
-            'model_state': {'v': result['model_state']['v'][S:], 'filter_state': left_filter},
-            'mappings': result['mappings'],
-        }
-        return right_result, left_result
-
-    def estimate_ego_motion_from_image(self,
-                                       right_eye_inputs=None, left_eye_inputs=None,
-                                       initial_state_right=None, initial_state_left=None,
-                                       initial_filter_state_right=None,
-                                       initial_filter_state_left=None,
-                                       oob_columns=None, cached_mappings=None,
-                                       eyes=('right', 'left'),
-                                       terms=('rotation', 'trans')):
-        """Ego-motion from raw per-eye image inputs.
-
-        Supports both eyes (concatenated flow with mirrored phi) or a single
-        eye (flow mirrored to the shared frame). When only ``'trans'`` is
-        requested, rotation is not subtracted from the flow before solving
-        for translation.
-        """
-        eyes = tuple(eyes)
-        if not eyes or not set(eyes).issubset({'right', 'left'}):
-            raise ValueError(
-                f"`eyes` must be a non-empty subset of {{'right','left'}}, got {eyes}"
-            )
-        eye_inputs_map = {'right': right_eye_inputs, 'left': left_eye_inputs}
-        for eye in eyes:
-            if eye_inputs_map[eye] is None:
-                raise ValueError(
-                    f"`eyes` includes '{eye}' but {eye}_eye_inputs is None"
-                )
-
-        predict_kwargs = {}
-        if cached_mappings is not None:
-            predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
-            predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
-
-        two_eye = set(eyes) == {'right', 'left'}
-
-        if two_eye:
-            S = right_eye_inputs.shape[0]
-            right_result, left_result = self.predict_two_eyes(
-                right_eye_inputs, left_eye_inputs,
-                init_state_right=initial_state_right, init_state_left=initial_state_left,
-                init_filter_state_right=initial_filter_state_right,
-                init_filter_state_left=initial_filter_state_left,
-                **predict_kwargs,
-            )
-
-            flow_key = next(
-                (k for k, m in self._readout_modules.items()
-                 if getattr(m, 'predicts_flow', False) and k in right_result['outputs']),
-                None,
-            )
-            if flow_key is None:
-                raise ValueError("No flow readout configured; cannot estimate ego motion.")
-
-            optic_flow_right = right_result['outputs'][flow_key]
-            optic_flow_left = left_result['outputs'][flow_key]
-            optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
-
-            phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
-            theta_tensor = self.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
-        else:
-            eye = eyes[0]
-            inputs = eye_inputs_map[eye]
-            S = inputs.shape[0]
-            init_state = initial_state_right if eye == 'right' else initial_state_left
-            init_filter_state = (
-                initial_filter_state_right if eye == 'right' else initial_filter_state_left
-            )
-            result = self.predict(
-                inputs,
-                init_state=init_state, init_filter_state=init_filter_state,
-                **predict_kwargs,
-            )
-
-            flow_key = next(
-                (k for k, m in self._readout_modules.items()
-                 if getattr(m, 'predicts_flow', False) and k in result['outputs']),
-                None,
-            )
-            if flow_key is None:
-                raise ValueError("No flow readout configured; cannot estimate ego motion.")
-
-            optic_flow = result['outputs'][flow_key]
-            if eye == 'left':
-                mod = self._readout_modules[flow_key]
-                if mod.eye_asymmetric:
-                    optic_flow = mod.flip_for_left_eye(optic_flow.clone())
-
-            phi_np = self.column_phi_theta[:, 0].copy()
-            theta_np = self.column_phi_theta[:, 1].copy()
-            if eye == 'left':
-                phi_np = -phi_np
-            phi_tensor = torch.tensor(phi_np, device=self.device, dtype=optic_flow.dtype)
-            theta_tensor = torch.tensor(theta_np, device=self.device, dtype=optic_flow.dtype)
-
-            right_result = result if eye == 'right' else None
-            left_result = result if eye == 'left' else None
-
-        valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
-        if oob_columns is not None:
-            valid_mask = valid_mask & ~oob_columns
-        phi_valid = phi_tensor[valid_mask]
-        theta_valid = theta_tensor[valid_mask]
-
-        T_len = optic_flow.shape[1]
-        d_right = optic_flow[:, :, valid_mask, 0].reshape(S * T_len, -1)
-        d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
-
-        rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
-            phi_valid, theta_valid, d_right, d_up, terms=terms,
-        )
-        rotations = rot_flat.reshape(S, T_len, 3)
-        translations = trans_flat.reshape(S, T_len, 3)
-
-        return rotations, translations, right_result, left_result
-
-
-# ---------------------------------------------------------------------------
-# Dynamic class composition: dynamics x anatomy
-# ---------------------------------------------------------------------------
-
-
-def compose_model_class(dynamics_type: str, model_type: str):
-    """Return a class that mixes ``dynamics_type`` onto ``model_type``.
+def compose_model_class(dynamics_type: str, model_type: str = 'ConnectomeModel'):
+    """Return a class that mixes ``dynamics_type`` onto :class:`ConnectomeModel`.
 
     ``dynamics_type`` is a class name in :mod:`dynamics_models` (e.g.
-    ``'CurrentDynamics'``). ``model_type`` is an anatomy class name in this
-    module (e.g. ``'OpticLobeRightRnn'``, ``'ConnectomeRnn'``).
+    ``'CurrentDynamics'``, ``'ConductanceDynamics'``).
+
+    ``model_type`` is kept as an optional string label so the save format can
+    grow more anatomy classes later, but today the only valid value is
+    ``'ConnectomeModel'``. Anatomical scope is set by the ``areas``/``side``
+    filters at connectome-load time; brain-region-specific operations live on
+    :class:`regions.RegionView` objects in ``model.regions``.
 
     Result is cached so repeated calls with the same pair return the *same*
     class object — important for ``isinstance`` and for save/load identity.
     """
+    if model_type != 'ConnectomeModel':
+        raise ValueError(
+            f"Unknown model_type {model_type!r}. Only 'ConnectomeModel' is "
+            f"supported; pick areas via the connectome loader instead."
+        )
+
     key = (dynamics_type, model_type)
     cached = _COMPOSED_CLASS_CACHE.get(key)
     if cached is not None:
@@ -1728,15 +1086,7 @@ def compose_model_class(dynamics_type: str, model_type: str):
             f"or fix the config."
         ) from e
 
-    anatomy_cls = globals().get(model_type)
-    if anatomy_cls is None or not (isinstance(anatomy_cls, type)
-                                   and issubclass(anatomy_cls, BaseRnn)):
-        raise ValueError(
-            f"Unknown model_type {model_type!r}. Expected a BaseRnn subclass "
-            f"defined in neural_models.py (e.g. 'OpticLobeRightRnn', "
-            f"'ConnectomeRnn')."
-        )
-
+    anatomy_cls = ConnectomeModel
     name = f'{model_type}_{dynamics_type}'
     cls = type(name, (dynamics_cls, anatomy_cls), {})
     cls._dynamics_type_name = dynamics_type
@@ -1758,7 +1108,10 @@ def _baseRnn_save_class_identity(self):
 
 @classmethod
 def _baseRnn_resolve_class_from_payload(cls, payload):
-    return compose_model_class(payload['dynamics_type'], payload['model_type'])
+    return compose_model_class(
+        payload['dynamics_type'],
+        payload.get('model_type', 'ConnectomeModel'),
+    )
 
 
 # Attach to BaseRnn here (defined out-of-class so the factory above can

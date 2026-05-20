@@ -19,7 +19,7 @@ Both are listed in the config ``readouts`` key and discovered automatically by
 import numpy as np
 import torch
 
-from neural_models import NeuralModelConv
+from model_layers import HexGridConv
 
 _FLOW_NEURON_TYPES = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
@@ -35,7 +35,7 @@ class HexGridReadout(torch.nn.Module):
 
     Handles:
     * Column-to-neuron mapping (shared across all hex-grid readouts).
-    * Stacking ``NeuralModelConv`` layers with optional BatchNorm + softplus
+    * Stacking ``HexGridConv`` layers with optional BatchNorm + softplus
       between them.
     * Optional denominator normalisation (last channel passed through softplus
       and used to divide the remaining channels).
@@ -81,7 +81,7 @@ class HexGridReadout(torch.nn.Module):
         self.batch_norms = torch.nn.ModuleList()
         for i, (channels, csz) in enumerate(zip(num_channels, conv_sizes)):
             is_last = (i == len(num_channels) - 1)
-            self.conv_layers.append(NeuralModelConv(
+            self.conv_layers.append(HexGridConv(
                 in_features=in_features,
                 out_features=channels,
                 conv_size=csz,

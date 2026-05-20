@@ -2,7 +2,7 @@
 
 These models share the spatial structure of the connectome models -- they
 still convolve over the columnar hex lattice using
-:class:`neural_models.NeuralModelConv` -- but they have no neurons,
+:class:`model_layers.HexGridConv` -- but they have no neurons,
 synapses, or recurrent dynamics.  Each forward pass is a pure
 feed-forward map over a fixed temporal window of input frames.
 
@@ -14,7 +14,8 @@ its stateless feed-forward semantics don't match the RNN's per-timestep
 
 import torch
 
-from neural_models import NeuralModelConv, SerializableModel
+from model_layers import HexGridConv
+from neural_models import SerializableModel
 
 
 class ConvModel(SerializableModel, torch.nn.Module):
@@ -69,7 +70,7 @@ class ConvModel(SerializableModel, torch.nn.Module):
 
         in_channels = (self.num_input_frames,) + self.channels[:-1]
         self.conv_layers = torch.nn.ModuleList([
-            NeuralModelConv(
+            HexGridConv(
                 in_features=cin,
                 out_features=cout,
                 conv_size=self.conv_size,
@@ -104,7 +105,7 @@ class ConvModel(SerializableModel, torch.nn.Module):
                 f"expected {self.num_columns} columns, got {frames.shape[2]}."
             )
 
-        # NeuralModelConv expects (..., num_columns, in_features); the
+        # HexGridConv expects (..., num_columns, in_features); the
         # 5 frames become the input channels of the first conv.
         x = frames.transpose(-1, -2)
         for i, layer in enumerate(self.conv_layers):

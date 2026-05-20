@@ -37,6 +37,7 @@ import torch
 
 import data_utilities as du
 import neural_models as nm
+import ego_motion as em
 import stimulus_utilities as su
 
 from movie_utilities import (
@@ -316,7 +317,7 @@ def _run_two_eyes(args, model, config, output_dir,
 
         print(f"\nRunning model on stimulus {stim_index} ({num_frames} frames, N={N})...")
         with torch.no_grad():
-            right_result, left_result = model.predict_two_eyes(right_input, left_input)
+            right_result, left_result = model.regions['optic_lobe'].predict_two_eyes(right_input, left_input)
 
         pred_flow_right = right_result["outputs"][flow_key][0].cpu().numpy()[:num_frames]
         pred_flow_left = left_result["outputs"][flow_key][0].cpu().numpy()[:num_frames]
@@ -415,7 +416,7 @@ def _run_ego_motion_pano(args, model, config, model_folder, output_dir,
 
     print(f"Running model on {num_frames} frames, N={N}...")
     with torch.no_grad():
-        pred_rot, pred_trans, right_res, left_res = model.estimate_ego_motion_from_image(
+        pred_rot, pred_trans, right_res, left_res = model.regions['optic_lobe'].estimate_ego_motion_from_image(
             right_input, left_input, oob_columns=oob_columns)
 
     decoder_key = next(k for k, m in model._readout_modules.items() if m.predicts_flow)
@@ -892,10 +893,10 @@ def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
     true_trans_t = torch.tensor(true_trans, dtype=torch.float64)
     pred_trans_t = torch.tensor(pred_trans, dtype=torch.float64)
 
-    true_rot_int = nm.integrate_angular_velocity(true_rot_t, model_dt).numpy()
-    pred_rot_int = nm.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
-    true_pos = nm.integrate_translational_velocity(true_trans_t, true_rot_t, model_dt).numpy()
-    pred_pos = nm.integrate_translational_velocity(pred_trans_t, pred_rot_t, model_dt).numpy()
+    true_rot_int = em.integrate_angular_velocity(true_rot_t, model_dt).numpy()
+    pred_rot_int = em.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
+    true_pos = em.integrate_translational_velocity(true_trans_t, true_rot_t, model_dt).numpy()
+    pred_pos = em.integrate_translational_velocity(pred_trans_t, pred_rot_t, model_dt).numpy()
 
     T = true_rot.shape[0]
     times = np.arange(T) * model_dt

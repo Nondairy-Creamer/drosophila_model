@@ -88,7 +88,7 @@ def main() -> None:
     # --- Warmup (CUDA kernel compilation, cuDNN autotuning, etc.) ---
     print("\nWarmup run...")
     with torch.no_grad():
-        model.estimate_ego_motion_from_image(
+        model.regions['optic_lobe'].estimate_ego_motion_from_image(
             right_stim[:, :1, :], left_stim[:, :1, :],
         )
         _sync(device)
@@ -98,7 +98,7 @@ def main() -> None:
     with torch.no_grad():
         _sync(device)
         t0 = time.perf_counter()
-        model.estimate_ego_motion_from_image(right_stim, left_stim)
+        model.regions['optic_lobe'].estimate_ego_motion_from_image(right_stim, left_stim)
         _sync(device)
         full_pass_time = time.perf_counter() - t0
     print(f"  Full pass: {full_pass_time * 1000:.2f} ms ({full_pass_time / n_time * 1000:.4f} ms/frame)")
@@ -118,7 +118,7 @@ def main() -> None:
 
             _sync(device)
             t0 = time.perf_counter()
-            _, _, r_res, l_res = model.estimate_ego_motion_from_image(
+            _, _, r_res, l_res = model.regions['optic_lobe'].estimate_ego_motion_from_image(
                 right_frame, left_frame,
                 initial_state_right=state_right,
                 initial_state_left=state_left,

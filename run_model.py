@@ -60,10 +60,12 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
+    areas = config['model']['areas']
+    side = config['model']['side']
+
     if len(config['model']['use_connectome_subset']) > 0:
         # Connectome subset: load the parquet bundle, filter via DataFrame, then
-        # wrap into a standard ConnectomeData. (load_connectome doesn't know
-        # about subsets.)
+        # apply the areas/side filter through load_connectome_from_dataframes.
         connectome_folder = Path(config['data']['connectome_folder'])
         cell_info_df = pd.read_parquet(connectome_folder / 'optic_lobes_cell_info.parquet')
         synapse_counts_df = pd.read_parquet(connectome_folder / 'optic_lobes_synapse_counts.parquet')
@@ -81,16 +83,15 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
         connectome = cl.load_connectome_from_dataframes(
             cell_info_df, column_info_df, synapse_counts_df,
-            name=config['model'].get('connectome', 'optic_lobe_right'),
-            is_single_eye=True,
+            areas=areas, side=side,
         )
     else:
         connectome = cl.load_connectome(
-            config['model'].get('connectome', 'optic_lobe_right'),
+            areas=areas, side=side,
             connectome_folder=config['data']['connectome_folder'],
         )
 
-    # Get model class from config: compose dynamics + anatomy at runtime.
+    # Get model class from config: compose ConnectomeModel + dynamics at runtime.
     ModelClass = nm.compose_model_class(
         dynamics_type=config['model']['dynamics_type'],
         model_type=config['model']['model_type'],

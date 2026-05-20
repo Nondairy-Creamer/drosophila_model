@@ -149,7 +149,7 @@ def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
         trans_rate_native = clip['translation'].numpy()
 
         # Integrate rates to get cumulative positions
-        from neural_models import integrate_angular_velocity, integrate_translational_velocity
+        from ego_motion import integrate_angular_velocity, integrate_translational_velocity
         omega_t = torch.tensor(rot_rate_native, dtype=torch.float64)
         rotation = integrate_angular_velocity(omega_t, video_dt).numpy()
         translation = integrate_translational_velocity(

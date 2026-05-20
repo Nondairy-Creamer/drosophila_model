@@ -5,11 +5,12 @@ CellAnn / HandTuned / Arbitrary) as a mixin that owns its own parameters and
 the methods that touch them (``forward``, ``firing_rate``, ``calc_sigma_max``,
 ``_apply_sigma_scale``, ``silence_neurons``).
 
-The mixins are designed to be combined with anatomy classes from
-:mod:`neural_models` via multiple inheritance, e.g.::
+The mixins are designed to be combined with :class:`neural_models.ConnectomeModel`
+via multiple inheritance — done at runtime by
+:func:`neural_models.compose_model_class`::
 
-    class CurrentModel(CurrentDynamics, OpticLobeRightRnn): pass
-    class WholeBrainCurrentModel(CurrentDynamics, ConnectomeRnn): pass
+    ModelCls = compose_model_class('CurrentDynamics')
+    # equivalent to: class ModelCls(CurrentDynamics, ConnectomeModel): pass
 
 This module imports nothing from :mod:`neural_models` to keep the dependency
 one-way (``neural_models -> dynamics_models``).
@@ -18,7 +19,7 @@ Host interface
 ==============
 
 The mixins are duck-typed against the following attributes/methods. A
-``ConnectomeRnn`` host (or any subclass thereof) is what they're written for;
+:class:`neural_models.ConnectomeModel` host is what they're written for;
 plugging them onto a non-connectome host would require synthesising these.
 
 From ``BaseRnn``:
@@ -27,7 +28,7 @@ From ``BaseRnn``:
     ``max_allowed_sigma`` (class attr), ``silence_val``,
     ``_save_init_inputs()``.
 
-From ``ConnectomeRnn``:
+From ``ConnectomeModel``:
     ``synapse_counts`` (CSR sparse tensor; some mixins replace it with a
     list of CSRs at init), ``synapse_counts_coo`` (numpy COO),
     ``neuron_to_type_index``, ``num_neurons``, ``num_cell_types``,
@@ -40,7 +41,7 @@ From ``ConnectomeRnn``:
 Connectome-layout contract
 ==========================
 
-``ConnectomeRnn`` sets ``self.synapse_counts`` to a single CSR sparse tensor.
+``ConnectomeModel`` sets ``self.synapse_counts`` to a single CSR sparse tensor.
 A dynamics mixin may replace this with a Python list of CSR tensors (one per
 neurotransmitter, as ``ConductanceDynamics`` does) or mutate it in place (as
 ``HandTunedDynamics`` does). Code that serialises/restores

@@ -1,19 +1,69 @@
 # Model Architecture
 
-Overview of the neural model classes in `neural_models.py`.
+Overview of the neural model classes.
+
+## Module Layout
+
+| Module | Contents |
+|---|---|
+| `neural_models.py` | `SerializableModel`, `BaseRnn`, `ConnectomeModel`, `compose_model_class` |
+| `dynamics_models.py` | Dynamics mixins: `CurrentDynamics`, `ConductanceDynamics`, `CellAnnDynamics`, `HandTunedDynamics`, `ArbitraryDynamics` |
+| `regions.py` | `RegionView` base + per-area subclasses (`OpticLobeRegion`, `AntennaLobeRegion`, …) and the area-name → region-class registry |
+| `model_layers.py` | Reusable `nn.Module` building blocks: `HexGridConv`, `TemporalLRU`, `CellTypeLayerNorm` |
+| `ego_motion.py` | Rotation math + velocity integration: `integrate_angular_velocity`, `integrate_translational_velocity` |
+| `connectome_loading.py` | `ConnectomeData` dataclass + `load_connectome(areas, side)` |
+| `engineering_models.py` | `ConvModel` (stateless hex-grid CNN, sister to `BaseRnn`) |
 
 ## Class Hierarchy
 
 ```
 torch.nn.Module
-├── BaseRnn (ABC)          Base class — connectome-constrained RNN
-│   ├── CurrentModel           Current-based synapse model
-│   └── ConductanceModel       Conductance-based synapse model
-├── NeuralModelConv            Hex-grid spatial convolution
-├── TemporalLRU                Complex diagonal linear recurrence (temporal filter)
-├── MotionDecoder              Multi-layer conv decoder (firing rates → optic flow)
-└── CellTypeLayerNorm          Layer norm with per-cell-type weight/bias
+├── BaseRnn (ABC)             Connectome-agnostic RNN scaffolding
+│   └── ConnectomeModel       Loads any combination of areas; owns self.regions
+│
+│  Concrete models are composed at runtime by
+│      compose_model_class(dynamics_type)
+│  e.g. CurrentDynamics + ConnectomeModel → ConnectomeModel_CurrentDynamics
+│
+│  Anatomical scope is data-driven, not class-driven:
+│      ConnectomeData built with areas=['optic_lobe'] side='right'
+│      → model.regions = {'optic_lobe': OpticLobeRegion(side='right', ...)}
+│      → optic-lobe-specific methods live on that region object.
+│
+├── ConvModel                 Engineering hex-grid CNN (no dynamics)
+│
+├── Regions (regions.py)
+│   ├── RegionView            Base: name + cell_indices + column_indices + side
+│   ├── OpticLobeRegion       side='right'|'left'|'both' (eye-terminology alias num_eyes);
+│   │                            predict_two_eyes, estimate_ego_motion_from_image,
+│   │                            column_phi_theta_two_eyes
+│   └── AntennaLobeRegion     (stub for future olfactory work)
+│
+└── Layers (model_layers.py)
+    ├── HexGridConv           Hex-grid spatial convolution
+    ├── TemporalLRU           Complex diagonal linear recurrence (temporal filter)
+    └── CellTypeLayerNorm     Layer norm with per-cell-type weight/bias
 ```
+
+## Configuration
+
+A `ConnectomeModel` is parameterised by a flat areas list + a side filter,
+plus the dynamics mixin to use:
+
+```toml
+[model]
+model_type    = 'ConnectomeModel'
+dynamics_type = 'ConductanceDynamics'
+areas         = ['optic_lobe']         # any subset of region-registry keys
+side          = 'right'                # 'right' | 'left' | 'both'
+```
+
+The loader (`connectome_loading.load_connectome(areas=..., side=...)`) filters
+rows of the master parquet by these two fields, builds the
+`ConnectomeData`, and returns it for the model constructor to consume. The
+brain is bilaterally symmetric, so `side` is a model-wide filter that applies
+to every bilateral region (optic lobe, antenna lobe, mushroom body, …) — not
+just the eyes.
 
 ---
 
@@ -64,7 +114,7 @@ Root IDs are then converted to dense matrix indices. The result is a sparse `(N,
 
 When `use_input_conv=True`, raw columnar stimulus passes through two stages before entering the RNN:
 
-1. **Spatial contrast normalization** (`NeuralModelConv` with positive, normalized weights) — computes a local weighted mean and variance over hex-grid neighbours, then normalizes: `y = -(x - mean) / sqrt(var + eps)`.
+1. **Spatial contrast normalization** (`HexGridConv` with positive, normalized weights) — computes a local weighted mean and variance over hex-grid neighbours, then normalizes: `y = -(x - mean) / sqrt(var + eps)`.
 2. **Temporal filtering** (`TemporalLRU`) — a complex diagonal linear recurrence that applies learned bandpass filtering independently per column.
 
 Both are applied per-timestep inside `apply_input_conv`.
@@ -82,11 +132,12 @@ Subclasses must implement:
 |---|---|
 | `predict(inputs, ...)` | Run the full simulation loop. Returns per-cell-type voltage/firing-rate traces, optional decoder output, and final state. |
 | `find_steady_state(...)` | Iterate the model with zero input until state converges; stores result in `self.steady_state`. |
-| `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` re-composes the concrete class from the saved `model_type` (anatomy) and `dynamics_type` (mixin) strings via `compose_model_class`. |
+| `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` re-composes the concrete class from the saved `dynamics_type` string via `compose_model_class`. |
 | `silence_neurons(names)` | Zero the input and output strength of specified cell types (for lesion experiments). |
 | `get_shared_columns(neuron_list)` | Find columns that contain all specified cell types; returns neuron and column index arrays. |
-| `estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline: run both eyes through the model, decode optic flow, then solve for rotation and translation. |
-| `estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | (static) Solve for 6-DOF ego-motion from optic flow via least-squares rotation estimation followed by SVD-based translation estimation. |
+| `estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | Solve for 6-DOF ego-motion from optic flow via least-squares rotation estimation followed by SVD-based translation estimation. |
+| `model.regions['optic_lobe'].estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline (lives on `OpticLobeRegion`): run both eyes through the model, decode optic flow, then solve for rotation and translation. |
+| `model.regions['optic_lobe'].predict_two_eyes(inputs_right, inputs_left, ...)` | Per-eye `predict()` results; mirror-trick on single-eye hosts, native slice on two-eye hosts. |
 
 ### `predict` in detail
 
@@ -192,7 +243,7 @@ where `R` = number of unique neurotransmitters, `T` = number of unique cell type
 
 ## Helper Modules
 
-### NeuralModelConv
+### HexGridConv
 
 Spatial convolution on a hex grid. Given per-column features, gathers features from neighbouring columns (determined by p,q lattice offsets), applies a learned weight tensor, and adds a bias. Boundary columns and absent neuron types (NaN features) are handled gracefully.
 
@@ -210,7 +261,7 @@ Provides natural bandpass filtering with learnable frequency response. Called pe
 
 Multi-layer hex-grid convolutional decoder that maps firing rates to 2D optic flow per column. Architecture:
 - Maps neuron firing rates to per-column features using a precomputed `column_to_decoder_neurons` index.
-- Passes features through N conv layers (`NeuralModelConv`), with BatchNorm + softplus between all but the last.
+- Passes features through N conv layers (`HexGridConv`), with BatchNorm + softplus between all but the last.
 - Final layer outputs 3 channels: the first two are divided by softplus of the third to produce the 2D flow vector.
 
 The decoder reads from a fixed set of medulla/lobula cell types (T1–T5, Tm, TmY families).

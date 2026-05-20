@@ -175,11 +175,12 @@ activation_overrides = {ct: 'relu' for ct in T4_types + T5_types}
 config = du.load_config('config.toml')
 import connectome_loading as cl
 connectome = cl.load_connectome(
-    config['model'].get('connectome', 'optic_lobe_right'),
+    areas=config['model']['areas'],
+    side=config['model']['side'],
     connectome_folder=config['data']['connectome_folder'],
 )
 
-HandTunedModel = nm.compose_model_class('HandTunedDynamics', 'OpticLobeRightRnn')
+HandTunedModel = nm.compose_model_class('HandTunedDynamics')
 
 for name, operations in model_configs.items():
     print(f'Creating model: {name}')

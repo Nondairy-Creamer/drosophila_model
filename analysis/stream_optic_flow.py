@@ -499,7 +499,7 @@ def main() -> int:
 
             with torch.no_grad():
                 ego_rotation, ego_translation, right_result, _ = (
-                    model.estimate_ego_motion_from_image(
+                    model.regions['optic_lobe'].estimate_ego_motion_from_image(
                         right_eye_inputs=right_stim,
                         initial_state_right=state_right,
                         initial_filter_state_right=filter_state_right,

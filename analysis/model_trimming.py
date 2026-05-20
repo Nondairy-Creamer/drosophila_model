@@ -102,7 +102,7 @@ def compute_loss(mdl, stim):
         N = stim.shape[2] // 2
         oob = ~train_mask.any(dim=1).any(dim=0)
         pred_rot, pred_trans, right_res, left_res = \
-            mdl.estimate_ego_motion_from_image(stim[:, :, :N], stim[:, :, N:], oob_columns=oob)
+            mdl.regions['optic_lobe'].estimate_ego_motion_from_image(stim[:, :, :N], stim[:, :, N:], oob_columns=oob)
         flow_key = next(k for k, m in mdl._readout_modules.items() if m.predicts_flow)
         outputs = {
             flow_key: torch.cat([right_res['outputs'][flow_key],

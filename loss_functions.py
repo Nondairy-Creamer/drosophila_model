@@ -1,5 +1,6 @@
 import torch
 import neural_models as nm
+import ego_motion as em
 import readout_utilities as ru
 
 
@@ -178,12 +179,12 @@ def odometry_loss(model, outputs, target, train_mask, loss_start_step):
     loss_rot_rate = normalized_mse(pred_rot, target_rot)
     loss_trans_rate = cosine_loss(pred_trans, target_trans)
 
-    pred_rot_pos = nm.integrate_angular_velocity(pred_rot, model.dt)
-    target_rot_pos = nm.integrate_angular_velocity(target_rot, model.dt)
+    pred_rot_pos = em.integrate_angular_velocity(pred_rot, model.dt)
+    target_rot_pos = em.integrate_angular_velocity(target_rot, model.dt)
     loss_rot_pos = normalized_mse(pred_rot_pos, target_rot_pos)
 
-    pred_trans_pos = nm.integrate_translational_velocity(pred_trans, pred_rot, model.dt)
-    target_trans_pos = nm.integrate_translational_velocity(target_trans, target_rot, model.dt)
+    pred_trans_pos = em.integrate_translational_velocity(pred_trans, pred_rot, model.dt)
+    target_trans_pos = em.integrate_translational_velocity(target_trans, target_rot, model.dt)
     loss_trans_pos = cosine_loss(pred_trans_pos, target_trans_pos)
 
     return (loss_rot_rate + loss_trans_rate + loss_rot_pos + loss_trans_pos) / 4

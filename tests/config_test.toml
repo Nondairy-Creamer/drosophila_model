@@ -1,6 +1,8 @@
 [model]
-model_type = 'OpticLobeRightRnn'
+model_type = 'ConnectomeModel'
 dynamics_type = 'CurrentDynamics'
+areas = ['optic_lobe']
+side = 'right'
 device = "cpu"
 dtype = "float32"
 use_layer_norm = true

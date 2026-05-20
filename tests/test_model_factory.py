@@ -51,7 +51,8 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
 
     connectome = cl.load_connectome_from_dataframes(
         cell_info_df, column_info_df, synapse_counts_df,
-        name='optic_lobe_right', is_single_eye=True,
+        areas=config["model"]["areas"],
+        side=config["model"]["side"],
     )
 
     model_class = nm.compose_model_class(

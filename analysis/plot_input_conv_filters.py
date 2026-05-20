@@ -20,6 +20,7 @@ from matplotlib import pyplot as plt
 
 import torch
 import neural_models as nm
+import model_layers as ml
 
 from analysis_utilities import centered_norm
 
@@ -79,8 +80,8 @@ def main() -> None:
             pre_weight = pre_weight / pre_weight.sum()
         pre_xy = pre_weight.cpu().numpy()
 
-        pre_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.input_pre_conv_size)
-        pre_grid = nm.NeuralModelConv.pq_to_xy(pre_offsets)
+        pre_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.input_pre_conv_size)
+        pre_grid = ml.HexGridConv.pq_to_xy(pre_offsets)
         vmin_pre, vmax_pre = centered_norm(pre_xy)
         scatter_pre = axes[ax_idx].scatter(
             pre_grid[:, 0],
@@ -105,9 +106,9 @@ def main() -> None:
         fig.colorbar(scatter_pre, ax=axes[ax_idx], shrink=0.8, pad=0.02)
         ax_idx += 1
 
-    pq_offsets = nm.NeuralModelConv.hex_grid_pq_offsets(model.input_conv_size_x)
+    pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.input_conv_size_x)
     spatial_weights = conv_xy
-    grid_points = nm.NeuralModelConv.pq_to_xy(pq_offsets)
+    grid_points = ml.HexGridConv.pq_to_xy(pq_offsets)
 
     vmin_xy, vmax_xy = centered_norm(spatial_weights)
     scatter = axes[ax_idx].scatter(
