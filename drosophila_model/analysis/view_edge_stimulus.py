@@ -356,7 +356,7 @@ def main():
 
     # ── Hex mosaic animations ─────────────────────────────────────────
     if args.hex:
-        from drosophila_model.FlyEye.visualize_stimulus import visualize_column_responses
+        from drosophila_model.fly_eye.visualize_stimulus import visualize_column_responses
         import matplotlib.cm as mpl_cm
 
         column_p_q = model.regions['optic_lobe'].column_p_q

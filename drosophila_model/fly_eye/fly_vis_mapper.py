@@ -29,7 +29,7 @@ class FlyVisMapper:
         W (scipy.sparse.csr_matrix): Weight matrix mapping pixels to ommatidia (N, P)
     
     Example:
-        >>> from FlyEye.fly_vis_mapper import FlyVisMapper
+        >>> from drosophila_model.fly_eye.fly_vis_mapper import FlyVisMapper
         >>> import cv2
         >>> mapper = FlyVisMapper(fly_eye="both")
         >>> img = cv2.imread("image.jpg")

@@ -16,12 +16,6 @@ drosophila_model.egg-info/SOURCES.txt
 drosophila_model.egg-info/dependency_links.txt
 drosophila_model.egg-info/requires.txt
 drosophila_model.egg-info/top_level.txt
-drosophila_model/FlyEye/__init__.py
-drosophila_model/FlyEye/extract_fly_eye_data.py
-drosophila_model/FlyEye/fly_vis_mapper.py
-drosophila_model/FlyEye/hexagonal_animation.py
-drosophila_model/FlyEye/utils.py
-drosophila_model/FlyEye/visualize_stimulus.py
 drosophila_model/analysis/__init__.py
 drosophila_model/analysis/analysis_utilities.py
 drosophila_model/analysis/analyze_connectome.py
@@ -55,6 +49,12 @@ drosophila_model/analysis/view_stimulus_preprocessing.py
 drosophila_model/analysis/visualize_connectome.py
 drosophila_model/analysis/white_noise.py
 drosophila_model/analysis/white_noise_silencing.py
+drosophila_model/fly_eye/__init__.py
+drosophila_model/fly_eye/extract_fly_eye_data.py
+drosophila_model/fly_eye/fly_vis_mapper.py
+drosophila_model/fly_eye/hexagonal_animation.py
+drosophila_model/fly_eye/utils.py
+drosophila_model/fly_eye/visualize_stimulus.py
 drosophila_model/model_definition/__init__.py
 drosophila_model/model_definition/model_layers.py
 drosophila_model/model_definition/readout_utilities.py

@@ -204,10 +204,10 @@ def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
 
 
 def _load_flyeye_utils():
-    """Load FlyEye/utils.py directly, bypassing FlyEye/__init__.py so we don't
-    pull in optional deps (natsort, cv2) required by other FlyEye submodules."""
+    """Load fly_eye/utils.py directly, bypassing fly_eye/__init__.py so we don't
+    pull in optional deps (natsort, cv2) required by other fly_eye submodules."""
     import importlib.util
-    utils_path = _pkg_root / "FlyEye" / "utils.py"
+    utils_path = _pkg_root / "fly_eye" / "utils.py"
     spec = importlib.util.spec_from_file_location("flyeye_utils_local", utils_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
