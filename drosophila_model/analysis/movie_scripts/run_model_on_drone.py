@@ -112,15 +112,15 @@ def main() -> None:
             )
 
         decoder_key = next(k for k, m in model._readout_modules.items() if m.predicts_flow)
-        pred_flow_right = right_res["outputs"][decoder_key][0].cpu().numpy()
-        pred_flow_left = left_res["outputs"][decoder_key][0].cpu().numpy()
+        pred_flow_right = right_res["outputs"]["optic_lobe"][decoder_key][0].cpu().numpy()
+        pred_flow_left = left_res["outputs"]["optic_lobe"][decoder_key][0].cpu().numpy()
         pred_rot_np = pred_rot[0].cpu().numpy()
         pred_trans_np = pred_trans[0].cpu().numpy()
 
         t4_keys = ["T4a", "T4b", "T4c", "T4d"]
         t5_keys = ["T5a", "T5b", "T5c", "T5d"]
-        fr_right = right_res["outputs"].get("firing_rate", {})
-        fr_left = left_res["outputs"].get("firing_rate", {})
+        fr_right = right_res["outputs"]["optic_lobe"].get("firing_rate", {})
+        fr_left = left_res["outputs"]["optic_lobe"].get("firing_rate", {})
         t4_right = {k: fr_right[k][0].cpu().numpy() for k in t4_keys if k in fr_right}
         t4_left = {k: fr_left[k][0].cpu().numpy() for k in t4_keys if k in fr_left}
         t5_right = {k: fr_right[k][0].cpu().numpy() for k in t5_keys if k in fr_right}
@@ -383,8 +383,8 @@ def _estimate_depth_per_column(model, right_res, left_res, decoder_key,
     Returns:
         nearness_right, nearness_left: (T, N) numpy arrays of ρ_i ∝ 1/Z_i.
     """
-    optic_flow_right = right_res["outputs"][decoder_key]   # (1, T, N, 2)
-    optic_flow_left = left_res["outputs"][decoder_key]
+    optic_flow_right = right_res["outputs"]["optic_lobe"][decoder_key]   # (1, T, N, 2)
+    optic_flow_left = left_res["outputs"]["optic_lobe"][decoder_key]
     optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)  # (1, T, 2N, 2)
 
     phi = model.regions['optic_lobe'].column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)

@@ -52,7 +52,42 @@ class RegionView(nn.Module):
         side: ``'right'`` / ``'left'`` / ``'both'`` — sides of this bilateral
             region represented in the loaded slice.
         num_sides: 1 if a single hemisphere was loaded, 2 if both.
+
+    Predict-time hooks (override in subclasses that drive the network):
+        default_input_neurons / default_output_neurons / default_readouts /
+        default_readout_neurons:
+            Class-level cell-type / readout-name lists this region exposes
+            as defaults. ``ConnectomeModel.predict`` uses
+            ``default_input_neurons`` / ``default_output_neurons`` when its
+            ``input_neurons`` / ``output_neurons`` args are ``None``.
+            ``default_readouts`` lists readout class names this region
+            instantiates via :meth:`instantiate_readouts`; per-region
+            override via ``[model.regions.<area>].readouts`` in config.
+        build_input_mapping:
+            Map a cell-type name list to the ``stim_to_cell_mapping`` dict
+            consumed by ``ConnectomeModel.forward``. Default ``None`` =
+            abstain.
+        initialize_recording:
+            Allocate this region's per-step output buffers (the recording
+            structure is the region's choice — optic-lobe uses column-
+            aligned ``(B, T, num_columns)`` tensors with NaN padding; an
+            antenna-lobe region would use per-ORN-type ``(B, T, N_ct)``
+            tensors with no NaN padding). Returns
+            ``(region_outputs, region_mapping)`` or ``None``.
+        record_step:
+            Per-timestep writer for this region's recording buffers.
+        instantiate_readouts:
+            Build this region's readout submodules using its own geometry.
+            Stores them on ``self._readout_modules``.
+        apply_input_pre_filter:
+            Apply any per-timestep input pre-filter (e.g. the optic-lobe
+            HexGridConv + contrast norm + temporal LRU). Default no-op.
     """
+
+    default_input_neurons: list[str] = []
+    default_output_neurons: list[str] = []
+    default_readouts: list[str] = []
+    default_readout_neurons: list[str] | None = None
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
                  cell_indices: np.ndarray, side: str,
@@ -73,9 +108,47 @@ class RegionView(nn.Module):
         )
         self.side = side
         self.num_sides = 2 if side == 'both' else 1
+
+        # Empty ModuleDict so torch's submodule registration always sees
+        # ``regions.<area>._readout_modules`` even before
+        # :meth:`instantiate_readouts` runs.
+        self._readout_modules = nn.ModuleDict()
+
+        # Shared (region-agnostic) opts. Pop here so subclass _load_extras
+        # validators don't see them as unknown keys. Falling through to the
+        # class-level defaults when not set in config.
+        opts = dict(region_opts or {})
+        if 'input_neurons' in opts:
+            self.default_input_neurons = list(opts.pop('input_neurons'))
+        if 'output_neurons' in opts:
+            self.default_output_neurons = list(opts.pop('output_neurons'))
+        readouts_cfg = opts.pop('readouts', None)
+        readout_neurons_cfg = opts.pop('readout_neurons', None)
+        regularizer_parameters_cfg = opts.pop('regularizer_parameters', None)
+
         self._load_extras(
             Path(model.connectome_folder) / 'area_extras',
-            dict(region_opts or {}),
+            opts,
+        )
+
+        # Per-region readout instantiation. Subclasses may override
+        # :meth:`instantiate_readouts` to use their own geometry / kwargs.
+        # Readouts list falls back to ``default_readouts`` when not in
+        # config.
+        readout_names = (
+            list(readouts_cfg) if readouts_cfg is not None
+            else list(self.default_readouts)
+        )
+        if readout_neurons_cfg is not None:
+            readout_neurons = list(readout_neurons_cfg)
+        elif self.default_readout_neurons is not None:
+            readout_neurons = list(self.default_readout_neurons)
+        else:
+            readout_neurons = None
+        self.instantiate_readouts(
+            readout_names=readout_names,
+            readout_neurons=readout_neurons,
+            regularizer_parameters=regularizer_parameters_cfg,
         )
 
     @property
@@ -98,6 +171,75 @@ class RegionView(nn.Module):
         extract the keys they accept and may warn / raise on unknown keys.
         """
         pass
+
+    # ------------------------------------------------------------------
+    # Predict-time hooks (default no-ops; override per-region)
+    # ------------------------------------------------------------------
+
+    @property
+    def input_stim_size(self) -> int:
+        """Size of this region's slice of the model's input axis.
+
+        Regions that drive input return the number of stimulus channels
+        they consume (e.g. hex columns for the optic lobe, glomeruli for
+        the antenna lobe). Default ``0`` = this region doesn't drive
+        input. Summed across regions by
+        :meth:`ConnectomeModel.find_steady_state` to size the zero
+        stimulus tensor.
+        """
+        return 0
+
+    def build_input_mapping(self, input_neurons: list[str]):
+        """Return ``(stim_to_cell_mapping, input_meta)`` or ``None``.
+
+        ``stim_to_cell_mapping`` is the dict consumed by
+        ``ConnectomeModel.forward``; ``input_meta`` is an opaque dict
+        forwarded to :meth:`initialize_recording`.
+        """
+        return None
+
+    def initialize_recording(self, num_batches: int, num_time: int,
+                             output_neurons: list[str], input_meta: dict,
+                             record_synaptic: bool):
+        """Allocate this region's per-step output buffers + readout buffers.
+
+        Returns ``(region_outputs, region_mapping)`` or ``None`` (this
+        region records nothing this predict). ``region_outputs`` is the
+        per-region dict that ends up under ``result['outputs'][name]``;
+        ``region_mapping`` is an opaque per-region context passed to
+        :meth:`record_step` plus surfaced under
+        ``result['mappings'][name]``.
+        """
+        return None
+
+    def record_step(self, t: int, v, fr, syn_current,
+                    region_outputs: dict, region_mapping: dict) -> None:
+        """Write this region's per-step values + readout outputs.
+
+        Called once per timestep with the full-network voltage and firing
+        rate. Default no-op.
+        """
+        return
+
+    def apply_input_pre_filter(self, u_t, filter_state):
+        """Per-timestep input pre-filter. Default no-op."""
+        return u_t, filter_state
+
+    def instantiate_readouts(self, readout_names: list[str],
+                             readout_neurons: list[str] | None,
+                             regularizer_parameters: dict | None) -> None:
+        """Build this region's readout submodules from class names.
+
+        Default raises if any readouts are requested, since the base
+        ``RegionView`` cannot supply geometry kwargs. Subclasses override
+        to wire their own geometry (e.g. ``OpticLobeRegion`` passes
+        ``column_p_q`` / ``num_columns``).
+        """
+        if readout_names:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not implement instantiate_readouts "
+                f"but was asked to build readouts {readout_names!r}."
+            )
 
     def __repr__(self):
         return (f"{type(self).__name__}(name={self.name!r}, side={self.side!r}, "
@@ -146,6 +288,19 @@ class OpticLobeRegion(RegionView):
         'input_pre_conv_size': 5,
         'num_temporal_modes':  4,
     }
+
+    # Visual input/output cell-type defaults for ConnectomeModel.predict.
+    default_input_neurons = ['L1', 'L2', 'L3']
+    default_output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+    # Readouts that produce column-aligned visual outputs.
+    default_readouts = ['FlowConv2Readout', 'L1Reg']
+    default_readout_neurons = [
+        'T1', 'T2', 'T2a', 'T3',
+        'T4a', 'T4b', 'T4c', 'T4d',
+        'T5a', 'T5b', 'T5c', 'T5d',
+        'Tm1', 'Tm2', 'Tm3', 'Tm4',
+        'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+    ]
 
     def _load_extras(self, extras_dir: Path, opts: dict) -> None:
         model = self.model
@@ -293,6 +448,171 @@ class OpticLobeRegion(RegionView):
         return neuron_indices[neuron_is_in_list], col_per_neuron[neuron_is_in_list]
 
     # ------------------------------------------------------------------
+    # Predict-time hooks
+    # ------------------------------------------------------------------
+
+    @property
+    def input_stim_size(self) -> int:
+        """One stimulus channel per hex column of this eye."""
+        return self.num_columns
+
+    def build_input_mapping(self, input_neurons):
+        """Map visual cell types to hex-column stimulus indices."""
+        model = self.model
+        neuron_idx, column_idx = self.get_shared_columns(input_neurons)
+        stim_to_cell_mapping = {
+            'neuron_index': torch.tensor(
+                neuron_idx, device=model.device, dtype=torch.int64,
+            ),
+            'stimulus_index': torch.tensor(
+                column_idx, device=model.device, dtype=torch.int64,
+            ),
+        }
+        return stim_to_cell_mapping, {'stimulus_columns_np': column_idx}
+
+    def initialize_recording(self, num_batches, num_time, output_neurons,
+                             input_meta, record_synaptic,
+                             precomputed_output_mapping=None):
+        """Allocate column-aligned per-cell-type and readout buffers.
+
+        ``region_outputs`` mirrors the optic-lobe contract today:
+        ``voltage`` / ``firing_rate`` (and optionally ``synaptic_current``)
+        are dicts of ``(B, T, num_columns)`` tensors with NaN padding so
+        column index 2 corresponds to the same retinotopic column across
+        cell types. Readout buffers are ``(B, T, num_columns, *extras)``.
+
+        If ``precomputed_output_mapping`` is provided (round-trip from a
+        previous ``predict`` call), it's reused directly and
+        ``output_neurons`` is ignored.
+        """
+        model = self.model
+        device, dtype = model.device, model.dtype
+
+        if precomputed_output_mapping is not None:
+            readout_dict = precomputed_output_mapping
+            output_neurons = list(readout_dict.keys())
+        else:
+            col_per_neuron = model.column_indices_per_neuron
+            input_cols = input_meta['stimulus_columns_np']
+            neuron_index = np.arange(model.num_neurons)
+
+            readout_dict = {}
+            for nt in output_neurons:
+                mask = (
+                    (model.cell_types == nt)
+                    & ~np.isnan(col_per_neuron)
+                    & np.isin(col_per_neuron, input_cols)
+                )
+                readout_dict[nt] = {
+                    'column_indices': torch.tensor(
+                        col_per_neuron[mask], device=device, dtype=torch.int64,
+                    ),
+                    'neuron_indices': torch.tensor(
+                        neuron_index[mask], device=device, dtype=torch.int64,
+                    ),
+                }
+
+        shape = (num_batches, num_time, self.num_columns)
+        region_outputs: dict = {'voltage': {}, 'firing_rate': {}}
+        if record_synaptic:
+            region_outputs['synaptic_current'] = {}
+        for nt in output_neurons:
+            region_outputs['voltage'][nt] = torch.full(
+                shape, float('nan'), device=device, dtype=dtype,
+            )
+            region_outputs['firing_rate'][nt] = torch.full(
+                shape, float('nan'), device=device, dtype=dtype,
+            )
+            if record_synaptic:
+                region_outputs['synaptic_current'][nt] = torch.full(
+                    shape, float('nan'), device=device, dtype=dtype,
+                )
+
+        for name, mod in self._readout_modules.items():
+            if getattr(mod, 'training_only', False):
+                continue
+            mod_shape = shape + mod.output_extra_dims
+            region_outputs[name] = torch.full(
+                mod_shape, float('nan'), device=device, dtype=dtype,
+            )
+
+        region_mapping = {
+            'input_mapping': None,  # filled in by predict()
+            'output_mapping': readout_dict,
+            'output_neurons': list(output_neurons),
+            'record_synaptic': record_synaptic,
+        }
+        return region_outputs, region_mapping
+
+    def record_step(self, t, v, fr, syn_current, region_outputs, region_mapping):
+        readout_dict = region_mapping['output_mapping']
+        record_synaptic = region_mapping['record_synaptic']
+
+        for name, mod in self._readout_modules.items():
+            if getattr(mod, 'training_only', False):
+                continue
+            region_outputs[name][:, t, ...] = mod(fr)
+
+        for nt in region_mapping['output_neurons']:
+            ci = readout_dict[nt]['column_indices']
+            ni = readout_dict[nt]['neuron_indices']
+            valid = ci >= 0
+            if torch.any(valid):
+                region_outputs['voltage'][nt][:, t, ci[valid]] = v[:, ni[valid]]
+                region_outputs['firing_rate'][nt][:, t, ci[valid]] = fr[:, ni[valid]]
+                if record_synaptic:
+                    region_outputs['synaptic_current'][nt][:, t, ci[valid]] = (
+                        syn_current[:, ni[valid]]
+                    )
+
+    def apply_input_pre_filter(self, u_t, filter_state):
+        if self.use_input_conv:
+            return self.apply_input_conv(u_t, filter_state)
+        return u_t, filter_state
+
+    def instantiate_readouts(self, readout_names, readout_neurons,
+                             regularizer_parameters):
+        """Build column-aware readout submodules.
+
+        Each readout class in :mod:`drosophila_model.model_definition.readouts`
+        is instantiated with the optic-lobe geometry. Any
+        ``_regularizer_config`` declared by a readout is auto-instantiated
+        alongside it (e.g. ``DecoderWeightL1Reg`` tied to a specific
+        decoder).
+        """
+        from drosophila_model.model_definition import readouts as readouts_mod
+
+        if not readout_names:
+            return
+
+        model = self.model
+        kwargs = dict(
+            cell_types=model.cell_types,
+            column_indices=model.column_indices_per_neuron,
+            column_p_q=self.column_p_q,
+            num_neurons=model.num_neurons,
+            num_columns=self.num_columns,
+            device=model.device,
+            dtype=model.dtype,
+            readout_neurons=readout_neurons,
+            regularizer_parameters=regularizer_parameters,
+        )
+        for name in readout_names:
+            cls = getattr(readouts_mod, name, None)
+            if cls is None or not isinstance(cls, type):
+                raise ValueError(f"Unknown readout class: {name!r}")
+            mod = cls(**kwargs)
+            self._readout_modules[name] = mod
+
+            for reg_cls, weight in getattr(mod, '_regularizer_config', {}).items():
+                if not weight:
+                    continue
+                reg_name = f"{name}_{reg_cls.__name__}"
+                self._readout_modules[reg_name] = reg_cls(
+                    readout_name=name, weight=weight,
+                )
+
+    # ------------------------------------------------------------------
     # Ego-motion
     # ------------------------------------------------------------------
 
@@ -347,26 +667,36 @@ class OpticLobeRegion(RegionView):
             init_filter_state=init_filter_state, **kwargs,
         )
 
+        # Per-region outputs: split each region's tensors along the batch
+        # dim. Single-host two-eye predict has only an optic_lobe region
+        # today, but the loop is region-agnostic so a future host with
+        # multiple regions splits all of them consistently.
         outputs = result['outputs']
         right_outputs, left_outputs = {}, {}
-
-        for key in ('voltage', 'firing_rate', 'synaptic_current'):
-            if key in outputs:
-                right_outputs[key] = {k: v[:S] for k, v in outputs[key].items()}
-                left_outputs[key] = {k: v[S:] for k, v in outputs[key].items()}
-
-        for rname, mod in model._readout_modules.items():
-            if rname not in outputs:
-                continue
-            if getattr(mod, 'training_only', False):
-                right_outputs[rname] = outputs[rname]
-                left_outputs[rname] = outputs[rname]
-                continue
-            right_outputs[rname] = outputs[rname][:S]
-            left_val = outputs[rname][S:].clone()
-            if mod.eye_asymmetric:
-                left_val = mod.flip_for_left_eye(left_val)
-            left_outputs[rname] = left_val
+        for region_name, region_out in outputs.items():
+            region = model.regions[region_name]
+            right_region, left_region = {}, {}
+            for key, val in region_out.items():
+                if key in ('voltage', 'firing_rate', 'synaptic_current'):
+                    right_region[key] = {k: v[:S] for k, v in val.items()}
+                    left_region[key] = {k: v[S:] for k, v in val.items()}
+                    continue
+                mod = region._readout_modules[key] if key in region._readout_modules else None
+                if mod is None:
+                    right_region[key] = val
+                    left_region[key] = val
+                    continue
+                if getattr(mod, 'training_only', False):
+                    right_region[key] = val
+                    left_region[key] = val
+                    continue
+                right_region[key] = val[:S]
+                left_val = val[S:].clone()
+                if mod.eye_asymmetric:
+                    left_val = mod.flip_for_left_eye(left_val)
+                left_region[key] = left_val
+            right_outputs[region_name] = right_region
+            left_outputs[region_name] = left_region
 
         filter_state = result['model_state']['filter_state']
         right_filter = filter_state[:S] if filter_state is not None else None
@@ -414,8 +744,9 @@ class OpticLobeRegion(RegionView):
 
         predict_kwargs = {}
         if cached_mappings is not None:
-            predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
-            predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
+            optic_cached = cached_mappings.get(self.name, {})
+            predict_kwargs['input_neurons'] = optic_cached.get('input_mapping')
+            predict_kwargs['output_neurons'] = optic_cached.get('output_mapping')
 
         two_eye = set(eyes) == {'right', 'left'}
 
@@ -429,16 +760,18 @@ class OpticLobeRegion(RegionView):
                 **predict_kwargs,
             )
 
+            right_region_out = right_result['outputs'].get(self.name, {})
+            left_region_out = left_result['outputs'].get(self.name, {})
             flow_key = next(
-                (k for k, m in model._readout_modules.items()
-                 if getattr(m, 'predicts_flow', False) and k in right_result['outputs']),
+                (k for k, m in self._readout_modules.items()
+                 if getattr(m, 'predicts_flow', False) and k in right_region_out),
                 None,
             )
             if flow_key is None:
                 raise ValueError("No flow readout configured; cannot estimate ego motion.")
 
-            optic_flow_right = right_result['outputs'][flow_key]
-            optic_flow_left = left_result['outputs'][flow_key]
+            optic_flow_right = right_region_out[flow_key]
+            optic_flow_left = left_region_out[flow_key]
             optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
             phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
@@ -457,17 +790,18 @@ class OpticLobeRegion(RegionView):
                 **predict_kwargs,
             )
 
+            region_out = result['outputs'].get(self.name, {})
             flow_key = next(
-                (k for k, m in model._readout_modules.items()
-                 if getattr(m, 'predicts_flow', False) and k in result['outputs']),
+                (k for k, m in self._readout_modules.items()
+                 if getattr(m, 'predicts_flow', False) and k in region_out),
                 None,
             )
             if flow_key is None:
                 raise ValueError("No flow readout configured; cannot estimate ego motion.")
 
-            optic_flow = result['outputs'][flow_key]
+            optic_flow = region_out[flow_key]
             if eye == 'left':
-                mod = model._readout_modules[flow_key]
+                mod = self._readout_modules[flow_key]
                 if mod.eye_asymmetric:
                     optic_flow = mod.flip_for_left_eye(optic_flow.clone())
 

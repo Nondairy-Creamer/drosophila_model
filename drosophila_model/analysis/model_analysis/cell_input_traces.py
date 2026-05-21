@@ -460,7 +460,7 @@ def run_t4_input_traces(
                         batch,
                         input_neurons=["L1", "L2", "L3"],
                         output_neurons=output_types,
-                    )["outputs"]
+                    )["outputs"]["optic_lobe"]
 
                 for trace_key, _leg, ct, ni in plot_specs:
                     if ct not in output_types:
@@ -490,7 +490,7 @@ def run_t4_input_traces(
                     batch,
                     input_neurons=["L1", "L2", "L3"],
                     output_neurons=output_types,
-                )["outputs"]
+                )["outputs"]["optic_lobe"]
 
             for trace_key, _leg, ct, ni in plot_specs:
                 if ct not in output_types:

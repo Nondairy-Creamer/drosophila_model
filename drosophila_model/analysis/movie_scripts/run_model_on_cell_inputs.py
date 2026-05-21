@@ -131,7 +131,7 @@ def _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
     print(f"Running model prediction for stimulus {stim_index}...")
     with torch.no_grad():
         pred_output = model.predict(stim_input)
-        pred_flow = pred_output["outputs"][flow_key][0].cpu().numpy()
+        pred_flow = pred_output["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()
 
     # Filtered stimulus
     filtered_stim_np = None
@@ -202,8 +202,8 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
     print(f"Running model prediction ({num_frames} frames, N={N} columns per eye)...")
     with torch.no_grad():
         right_result, left_result = model.regions['optic_lobe'].predict_two_eyes(right_input, left_input)
-        pred_flow_right = right_result['outputs'][flow_key][0].cpu().numpy()
-        pred_flow_left = left_result['outputs'][flow_key][0].cpu().numpy()
+        pred_flow_right = right_result['outputs']['optic_lobe'][flow_key][0].cpu().numpy()
+        pred_flow_left = left_result['outputs']['optic_lobe'][flow_key][0].cpu().numpy()
 
     filtered_right_np = None
     filtered_left_np = None

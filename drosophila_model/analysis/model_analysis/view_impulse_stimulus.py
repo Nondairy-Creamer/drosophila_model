@@ -229,7 +229,7 @@ def main():
             input_neurons=INPUT_NEURONS,
             output_neurons=output_types,
         )
-    outputs = result["outputs"]
+    outputs = result["outputs"]["optic_lobe"]
 
     # ── Resolve column indices ────────────────────────────────────────
     show_columns = args.columns

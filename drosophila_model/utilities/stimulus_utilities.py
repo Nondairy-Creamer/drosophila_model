@@ -2778,7 +2778,7 @@ def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_nois
             input_neurons=input_neurons,
             output_neurons=output_neurons,
             init_state=None
-        )['outputs']
+        )['outputs']['optic_lobe']
     
     flow_key = next(
         (k for k, m in perturbed_model._readout_modules.items() if m.predicts_flow and k in pred),

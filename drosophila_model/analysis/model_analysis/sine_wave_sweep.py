@@ -160,7 +160,7 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
 
     with torch.no_grad():
         pred = model.predict(all_stim_tensor, input_neurons=["L1", "L2", "L3"],
-                             output_neurons=all_neurons)['outputs']
+                             output_neurons=all_neurons)['outputs']['optic_lobe']
 
     # --- extract mean decoder responses (if model has a decoder) ---
     decoder_results = None

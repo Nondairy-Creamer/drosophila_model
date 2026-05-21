@@ -30,9 +30,9 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
         readouts = ['FlowConv2Readout']
     config, repo_root = load_test_config()
     config["model"]["device"] = "cpu"
-    config["model"]["readouts"] = readouts
     config["model"].setdefault("regions", {}).setdefault("optic_lobe", {})
     config["model"]["regions"]["optic_lobe"]["use_input_conv"] = use_input_conv
+    config["model"]["regions"]["optic_lobe"]["readouts"] = readouts
 
     connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
     cell_info_df = pd.read_parquet(connectome_folder / "cell_info.parquet")
@@ -68,7 +68,6 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
         count_threshold=config["model"]["synapse_count_threshold"],
         device=config["model"]["device"],
         dtype=config["model"]["dtype"],
-        readouts=config["model"]["readouts"],
         region_kwargs=config["model"].get("regions", {}),
         dt=config["model"]["dt"],
         seed=0,

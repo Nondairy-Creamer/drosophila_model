@@ -220,7 +220,7 @@ def main() -> None:
             stimulus,
             input_neurons=input_neurons,
             output_neurons=output_neurons,
-        )["outputs"]["firing_rate"]
+        )["outputs"]["optic_lobe"]["firing_rate"]
 
     stim_np = stimulus.detach().cpu().numpy()
     n_cols = model.regions['optic_lobe'].num_columns

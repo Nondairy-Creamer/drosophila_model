@@ -14,9 +14,10 @@ def test_model_gradients():
     torch.manual_seed(42)
     inputs = torch.randn((1, 20, model.regions['optic_lobe'].num_columns), dtype=model.dtype, device=model.device)
     outputs = model.predict(inputs, input_neurons=input_neurons, output_neurons=model.unique_cell_types.tolist())['outputs']
-    target = torch.zeros_like(outputs["FlowConv2Readout"]) + 1
+    optic_outputs = outputs['optic_lobe']
+    target = torch.zeros_like(optic_outputs["FlowConv2Readout"]) + 1
 
-    loss = lf.mse_loss(target, outputs["FlowConv2Readout"])
+    loss = lf.mse_loss(target, optic_outputs["FlowConv2Readout"])
     loss.backward()
 
     grad_nonzero = {}

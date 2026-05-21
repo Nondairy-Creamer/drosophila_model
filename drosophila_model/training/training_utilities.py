@@ -45,7 +45,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
         train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
 
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    cached_mappings = {'input_mapping': input_neurons, 'output_mapping': output_neurons}
+    # Per-region cached mappings. Initialised with cell-type-name lists for
+    # the first iteration; predict() returns the rebuilt mapping dicts which
+    # we reuse on subsequent iterations.
+    cached_mappings = {'optic_lobe': {
+        'input_mapping': input_neurons,
+        'output_mapping': output_neurons,
+    }}
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -119,11 +125,15 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                     model.regions['optic_lobe'].estimate_ego_motion_from_image(
                         right_batch, left_batch, oob_columns=oob)
 
+                # Per-region outputs: concatenate right+left readouts on the
+                # column axis for the two-eye loss terms.
                 outputs = {}
-                for key in list(right_res['outputs'].keys()):
-                    if key in ('voltage', 'firing_rate'):
+                right_optic = right_res['outputs'].get('optic_lobe', {})
+                left_optic = left_res['outputs'].get('optic_lobe', {})
+                for key in right_optic.keys():
+                    if key in ('voltage', 'firing_rate', 'synaptic_current'):
                         continue
-                    r, l = right_res['outputs'][key], left_res['outputs'][key]
+                    r, l = right_optic[key], left_optic[key]
                     if r.dim() < 2:
                         outputs[key] = r
                         continue
@@ -134,11 +144,14 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 outputs['pred_rotation'] = pred_rot
                 outputs['pred_translation'] = pred_trans
             else:
+                optic_cache = cached_mappings.get('optic_lobe', {})
                 result = model.predict(
                     inputs_batch,
-                    input_neurons=cached_mappings['input_mapping'],
-                    output_neurons=cached_mappings['output_mapping'])
-                outputs = result['outputs']
+                    input_neurons=optic_cache.get('input_mapping'),
+                    output_neurons=optic_cache.get('output_mapping'))
+                # Today the loss functions consume the optic-lobe region's
+                # readouts; flatten to that region's dict for them.
+                outputs = result['outputs'].get('optic_lobe', {})
                 cached_mappings = result['mappings']
 
             component_vals = {

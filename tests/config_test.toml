@@ -5,7 +5,6 @@ device = "cpu"
 dtype = "float32"
 use_layer_norm = true
 nonlinearity = "Softplus"
-readouts = ['FlowConv2Readout']
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = [
@@ -19,6 +18,7 @@ use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
+readouts            = ['FlowConv2Readout']
 
 [training]
 num_steps = 100

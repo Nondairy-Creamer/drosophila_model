@@ -411,8 +411,9 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
 
         predict_kwargs = {}
         if cached_mappings is not None:
-            predict_kwargs['input_neurons'] = cached_mappings['input_mapping']
-            predict_kwargs['output_neurons'] = cached_mappings['output_mapping']
+            optic_cache = cached_mappings.get('optic_lobe', {})
+            predict_kwargs['input_neurons'] = optic_cache.get('input_mapping')
+            predict_kwargs['output_neurons'] = optic_cache.get('output_mapping')
         else:
             predict_kwargs['output_neurons'] = valid_cell_types
 
@@ -431,7 +432,7 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
             cached_mappings = result['mappings']
 
         for ct in valid_cell_types:
-            fr = result['outputs']['firing_rate'][ct][0].cpu().numpy()
+            fr = result['outputs']['optic_lobe']['firing_rate'][ct][0].cpu().numpy()
             all_firing_rates[ct].append(fr)
 
     # ── Compute STAs ─────────────────────────────────────────────────

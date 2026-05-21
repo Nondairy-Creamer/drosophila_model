@@ -232,7 +232,7 @@ def main():
             all_stim_tensor,
             input_neurons=["L1", "L2", "L3"],
             output_neurons=output_neurons,
-        )["outputs"]
+        )["outputs"]["optic_lobe"]
 
     panos_per_condition = len(index_map) // (len(directions) * len(wavelengths) * num_sweep)
     if panos_per_condition * len(directions) * len(wavelengths) * num_sweep != len(index_map):

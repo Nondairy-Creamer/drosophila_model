@@ -146,7 +146,7 @@ def main() -> None:
             output_neurons=output_neurons,
             init_state=init_v,
             init_filter_state=init_filter_state,
-        )['outputs']['firing_rate']
+        )['outputs']['optic_lobe']['firing_rate']
 
     cell_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     cell_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]

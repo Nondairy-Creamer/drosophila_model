@@ -195,7 +195,7 @@ def predict_optic_flow(
     if flow_key is None:
         raise ValueError("Model has no flow readout configured. Cannot predict optic flow.")
     with torch.no_grad():
-        outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']
+        outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']['optic_lobe']
         return outputs[flow_key]
 
 

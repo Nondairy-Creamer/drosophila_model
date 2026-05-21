@@ -48,17 +48,19 @@ def compute_loss(model, cell_inputs, target, train_mask, config):
                 model.regions['optic_lobe'].estimate_ego_motion_from_image(
                     cell_inputs[:, :, :N], cell_inputs[:, :, N:], oob_columns=oob)
             outputs = {}
-            for key in right_res['outputs']:
-                if key in ('voltage', 'firing_rate'):
+            right_optic = right_res['outputs']['optic_lobe']
+            left_optic = left_res['outputs']['optic_lobe']
+            for key in right_optic:
+                if key in ('voltage', 'firing_rate', 'synaptic_current'):
                     continue
                 outputs[key] = torch.cat(
-                    [right_res['outputs'][key], left_res['outputs'][key]], dim=2)
+                    [right_optic[key], left_optic[key]], dim=2)
             outputs['pred_rotation'] = pred_rot
             outputs['pred_translation'] = pred_trans
         else:
             input_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
             result = model.predict(cell_inputs, input_neurons=input_neurons)
-            outputs = result['outputs']
+            outputs = result['outputs']['optic_lobe']
 
         loss = sum(
             getattr(lf, n)(model, outputs, target, train_mask, loss_start_step)

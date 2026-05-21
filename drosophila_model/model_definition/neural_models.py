@@ -261,16 +261,12 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     def __init__(self, *,
                  nonlinearity='Softplus', device='cpu', dtype='float32',
                  dt=0.01, seed=None, init_std=0.1, commit_hash=None,
-                 readouts=None, readout_neurons=None, regularizer_parameters=None,
                  use_layer_norm=True, **kwargs):
         super().__init__(**kwargs)
 
         self.commit_hash = commit_hash
         self.silence_val = 1e-8
         self.init_std = init_std
-        self.readouts = list(readouts) if readouts else []
-        self.readout_neurons = list(readout_neurons) if readout_neurons else None
-        self.regularizer_parameters = dict(regularizer_parameters) if regularizer_parameters else {}
         self.use_layer_norm = use_layer_norm
 
         if seed is not None:
@@ -388,15 +384,14 @@ class ConnectomeModel(BaseRnn):
                 f"connectome_loading.load_connectome({{area: side}})). "
                 f"Got {type(connectome).__name__}."
             )
-        cdata = connectome
-        self.area_sides = dict(cdata.area_sides)
-        self.areas = list(cdata.area_sides.keys())
-        self.connectome_folder = cdata.connectome_folder
+        self.area_sides = dict(connectome.area_sides)
+        self.areas = list(connectome.area_sides.keys())
+        self.connectome_folder = connectome.connectome_folder
 
         # Store the resolved ConnectomeData in init_inputs so saved
         # checkpoints are self-contained (no parquet path required to reload).
         self._save_init_inputs()
-        self.init_inputs['connectome'] = cdata
+        self.init_inputs['connectome'] = connectome
 
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
         (
@@ -404,10 +399,10 @@ class ConnectomeModel(BaseRnn):
             area_per_neuron, side_per_neuron, per_neuron_extras,
             synapse_counts_coo,
         ) = self._preprocess_connectome(
-            cdata.synapse_counts_coo, cdata.root_ids, cdata.cell_types,
-            cdata.neurotransmitters,
-            cdata.area_per_neuron, cdata.side_per_neuron,
-            cdata.per_neuron_extras,
+            connectome.synapse_counts_coo, connectome.root_ids, connectome.cell_types,
+            connectome.neurotransmitters,
+            connectome.area_per_neuron, connectome.side_per_neuron,
+            connectome.per_neuron_extras,
             valid_neurotransmitters, count_threshold,
         )
 
@@ -472,10 +467,10 @@ class ConnectomeModel(BaseRnn):
         # area_extras parquet, consumes its own option sub-dict from
         # region_kwargs, and owns its area-specific submodules (e.g.
         # OpticLobeRegion builds the input_conv stack when
-        # region_kwargs['optic_lobe']['use_input_conv'] is True).
+        # region_kwargs['optic_lobe']['use_input_conv'] is True). Each
+        # region also instantiates its own readouts from
+        # region_kwargs[area]['readouts'].
         self.regions = regions_mod.build_regions(self, self.region_kwargs)
-
-        self._initialize_readouts()
 
     # ------------------------------------------------------------------
     # Connectome preprocessing
@@ -541,58 +536,36 @@ class ConnectomeModel(BaseRnn):
                 synapse_counts_coo)
 
     # ------------------------------------------------------------------
-    # Readouts
+    # Readouts (region-owned; aggregated here for convenient lookup)
     # ------------------------------------------------------------------
+
+    @property
+    def _readout_modules(self):
+        """Flat view of region-owned readout modules.
+
+        Each region owns its own ``_readout_modules`` ModuleDict; this
+        property aggregates them for callers that just want to find or
+        iterate readouts by name. Names are expected to be unique across
+        regions; later regions win on conflict (today only optic_lobe
+        publishes readouts so there's no conflict).
+        """
+        merged = {}
+        for region in self.regions.values():
+            for name, mod in region._readout_modules.items():
+                merged[name] = mod
+        return merged
 
     @property
     def has_decoder(self):
         return any(getattr(mod, 'predicts_flow', False)
                    for mod in self._readout_modules.values())
 
-    def _initialize_readouts(self):
-        """Instantiate readout modules by class name from ``readout_utilities``.
-
-        Visual readouts (anything that wants ``column_p_q`` / ``num_columns``)
-        require the ``optic_lobe`` region. The user is responsible for only
-        listing visual readouts when their config includes ``'optic_lobe'`` in
-        ``areas``.
-        """
-        from drosophila_model.model_definition import readout_utilities
-        self._readout_modules = torch.nn.ModuleDict()
-        if not self.readouts:
-            return
-
-        if 'optic_lobe' not in self.regions:
-            raise ValueError(
-                f"Readouts {self.readouts} were configured but no 'optic_lobe' "
-                "region is present. Visual readouts require the optic lobe; "
-                "either add 'optic_lobe' to areas or drop the readouts."
-            )
-        optic = self.regions['optic_lobe']
-
-        kwargs = dict(
-            cell_types=self.cell_types,
-            column_indices=self.column_indices_per_neuron,
-            column_p_q=optic.column_p_q,
-            num_neurons=self.num_neurons,
-            num_columns=optic.num_columns,
-            device=self.device,
-            dtype=self.dtype,
-            readout_neurons=self.readout_neurons,
-            regularizer_parameters=self.regularizer_parameters,
-        )
-        for name in self.readouts:
-            cls = getattr(readout_utilities, name, None)
-            if cls is None or not isinstance(cls, type):
-                raise ValueError(f"Unknown readout class: {name!r}")
-            mod = cls(**kwargs)
-            self._readout_modules[name] = mod
-
-            for reg_cls, weight in getattr(mod, '_regularizer_config', {}).items():
-                if not weight:
-                    continue
-                reg_name = f"{name}_{reg_cls.__name__}"
-                self._readout_modules[reg_name] = reg_cls(readout_name=name, weight=weight)
+    def find_readout_region(self, readout_name):
+        """Return the region that owns ``readout_name`` (or ``None``)."""
+        for region in self.regions.values():
+            if readout_name in region._readout_modules:
+                return region
+        return None
 
     # ------------------------------------------------------------------
     # Connectome helpers used by dynamics mixins
@@ -715,120 +688,218 @@ class ConnectomeModel(BaseRnn):
     # ------------------------------------------------------------------
 
     def predict(self, inputs,
-                input_neurons=['L1', 'L2', 'L3'],
-                output_neurons=['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'],
+                input_neurons=None, output_neurons=None,
                 init_state=None, init_filter_state=None):
-        num_batches, num_time, num_neurons = inputs.shape
+        """Step the network forward over ``inputs``.
 
+        Anatomy-agnostic: I/O mapping, per-timestep input pre-filtering,
+        recording structure, and readouts are all delegated to
+        :class:`RegionView` subclasses. Outputs and mappings are nested
+        per-region (e.g. ``result['outputs']['optic_lobe']['firing_rate']``).
+
+        ``input_neurons`` / ``output_neurons`` are lists of cell-type
+        names; passing ``None`` collects each region's
+        ``default_input_neurons`` / ``default_output_neurons``. Either may
+        also be a pre-built mapping dict (round-trip from a previous
+        ``predict`` call via the per-region mappings).
+        """
+        num_batches, num_time, _ = inputs.shape
         filter_state = init_filter_state
 
-        # predict() currently assumes a visual input stream over hex columns;
-        # the optic-lobe region owns the column geometry, the input-conv
-        # pipeline, and the cell-type->column shared-membership lookup.
-        optic = self.regions['optic_lobe']
-        num_columns = optic.num_columns
-        col_per_neuron = self.column_indices_per_neuron
+        stim_to_cell_mapping, input_meta_per_region = self._resolve_input_mapping(
+            input_neurons,
+        )
+        output_per_region = self._resolve_output_neurons(output_neurons)
 
-        if isinstance(input_neurons, list):
-            input_neurons = [i for i in input_neurons if i in self.unique_cell_types]
-            output_neurons = [i for i in output_neurons if i in self.unique_cell_types]
+        record_synaptic = getattr(self, 'records_synaptic_current', False)
 
-            input_neuron_indices, input_column_indices = optic.get_shared_columns(input_neurons)
-            input_column_indices_np = input_column_indices
-            stim_to_cell_mapping = {
-                'neuron_index': torch.tensor(input_neuron_indices, device=self.device, dtype=torch.int64),
-                'stimulus_index': torch.tensor(input_column_indices, device=self.device, dtype=torch.int64),
-            }
-        else:
-            stim_to_cell_mapping = input_neurons
-            input_column_indices_np = stim_to_cell_mapping['stimulus_index'].detach().cpu().numpy()
-
-        if isinstance(output_neurons, list):
-            readout_dict = {}
-            for i in output_neurons:
-                is_correct_type = (
-                    (self.cell_types == i)
-                    & ~np.isnan(col_per_neuron)
-                    & np.isin(col_per_neuron, input_column_indices_np)
+        region_outputs: dict = {}
+        region_mappings: dict = {}
+        for name, region in self.regions.items():
+            spec = output_per_region.get(name)
+            if spec is None:
+                continue
+            meta = input_meta_per_region.get(name, {})
+            if isinstance(spec, dict):
+                # Round-trip: spec is a precomputed readout_dict.
+                result = region.initialize_recording(
+                    num_batches, num_time, [], meta, record_synaptic,
+                    precomputed_output_mapping=spec,
                 )
-                neuron_index = np.arange(self.num_neurons)
-                readout_dict[i] = {
-                    'column_indices': torch.tensor(col_per_neuron[is_correct_type], device=self.device, dtype=torch.int64),
-                    'neuron_indices': torch.tensor(neuron_index[is_correct_type], device=self.device, dtype=torch.int64),
-                }
-            readout_keys = output_neurons
-        else:
-            readout_dict = output_neurons
-            readout_keys = list(readout_dict.keys())
+            else:
+                # spec is a cell-type-name list.
+                if not spec:
+                    continue
+                result = region.initialize_recording(
+                    num_batches, num_time, spec, meta, record_synaptic,
+                )
+            if result is None:
+                continue
+            outs, mapping = result
+            mapping['input_mapping'] = (
+                stim_to_cell_mapping if name in input_meta_per_region else None
+            )
+            region_outputs[name] = outs
+            region_mappings[name] = mapping
 
         if init_state is None:
             v = self.steady_state.unsqueeze(0).expand(num_batches, -1)
         else:
             v = init_state
 
-        outputs = {'voltage': {}, 'firing_rate': {}}
-        record_synaptic = getattr(self, 'records_synaptic_current', False)
-        if record_synaptic:
-            outputs['synaptic_current'] = {}
-        for i in readout_keys:
-            outputs['voltage'][i] = torch.full((num_batches, num_time, num_columns), float('nan'), device=self.device, dtype=self.dtype)
-            outputs['firing_rate'][i] = torch.full((num_batches, num_time, num_columns), float('nan'), device=self.device, dtype=self.dtype)
-            if record_synaptic:
-                outputs['synaptic_current'][i] = torch.full((num_batches, num_time, num_columns), float('nan'), device=self.device, dtype=self.dtype)
-
-        for name, mod in self._readout_modules.items():
-            if getattr(mod, 'training_only', False):
-                continue
-            shape = (num_batches, num_time, num_columns) + mod.output_extra_dims
-            outputs[name] = torch.full(shape, float('nan'),
-                                       device=self.device, dtype=self.dtype)
-
         for t in range(num_time):
             u_t = inputs[:, t, :]
-
-            if optic.use_input_conv:
-                u_t, filter_state = optic.apply_input_conv(u_t, filter_state)
+            u_t, filter_state = self._apply_input_pre_filters(u_t, filter_state)
 
             v = self(v, u_t, stim_to_cell_mapping)
-
             if self.use_layer_norm:
                 v = self.layer_norm(v)
-
             fr = self.firing_rate(v)
+            syn_current = self.compute_synaptic_current(v) if record_synaptic else None
 
-            for name, mod in self._readout_modules.items():
-                if getattr(mod, 'training_only', False):
-                    continue
-                outputs[name][:, t, ...] = mod(fr)
-
-            if record_synaptic:
-                syn_current = self.compute_synaptic_current(v)
-
-            for i in readout_keys:
-                ci = readout_dict[i]['column_indices']
-                ni = readout_dict[i]['neuron_indices']
-                valid = ci >= 0
-                if torch.any(valid):
-                    outputs['voltage'][i][:, t, ci[valid]] = v[:, ni[valid]]
-                    outputs['firing_rate'][i][:, t, ci[valid]] = fr[:, ni[valid]]
-                    if record_synaptic:
-                        outputs['synaptic_current'][i][:, t, ci[valid]] = syn_current[:, ni[valid]]
+            for name in region_outputs:
+                self.regions[name].record_step(
+                    t, v, fr, syn_current,
+                    region_outputs[name], region_mappings[name],
+                )
 
         if self.training:
-            for name, mod in self._readout_modules.items():
-                if getattr(mod, 'training_only', False):
-                    outputs[name] = mod(self)
+            for name, region in self.regions.items():
+                if name not in region_outputs:
+                    continue
+                for rname, mod in region._readout_modules.items():
+                    if getattr(mod, 'training_only', False):
+                        region_outputs[name][rname] = mod(self)
 
         return {
-            'outputs': outputs,
+            'outputs': region_outputs,
             'model_state': {'v': v.detach(), 'filter_state': filter_state},
-            'mappings': {'input_mapping': stim_to_cell_mapping, 'output_mapping': readout_dict},
+            'mappings': region_mappings,
         }
+
+    # ------------------------------------------------------------------
+    # predict() helpers: region dispatch
+    # ------------------------------------------------------------------
+
+    def _resolve_input_mapping(self, input_neurons):
+        """Build the stim->cell mapping plus per-region ``input_meta``.
+
+        ``input_neurons`` may be:
+          - ``None``: each region uses its own ``default_input_neurons``.
+          - list of cell-type names: filtered to known types; routed to
+            the first region whose ``build_input_mapping`` claims it.
+          - pre-built ``stim_to_cell_mapping`` dict: passed through
+            unchanged; ``input_meta`` is reconstructed enough to drive
+            ``initialize_recording``.
+
+        Returns ``(stim_to_cell_mapping, input_meta_per_region)`` where
+        ``input_meta_per_region`` is keyed by region name. Today only one
+        region drives input (optic_lobe) so the mapping is single-valued,
+        but multiple-input-region models would aggregate here.
+        """
+        if isinstance(input_neurons, dict):
+            stimulus_columns_np = (
+                input_neurons['stimulus_index'].detach().cpu().numpy()
+            )
+            # Round-trip path: today only the optic-lobe builds an input
+            # mapping, so attribute the meta to it.
+            owner = next(iter(self.regions))
+            return input_neurons, {owner: {'stimulus_columns_np': stimulus_columns_np}}
+
+        if input_neurons is None:
+            # Each region contributes its own defaults; if any region
+            # provides defaults we build a single combined mapping.
+            for name, region in self.regions.items():
+                cell_types = [
+                    n for n in region.default_input_neurons
+                    if n in self.unique_cell_types
+                ]
+                if not cell_types:
+                    continue
+                result = region.build_input_mapping(cell_types)
+                if result is not None:
+                    mapping, meta = result
+                    return mapping, {name: meta}
+            raise ValueError(
+                "No region provided default input_neurons. Pass "
+                "input_neurons explicitly or add defaults to a region."
+            )
+
+        filtered = [n for n in input_neurons if n in self.unique_cell_types]
+        for name, region in self.regions.items():
+            result = region.build_input_mapping(filtered)
+            if result is not None:
+                mapping, meta = result
+                return mapping, {name: meta}
+
+        raise ValueError(
+            f"No region implements build_input_mapping for input_neurons="
+            f"{filtered!r}."
+        )
+
+    def _resolve_output_neurons(self, output_neurons):
+        """Resolve ``output_neurons`` into a per-region spec.
+
+        Returns ``{region_name: spec}`` where each ``spec`` is either:
+          - a list of cell-type names (``initialize_recording`` will build
+            the readout dict from scratch), or
+          - a pre-built ``readout_dict`` (round-trip from a prior predict;
+            ``initialize_recording`` reuses it via
+            ``precomputed_output_mapping``).
+
+        Input forms:
+          - ``None``: each region uses its own ``default_output_neurons``.
+          - list of cell-type names: each entry routed to the first region
+            whose cell-type set includes it (today: all to optic_lobe).
+          - ``{region_name: readout_dict}``: per-region passthrough.
+          - bare ``readout_dict`` (legacy single-region): attributed to the
+            first region.
+        """
+        if isinstance(output_neurons, dict):
+            # Distinguish per-region passthrough vs. legacy single-region
+            # readout_dict. Per-region keys are all region names; legacy
+            # keys are cell-type names whose values carry ``column_indices``.
+            looks_per_region = bool(output_neurons) and all(
+                k in self.regions for k in output_neurons
+            )
+            if looks_per_region:
+                return dict(output_neurons)
+            # Legacy bare readout_dict: attribute to first region.
+            owner = next(iter(self.regions))
+            return {owner: output_neurons}
+
+        if output_neurons is None:
+            return {
+                name: [
+                    n for n in region.default_output_neurons
+                    if n in self.unique_cell_types
+                ]
+                for name, region in self.regions.items()
+            }
+
+        filtered = [n for n in output_neurons if n in self.unique_cell_types]
+        per_region: dict[str, list[str]] = {name: [] for name in self.regions}
+        for ct in filtered:
+            for name, region in self.regions.items():
+                cell_idx_np = region.cell_indices.cpu().numpy()
+                if ct in self.cell_types[cell_idx_np]:
+                    per_region[name].append(ct)
+                    break
+        return per_region
+
+    def _apply_input_pre_filters(self, u_t, filter_state):
+        """Compose per-region input pre-filters in region-iteration order."""
+        for region in self.regions.values():
+            u_t, filter_state = region.apply_input_pre_filter(u_t, filter_state)
+        return u_t, filter_state
 
     def find_steady_state(self, run_time=100, max_iter=25):
         print("Finding steady state ...")
+        # Region-agnostic: each region reports the size of its slice of
+        # the input axis. Summed gives the total stimulus width.
+        stim_size = sum(region.input_stim_size for region in self.regions.values())
         inputs = torch.zeros(
-            (1, run_time, self.regions['optic_lobe'].num_columns), device=self.device, dtype=self.dtype,
+            (1, run_time, stim_size), device=self.device, dtype=self.dtype,
         )
         initial_state = self.steady_state.unsqueeze(0)
         initial_ave = initial_state.abs().mean()

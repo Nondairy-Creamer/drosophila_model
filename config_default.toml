@@ -15,32 +15,39 @@ device = "cuda"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "Softplus"
-readouts = ['FlowConv2Readout', 'L1Reg']
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = []
-readout_neurons = [
-    'T1', 'T2', 'T2a', 'T3',
-    'T4a', 'T4b', 'T4c', 'T4d',
-    'T5a', 'T5b', 'T5c', 'T5d',
-    'Tm1', 'Tm2', 'Tm3', 'Tm4',
-    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
-]
-
-[model.regularizer_parameters]
-input_layer_l1 = 0.0
 
 # Per-region option sub-tables. The set of region keys here drives which
 # areas get loaded by `connectome_loading.load_connectome` and which
 # RegionView subclasses get built. Each region owns its own `side`
 # ('right' | 'left' | 'both'); all other keys are forwarded verbatim to
-# that region's RegionView._load_extras (see regions.py).
+# that region's RegionView._load_extras (see regions.py). Each region
+# also owns its own `readouts` / `readout_neurons` / regularizer params
+# since their structure (e.g. column alignment) is region-specific.
 [model.regions.optic_lobe]
 side                = 'right'
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
+readouts            = ['FlowConv2Readout', 'L1Reg']
+readout_neurons     = [
+    'T1', 'T2', 'T2a', 'T3',
+    'T4a', 'T4b', 'T4c', 'T4d',
+    'T5a', 'T5b', 'T5c', 'T5d',
+    'Tm1', 'Tm2', 'Tm3', 'Tm4',
+    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+]
+# Optional per-region overrides for ConnectomeModel.predict defaults. If
+# unset, the region's class-level defaults are used
+# (OpticLobeRegion: L1/L2/L3 inputs, T4/T5 outputs).
+# input_neurons  = ['L1', 'L2', 'L3']
+# output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+
+[model.regions.optic_lobe.regularizer_parameters]
+input_layer_l1 = 0.0
 
 [training]
 num_steps = 100000

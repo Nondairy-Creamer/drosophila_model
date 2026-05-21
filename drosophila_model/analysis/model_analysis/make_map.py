@@ -242,8 +242,8 @@ def _per_column_rho(model, right_res, left_res, oob, num_frames):
     decoder_key = next(
         k for k, m in model._readout_modules.items() if m.predicts_flow
     )
-    optic_flow_right = right_res["outputs"][decoder_key]
-    optic_flow_left = left_res["outputs"][decoder_key]
+    optic_flow_right = right_res["outputs"]["optic_lobe"][decoder_key]
+    optic_flow_left = left_res["outputs"]["optic_lobe"][decoder_key]
     optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
 
     phi = model.regions['optic_lobe'].column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)

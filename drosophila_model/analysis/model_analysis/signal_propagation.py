@@ -71,7 +71,7 @@ def run_signal_propagation(
     time_axis_s = np.arange(sine_wave.shape[0]) * dt - pre_stim_time
 
     panels = [("stimulus", sine_wave)] + [
-        (ct, pred["outputs"]["firing_rate"][ct][0].cpu().numpy()) for ct in available
+        (ct, pred["outputs"]["optic_lobe"]["firing_rate"][ct][0].cpu().numpy()) for ct in available
     ]
 
     fig, axes = plt.subplots(

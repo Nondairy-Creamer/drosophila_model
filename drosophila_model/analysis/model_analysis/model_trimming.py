@@ -104,8 +104,8 @@ def compute_loss(mdl, stim):
             mdl.regions['optic_lobe'].estimate_ego_motion_from_image(stim[:, :, :N], stim[:, :, N:], oob_columns=oob)
         flow_key = next(k for k, m in mdl._readout_modules.items() if m.predicts_flow)
         outputs = {
-            flow_key: torch.cat([right_res['outputs'][flow_key],
-                                 left_res['outputs'][flow_key]], dim=2),
+            flow_key: torch.cat([right_res['outputs']['optic_lobe'][flow_key],
+                                 left_res['outputs']['optic_lobe'][flow_key]], dim=2),
             'pred_rotation': pred_rot,
             'pred_translation': pred_trans,
         }
@@ -113,7 +113,7 @@ def compute_loss(mdl, stim):
         return sum(getattr(lf, n)(mdl, outputs, target, train_mask, loss_start_step)
                    for n in loss_names) / len(loss_names)
     flow_key = next(k for k, m in mdl._readout_modules.items() if m.predicts_flow)
-    pred = mdl.predict(stim, input_neurons=input_neurons)['outputs'][flow_key]
+    pred = mdl.predict(stim, input_neurons=input_neurons)['outputs']['optic_lobe'][flow_key]
     return lf.mse_loss(target_tensor, pred)
 
 

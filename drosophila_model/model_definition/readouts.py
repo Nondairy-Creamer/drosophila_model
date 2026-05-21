@@ -403,3 +403,8 @@ class DecoderWeightL1Reg(Regularizer):
     def forward(self, model):
         readout = model._readout_modules[self.readout_name]
         return self.l1_weight * readout.conv_layers[0].weight.abs().sum()
+
+
+# The L1Reg regularizer above already iterates ``model._readout_modules``;
+# that aggregated property still works because ConnectomeModel exposes
+# region-owned readouts via a flat view.

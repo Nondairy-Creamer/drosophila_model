@@ -186,7 +186,7 @@ def _run_one_eye(args, model, config, output_dir,
                   f"{len(directions)} directions ({num_frames} frames)...")
             with torch.no_grad():
                 result = model.predict(batch_stim)
-                batch_pred = result["outputs"][flow_key].cpu().numpy()[:, :num_frames]
+                batch_pred = result["outputs"]["optic_lobe"][flow_key].cpu().numpy()[:, :num_frames]
 
             out_path = output_dir / f"directional_sine_stim_{stim_index}.mp4"
             print(f"  Creating movie -> {out_path}")
@@ -230,7 +230,7 @@ def _run_one_eye(args, model, config, output_dir,
         print(f"\nRunning model on stimulus {stim_index} ({num_frames} frames)...")
         with torch.no_grad():
             result = model.predict(stim_input)
-            pred_flow = result["outputs"][flow_key][0].cpu().numpy()
+            pred_flow = result["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()
 
         pred_flow = pred_flow[:num_frames]
         stim_np = stimulus_np[stim_index, :num_frames]
@@ -317,8 +317,8 @@ def _run_two_eyes(args, model, config, output_dir,
         with torch.no_grad():
             right_result, left_result = model.regions['optic_lobe'].predict_two_eyes(right_input, left_input)
 
-        pred_flow_right = right_result["outputs"][flow_key][0].cpu().numpy()[:num_frames]
-        pred_flow_left = left_result["outputs"][flow_key][0].cpu().numpy()[:num_frames]
+        pred_flow_right = right_result["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()[:num_frames]
+        pred_flow_left = left_result["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()[:num_frames]
 
         out_path = output_dir / f"{args.stim_type}_stim_{stim_index}.mp4"
         print(f"  Creating movie -> {out_path}")
@@ -418,8 +418,8 @@ def _run_ego_motion_pano(args, model, config, model_folder, output_dir,
             right_input, left_input, oob_columns=oob_columns)
 
     decoder_key = next(k for k, m in model._readout_modules.items() if m.predicts_flow)
-    pred_flow_right = right_res["outputs"][decoder_key][0].cpu().numpy()
-    pred_flow_left = left_res["outputs"][decoder_key][0].cpu().numpy()
+    pred_flow_right = right_res["outputs"]["optic_lobe"][decoder_key][0].cpu().numpy()
+    pred_flow_left = left_res["outputs"]["optic_lobe"][decoder_key][0].cpu().numpy()
     pred_rot_np = pred_rot[0].cpu().numpy()
     pred_trans_np = pred_trans[0].cpu().numpy()
 
@@ -460,8 +460,8 @@ def _run_ego_motion_pano(args, model, config, model_folder, output_dir,
 
     has_mag_readout = 'MotionMagReadout' in model._readout_modules
     if has_mag_readout and args.save_figures:
-        pred_mag_right = right_res['outputs']['MotionMagReadout'][0].cpu().numpy()
-        pred_mag_left = left_res['outputs']['MotionMagReadout'][0].cpu().numpy()
+        pred_mag_right = right_res['outputs']['optic_lobe']['MotionMagReadout'][0].cpu().numpy()
+        pred_mag_left = left_res['outputs']['optic_lobe']['MotionMagReadout'][0].cpu().numpy()
         _save_magnitude_figure(
             true_mag_right, true_mag_left,
             pred_mag_right, pred_mag_left,

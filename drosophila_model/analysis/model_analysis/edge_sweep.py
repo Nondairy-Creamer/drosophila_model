@@ -189,7 +189,7 @@ def main():
                 batch_tensor,
                 input_neurons=["L1", "L2", "L3"],
                 output_neurons=output_neurons,
-            )["outputs"]
+            )["outputs"]["optic_lobe"]
 
         # Decoder responses (baseline-subtracted)
         if results is not None:
@@ -333,7 +333,7 @@ def main():
             batch_xt_tensor,
             input_neurons=["L1", "L2", "L3"],
             output_neurons=output_neurons,
-        )["outputs"]
+        )["outputs"]["optic_lobe"]
 
     conv_xt = input_conv_stimulus_timecourse(model, batch_xt_tensor)
     use_conv = getattr(model.regions['optic_lobe'], "use_input_conv", False)
