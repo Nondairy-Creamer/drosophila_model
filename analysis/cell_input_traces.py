@@ -155,7 +155,7 @@ def generate_stimulus_sine(
 def shared_columns_sorted_by_phi(model: nm.BaseRnn, input_cols: np.ndarray) -> List[int]:
     """L1/L2/L3 shared column ids sorted by azimuth φ then column index."""
     uc = np.unique(input_cols).astype(int)
-    phi_all = model.column_phi_theta[:, 0]
+    phi_all = model.regions['optic_lobe'].column_phi_theta[:, 0]
     keyed = [(int(c), float(phi_all[c])) for c in uc]
     keyed.sort(key=lambda t: (t[1], t[0]))
     return [t[0] for t in keyed]
@@ -163,7 +163,7 @@ def shared_columns_sorted_by_phi(model: nm.BaseRnn, input_cols: np.ndarray) -> L
 
 def neuron_index_at_column(model: nm.BaseRnn, column_id: int, cell_type: str) -> int:
     """Neuron index of *cell_type* at *column_id* (deterministic if multiple: smallest index)."""
-    mask = (model.cell_types == cell_type) & (model.column_indices == column_id)
+    mask = (model.cell_types == cell_type) & (model.column_indices_per_neuron == column_id)
     hits = np.where(mask)[0]
     if hits.size == 0:
         raise RuntimeError(
@@ -214,7 +214,7 @@ def presynaptic_indices_all(model: nm.BaseRnn, post_idx: int) -> List[Tuple[str,
 
 def trace_for_neuron(pred: dict, model: nm.BaseRnn, cell_type: str, neuron_idx: int) -> np.ndarray:
     """Firing-rate time series (time,) for one neuron, from predict outputs."""
-    ci = model.column_indices[neuron_idx]
+    ci = model.column_indices_per_neuron[neuron_idx]
     if np.isnan(ci):
         return np.full(pred["firing_rate"][cell_type].shape[1], np.nan)
     col = int(ci)
@@ -324,8 +324,8 @@ def run_t4_input_traces(
         raise ValueError(f"stim_type must be 'edge' or 'sine', got {stim_type!r}")
 
     dt = model_config["model"]["dt"]
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
 
     if stim_type == "edge":
         stim_time = FOV_DEG / VELOCITY_DEG_S
@@ -371,7 +371,7 @@ def run_t4_input_traces(
             f"stim_time={stim_time:g} s, pre_stim={pre_stim:g} s"
         )
 
-    _, input_cols_arr = model.get_shared_columns(["L1", "L2", "L3"])
+    _, input_cols_arr = model.regions['optic_lobe'].get_shared_columns(["L1", "L2", "L3"])
     input_cols = np.unique(input_cols_arr)
 
     col, t4_idx, t5_idx, middle_k, n_cols = resolve_same_column_t4_t5(model, input_cols, column_offset)
@@ -739,7 +739,7 @@ def run_t4_input_traces(
         if not partners:
             lines_loc.append("  (none found in synapse_counts_coo)")
         for ct, ni in partners:
-            ci = model.column_indices[ni]
+            ci = model.column_indices_per_neuron[ni]
             w = _synapse_weight_post_pre(model, post_idx, ni)
             g_out = presynaptic_output_gain(model, ni)
             pscale = path_scales[ni]

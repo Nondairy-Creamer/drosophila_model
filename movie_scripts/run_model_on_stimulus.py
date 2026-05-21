@@ -103,7 +103,7 @@ def main() -> None:
     device = model.device
     dtype = model.dtype
     model_dt = model.dt
-    column_phi_theta = model.column_phi_theta
+    column_phi_theta = model.regions['optic_lobe'].column_phi_theta
     N = column_phi_theta.shape[0]
 
     # Force stimulus generation to use the model's dt and device so the resampled
@@ -120,7 +120,7 @@ def main() -> None:
 
     frame_rate = args.fps or max(1, int(round((1 / model_dt) / 2)))
 
-    column_xyz = model.get_column_xyz()
+    column_xyz = model.regions['optic_lobe'].get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]
 
     flow_key = get_flow_key(model)

@@ -129,8 +129,8 @@ def main():
 
     dt = model.dt
     print(f"dt: {dt}")
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     center_idx = _central_ommatidium_index(
         np.asarray(sample_phi), np.asarray(sample_theta)
     )

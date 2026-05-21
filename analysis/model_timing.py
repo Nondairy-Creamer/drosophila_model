@@ -77,7 +77,7 @@ def main() -> None:
         cell_inputs = cell_inputs_data.to(device=device, dtype=dtype)
 
     idx = args.stimulus_index
-    n_cols = model.num_columns
+    n_cols = model.regions['optic_lobe'].num_columns
     right_stim = cell_inputs[idx : idx + 1, :, :n_cols]
     left_stim = cell_inputs[idx : idx + 1, :, n_cols:]
     n_time = right_stim.shape[1]

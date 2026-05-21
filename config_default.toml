@@ -1,18 +1,17 @@
 [model]
-# Anatomy (currently only 'ConnectomeModel'; regions are picked via `areas`).
+# Default model: visual-system only, single right eye, current-based dynamics.
+# This is a boilerplate that user configs override per-key. The [model.regions.*]
+# sub-tables below cover only the regions defaulted here (optic_lobe). Configs
+# that use other areas (e.g. antenna_lobe) supply their own region sub-table.
 model_type = 'ConnectomeModel'
-# Dynamics mixin (class in dynamics_models.py)
 dynamics_type = 'CurrentDynamics'
-# Brain areas to load (must match the 'area' column in cell_info parquet).
 areas = ['optic_lobe']
-# Side filter for bilateral regions: 'right' | 'left' | 'both'.
 side = 'right'
 device = "cuda"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "Softplus"
 readouts = ['FlowConv2Readout', 'L1Reg']
-use_input_conv = true
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = []
@@ -26,6 +25,14 @@ readout_neurons = [
 
 [model.regularizer_parameters]
 input_layer_l1 = 0.0
+
+# Per-region option sub-tables. One sub-table per region in `areas`. Forwarded
+# verbatim to that region's RegionView._load_extras (see regions.py).
+[model.regions.optic_lobe]
+use_input_conv      = true
+conv_size_x         = 7
+input_pre_conv_size = 5
+num_temporal_modes  = 4
 
 [training]
 num_steps = 100000

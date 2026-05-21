@@ -74,7 +74,7 @@ def main() -> None:
     drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))
     print(f"Found {len(drone_clips)} clips")
 
-    column_xyz = model.get_column_xyz()
+    column_xyz = model.regions['optic_lobe'].get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]
 
     output_dir = Path(args.output_dir) if args.output_dir else model_folder / "drone_flow_movie"
@@ -135,13 +135,13 @@ def main() -> None:
                 model, right_res, left_res, decoder_key, oob, num_frames, N,
             )
             nearness_right, nearness_left = _mask_pole_columns(
-                nearness_right, nearness_left, pred_trans_np, model.column_phi_theta,
+                nearness_right, nearness_left, pred_trans_np, model.regions['optic_lobe'].column_phi_theta,
             )
 
         if args.translation:
             pred_flow_right, pred_flow_left = _subtract_rotation_flow(
                 pred_flow_right, pred_flow_left,
-                pred_rot_np, model.column_phi_theta,
+                pred_rot_np, model.regions['optic_lobe'].column_phi_theta,
             )
 
         true_rot_rate = clip["rotation_rate"][:num_frames]
@@ -400,7 +400,7 @@ def _estimate_depth_per_column(model, right_res, left_res, decoder_key,
     d_up = optic_flow[0, :num_frames, :, 1][:, valid_mask]
 
     with torch.no_grad():
-        _, _, rho_valid = model.estimate_ego_motion_from_flow(
+        _, _, rho_valid = model.regions['optic_lobe'].estimate_ego_motion_from_flow(
             phi[valid_mask], theta[valid_mask], d_right, d_up,
         )
 
@@ -417,7 +417,7 @@ def _mask_pole_columns(nearness_right, nearness_left, pred_trans,
                        column_phi_theta, threshold=0.1):
     """NaN-out columns within the focus of expansion/contraction cone.
 
-    Mirrors the per-frame mask used inside ``_estimate_translation_from_flow``
+    Mirrors the per-frame mask used inside ``ego_motion._estimate_translation_from_flow``
     when aggregating ρ into a scalar: drops columns where
     ``‖Π_i t̂‖² = 1 - (x_i · t̂)² ≤ threshold``.
 
@@ -453,7 +453,7 @@ def _mask_pole_columns(nearness_right, nearness_left, pred_trans,
 def _subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
     """Subtract rotation-induced flow, returning translation-only angular flow.
 
-    Uses the same decomposition as BaseRnn.estimate_ego_motion_from_flow:
+    Uses the same decomposition as ego_motion.estimate_from_flow:
         u_rot = x × omega
         d_right_rot = -(u_rot · e_phi),  d_up_rot = -(u_rot · e_theta)
 

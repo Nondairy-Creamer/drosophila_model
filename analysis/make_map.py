@@ -261,7 +261,7 @@ def _per_column_rho(model, right_res, left_res, oob, num_frames):
     d_up = optic_flow[0, :num_frames, :, 1][:, valid_mask]
 
     with torch.no_grad():
-        _, _, rho_valid = model.estimate_ego_motion_from_flow(
+        _, _, rho_valid = model.regions['optic_lobe'].estimate_ego_motion_from_flow(
             phi[valid_mask], theta[valid_mask], d_right, d_up,
         )
 

@@ -1,14 +1,20 @@
 """Region views: per-anatomical-area handles into a :class:`ConnectomeModel`.
 
-A region is a named subset of the model's neurons that exposes area-specific
-operations *and* owns any area-specific on-disk data. The model itself stays
-anatomy-agnostic; adding a new brain area means adding a new
-``RegionView`` subclass, registering it under its area name, and (if the area
-has geometry) shipping an ``area_extras/<name>_*.parquet`` file that the
-region's ``_load_extras`` reads at construction time.
+A region is a named subset of the model's neurons that:
 
-A single ``ConnectomeModel`` may host any combination of regions, picked at
-construction by the config ``areas`` list.
+- owns the area's on-disk geometry (loaded from ``area_extras/`` in
+  :meth:`RegionView._load_extras`),
+- owns any area-specific submodules (e.g. the optic-lobe input-conv stack),
+- exposes the area-specific operations (e.g. ``predict_two_eyes``).
+
+Regions are :class:`torch.nn.Module` subclasses so their submodules /
+parameters land in the parent model's ``state_dict()`` under
+``regions.<area>.*`` automatically.
+
+The model itself stays anatomy-agnostic: it asks ``self.regions['optic_lobe']``
+for visual things, ``self.regions['antenna_lobe']`` for olfactory things, etc.
+Adding a new area means adding a new ``RegionView`` subclass and registering
+it under its area name in :data:`REGION_REGISTRY`.
 
 ``OpticLobeRegion`` covers both the single-eye case (mirror trick) and the
 two-eye case (column slicing) with the same API, chosen by the ``side``
@@ -17,23 +23,30 @@ parameter the loader applied (``'right'`` / ``'left'`` / ``'both'``).
 
 from __future__ import annotations
 
+import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import torch
+from torch import nn
+
+import ego_motion
+from model_layers import HexGridConv, TemporalLRU
 
 if TYPE_CHECKING:
     from neural_models import ConnectomeModel
 
 
-class RegionView:
-    """A named subset of neurons inside a :class:`ConnectomeModel`.
+class RegionView(nn.Module):
+    """A named, area-specific sub-network inside a :class:`ConnectomeModel`.
 
     Attributes:
         name: Area name (e.g. ``'optic_lobe'``).
-        model: Back-reference to the owning ``ConnectomeModel``.
+        model: Back-reference to the owning ``ConnectomeModel`` (weakref'd to
+            avoid the model<->region cycle that would otherwise confuse
+            ``nn.Module``'s submodule registration).
         cell_indices: ``(N_r,)`` int64 — neuron indices into the model's flat
             ``num_neurons`` axis.
         side: ``'right'`` / ``'left'`` / ``'both'`` — sides of this bilateral
@@ -42,20 +55,47 @@ class RegionView:
     """
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
-                 cell_indices: np.ndarray, side: str):
+                 cell_indices: np.ndarray, side: str,
+                 region_opts: dict | None = None):
+        super().__init__()
         if side not in ('right', 'left', 'both'):
             raise ValueError(f"side must be 'right'|'left'|'both', got {side!r}")
         self.name = name
-        self.model = model
-        self.cell_indices = cell_indices
+        # weakref: model owns region (via nn.ModuleDict), region looks back at
+        # model. Plain attribute assignment would be fine (weakref isn't an
+        # nn.Module) but using object.__setattr__ documents intent.
+        object.__setattr__(self, '_model_ref', weakref.ref(model))
+        # Buffers (rather than plain attrs) so .to(device) follows the model.
+        self.register_buffer(
+            'cell_indices',
+            torch.as_tensor(cell_indices, dtype=torch.int64),
+            persistent=False,
+        )
         self.side = side
         self.num_sides = 2 if side == 'both' else 1
-        self._load_extras(Path(model.connectome_folder) / 'area_extras')
+        self._load_extras(
+            Path(model.connectome_folder) / 'area_extras',
+            dict(region_opts or {}),
+        )
 
-    def _load_extras(self, extras_dir: Path) -> None:
-        """Override to read this region's ``area_extras/<name>_*.parquet`` file.
+    @property
+    def model(self) -> 'ConnectomeModel':
+        m = self._model_ref()
+        if m is None:
+            raise RuntimeError(
+                f"RegionView {self.name!r} has lost its model reference "
+                "(model was garbage-collected)."
+            )
+        return m
 
-        Default is a no-op for areas that don't need per-element geometry.
+    def _load_extras(self, extras_dir: Path, opts: dict) -> None:
+        """Override to read this region's ``area_extras/`` files and build
+        any area-specific submodules.
+
+        ``opts`` is the per-region config sub-table (from
+        ``config['model']['regions'][<area>]``), forwarded through
+        :func:`build_regions`. The base no-op ignores it; subclasses should
+        extract the keys they accept and may warn / raise on unknown keys.
         """
         pass
 
@@ -70,31 +110,65 @@ class RegionView:
 
 
 class OpticLobeRegion(RegionView):
-    """Optic-lobe region. Owns the hex-grid column geometry.
+    """Optic-lobe region. Owns the hex-grid column geometry AND the visual
+    input pipeline (HexGridConv pre-filter + contrast normalisation +
+    TemporalLRU).
 
-    On construction reads ``area_extras/optic_lobe_columns.parquet`` and
-    populates:
+    Configuration keys consumed from ``region_opts`` (a.k.a.
+    ``config['model']['regions']['optic_lobe']``):
+
+    - ``use_input_conv`` (default True): build and apply the input-conv stack.
+    - ``conv_size_x`` (default 7): hex diameter of the contrast-normalisation
+      spatial conv.
+    - ``input_pre_conv_size`` (default 5): hex diameter of the pre-filter conv.
+    - ``num_temporal_modes`` (default 4): complex modes in the temporal LRU.
+
+    Geometry loaded from ``area_extras/optic_lobe_columns.parquet``:
 
     - ``column_indices``: ``(C_r,)`` int64 — unique column indices present in
       this slice of the connectome (de-duped from the per-neuron column index).
-    - ``column_phi_theta``: ``(C_r, 2)`` float — ``(phi, theta)`` per column,
-      ordered to match ``column_indices``.
+    - ``column_phi_theta``: ``(C_r, 2)`` float — ``(phi, theta)`` per column.
     - ``column_p_q``: ``(C_r, 2)`` int — hex lattice coords per column.
     - ``column_phi_theta_two_eyes``: torch tensors used by
       :meth:`predict_two_eyes` and :meth:`estimate_ego_motion_from_image`.
-      Single-side host mirrors phi for a virtual second eye; two-side host
-      uses native columns directly.
+
+    If ``use_input_conv`` is true, also builds the input-conv submodules
+    (``input_pre_conv``, ``input_spatial_conv``, ``temporal_lru``) which the
+    model invokes via :meth:`apply_input_conv` from inside ``predict``.
 
     ``num_eyes`` is an alias for ``num_sides`` since the optic lobe maps 1:1
     onto eyes.
     """
 
-    def _load_extras(self, extras_dir: Path) -> None:
+    _DEFAULT_OPTS = {
+        'use_input_conv':      True,
+        'conv_size_x':         7,
+        'input_pre_conv_size': 5,
+        'num_temporal_modes':  4,
+    }
+
+    def _load_extras(self, extras_dir: Path, opts: dict) -> None:
         model = self.model
+
+        # Pull recognised opts; reject unknown keys with a clear error so
+        # typos in [model.regions.optic_lobe] don't silently no-op.
+        unknown = set(opts) - set(self._DEFAULT_OPTS)
+        if unknown:
+            raise ValueError(
+                f"OpticLobeRegion got unknown region_opts keys: {sorted(unknown)}. "
+                f"Accepted keys: {sorted(self._DEFAULT_OPTS)}."
+            )
+        cfg = {**self._DEFAULT_OPTS, **opts}
+        self.use_input_conv      = bool(cfg['use_input_conv'])
+        self.conv_size_x         = int(cfg['conv_size_x'])
+        self.input_pre_conv_size = int(cfg['input_pre_conv_size'])
+        self.num_temporal_modes  = int(cfg['num_temporal_modes'])
 
         # Region-local set of unique column indices (drop NaNs from neurons
         # without a column assignment, like the boundary cell types).
-        col_per_neuron = model.column_indices_per_neuron[self.cell_indices]
+        col_per_neuron = model.column_indices_per_neuron[
+            self.cell_indices.cpu().numpy()
+        ]
         col_vals = col_per_neuron[~np.isnan(col_per_neuron)]
         self.column_indices = np.unique(col_vals).astype(np.int64)
 
@@ -103,6 +177,7 @@ class OpticLobeRegion(RegionView):
 
         self.column_phi_theta = columns_df[['phi', 'theta']].to_numpy()
         self.column_p_q = columns_df[['p', 'q']].to_numpy().astype(np.int64)
+        self.num_columns = len(self.column_indices)
 
         if self.num_sides == 1:
             mirror = self.column_phi_theta.copy()
@@ -115,13 +190,127 @@ class OpticLobeRegion(RegionView):
             torch.tensor(two_eye[:, 1], device=model.device),
         )
 
+        if self.use_input_conv:
+            self._initialize_input_conv()
+
     @property
     def num_eyes(self) -> int:
         """Optic-lobe-terminology alias for :attr:`num_sides`."""
         return self.num_sides
 
     # ------------------------------------------------------------------
-    # Two-eye predict + ego-motion
+    # Visual input pipeline
+    # ------------------------------------------------------------------
+
+    def _initialize_input_conv(self) -> None:
+        """HexGridConv pre-filter -> local contrast normalisation -> TemporalLRU.
+
+        Initialised with the legacy ``-10.0`` -saturating mask so the very
+        first forward pass behaves like a centred identity filter.
+        """
+        model = self.model
+        if self.conv_size_x % 2 == 0:
+            raise ValueError("conv_size_x must be odd for centered spatial convolution.")
+        if self.input_pre_conv_size % 2 == 0:
+            raise ValueError("input_pre_conv_size must be odd for centered spatial convolution.")
+        if self.num_temporal_modes < 1:
+            raise ValueError("num_temporal_modes must be >= 1.")
+
+        self.input_pre_conv = HexGridConv(
+            in_features=1, out_features=1, conv_size=self.input_pre_conv_size,
+            column_p_q=self.column_p_q, device=model.device, dtype=model.dtype,
+            positive_weights=True, use_bias=False,
+        )
+        pq_offsets_pre = HexGridConv.hex_grid_pq_offsets(self.input_pre_conv_size)
+        with torch.no_grad():
+            self.input_pre_conv.weight.fill_(-10.0)
+            for i, (dp, dq) in enumerate(pq_offsets_pre):
+                if dp == 0 and dq == 0:
+                    self.input_pre_conv.weight[0, i, 0] = 0.0
+
+        self.input_spatial_conv = HexGridConv(
+            in_features=1, out_features=1, conv_size=self.conv_size_x,
+            column_p_q=self.column_p_q, device=model.device, dtype=model.dtype,
+            positive_weights=True, use_bias=False,
+        )
+        pq_offsets = HexGridConv.hex_grid_pq_offsets(self.conv_size_x)
+        with torch.no_grad():
+            self.input_spatial_conv.weight.fill_(-10.0)
+            for i, (dp, dq) in enumerate(pq_offsets):
+                if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
+                    self.input_spatial_conv.weight[0, i, 0] = 0.0
+
+        self.temporal_lru = TemporalLRU(
+            num_modes=self.num_temporal_modes, dt=model.dt,
+            device=model.device, dtype=model.dtype,
+        )
+
+    def apply_input_conv(self, u_t, filter_state=None):
+        """Apply spatial pre-filter, contrast normalisation, then temporal LRU."""
+        filtered = self.input_pre_conv(u_t)
+
+        local_mean = self.input_spatial_conv(filtered)
+        centered = filtered - local_mean
+        local_var = self.input_spatial_conv(centered ** 2)
+        normed = -centered / torch.sqrt(local_var + 1e-12)
+
+        y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
+        return y_t, new_filter_state
+
+    # ------------------------------------------------------------------
+    # Column-space helpers
+    # ------------------------------------------------------------------
+
+    def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
+        """Column locations projected to 3D Cartesian coordinates."""
+        phi = self.column_phi_theta[:, 0]
+        theta = self.column_phi_theta[:, 1]
+        x = radius * np.sin(theta) * np.cos(phi)
+        y = radius * np.sin(theta) * np.sin(phi)
+        z = radius * np.cos(theta)
+        return np.stack((x, y, z), axis=1)
+
+    def get_shared_columns(self, neuron_list):
+        """Columns where all cell types in ``neuron_list`` are present.
+
+        Returns ``(neuron_indices, column_indices)`` over the parent model's
+        flat neuron axis. Used by ``ConnectomeModel.predict`` to build the
+        stimulus-to-cell mapping for visual readouts.
+        """
+        from functools import reduce
+        model = self.model
+        col_per_neuron = model.column_indices_per_neuron
+
+        neuron_indices = np.arange(model.num_neurons)
+        per_type_cols = [col_per_neuron[model.cell_types == nt] for nt in neuron_list]
+        per_type_cols = [c[~np.isnan(c)] for c in per_type_cols]
+        shared_cols = reduce(np.intersect1d, per_type_cols)
+
+        neuron_masks = [(model.cell_types == nt) for nt in neuron_list]
+        neuron_is_in_list = np.any(np.stack(neuron_masks), axis=0)
+        neuron_is_in_list = neuron_is_in_list & np.isin(col_per_neuron, shared_cols)
+
+        return neuron_indices[neuron_is_in_list], col_per_neuron[neuron_is_in_list]
+
+    # ------------------------------------------------------------------
+    # Ego-motion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def estimate_ego_motion_from_flow(phi, theta, d_right, d_up,
+                                      terms=('rotation', 'trans')):
+        """Solve 6-DOF ego motion from optic flow over the eye's sphere.
+
+        Thin wrapper around :func:`ego_motion.estimate_from_flow`; lives on the
+        optic-lobe region because flow is an optic-lobe concept (no other
+        region produces optic flow).
+        """
+        return ego_motion.estimate_from_flow(
+            phi, theta, d_right, d_up, terms=terms,
+        )
+
+    # ------------------------------------------------------------------
+    # Two-eye predict + ego-motion-from-image
     # ------------------------------------------------------------------
 
     def predict_two_eyes(self, inputs_right, inputs_left,
@@ -302,7 +491,7 @@ class OpticLobeRegion(RegionView):
         d_right = optic_flow[:, :, valid_mask, 0].reshape(S * T_len, -1)
         d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
 
-        rot_flat, trans_flat, _ = model.estimate_ego_motion_from_flow(
+        rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
             phi_valid, theta_valid, d_right, d_up, terms=terms,
         )
         rotations = rot_flat.reshape(S, T_len, 3)
@@ -334,14 +523,22 @@ REGION_REGISTRY: dict[str, type[RegionView]] = {
 }
 
 
-def build_regions(model: 'ConnectomeModel') -> dict[str, RegionView]:
+def build_regions(model: 'ConnectomeModel',
+                  region_kwargs: dict[str, dict] | None = None) -> nn.ModuleDict:
     """Instantiate one ``RegionView`` per area present in ``model``'s connectome.
 
-    Uses ``model.area_per_neuron`` to assign neuron indices to each registered
-    area. Each region's ``__init__`` calls ``_load_extras`` to ingest its own
-    on-disk data from ``model.connectome_folder/area_extras/``.
+    Returns an ``nn.ModuleDict`` so the regions and their submodules land in
+    ``model.state_dict()`` automatically under ``regions.<area>.*``. Each
+    region's ``__init__`` calls ``_load_extras`` to ingest its own on-disk
+    data from ``model.connectome_folder/area_extras/`` and to build its
+    area-specific submodules.
+
+    ``region_kwargs`` maps area name to that region's option sub-dict (as it
+    appears under ``[model.regions.<area>]`` in the config). Sub-dicts are
+    forwarded verbatim to the region's ``_load_extras``.
     """
-    regions: dict[str, RegionView] = {}
+    region_kwargs = dict(region_kwargs or {})
+    regions = nn.ModuleDict()
     for area in sorted(set(model.area_per_neuron)):
         cls = REGION_REGISTRY.get(area)
         if cls is None:
@@ -353,5 +550,6 @@ def build_regions(model: 'ConnectomeModel') -> dict[str, RegionView]:
         regions[area] = cls(
             name=area, model=model,
             cell_indices=cell_idx, side=model.side,
+            region_opts=region_kwargs.get(area, {}),
         )
     return regions

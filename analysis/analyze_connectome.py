@@ -28,10 +28,10 @@ model = ModelClass(
 
 # Extract data from the model (uses filtered neurons/synapses)
 cell_types = model.cell_types
-column_indices = model.column_indices
-column_phi_theta = model.column_phi_theta  # (num_columns, 2) with (phi, theta)
+column_indices = model.column_indices_per_neuron
+column_phi_theta = model.regions['optic_lobe'].column_phi_theta  # (num_columns, 2) with (phi, theta)
 num_neurons = model.num_neurons
-num_columns = model.num_columns
+num_columns = model.regions['optic_lobe'].num_columns
 
 # Extract COO data from model.synapse_counts sparse tensor (post all model manipulation)
 synapse_counts_sparse = model.synapse_counts.coalesce()

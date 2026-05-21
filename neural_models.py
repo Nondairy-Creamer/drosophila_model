@@ -42,7 +42,6 @@ import subprocess
 import tempfile
 import warnings
 from abc import ABC, abstractmethod
-from functools import reduce
 from pathlib import Path
 
 import numpy as np
@@ -55,7 +54,7 @@ from connectome_loading import (
     load_connectome,
     load_connectome_from_dataframes,
 )
-from model_layers import CellTypeLayerNorm, HexGridConv, TemporalLRU
+from model_layers import CellTypeLayerNorm
 import regions as regions_mod
 
 
@@ -262,8 +261,7 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
                  nonlinearity='Softplus', device='cpu', dtype='float32',
                  dt=0.01, seed=None, init_std=0.1, commit_hash=None,
                  readouts=None, readout_neurons=None, regularizer_parameters=None,
-                 use_input_conv=True, conv_size_x=7, input_pre_conv_size=5,
-                 num_temporal_modes=4, use_layer_norm=True, **kwargs):
+                 use_layer_norm=True, **kwargs):
         super().__init__(**kwargs)
 
         self.commit_hash = commit_hash
@@ -272,10 +270,6 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
         self.readouts = list(readouts) if readouts else []
         self.readout_neurons = list(readout_neurons) if readout_neurons else None
         self.regularizer_parameters = dict(regularizer_parameters) if regularizer_parameters else {}
-        self.use_input_conv = use_input_conv
-        self.conv_size_x = conv_size_x
-        self.input_pre_conv_size = input_pre_conv_size
-        self.num_temporal_modes = num_temporal_modes
         self.use_layer_norm = use_layer_norm
 
         if seed is not None:
@@ -298,69 +292,8 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
 
     @abstractmethod
     def firing_rate(self, v):
+        return self.nonlinearity(v)
         """Convert voltage to firing rate."""
-
-    # ------------------------------------------------------------------
-    # Input pipeline
-    # ------------------------------------------------------------------
-
-    def _initialize_input_conv(self, column_p_q):
-        """Set up input convolution using HexGridConv + TemporalLRU.
-
-        Pipeline: pre-filter -> local contrast normalisation -> temporal LRU.
-        The pre-filter is a learned spatial conv applied before contrast
-        normalisation. Called from :class:`ConnectomeModel` once column_p_q is
-        known.
-        """
-        if self.conv_size_x % 2 == 0:
-            raise ValueError("conv_size_x must be odd for centered spatial convolution.")
-        if self.input_pre_conv_size % 2 == 0:
-            raise ValueError("input_pre_conv_size must be odd for centered spatial convolution.")
-        if self.num_temporal_modes < 1:
-            raise ValueError("num_temporal_modes must be >= 1.")
-
-        self.input_conv_size_x = self.conv_size_x
-
-        self.input_pre_conv = HexGridConv(
-            in_features=1, out_features=1, conv_size=self.input_pre_conv_size,
-            column_p_q=column_p_q, device=self.device, dtype=self.dtype,
-            positive_weights=True, use_bias=False,
-        )
-        pq_offsets_pre = HexGridConv.hex_grid_pq_offsets(self.input_pre_conv_size)
-        with torch.no_grad():
-            self.input_pre_conv.weight.fill_(-10.0)
-            for i, (dp, dq) in enumerate(pq_offsets_pre):
-                if dp == 0 and dq == 0:
-                    self.input_pre_conv.weight[0, i, 0] = 0.0
-
-        self.input_spatial_conv = HexGridConv(
-            in_features=1, out_features=1, conv_size=self.conv_size_x,
-            column_p_q=column_p_q, device=self.device, dtype=self.dtype,
-            positive_weights=True, use_bias=False,
-        )
-        pq_offsets = HexGridConv.hex_grid_pq_offsets(self.conv_size_x)
-        with torch.no_grad():
-            self.input_spatial_conv.weight.fill_(-10.0)
-            for i, (dp, dq) in enumerate(pq_offsets):
-                if max(abs(dp), abs(dq), abs(dp - dq)) <= 1:
-                    self.input_spatial_conv.weight[0, i, 0] = 0.0
-
-        self.temporal_lru = TemporalLRU(
-            num_modes=self.num_temporal_modes, dt=self.dt,
-            device=self.device, dtype=self.dtype,
-        )
-
-    def apply_input_conv(self, u_t, filter_state=None):
-        """Apply spatial pre-filter, contrast normalisation, then temporal LRU."""
-        filtered = self.input_pre_conv(u_t)
-
-        local_mean = self.input_spatial_conv(filtered)
-        centered = filtered - local_mean
-        local_var = self.input_spatial_conv(centered ** 2)
-        normed = -centered / torch.sqrt(local_var + 1e-12)
-
-        y_t, new_filter_state = self.temporal_lru.step(normed, state=filter_state)
-        return y_t, new_filter_state
 
     # ------------------------------------------------------------------
     # Training noise / spectral-norm rescaling
@@ -393,152 +326,6 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
                     break
                 scale_factor = (self.max_allowed_sigma / sigma_max) ** damping_factor
                 self._apply_sigma_scale(scale_factor)
-
-    # ------------------------------------------------------------------
-    # Static ego-motion math (no connectome refs)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _cross_matrix(a):
-        ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
-        O = torch.zeros_like(ax)
-        return torch.stack([
-            torch.stack([   O, -az,  ay], dim=-1),
-            torch.stack([  az,   O, -ax], dim=-1),
-            torch.stack([ -ay,  ax,   O], dim=-1),
-        ], dim=-2)
-
-    @staticmethod
-    def _spherical_basis(phi, theta):
-        x = torch.stack((
-            torch.sin(theta) * torch.cos(phi),
-            torch.sin(theta) * torch.sin(phi),
-            torch.cos(theta),
-        ), dim=1)
-        e_theta = torch.stack((
-            torch.cos(theta) * torch.cos(phi),
-            torch.cos(theta) * torch.sin(phi),
-            -torch.sin(theta),
-        ), dim=1)
-        e_phi = torch.stack((
-            -torch.sin(phi),
-            torch.cos(phi),
-            torch.zeros_like(phi),
-        ), dim=1)
-        return x, e_phi, e_theta
-
-    @classmethod
-    def _estimate_rotation_from_flow(cls, phi, theta, d_right, d_up):
-        x, e_phi, e_theta = cls._spherical_basis(phi, theta)
-        u = -d_right[..., None] * e_phi - d_up[..., None] * e_theta
-        T_len, N = d_right.shape
-        A = cls._cross_matrix(x)
-        A_flat = A.reshape(3 * N, 3)
-        u_flat = u.reshape(T_len, 3 * N).T
-        AtA = A_flat.T @ A_flat
-        Atb = A_flat.T @ u_flat
-        omega_star = torch.linalg.solve(AtA, Atb).T
-        return omega_star
-
-    @classmethod
-    def _estimate_translation_from_flow(cls, phi, theta, d_right, d_up):
-        x, e_phi, e_theta = cls._spherical_basis(phi, theta)
-        v = -d_right[..., None] * e_phi - d_up[..., None] * e_theta
-        T_len, N = d_right.shape
-
-        outer = x.unsqueeze(2) @ x.unsqueeze(1)
-        I = torch.eye(3, device=x.device, dtype=x.dtype).expand(N, 3, 3)
-        P = I - outer
-
-        vx = cls._cross_matrix(v)
-        C_blocks = vx @ P
-        C = C_blocks.reshape(T_len, 3 * N, 3)
-        _, _, Vh = torch.linalg.svd(C, full_matrices=False)
-        T_dir = Vh[:, -1]
-
-        w_i = torch.einsum('nij,tj->tni', P, T_dir)
-        v_dot_w = (v * w_i).sum(dim=-1)
-        w_norm_sq = (w_i * w_i).sum(dim=-1)
-        weighted_sign = (v_dot_w * w_norm_sq).sum(dim=-1)
-        sign_flip = torch.where(
-            weighted_sign > 0,
-            torch.tensor(-1.0, device=x.device, dtype=d_right.dtype),
-            torch.tensor(1.0, device=x.device, dtype=d_right.dtype),
-        )
-        T_dir = T_dir * sign_flip[:, None]
-        v_dot_w = v_dot_w * sign_flip[:, None]
-
-        rho_star = -v_dot_w / (w_norm_sq + 1e-12)
-
-        focus_threshold = 0.1
-        valid = w_norm_sq > focus_threshold
-        rho_masked = torch.where(valid, rho_star, torch.full_like(rho_star, float('nan')))
-        rho_agg = torch.nanmedian(rho_masked, dim=-1).values
-        rho_agg = torch.where(
-            torch.isnan(rho_agg),
-            torch.nanmedian(rho_star, dim=-1).values,
-            rho_agg,
-        )
-        T_star = rho_agg[:, None] * T_dir
-        return T_star, rho_star
-
-    def estimate_ego_motion_from_flow(self, phi, theta, d_right, d_up,
-                                      terms=('rotation', 'trans')):
-        """Estimate ego-motion (rotation + translation) from optic flow.
-
-        Coordinate system:
-            +X: Forward (phi=0, theta=pi/2)
-            +Y: Left    (phi=pi/2, theta=pi/2)
-            +Z: Up      (theta=0)
-
-        Returns ``(omega_star, T_star, rho_star)``. See the inline doc on the
-        old BaseRnn for the full sign/convention/de-rotation explanation.
-        """
-        terms = tuple(terms)
-        valid_terms = {'rotation', 'trans'}
-        if not terms or not set(terms).issubset(valid_terms):
-            raise ValueError(
-                f"`terms` must be a non-empty subset of {valid_terms}, got {terms}"
-            )
-
-        unbatched = d_right.dim() == 1
-        if unbatched:
-            d_right = d_right.unsqueeze(0)
-            d_up = d_up.unsqueeze(0)
-
-        T_len, N = d_right.shape
-        device, dtype = d_right.device, d_right.dtype
-
-        if 'rotation' in terms:
-            omega_star = self._estimate_rotation_from_flow(phi, theta, d_right, d_up)
-        else:
-            omega_star = torch.zeros(T_len, 3, device=device, dtype=dtype)
-
-        if 'trans' in terms:
-            if 'rotation' in terms:
-                x, e_phi, e_theta = self._spherical_basis(phi, theta)
-                A = self._cross_matrix(x)
-                u_rot = torch.einsum('nij,tj->tni', A, omega_star)
-                d_right_rot = -(u_rot * e_phi).sum(dim=-1)
-                d_up_rot = -(u_rot * e_theta).sum(dim=-1)
-                d_right_t = d_right - d_right_rot
-                d_up_t = d_up - d_up_rot
-            else:
-                d_right_t = d_right
-                d_up_t = d_up
-            T_star, rho_star = self._estimate_translation_from_flow(
-                phi, theta, d_right_t, d_up_t,
-            )
-        else:
-            T_star = torch.zeros(T_len, 3, device=device, dtype=dtype)
-            rho_star = torch.zeros(T_len, N, device=device, dtype=dtype)
-
-        if unbatched:
-            omega_star = omega_star.squeeze(0)
-            T_star = T_star.squeeze(0)
-            rho_star = rho_star.squeeze(0)
-
-        return omega_star, T_star, rho_star
 
     # ------------------------------------------------------------------
     # to(): move plain (non-Parameter, non-Buffer) tensor attributes too
@@ -581,12 +368,17 @@ class ConnectomeModel(BaseRnn):
                  connectome,
                  excitatory_nt=['ACH'], inhibitory_nt=['GLUT', 'GABA'],
                  count_threshold=2,
+                 region_kwargs=None,
                  **kwargs):
         super().__init__(**kwargs)
 
         self.excitatory_nt = excitatory_nt
         self.inhibitory_nt = inhibitory_nt
         self.count_threshold = count_threshold
+        # Per-region option sub-dicts from config['model']['regions']; passed
+        # through to each RegionView's _load_extras. Saved into init_inputs by
+        # the _save_init_inputs() snapshot below so checkpoints round-trip.
+        self.region_kwargs = dict(region_kwargs or {})
 
         if not isinstance(connectome, ConnectomeData):
             raise TypeError(
@@ -674,53 +466,14 @@ class ConnectomeModel(BaseRnn):
                 device=self.device, dtype=self.dtype,
             )
 
-        # Regions read their own area_extras and own per-area geometry (e.g.
-        # OpticLobeRegion.column_phi_theta / column_p_q). Build them before
-        # readouts + input_conv because those legacy components ask the model
-        # for column_p_q / column_phi_theta, which delegate to the optic-lobe
-        # region via @property.
-        self.regions = regions_mod.build_regions(self)
+        # Build per-area RegionView submodules. Each region reads its own
+        # area_extras parquet, consumes its own option sub-dict from
+        # region_kwargs, and owns its area-specific submodules (e.g.
+        # OpticLobeRegion builds the input_conv stack when
+        # region_kwargs['optic_lobe']['use_input_conv'] is True).
+        self.regions = regions_mod.build_regions(self, self.region_kwargs)
 
         self._initialize_readouts()
-        if self.use_input_conv:
-            if self.column_p_q is None:
-                raise RuntimeError(
-                    "use_input_conv=True requires the 'optic_lobe' region; "
-                    "either include 'optic_lobe' in areas or disable use_input_conv."
-                )
-            self._initialize_input_conv(self.column_p_q)
-
-    # ------------------------------------------------------------------
-    # Visual-column delegators (currently sourced from OpticLobeRegion)
-    # ------------------------------------------------------------------
-
-    @property
-    def column_phi_theta(self):
-        """``(num_columns, 2)`` (phi, theta) per column, or None.
-
-        Delegates to ``self.regions['optic_lobe']`` for backward-compat with
-        analysis scripts and the visual readouts.
-        """
-        region = self.regions.get('optic_lobe') if hasattr(self, 'regions') else None
-        return region.column_phi_theta if region is not None else None
-
-    @property
-    def column_p_q(self):
-        """``(num_columns, 2)`` hex p,q coords per column, or None."""
-        region = self.regions.get('optic_lobe') if hasattr(self, 'regions') else None
-        return region.column_p_q if region is not None else None
-
-    @property
-    def column_indices(self):
-        """``(num_neurons,)`` per-neuron column index (NaN where unassigned)."""
-        return self.column_indices_per_neuron
-
-    @property
-    def num_columns(self):
-        region = self.regions.get('optic_lobe') if hasattr(self, 'regions') else None
-        if region is None:
-            return 0
-        return len(region.column_indices)
 
     # ------------------------------------------------------------------
     # Connectome preprocessing
@@ -795,15 +548,32 @@ class ConnectomeModel(BaseRnn):
                    for mod in self._readout_modules.values())
 
     def _initialize_readouts(self):
-        """Instantiate readout modules by class name from ``readout_utilities``."""
+        """Instantiate readout modules by class name from ``readout_utilities``.
+
+        Visual readouts (anything that wants ``column_p_q`` / ``num_columns``)
+        require the ``optic_lobe`` region. The user is responsible for only
+        listing visual readouts when their config includes ``'optic_lobe'`` in
+        ``areas``.
+        """
         import readout_utilities
         self._readout_modules = torch.nn.ModuleDict()
+        if not self.readouts:
+            return
+
+        if 'optic_lobe' not in self.regions:
+            raise ValueError(
+                f"Readouts {self.readouts} were configured but no 'optic_lobe' "
+                "region is present. Visual readouts require the optic lobe; "
+                "either add 'optic_lobe' to areas or drop the readouts."
+            )
+        optic = self.regions['optic_lobe']
+
         kwargs = dict(
             cell_types=self.cell_types,
-            column_indices=self.column_indices,
-            column_p_q=self.column_p_q,
+            column_indices=self.column_indices_per_neuron,
+            column_p_q=optic.column_p_q,
             num_neurons=self.num_neurons,
-            num_columns=self.num_columns,
+            num_columns=optic.num_columns,
             device=self.device,
             dtype=self.dtype,
             readout_neurons=self.readout_neurons,
@@ -882,22 +652,6 @@ class ConnectomeModel(BaseRnn):
             signed_values.detach().cpu().numpy(),
         ])
 
-    def get_shared_columns(self, neuron_list):
-        """Columns where all ``neuron_list`` cell types are present."""
-        neuron_indices = np.arange(self.num_neurons)
-
-        column_indices = [self.column_indices[self.cell_types == i] for i in neuron_list]
-        column_indices = [i[~np.isnan(i)] for i in column_indices]
-        column_indices = reduce(np.intersect1d, column_indices)
-
-        neuron_masks = [(self.cell_types == i) for i in neuron_list]
-        neuron_is_in_list = np.any(np.stack(neuron_masks), axis=0)
-        neuron_is_in_list = neuron_is_in_list & np.isin(self.column_indices, column_indices)
-
-        selected_neuron_indices = neuron_indices[neuron_is_in_list]
-        selected_column_indices = self.column_indices[neuron_is_in_list]
-        return selected_neuron_indices, selected_column_indices
-
     def _silencing_mask(self, neurons_to_silence, invert_silencing=False):
         """Return a boolean mask over cell types for neurons to silence."""
         if not neurons_to_silence:
@@ -924,15 +678,6 @@ class ConnectomeModel(BaseRnn):
             warnings.warn(f"cell type '{name}' not found")
             return None
         return int(matches[0])
-
-    def get_column_xyz(self, radius: float = 1.0) -> np.ndarray:
-        """Column locations projected to 3D Cartesian coordinates."""
-        phi = self.column_phi_theta[:, 0]
-        theta = self.column_phi_theta[:, 1]
-        x = radius * np.sin(theta) * np.cos(phi)
-        y = radius * np.sin(theta) * np.sin(phi)
-        z = radius * np.cos(theta)
-        return np.stack((x, y, z), axis=1)
 
     # ------------------------------------------------------------------
     # Extra-state serialisation for the CSR synapse matrix
@@ -975,11 +720,18 @@ class ConnectomeModel(BaseRnn):
 
         filter_state = init_filter_state
 
+        # predict() currently assumes a visual input stream over hex columns;
+        # the optic-lobe region owns the column geometry, the input-conv
+        # pipeline, and the cell-type->column shared-membership lookup.
+        optic = self.regions['optic_lobe']
+        num_columns = optic.num_columns
+        col_per_neuron = self.column_indices_per_neuron
+
         if isinstance(input_neurons, list):
             input_neurons = [i for i in input_neurons if i in self.unique_cell_types]
             output_neurons = [i for i in output_neurons if i in self.unique_cell_types]
 
-            input_neuron_indices, input_column_indices = self.get_shared_columns(input_neurons)
+            input_neuron_indices, input_column_indices = optic.get_shared_columns(input_neurons)
             input_column_indices_np = input_column_indices
             stim_to_cell_mapping = {
                 'neuron_index': torch.tensor(input_neuron_indices, device=self.device, dtype=torch.int64),
@@ -994,12 +746,12 @@ class ConnectomeModel(BaseRnn):
             for i in output_neurons:
                 is_correct_type = (
                     (self.cell_types == i)
-                    & ~np.isnan(self.column_indices)
-                    & np.isin(self.column_indices, input_column_indices_np)
+                    & ~np.isnan(col_per_neuron)
+                    & np.isin(col_per_neuron, input_column_indices_np)
                 )
                 neuron_index = np.arange(self.num_neurons)
                 readout_dict[i] = {
-                    'column_indices': torch.tensor(self.column_indices[is_correct_type], device=self.device, dtype=torch.int64),
+                    'column_indices': torch.tensor(col_per_neuron[is_correct_type], device=self.device, dtype=torch.int64),
                     'neuron_indices': torch.tensor(neuron_index[is_correct_type], device=self.device, dtype=torch.int64),
                 }
             readout_keys = output_neurons
@@ -1017,23 +769,23 @@ class ConnectomeModel(BaseRnn):
         if record_synaptic:
             outputs['synaptic_current'] = {}
         for i in readout_keys:
-            outputs['voltage'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
-            outputs['firing_rate'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
+            outputs['voltage'][i] = torch.full((num_batches, num_time, num_columns), float('nan'), device=self.device, dtype=self.dtype)
+            outputs['firing_rate'][i] = torch.full((num_batches, num_time, num_columns), float('nan'), device=self.device, dtype=self.dtype)
             if record_synaptic:
-                outputs['synaptic_current'][i] = torch.full((num_batches, num_time, self.num_columns), float('nan'), device=self.device, dtype=self.dtype)
+                outputs['synaptic_current'][i] = torch.full((num_batches, num_time, num_columns), float('nan'), device=self.device, dtype=self.dtype)
 
         for name, mod in self._readout_modules.items():
             if getattr(mod, 'training_only', False):
                 continue
-            shape = (num_batches, num_time, self.num_columns) + mod.output_extra_dims
+            shape = (num_batches, num_time, num_columns) + mod.output_extra_dims
             outputs[name] = torch.full(shape, float('nan'),
                                        device=self.device, dtype=self.dtype)
 
         for t in range(num_time):
             u_t = inputs[:, t, :]
 
-            if self.use_input_conv:
-                u_t, filter_state = self.apply_input_conv(u_t, filter_state)
+            if optic.use_input_conv:
+                u_t, filter_state = optic.apply_input_conv(u_t, filter_state)
 
             v = self(v, u_t, stim_to_cell_mapping)
 
@@ -1074,7 +826,7 @@ class ConnectomeModel(BaseRnn):
     def find_steady_state(self, run_time=100, max_iter=25):
         print("Finding steady state ...")
         inputs = torch.zeros(
-            (1, run_time, self.num_columns), device=self.device, dtype=self.dtype,
+            (1, run_time, self.regions['optic_lobe'].num_columns), device=self.device, dtype=self.dtype,
         )
         initial_state = self.steady_state.unsqueeze(0)
         initial_ave = initial_state.abs().mean()

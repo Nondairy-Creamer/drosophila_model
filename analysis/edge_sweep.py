@@ -120,8 +120,8 @@ def main():
     model = nm.BaseRnn.load(model_folder / "model.pt")
 
     dt = model_config["model"]["dt"]
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
 
     # --- parameters ---
     directions = ["left", "right", "up", "down"]
@@ -337,7 +337,7 @@ def main():
         )["outputs"]
 
     conv_xt = input_conv_stimulus_timecourse(model, batch_xt_tensor)
-    use_conv = getattr(model, "use_input_conv", False)
+    use_conv = getattr(model.regions['optic_lobe'], "use_input_conv", False)
 
     xt_folder = fig_folder / "xt_plots"
     xt_folder.mkdir(parents=True, exist_ok=True)

@@ -8,13 +8,18 @@ dtype = "float32"
 use_layer_norm = true
 nonlinearity = "Softplus"
 readouts = ['FlowConv2Readout']
-use_input_conv = true
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = [
     'L2', 'L4', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'CT1', 'T5a', 'T5b', 'T5c', 'T5d',
     'L1', 'L3', 'L5', 'Mi1', 'Tm3', 'Mi4', 'Mi9', 'C2', 'C3', 'T4a', 'T4b', 'T4c' ,'T4d'
 ]
+
+[model.regions.optic_lobe]
+use_input_conv      = true
+conv_size_x         = 7
+input_pre_conv_size = 5
+num_temporal_modes  = 4
 
 [training]
 num_steps = 100

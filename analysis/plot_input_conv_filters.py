@@ -57,11 +57,11 @@ def main() -> None:
     model_path = Path(args.model_folder)
     model_pt = model_path / "model.pt" if model_path.is_dir() else model_path
     model = nm.BaseRnn.load(model_pt, device="cpu")
-    if not model.use_input_conv:
+    if not model.regions['optic_lobe'].use_input_conv:
         raise ValueError("Model does not have input convolution enabled.")
 
-    raw_weight = model.input_spatial_conv.weight[0, :, 0].detach()
-    if model.input_spatial_conv.positive_weights:
+    raw_weight = model.regions['optic_lobe'].input_spatial_conv.weight[0, :, 0].detach()
+    if model.regions['optic_lobe'].input_spatial_conv.positive_weights:
         raw_weight = raw_weight.exp()
         raw_weight = raw_weight / raw_weight.sum()
     conv_xy = raw_weight.cpu().numpy()
@@ -74,13 +74,13 @@ def main() -> None:
     ax_idx = 0
 
     if has_pre_conv:
-        pre_weight = model.input_pre_conv.weight[0, :, 0].detach()
-        if model.input_pre_conv.positive_weights:
+        pre_weight = model.regions['optic_lobe'].input_pre_conv.weight[0, :, 0].detach()
+        if model.regions['optic_lobe'].input_pre_conv.positive_weights:
             pre_weight = pre_weight.exp()
             pre_weight = pre_weight / pre_weight.sum()
         pre_xy = pre_weight.cpu().numpy()
 
-        pre_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.input_pre_conv_size)
+        pre_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.regions['optic_lobe'].input_pre_conv_size)
         pre_grid = ml.HexGridConv.pq_to_xy(pre_offsets)
         vmin_pre, vmax_pre = centered_norm(pre_xy)
         scatter_pre = axes[ax_idx].scatter(
@@ -106,7 +106,7 @@ def main() -> None:
         fig.colorbar(scatter_pre, ax=axes[ax_idx], shrink=0.8, pad=0.02)
         ax_idx += 1
 
-    pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.input_conv_size_x)
+    pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.regions['optic_lobe'].conv_size_x)
     spatial_weights = conv_xy
     grid_points = ml.HexGridConv.pq_to_xy(pq_offsets)
 
@@ -149,10 +149,10 @@ def main() -> None:
     t = np.arange(num_steps) * dt
 
     with torch.no_grad():
-        modes, feedthrough = model.temporal_lru.impulse_response_components(num_t=num_steps)
+        modes, feedthrough = model.regions['optic_lobe'].temporal_lru.impulse_response_components(num_t=num_steps)
         modes = modes.cpu().numpy()
         feedthrough_val = feedthrough.item()
-        h, _ = compute_lru_impulse_response(model.temporal_lru, num_steps=num_steps, dt=dt)
+        h, _ = compute_lru_impulse_response(model.regions['optic_lobe'].temporal_lru, num_steps=num_steps, dt=dt)
 
     fig_lru, (ax_comp, ax_full) = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 

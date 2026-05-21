@@ -155,8 +155,8 @@ def main():
     print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, "
           f"omega={model.get_omega():.4f}")
 
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     dt = model.dt
 
     output_types = sorted(
@@ -360,7 +360,7 @@ def main():
         from FlyEye.visualize_stimulus import visualize_column_responses
         import matplotlib.cm as mpl_cm
 
-        column_p_q = model.column_p_q
+        column_p_q = model.regions['optic_lobe'].column_p_q
         hex_conds = args.condition if args.condition else cond_names
 
         # Subsample to keep animations at a reasonable frame count

@@ -10,7 +10,7 @@ Overview of the neural model classes.
 | `dynamics_models.py` | Dynamics mixins: `CurrentDynamics`, `ConductanceDynamics`, `CellAnnDynamics`, `HandTunedDynamics`, `ArbitraryDynamics` |
 | `regions.py` | `RegionView` base + per-area subclasses (`OpticLobeRegion`, `AntennaLobeRegion`, …) and the area-name → region-class registry |
 | `model_layers.py` | Reusable `nn.Module` building blocks: `HexGridConv`, `TemporalLRU`, `CellTypeLayerNorm` |
-| `ego_motion.py` | Rotation math + velocity integration: `integrate_angular_velocity`, `integrate_translational_velocity` |
+| `ego_motion.py` | Flow -> 6-DOF solver (`estimate_from_flow`), rotation math, velocity integration |
 | `connectome_loading.py` | `ConnectomeData` dataclass + `load_connectome(areas, side)` |
 | `engineering_models.py` | `ConvModel` (stateless hex-grid CNN, sister to `BaseRnn`) |
 
@@ -32,11 +32,19 @@ torch.nn.Module
 │
 ├── ConvModel                 Engineering hex-grid CNN (no dynamics)
 │
-├── Regions (regions.py)
-│   ├── RegionView            Base: name + cell_indices + column_indices + side
-│   ├── OpticLobeRegion       side='right'|'left'|'both' (eye-terminology alias num_eyes);
-│   │                            predict_two_eyes, estimate_ego_motion_from_image,
-│   │                            column_phi_theta_two_eyes
+├── Regions (regions.py, all nn.Module so submodules land in state_dict)
+│   ├── RegionView            Base: name + cell_indices + side; weakref to model
+│   ├── OpticLobeRegion       Owns ALL vision-specific state and methods:
+│   │                            column_phi_theta / column_p_q / column_indices /
+│   │                            num_columns / column_phi_theta_two_eyes,
+│   │                            input_pre_conv / input_spatial_conv / temporal_lru
+│   │                            (built when region_opts['use_input_conv']=true),
+│   │                            plus its own config (use_input_conv, conv_size_x,
+│   │                            input_pre_conv_size, num_temporal_modes),
+│   │                            apply_input_conv, get_shared_columns, get_column_xyz,
+│   │                            estimate_ego_motion_from_flow, predict_two_eyes,
+│   │                            estimate_ego_motion_from_image.
+│   │                          side='right'|'left'|'both' (eye-terminology alias num_eyes).
 │   └── AntennaLobeRegion     (stub for future olfactory work)
 │
 └── Layers (model_layers.py)
@@ -48,7 +56,9 @@ torch.nn.Module
 ## Configuration
 
 A `ConnectomeModel` is parameterised by a flat areas list + a side filter,
-plus the dynamics mixin to use:
+plus the dynamics mixin to use. Region-specific knobs (input-conv sizes,
+spatial filter widths, anything area-private) live in a `[model.regions.<area>]`
+sub-table — one per area, keyed by the same names used in `areas`:
 
 ```toml
 [model]
@@ -56,6 +66,16 @@ model_type    = 'ConnectomeModel'
 dynamics_type = 'ConductanceDynamics'
 areas         = ['optic_lobe']         # any subset of region-registry keys
 side          = 'right'                # 'right' | 'left' | 'both'
+readouts      = ['FlowConv2Readout']   # user owns: only list visual readouts
+                                        # when 'optic_lobe' is in areas
+
+# Per-region option sub-table. Forwarded verbatim to
+# OpticLobeRegion._load_extras as `opts`; unknown keys raise.
+[model.regions.optic_lobe]
+use_input_conv      = true
+conv_size_x         = 7
+input_pre_conv_size = 5
+num_temporal_modes  = 4
 ```
 
 The loader (`connectome_loading.load_connectome(areas=..., side=...)`) filters
@@ -63,6 +83,11 @@ rows of the master bundle by these two fields, builds the `ConnectomeData`,
 and returns it for the model constructor to consume. The brain is bilaterally
 symmetric, so `side` is a model-wide filter that applies to every bilateral
 region (optic lobe, antenna lobe, mushroom body, …) — not just the eyes.
+
+`config['model']['regions']` is passed to `ConnectomeModel.__init__` as
+`region_kwargs={...}` and stored on the model so it round-trips through
+save/load. `config_default.toml` only ships defaults for `optic_lobe`; configs
+that introduce new areas (e.g. antenna lobe) supply their own region sub-table.
 
 ## Data layout
 
@@ -85,9 +110,12 @@ Universal fields land on `ConnectomeData`; anything outside the core set
 (today: only `column_index`) is forwarded verbatim through
 `ConnectomeData.per_neuron_extras`. Per-area geometry is loaded by the
 corresponding `RegionView` subclass from `area_extras/`, so the model itself
-stays anatomy-agnostic. Visual-column accessors (`model.column_phi_theta`,
-`model.column_p_q`) are convenience `@property` delegators that pass through
-to `model.regions['optic_lobe']`.
+stays anatomy-agnostic. All visual-specific state and operations
+(`column_phi_theta`, `column_p_q`, `num_columns`, the input-conv stack —
+`input_pre_conv` / `input_spatial_conv` / `temporal_lru` —, `apply_input_conv`,
+`get_shared_columns`, `get_column_xyz`, `estimate_ego_motion_from_flow`,
+`predict_two_eyes`, `estimate_ego_motion_from_image`) live on
+`model.regions['optic_lobe']` and are accessed through it.
 
 To add an area (e.g. antenna lobe):
 1. Append a section to `format_connectome_data.py` that writes more rows to
@@ -120,11 +148,14 @@ Abstract base class for connectome-constrained recurrent neural networks. Handle
 | `side` | input filter |
 | `connectome_folder` | path used by `RegionView._load_extras` to find `area_extras/` |
 
-Visual-column accessors (`model.column_phi_theta`, `model.column_p_q`,
-`model.num_columns`) are convenience `@property` delegators sourced from
-`model.regions['optic_lobe']` when that region is present.
+All visual-column accessors and helpers (`column_phi_theta`, `column_p_q`,
+`num_columns`, `get_shared_columns`, `get_column_xyz`) live on the optic-lobe
+region and are accessed as `model.regions['optic_lobe'].<attr>`. The model
+itself owns only the universal `column_indices_per_neuron` (the per-neuron
+column index with NaNs for non-visual neurons), which sits inside
+`per_neuron_extras` and is forwarded from `cell_info.parquet`.
 
-Key configuration arguments:
+Key model-level configuration arguments:
 
 | Argument | Default | Description |
 |---|---|---|
@@ -134,10 +165,17 @@ Key configuration arguments:
 | `dt` | `0.01` | Simulation timestep |
 | `count_threshold` | `2` | Minimum synapse count to keep a connection |
 | `readouts` | `[]` | List of readout class names: `'FlowNeuronReadout'`, `'FlowLinearReadout'`, `'FlowConv2Readout'`, `'MotionMagReadout'` |
-| `use_input_conv` | `True` | Whether to apply spatial/temporal input filtering |
-| `conv_size_x` | `5` | Hex-grid diameter for the input spatial convolution |
-| `num_temporal_modes` | `4` | Number of complex modes in the input temporal filter |
+| `region_kwargs` | `{}` | Per-region option sub-dict: `{<area>: {...}}`. Wired up from `config['model']['regions']`. |
 | `use_layer_norm` | `True` | Whether to apply `CellTypeLayerNorm` after each RNN step |
+
+Region-owned configuration arguments (sit in `region_kwargs['<area>']`):
+
+| Region | Key | Default | Description |
+|---|---|---|---|
+| `optic_lobe` | `use_input_conv` | `True` | Build + apply the input-conv stack (HexGridConv + contrast norm + TemporalLRU) |
+| `optic_lobe` | `conv_size_x` | `7` | Hex-grid diameter for the contrast-norm spatial conv |
+| `optic_lobe` | `input_pre_conv_size` | `5` | Hex-grid diameter for the pre-filter conv |
+| `optic_lobe` | `num_temporal_modes` | `4` | Complex modes in the temporal LRU |
 
 ### Connectome preprocessing (`_preprocess_connectome`)
 
@@ -151,12 +189,19 @@ Root IDs are then converted to dense matrix indices. The result is a sparse `(N,
 
 ### Input processing pipeline
 
-When `use_input_conv=True`, raw columnar stimulus passes through two stages before entering the RNN:
+When `region_kwargs['optic_lobe']['use_input_conv'] = true`, raw columnar
+stimulus passes through two stages
+before entering the RNN. The entire pipeline is owned by
+`OpticLobeRegion` — the model invokes
+`self.regions['optic_lobe'].apply_input_conv(u_t, filter_state)` inside its
+`predict` loop:
 
 1. **Spatial contrast normalization** (`HexGridConv` with positive, normalized weights) — computes a local weighted mean and variance over hex-grid neighbours, then normalizes: `y = -(x - mean) / sqrt(var + eps)`.
 2. **Temporal filtering** (`TemporalLRU`) — a complex diagonal linear recurrence that applies learned bandpass filtering independently per column.
 
-Both are applied per-timestep inside `apply_input_conv`.
+Submodules live at `model.regions['optic_lobe'].input_pre_conv`,
+`...input_spatial_conv`, and `...temporal_lru`; their parameters land in
+`state_dict()` under the `regions.optic_lobe.*` prefix.
 
 ### Abstract methods
 
@@ -174,7 +219,7 @@ Subclasses must implement:
 | `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` re-composes the concrete class from the saved `dynamics_type` string via `compose_model_class`. |
 | `silence_neurons(names)` | Zero the input and output strength of specified cell types (for lesion experiments). |
 | `get_shared_columns(neuron_list)` | Find columns that contain all specified cell types; returns neuron and column index arrays. |
-| `estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | Solve for 6-DOF ego-motion from optic flow via least-squares rotation estimation followed by SVD-based translation estimation. |
+| `regions['optic_lobe'].estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | Solve for 6-DOF ego-motion from optic flow via least-squares rotation estimation followed by SVD-based translation estimation. Lives on the region (and ultimately on `ego_motion.estimate_from_flow`) because flow is an optic-lobe concept. |
 | `model.regions['optic_lobe'].estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline (lives on `OpticLobeRegion`): run both eyes through the model, decode optic flow, then solve for rotation and translation. |
 | `model.regions['optic_lobe'].predict_two_eyes(inputs_right, inputs_left, ...)` | Per-eye `predict()` results; mirror-trick on single-eye hosts, native slice on two-eye hosts. |
 

@@ -1,7 +1,7 @@
 """Tests for ego-motion estimation from synthetic optic flow.
 
 Generates optic flow from known rotation/translation parameters, then checks
-that ``estimate_ego_motion_from_flow`` recovers them.
+that ``OpticLobeRegion.estimate_ego_motion_from_flow`` recovers them.
 """
 from pathlib import Path
 
@@ -48,7 +48,7 @@ def test_pure_rotation(viewing_dirs, model):
     T_true = torch.tensor([0.0, 0.0, 0.0])
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, 1.0)
-    omega_pred, T_pred, _ = model.estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -66,7 +66,7 @@ def test_pure_translation(viewing_dirs, model):
     Z = torch.ones(N) * 2.0
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, _ = model.estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -86,7 +86,7 @@ def test_combined_motion(viewing_dirs, model):
     Z = torch.ones(N) * 3.0
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, _ = model.estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -108,7 +108,7 @@ def test_varying_depth(viewing_dirs, model):
     Z = 5.0 - 2.0 * x_component
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, rho_pred = model.estimate_ego_motion_from_flow(
+    omega_pred, T_pred, rho_pred = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -139,7 +139,7 @@ def test_noisy_flow(viewing_dirs, model):
     d_right_noisy = d_right + noise_level * torch.randn_like(d_right)
     d_up_noisy = d_up + noise_level * torch.randn_like(d_up)
 
-    omega_pred, T_pred, _ = model.estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
         phi, theta, d_right_noisy, d_up_noisy,
     )
 

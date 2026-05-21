@@ -83,7 +83,7 @@ def main() -> None:
     device = model.device
     dtype = model.dtype
     model_dt = model.dt
-    column_phi_theta = model.column_phi_theta
+    column_phi_theta = model.regions['optic_lobe'].column_phi_theta
 
     # Force stimulus generation to use the model's dt and device so the resampled
     # stimulus rate matches the movie playback rate, and device matches the model
@@ -150,8 +150,8 @@ def main() -> None:
             init_filter_state=init_filter_state,
         )['outputs']['firing_rate']
 
-    cell_phi = model.column_phi_theta[:, 0]
-    cell_theta = model.column_phi_theta[:, 1]
+    cell_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    cell_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     cell_x = -np.sin(cell_theta) * np.cos(cell_phi)
     cell_z = np.cos(cell_theta)
 
@@ -197,7 +197,7 @@ def main() -> None:
             seq_data, cell_x, cell_z,
             offset=diamond_offset, scale=diamond_scale, size_scale=0.6,
             stim_cmap='gray', stim_scale_frac=1.0, stim_size_frac=1.0,
-            stim_p_q=model.column_p_q)
+            stim_p_q=model.regions['optic_lobe'].column_p_q)
         make_movie(init_scatter_diamond, ['sequence'], output_dir, frame_rate,
                    save_name=save_name)
 

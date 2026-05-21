@@ -341,9 +341,9 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
 
     dt = model.dt
     num_lags = int(round(sta_duration_ms / (dt * 1000)))
-    num_columns = model.num_columns
+    num_columns = model.regions['optic_lobe'].num_columns
 
-    if model.column_p_q is None:
+    if model.regions['optic_lobe'].column_p_q is None:
         raise RuntimeError('Model has no column_p_q; '
                            'cannot compute hex neighbor structure.')
 
@@ -382,7 +382,7 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
 
     # ── Hex neighbor structure ───────────────────────────────────────
     nearest = ml.HexGridConv.compute_nearest_columns(
-        filter_size, model.column_p_q,
+        filter_size, model.regions['optic_lobe'].column_p_q,
     )
     pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(filter_size)
     print(f'Filter size {filter_size}: {pq_offsets.shape[0]} spatial offsets, '

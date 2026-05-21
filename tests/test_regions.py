@@ -29,7 +29,7 @@ def test_optic_lobe_region_indices_consistent():
     expected_cells = np.flatnonzero(model.area_per_neuron == "optic_lobe")
     np.testing.assert_array_equal(region.cell_indices, expected_cells)
 
-    col_vals = model.column_indices[model.area_per_neuron == "optic_lobe"]
+    col_vals = model.column_indices_per_neuron[model.area_per_neuron == "optic_lobe"]
     expected_cols = np.unique(col_vals[~np.isnan(col_vals)]).astype(np.int64)
     np.testing.assert_array_equal(region.column_indices, expected_cols)
 
@@ -40,12 +40,12 @@ def test_optic_lobe_column_phi_theta_two_eyes_mirrored():
     region = model.regions["optic_lobe"]
 
     phi_2e, theta_2e = region.column_phi_theta_two_eyes
-    n = model.num_columns
+    n = model.regions['optic_lobe'].num_columns
 
     assert phi_2e.shape[0] == 2 * n
     assert theta_2e.shape[0] == 2 * n
 
-    phi_np = model.column_phi_theta[:, 0]
+    phi_np = model.regions['optic_lobe'].column_phi_theta[:, 0]
     np.testing.assert_allclose(phi_2e[:n].cpu().numpy(), phi_np)
     np.testing.assert_allclose(phi_2e[n:].cpu().numpy(), -phi_np)
 
@@ -57,7 +57,7 @@ def test_predict_two_eyes_runs():
     region = model.regions["optic_lobe"]
 
     S, T = 1, 3
-    inputs_right = torch.zeros(S, T, model.num_columns,
+    inputs_right = torch.zeros(S, T, model.regions['optic_lobe'].num_columns,
                                dtype=model.dtype, device=model.device)
     inputs_left = torch.zeros_like(inputs_right)
 

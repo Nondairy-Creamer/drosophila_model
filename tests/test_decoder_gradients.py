@@ -12,7 +12,7 @@ def test_model_gradients():
     model.train()
 
     torch.manual_seed(42)
-    inputs = torch.randn((1, 20, model.num_columns), dtype=model.dtype, device=model.device)
+    inputs = torch.randn((1, 20, model.regions['optic_lobe'].num_columns), dtype=model.dtype, device=model.device)
     outputs = model.predict(inputs, input_neurons=input_neurons, output_neurons=model.unique_cell_types.tolist())['outputs']
     target = torch.zeros_like(outputs["FlowConv2Readout"]) + 1
 

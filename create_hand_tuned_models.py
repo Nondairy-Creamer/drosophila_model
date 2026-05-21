@@ -190,7 +190,7 @@ for name, operations in model_configs.items():
         nonlinearity='Tanh',
         count_threshold=config['model']['synapse_count_threshold'],
         use_layer_norm=False,
-        use_input_conv=False,
+        region_kwargs={'optic_lobe': {'use_input_conv': False}},
         device=device,
         dtype=dtype,
         dt=dt,

@@ -78,8 +78,8 @@ def main() -> None:
     dtype = model.dtype
     frame_rate = args.fps or max(1, int((1 / model.dt) / 2))
 
-    N = model.column_phi_theta.shape[0]
-    column_xyz = model.get_column_xyz()
+    N = model.regions['optic_lobe'].column_phi_theta.shape[0]
+    column_xyz = model.regions['optic_lobe'].get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]
 
     flow_key = get_flow_key(model)
@@ -138,7 +138,7 @@ def _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
     # Filtered stimulus
     filtered_stim_np = None
     with torch.no_grad():
-        if model.use_input_conv:
+        if model.regions['optic_lobe'].use_input_conv:
             filtered_stim_np = compute_filtered(model, stim_input)
 
     stimulus = stim_input[0].detach().cpu().numpy()
@@ -210,7 +210,7 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
     filtered_right_np = None
     filtered_left_np = None
     with torch.no_grad():
-        if model.use_input_conv:
+        if model.regions['optic_lobe'].use_input_conv:
             filtered_right_np = compute_filtered(model, right_input)
             filtered_left_np = compute_filtered(model, left_input)
 

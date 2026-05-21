@@ -405,8 +405,8 @@ def main() -> int:
         first_left_gray = cv2.cvtColor(first_left, cv2.COLOR_BGR2GRAY) if first_left.ndim == 3 else first_left
         first_right_gray = cv2.cvtColor(first_right, cv2.COLOR_BGR2GRAY) if first_right.ndim == 3 else first_right
 
-        sample_phi_right = np.asarray(model.column_phi_theta[:, 0], dtype=np.float64)
-        sample_theta = np.asarray(model.column_phi_theta[:, 1], dtype=np.float64)
+        sample_phi_right = np.asarray(model.regions['optic_lobe'].column_phi_theta[:, 0], dtype=np.float64)
+        sample_theta = np.asarray(model.regions['optic_lobe'].column_phi_theta[:, 1], dtype=np.float64)
         sample_phi_left = -sample_phi_right
 
         print(

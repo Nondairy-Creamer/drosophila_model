@@ -85,7 +85,7 @@ input_neurons = ['L1', 'L2', 'L3']
 
 target_tensor = target['optic_flow'] if isinstance(target, dict) else target
 
-fit_odometry = target_tensor.shape[2] == 2 * model.num_columns
+fit_odometry = target_tensor.shape[2] == 2 * model.regions['optic_lobe'].num_columns
 
 if train_mask is None:
     train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)

@@ -133,7 +133,7 @@ def compute_filtered(model, input_batch):
     filter_state = None
     frames = []
     for t in range(input_batch.shape[1]):
-        y_t, filter_state = model.apply_input_conv(input_batch[:, t, :], filter_state)
+        y_t, filter_state = model.regions['optic_lobe'].apply_input_conv(input_batch[:, t, :], filter_state)
         frames.append(y_t[0])
     return torch.stack(frames, dim=0).cpu().numpy()
 

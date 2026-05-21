@@ -123,7 +123,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             readouts=config['model']['readouts'],
             readout_neurons=config['model'].get('readout_neurons'),
             regularizer_parameters=config['model'].get('regularizer_parameters'),
-            use_input_conv=config['model']['use_input_conv'],
+            region_kwargs=config['model'].get('regions', {}),
             dt=dt,
             seed=seed,
             commit_hash=commit_hash,
@@ -132,10 +132,10 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # --- Build target dict ---
     if uses_two_eyes:
         stimulus, optic_flow, target_rotation, target_translation, train_mask = \
-            su.get_stimulus_two_eyes(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
+            su.get_stimulus_two_eyes(config['stimulus']['stimulus_type'], config, model.regions['optic_lobe'].column_phi_theta)
         target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
     else:
-        stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.column_phi_theta)
+        stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.regions['optic_lobe'].column_phi_theta)
 
         if config['training'].get('use_synthetic_data', False):
             target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)

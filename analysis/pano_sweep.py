@@ -151,7 +151,7 @@ def run_pano_sweep(
     model_dt = model.dt
     device = model.device
     dtype = model.dtype
-    column_phi_theta = model.column_phi_theta
+    column_phi_theta = model.regions['optic_lobe'].column_phi_theta
     N = column_phi_theta.shape[0]
 
     both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])

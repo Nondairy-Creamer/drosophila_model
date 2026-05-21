@@ -47,7 +47,7 @@ def _exponential_highpass(block, dt, tau):
 
 def _aligned_column_geometry(model: nm.BaseRnn, n_cols: int):
     """``column_phi_theta`` rows vs ``num_columns`` can differ by one; align for scatter/interp."""
-    pt = np.asarray(model.column_phi_theta)
+    pt = np.asarray(model.regions['optic_lobe'].column_phi_theta)
     if pt.shape[0] > n_cols:
         pt = pt[:n_cols]
     elif pt.shape[0] < n_cols:
@@ -173,8 +173,8 @@ def main() -> None:
     blocks = []
     for di, direction in enumerate(directions):
         block = get_constant_velocity_pano(
-            model.column_phi_theta[:, 0],
-            model.column_phi_theta[:, 1],
+            model.regions['optic_lobe'].column_phi_theta[:, 0],
+            model.regions['optic_lobe'].column_phi_theta[:, 1],
             direction,
             velocity_deg_per_s=args.velocity,
             dt=dt,
@@ -224,7 +224,7 @@ def main() -> None:
         )["outputs"]["firing_rate"]
 
     stim_np = stimulus.detach().cpu().numpy()
-    n_cols = model.num_columns
+    n_cols = model.regions['optic_lobe'].num_columns
     cell_x, cell_z, cell_phi, cell_theta = _aligned_column_geometry(model, n_cols)
     if stim_np.shape[2] < n_cols:
         pad_width = n_cols - stim_np.shape[2]

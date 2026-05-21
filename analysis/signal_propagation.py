@@ -36,8 +36,8 @@ def run_signal_propagation(
 ):
     """Present a rightward sine wave and save XT plots for L1, Tm1, T5."""
     dt = model.dt
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
 
     sine_wave, _ = make_lr_sine_wave(
         sample_phi, sample_theta,

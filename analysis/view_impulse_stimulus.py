@@ -59,7 +59,7 @@ def _run_input_decomposition(model, stim_tensor, input_neurons, target_cell_type
     num_batches, num_time, _ = stim_tensor.shape
 
     filtered_input = [n for n in input_neurons if n in model.unique_cell_types]
-    input_neuron_indices, input_column_indices = model.get_shared_columns(filtered_input)
+    input_neuron_indices, input_column_indices = model.regions['optic_lobe'].get_shared_columns(filtered_input)
     stim_to_cell_mapping = {
         'neuron_index': torch.tensor(input_neuron_indices, device=model.device, dtype=torch.int64),
         'stimulus_index': torch.tensor(input_column_indices, device=model.device, dtype=torch.int64),
@@ -71,8 +71,8 @@ def _run_input_decomposition(model, stim_tensor, input_neurons, target_cell_type
 
     for t in range(num_time):
         u_t = stim_tensor[:, t, :]
-        if model.use_input_conv:
-            u_t, filter_state = model.apply_input_conv(u_t, filter_state)
+        if model.regions['optic_lobe'].use_input_conv:
+            u_t, filter_state = model.regions['optic_lobe'].apply_input_conv(u_t, filter_state)
         v = model(v, u_t, stim_to_cell_mapping)
         if model.use_layer_norm:
             v = model.layer_norm(v)
@@ -81,7 +81,7 @@ def _run_input_decomposition(model, stim_tensor, input_neurons, target_cell_type
         for pt, vals in decomp.items():
             if pt not in contributions:
                 contributions[pt] = torch.full(
-                    (num_batches, num_time, model.num_columns), float('nan'),
+                    (num_batches, num_time, model.regions['optic_lobe'].num_columns), float('nan'),
                     device=model.device, dtype=model.dtype,
                 )
             contributions[pt][:, t, :] = vals
@@ -185,8 +185,8 @@ def main():
     print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, "
           f"omega={model.get_omega():.4f}")
 
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     dt = model.dt
     n_columns = len(sample_phi)
 
@@ -444,7 +444,7 @@ def main():
         from FlyEye.visualize_stimulus import visualize_column_responses
         import matplotlib.cm as mpl_cm
 
-        column_p_q = model.column_p_q
+        column_p_q = model.regions['optic_lobe'].column_p_q
 
         target_fps = args.hex_fps
         total_time = args.pre_stim_time + args.post_stim_time + pulse_dur_actual

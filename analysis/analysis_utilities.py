@@ -89,7 +89,7 @@ def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
     Matches the input path inside :meth:`~neural_models.BaseRnn.predict` when
     ``use_input_conv`` is True (spatial pre-filter, local contrast norm, temporal LRU).
 
-    If ``model.use_input_conv`` is False, returns *inputs* unchanged.
+    If ``model.regions['optic_lobe'].use_input_conv`` is False, returns *inputs* unchanged.
 
     Parameters
     ----------
@@ -103,7 +103,7 @@ def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
     torch.Tensor
         Same shape as *inputs* — drive fed to ``forward`` after filtering each step.
     """
-    if not getattr(model, "use_input_conv", False):
+    if not getattr(model.regions['optic_lobe'], "use_input_conv", False):
         return inputs
     if inputs.ndim != 3:
         raise ValueError(f"expected inputs (B, T, C), got shape {tuple(inputs.shape)}")
@@ -112,7 +112,7 @@ def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
     state = None
     with torch.no_grad():
         for t in range(t_steps):
-            y, state = model.apply_input_conv(inputs[:, t, :], state)
+            y, state = model.regions['optic_lobe'].apply_input_conv(inputs[:, t, :], state)
             out[:, t, :] = y
     return out
 
@@ -223,8 +223,8 @@ def run_model_on_stimuli(
     config = du.load_config(model_folder / "config.toml")
     model = nm.BaseRnn.load(model_path, device=device)
 
-    column_phi_theta = model.column_phi_theta
-    column_xyz = model.get_column_xyz()
+    column_phi_theta = model.regions['optic_lobe'].column_phi_theta
+    column_xyz = model.regions['optic_lobe'].get_column_xyz()
 
     if stimulus_specs is None:
         if stimulus_types is None:
@@ -284,14 +284,14 @@ def run_model_on_stimuli(
             "dt": torch.tensor(model.dt, device=model.device, dtype=model.dtype),
         }
 
-        if model.use_input_conv:
+        if model.regions['optic_lobe'].use_input_conv:
             with torch.no_grad():
                 stim_dev = stimulus.to(device=model.device, dtype=model.dtype)
                 filtered_frames = []
                 for si in range(stim_dev.shape[0]):
                     filter_state = None
                     for t in range(stim_dev.shape[1]):
-                        y_t, filter_state = model.apply_input_conv(
+                        y_t, filter_state = model.regions['optic_lobe'].apply_input_conv(
                             stim_dev[si : si + 1, t, :], filter_state
                         )
                         filtered_frames.append(y_t)
@@ -613,7 +613,7 @@ def project_eye_flow(angular_flow, cell_x, cell_y, cell_z, eye):
     ----------
     angular_flow : (..., N, 2) array — channel 0 is u_right, channel 1 is u_up.
     cell_x, cell_y, cell_z : (N,) right-eye Cartesian coordinates on the unit
-        sphere (as returned by ``model.get_column_xyz()``).
+        sphere (as returned by ``model.regions['optic_lobe'].get_column_xyz()``).
     eye : 'right' or 'left'.
     """
     _check_eye(eye)
@@ -741,7 +741,7 @@ def make_flow_comparison_movie(
     true_flow : (time, columns, 2) — angular flow ``(u_right, u_up)``
     pred_flow : (time, columns, 2) or None
     cell_x, cell_y, cell_z : (columns,) right-eye Cartesian coordinates on the
-        unit sphere (as returned by ``model.get_column_xyz()``). The eye-correct
+        unit sphere (as returned by ``model.regions['optic_lobe'].get_column_xyz()``). The eye-correct
         ``cell_y`` mirroring is handled internally based on ``eye``.
     output_path : Path for .mp4 output
     frame_rate : frames per second

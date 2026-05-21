@@ -112,8 +112,8 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
     """Core sweep loop (called by :func:`run_sine_wave_sweep`)."""
 
     dt = model.dt
-    sample_phi = model.column_phi_theta[:, 0]
-    sample_theta = model.column_phi_theta[:, 1]
+    sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
+    sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
 
     # --- parameters ---
     directions = ["left", "right", "up", "down"]
@@ -279,7 +279,7 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
                     batch_lookup[(direction, wavelength)] = i
 
             conv_inputs = input_conv_stimulus_timecourse(model, all_stim_tensor)
-            use_conv = getattr(model, "use_input_conv", False)
+            use_conv = getattr(model.regions['optic_lobe'], "use_input_conv", False)
             stim_label = "Input-conv stimulus" if use_conv else "Raw stimulus (no input conv)"
 
             for wavelength in wavelengths:
