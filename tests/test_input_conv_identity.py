@@ -1,7 +1,7 @@
 import torch
 
-import neural_models as nm
-import model_layers as ml
+from drosophila_model.model_definition.model_types import neural_models as nm
+from drosophila_model.model_definition import model_layers as ml
 from test_model_factory import build_model_from_test_config
 
 

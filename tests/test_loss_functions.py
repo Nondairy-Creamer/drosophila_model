@@ -1,6 +1,6 @@
 import torch
 
-import loss_functions as lf
+from drosophila_model.training import loss_functions as lf
 
 
 _EVAL_LOSS_FNS = ['mse_loss', 'cos_loss', 'normalized_mse', 'cosine_loss']

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from analysis.analysis_utilities import generate_optic_flow, load_viewing_directions
+from drosophila_model.analysis.analysis_utilities import generate_optic_flow, load_viewing_directions
 from test_model_factory import build_model_from_test_config, load_test_config
 
 TRANSLATION_THRESHOLD = 1e-5

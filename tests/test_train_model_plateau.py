@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-import training_utilities as tu
+from drosophila_model.training import training_utilities as tu
 from tests.test_model_factory import build_model_from_test_config
 
 

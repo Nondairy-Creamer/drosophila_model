@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-import neural_models as nm
+from drosophila_model.model_definition.model_types import neural_models as nm
 from tests.test_model_factory import build_model_from_test_config
 
 

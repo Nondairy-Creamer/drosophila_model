@@ -1,6 +1,6 @@
 import torch
 
-import loss_functions as lf
+from drosophila_model.training import loss_functions as lf
 from tests.test_model_factory import build_model_from_test_config
 
 

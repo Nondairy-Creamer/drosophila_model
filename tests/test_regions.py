@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-import regions as regions_mod
+from drosophila_model.model_definition.regions import regions as regions_mod
 from test_model_factory import build_model_from_test_config
 
 

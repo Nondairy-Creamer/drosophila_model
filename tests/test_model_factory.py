@@ -5,12 +5,11 @@ import pandas as pd
 import sys
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-import connectome_loading as cl
-import data_utilities as du
-import neural_models as nm
+from drosophila_model import connectome_loading as cl
+from drosophila_model import data_utilities as du
+from drosophila_model.model_definition.model_types import neural_models as nm
 
 
 def _resolve_connectome_folder(repo_root: Path, connectome_folder: str) -> Path:
