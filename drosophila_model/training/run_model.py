@@ -2,14 +2,14 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from drosophila_model import plotting_utilities as pu
-from drosophila_model.model_definition.model_types import neural_models as nm
-from drosophila_model import connectome_loading as cl
-from drosophila_model import data_utilities as du
+from drosophila_model.utilities import plotting_utilities as pu
+from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.utilities import data_utilities as du
 from datetime import datetime
 from drosophila_model.training import training_utilities as tu
-from drosophila_model import stimulus_utilities as su
-from drosophila_model import model_utilities as mu
+from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.utilities import model_utilities as mu
 import argparse
 
 
@@ -60,12 +60,14 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
-    areas = config['model']['areas']
-    side = config['model']['side']
+    area_sides = {
+        area: opts.get('side', 'both')
+        for area, opts in config['model'].get('regions', {}).items()
+    }
 
     if len(config['model']['use_connectome_subset']) > 0:
         # Connectome subset: load the bundle, filter via DataFrame, then apply
-        # the areas/side filter through load_connectome_from_dataframes.
+        # the per-region side filter through load_connectome_from_dataframes.
         connectome_folder = Path(config['data']['connectome_folder'])
         cell_info_df = pd.read_parquet(connectome_folder / 'cell_info.parquet')
         synapses_df = pd.read_parquet(connectome_folder / 'synapses.parquet')
@@ -82,12 +84,12 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
         connectome = cl.load_connectome_from_dataframes(
             cell_info_df, synapses_df,
-            areas=areas, side=side,
+            area_sides=area_sides,
             connectome_folder=str(connectome_folder),
         )
     else:
         connectome = cl.load_connectome(
-            areas=areas, side=side,
+            area_sides=area_sides,
             connectome_folder=config['data']['connectome_folder'],
         )
 

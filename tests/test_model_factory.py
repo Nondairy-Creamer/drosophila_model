@@ -7,9 +7,9 @@ import sys
 # Add parent directory to path for imports
 
 
-from drosophila_model import connectome_loading as cl
-from drosophila_model import data_utilities as du
-from drosophila_model.model_definition.model_types import neural_models as nm
+from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.utilities import data_utilities as du
+from drosophila_model.model_definition import neural_models as nm
 
 
 def _resolve_connectome_folder(repo_root: Path, connectome_folder: str) -> Path:
@@ -50,8 +50,10 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
 
     connectome = cl.load_connectome_from_dataframes(
         cell_info_df, synapses_df,
-        areas=config["model"]["areas"],
-        side=config["model"]["side"],
+        area_sides={
+            area: opts.get("side", "both")
+            for area, opts in config["model"].get("regions", {}).items()
+        },
         connectome_folder=str(connectome_folder),
     )
 

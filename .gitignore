@@ -4,6 +4,9 @@ figures/*
 models/*
 !models/.gitkeep
 __pycache__/
+*.egg-info/
+build/
+dist/
 .venv
 .DS_Store
 logs/*

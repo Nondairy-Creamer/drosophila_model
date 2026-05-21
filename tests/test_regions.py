@@ -3,15 +3,15 @@
 import numpy as np
 import torch
 
-from drosophila_model.model_definition.regions import regions as regions_mod
+from drosophila_model.model_definition import regions as regions_mod
 from test_model_factory import build_model_from_test_config
 
 
 def test_optic_lobe_region_registered():
-    """A model loaded with areas=['optic_lobe'] exposes an OpticLobeRegion."""
+    """A model configured with [model.regions.optic_lobe] exposes an OpticLobeRegion."""
     model, config, _, _ = build_model_from_test_config(readouts=[])
 
-    assert config["model"]["areas"] == ["optic_lobe"]
+    assert "optic_lobe" in config["model"]["regions"]
     assert "optic_lobe" in model.regions
 
     region = model.regions["optic_lobe"]

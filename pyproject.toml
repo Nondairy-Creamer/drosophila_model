@@ -33,7 +33,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["drosophila_model*"]
-exclude = ["tests*", "models*", "logs*", "figures*", "math*", "drone_analysis*"]
+exclude = ["tests*", "models*", "logs*", "figures*", "math*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

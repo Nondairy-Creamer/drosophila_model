@@ -11,7 +11,7 @@ Overview of the neural model classes.
 | `regions.py` | `RegionView` base + per-area subclasses (`OpticLobeRegion`, `AntennaLobeRegion`, …) and the area-name → region-class registry |
 | `model_layers.py` | Reusable `nn.Module` building blocks: `HexGridConv`, `TemporalLRU`, `CellTypeLayerNorm` |
 | `ego_motion.py` | Flow -> 6-DOF solver (`estimate_from_flow`), rotation math, velocity integration |
-| `connectome_loading.py` | `ConnectomeData` dataclass + `load_connectome(areas, side)` |
+| `connectome_loading.py` | `ConnectomeData` dataclass + `load_connectome(area_sides)` |
 | `engineering_models.py` | `ConvModel` (stateless hex-grid CNN, sister to `BaseRnn`) |
 
 ## Class Hierarchy
@@ -26,7 +26,7 @@ torch.nn.Module
 │  e.g. CurrentDynamics + ConnectomeModel → ConnectomeModel_CurrentDynamics
 │
 │  Anatomical scope is data-driven, not class-driven:
-│      ConnectomeData built with areas=['optic_lobe'] side='right'
+│      ConnectomeData built with area_sides={'optic_lobe': 'right'}
 │      → model.regions = {'optic_lobe': OpticLobeRegion(side='right', ...)}
 │      → optic-lobe-specific methods live on that region object.
 │
@@ -55,34 +55,34 @@ torch.nn.Module
 
 ## Configuration
 
-A `ConnectomeModel` is parameterised by a flat areas list + a side filter,
-plus the dynamics mixin to use. Region-specific knobs (input-conv sizes,
-spatial filter widths, anything area-private) live in a `[model.regions.<area>]`
-sub-table — one per area, keyed by the same names used in `areas`:
+A `ConnectomeModel` is parameterised by the set of `[model.regions.<area>]`
+sub-tables (one per loaded area) plus the dynamics mixin. Each region owns
+its own `side` filter (`'right'` / `'left'` / `'both'`); other keys in the
+sub-table are region-private (input-conv sizes, spatial filter widths, etc.):
 
 ```toml
 [model]
 model_type    = 'ConnectomeModel'
 dynamics_type = 'ConductanceDynamics'
-areas         = ['optic_lobe']         # any subset of region-registry keys
-side          = 'right'                # 'right' | 'left' | 'both'
 readouts      = ['FlowConv2Readout']   # user owns: only list visual readouts
-                                        # when 'optic_lobe' is in areas
+                                        # when 'optic_lobe' is in regions
 
-# Per-region option sub-table. Forwarded verbatim to
-# OpticLobeRegion._load_extras as `opts`; unknown keys raise.
+# Per-region option sub-table. The `side` key is pulled out by build_regions
+# and used as the per-area connectome filter; everything else is forwarded
+# verbatim to OpticLobeRegion._load_extras as `opts`.
 [model.regions.optic_lobe]
+side                = 'right'          # 'right' | 'left' | 'both'
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
 ```
 
-The loader (`connectome_loading.load_connectome(areas=..., side=...)`) filters
-rows of the master bundle by these two fields, builds the `ConnectomeData`,
-and returns it for the model constructor to consume. The brain is bilaterally
-symmetric, so `side` is a model-wide filter that applies to every bilateral
-region (optic lobe, antenna lobe, mushroom body, …) — not just the eyes.
+The loader (`connectome_loading.load_connectome(area_sides=...)`) takes a
+`{area: side}` mapping and filters the master bundle area-by-area, so different
+regions can be pulled from different hemispheres in the same model. The
+mapping is built at the call site from `config['model']['regions']`:
+`{area: opts.get('side', 'both') for area, opts in regions.items()}`.
 
 `config['model']['regions']` is passed to `ConnectomeModel.__init__` as
 `region_kwargs={...}` and stored on the model so it round-trips through
@@ -133,7 +133,7 @@ Abstract base class for connectome-constrained recurrent neural networks. Handle
 ### Construction
 
 `ConnectomeModel` takes a single `connectome: ConnectomeData` (built via
-`connectome_loading.load_connectome(areas, side)`). The dataclass holds:
+`connectome_loading.load_connectome(area_sides)`). The dataclass holds:
 
 | Field | Description |
 |---|---|
@@ -144,8 +144,8 @@ Abstract base class for connectome-constrained recurrent neural networks. Handle
 | `area_per_neuron` | `(N,)` string array of area names |
 | `side_per_neuron` | `(N,)` string array, one of `'right'`/`'left'`/`'central'` |
 | `per_neuron_extras` | dict of non-core per-neuron columns from `cell_info.parquet` (today: `'column_index'` only) |
-| `areas` | input filter |
-| `side` | input filter |
+| `area_sides` | input filter: `{area: side}` actually loaded |
+| `areas` | property: `list(area_sides.keys())` |
 | `connectome_folder` | path used by `RegionView._load_extras` to find `area_extras/` |
 
 All visual-column accessors and helpers (`column_phi_theta`, `column_p_q`,

@@ -1,3 +1,9 @@
+# Per-user identity used by `register_git_on_server.py`. Leave blank in the
+# default; users override in their local (gitignored) `config.toml`.
+[user]
+email = ''
+name  = ''
+
 [model]
 # Default model: visual-system only, single right eye, current-based dynamics.
 # This is a boilerplate that user configs override per-key. The [model.regions.*]
@@ -5,8 +11,6 @@
 # that use other areas (e.g. antenna_lobe) supply their own region sub-table.
 model_type = 'ConnectomeModel'
 dynamics_type = 'CurrentDynamics'
-areas = ['optic_lobe']
-side = 'right'
 device = "cuda"
 dtype = "float32"
 use_layer_norm = false
@@ -26,9 +30,13 @@ readout_neurons = [
 [model.regularizer_parameters]
 input_layer_l1 = 0.0
 
-# Per-region option sub-tables. One sub-table per region in `areas`. Forwarded
-# verbatim to that region's RegionView._load_extras (see regions.py).
+# Per-region option sub-tables. The set of region keys here drives which
+# areas get loaded by `connectome_loading.load_connectome` and which
+# RegionView subclasses get built. Each region owns its own `side`
+# ('right' | 'left' | 'both'); all other keys are forwarded verbatim to
+# that region's RegionView._load_extras (see regions.py).
 [model.regions.optic_lobe]
+side                = 'right'
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5

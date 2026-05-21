@@ -1,8 +1,8 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from drosophila_model import plotting_utilities as pu
+from drosophila_model.utilities import plotting_utilities as pu
 import numpy as np
-from drosophila_model.model_definition.model_types import neural_models as nm
+from drosophila_model.model_definition import neural_models as nm
 import time
 import tempfile
 import os

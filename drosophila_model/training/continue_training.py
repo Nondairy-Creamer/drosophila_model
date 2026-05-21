@@ -2,8 +2,8 @@ import torch
 from pathlib import Path
 import argparse
 import shutil
-from drosophila_model.model_definition.model_types import neural_models as nm
-from drosophila_model import data_utilities as du
+from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.utilities import data_utilities as du
 from drosophila_model.training import training_utilities as tu
 
 parser = argparse.ArgumentParser(description='Continue training a model from checkpoint')

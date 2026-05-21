@@ -1,8 +1,6 @@
 [model]
 model_type = 'ConnectomeModel'
 dynamics_type = 'CurrentDynamics'
-areas = ['optic_lobe']
-side = 'right'
 device = "cpu"
 dtype = "float32"
 use_layer_norm = true
@@ -16,6 +14,7 @@ use_connectome_subset = [
 ]
 
 [model.regions.optic_lobe]
+side                = 'right'
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5

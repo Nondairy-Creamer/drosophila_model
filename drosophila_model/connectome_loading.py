@@ -12,12 +12,13 @@ The bundle is produced once by :mod:`format_connectome_data` and stored under
   loaded by the corresponding :class:`regions.RegionView` subclass.
 
 :func:`load_connectome` reads ``cell_info.parquet`` + ``synapses.parquet``,
-filters by ``areas`` and ``side``, and returns a :class:`ConnectomeData`
-payload. The model and regions stay anatomy-agnostic about the bundle layout;
-any per-neuron column on ``cell_info.parquet`` outside the core set is
-forwarded verbatim via :attr:`ConnectomeData.per_neuron_extras` so that
-regions can claim what they need (e.g. ``OpticLobeRegion`` reads
-``column_index``).
+filters per area according to ``area_sides`` (a ``{area: side}`` dict), and
+returns a :class:`ConnectomeData` payload. Each region owns its own side
+filter, so e.g. ``{'optic_lobe': 'right', 'central_brain': 'both'}`` is fine.
+The model and regions stay anatomy-agnostic about the bundle layout; any
+per-neuron column on ``cell_info.parquet`` outside the core set is forwarded
+verbatim via :attr:`ConnectomeData.per_neuron_extras` so that regions can
+claim what they need (e.g. ``OpticLobeRegion`` reads ``column_index``).
 """
 
 from __future__ import annotations
@@ -55,8 +56,9 @@ class ConnectomeData:
             ``cell_info.parquet`` (each value an ``(N,)`` array aligned with
             ``root_ids``). Today the only entry is ``'column_index'`` for
             optic-lobe neurons.
-        areas: list of area names actually present (input filter).
-        side: side filter applied at load (``'right'`` / ``'left'`` / ``'both'``).
+        area_sides: ``{area: side}`` filter applied at load. Sides are
+            ``'right'`` / ``'left'`` / ``'both'``. Each region owns its own
+            side, so different areas can pull from different hemispheres.
         connectome_folder: bundle path; regions use it to find ``area_extras``.
     """
 
@@ -67,26 +69,27 @@ class ConnectomeData:
     area_per_neuron: np.ndarray
     side_per_neuron: np.ndarray
     per_neuron_extras: dict[str, np.ndarray] = field(default_factory=dict)
-    areas: list[str] = field(default_factory=list)
-    side: str = 'both'
+    area_sides: dict[str, str] = field(default_factory=dict)
     connectome_folder: str = ''
+
+    @property
+    def areas(self) -> list[str]:
+        """Areas loaded into this payload, in insertion order of ``area_sides``."""
+        return list(self.area_sides.keys())
 
 
 def load_connectome(
-    areas: list[str],
+    area_sides: dict[str, str],
     *,
-    side: str = 'both',
     connectome_folder: Optional[str] = None,
 ) -> ConnectomeData:
     """Load a multi-area slice of the canonical connectome bundle.
 
     Args:
-        areas: Area names to include, e.g. ``['optic_lobe']`` or
-            ``['optic_lobe', 'antenna_lobe']``. Matched against the ``area``
-            column of ``cell_info.parquet``.
-        side: ``'right'`` / ``'left'`` / ``'both'``. Filters bilateral
-            regions by the ``side`` column. ``'both'`` keeps every side,
-            including non-bilateral (e.g. central-brain) neurons.
+        area_sides: Mapping from area name to side filter. Side is one of
+            ``'right'`` / ``'left'`` / ``'both'``. ``'both'`` keeps every
+            side for that area (including non-bilateral / central neurons).
+            Example: ``{'optic_lobe': 'right', 'antenna_lobe': 'both'}``.
         connectome_folder: Override the data folder. Defaults to
             ``config['data']['connectome_folder']``.
     """
@@ -99,7 +102,7 @@ def load_connectome(
 
     return load_connectome_from_dataframes(
         cell_info_df, synapses_df,
-        areas=areas, side=side, connectome_folder=str(folder),
+        area_sides=area_sides, connectome_folder=str(folder),
     )
 
 
@@ -107,8 +110,7 @@ def load_connectome_from_dataframes(
     cell_info_df: pd.DataFrame,
     synapses_df: pd.DataFrame,
     *,
-    areas: list[str],
-    side: str = 'both',
+    area_sides: dict[str, str],
     connectome_folder: str = '',
 ) -> ConnectomeData:
     """Build a :class:`ConnectomeData` from already-loaded DataFrames.
@@ -118,10 +120,13 @@ def load_connectome_from_dataframes(
     ``connectome_folder`` should still point at the on-disk bundle so that
     region subclasses can find their ``area_extras`` files.
     """
-    if not areas:
-        raise ValueError("`areas` must be a non-empty list of area names.")
-    if side not in ('right', 'left', 'both'):
-        raise ValueError(f"side must be 'right'|'left'|'both', got {side!r}")
+    if not area_sides:
+        raise ValueError("`area_sides` must be a non-empty {area: side} dict.")
+    for area, side in area_sides.items():
+        if side not in ('right', 'left', 'both'):
+            raise ValueError(
+                f"side for area {area!r} must be 'right'|'left'|'both', got {side!r}"
+            )
     for col in _CORE_CELL_INFO_COLS:
         if col not in cell_info_df.columns:
             raise ValueError(
@@ -129,16 +134,19 @@ def load_connectome_from_dataframes(
                 f"Re-run format_connectome_data.py to regenerate the bundle."
             )
 
-    area_mask = cell_info_df['area'].isin(areas)
-    if side == 'both':
-        side_mask = np.ones(len(cell_info_df), dtype=bool)
-    else:
-        # Keep matched bilateral side plus anything non-lateralised.
-        side_mask = cell_info_df['side'].isin([side, 'central', 'left,right', None])
-    keep = area_mask & side_mask
+    # OR per-area keep-masks, each respecting its own side filter.
+    keep = np.zeros(len(cell_info_df), dtype=bool)
+    for area, side in area_sides.items():
+        area_mask = (cell_info_df['area'] == area)
+        if side == 'both':
+            side_mask = np.ones(len(cell_info_df), dtype=bool)
+        else:
+            # Keep matched bilateral side plus anything non-lateralised.
+            side_mask = cell_info_df['side'].isin([side, 'central', 'left,right', None])
+        keep |= area_mask & side_mask
     if not keep.any():
         raise ValueError(
-            f"No neurons match areas={areas} side={side!r}. "
+            f"No neurons match area_sides={area_sides}. "
             f"Available areas: {sorted(cell_info_df['area'].unique())}; "
             f"sides: {sorted(cell_info_df['side'].dropna().unique())}."
         )
@@ -166,7 +174,6 @@ def load_connectome_from_dataframes(
         area_per_neuron=cell_info_df['area'].to_numpy(),
         side_per_neuron=cell_info_df['side'].to_numpy(),
         per_neuron_extras=extras,
-        areas=list(areas),
-        side=side,
+        area_sides=dict(area_sides),
         connectome_folder=connectome_folder,
     )

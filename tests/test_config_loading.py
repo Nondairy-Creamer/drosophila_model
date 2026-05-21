@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from drosophila_model import data_utilities as du
+from drosophila_model.utilities import data_utilities as du
 
 
 def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
