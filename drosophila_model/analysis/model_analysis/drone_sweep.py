@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.utilities import ego_motion as em
 from drosophila_model.utilities import stimulus_utilities as su
@@ -138,7 +138,7 @@ def run_drone_sweep(
     """
     model_path = Path(model_path)
     model_folder = model_path.parent if model_path.is_file() else model_path
-    local_config = du.load_config()
+    local_config = load_config()
 
     print(f"Loading model from {model_path}...")
     model = nm.BaseRnn.load(model_path)

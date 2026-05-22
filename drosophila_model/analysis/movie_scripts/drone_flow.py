@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.utilities import stimulus_utilities as su
 from drosophila_model.utilities.ego_motion import (
     integrate_angular_velocity, integrate_translational_velocity,
@@ -91,7 +91,7 @@ def main() -> None:
                              "<data_folder>/stimulus/drone_poses)")
     args = parser.parse_args()
 
-    config = du.load_config(args.config)
+    config = load_config(args.config)
     data_folder = Path(config["data"]["data_folder"])
     output_folder = Path(args.output_dir)
     output_folder.mkdir(parents=True, exist_ok=True)

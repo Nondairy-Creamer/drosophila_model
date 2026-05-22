@@ -19,7 +19,7 @@ from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
 from drosophila_model.utilities.stimulus_utilities import build_ommatidium_sampling_matrix
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 
 BOX_FILTER_SIZE = 4
 
@@ -584,7 +584,7 @@ def main():
                              'Output is saved as drone_data_monocular.pt.')
     args = parser.parse_args()
 
-    data_folder = Path(du.load_config()['data']['data_folder'])
+    data_folder = Path(load_config()['data']['data_folder'])
     data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
     pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
     output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus'

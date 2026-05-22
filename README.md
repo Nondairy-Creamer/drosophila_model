@@ -32,7 +32,8 @@ Both scripts read parameters from `config.toml` (lives in the `drosophila_model_
 | `training_utilities.py` | Training loop, gradient updates, checkpointing |
 | `loss_functions.py` | Loss functions (MSE, correlation, cosine, combined) |
 | `stimulus_utilities.py` | Stimulus generation — random panoramas, sine gratings, drone footage, optic flow computation |
-| `data_utilities.py` | Config loading/saving, connectome data helpers |
+| `config.py` | Config loading/saving (`load_config`, `save_config`) |
+| `data_utilities.py` | Connectome data helpers |
 | `model_utilities.py` | Git provenance, misc model helpers |
 | `plotting_utilities.py` | Plotting helpers used during training |
 | `movie_utilities.py` | Video/animation utilities |

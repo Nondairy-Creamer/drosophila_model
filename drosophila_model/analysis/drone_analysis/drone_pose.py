@@ -25,7 +25,7 @@ from scipy.ndimage import median_filter
 from pathlib import Path
 import argparse
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 
 from drosophila_model.analysis.drone_analysis.estimate_pose import (
     DualCameraRig, EquirectRig, TagMap, run_pipeline, run_pipeline_auto,
@@ -288,7 +288,7 @@ def main():
                         help='Process only these clip IDs (default: all)')
     args = parser.parse_args()
 
-    data_folder = Path(du.load_config()['data']['data_folder'])
+    data_folder = Path(load_config()['data']['data_folder'])
     data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
     output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus' / 'drone_poses'
     output_dir.mkdir(parents=True, exist_ok=True)

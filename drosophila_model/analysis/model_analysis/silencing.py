@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 import numpy as np
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.training import loss_functions as lf
 
@@ -94,10 +94,10 @@ def main() -> None:
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
 
-    local_config = du.load_config()
+    local_config = load_config()
     model_config_path = model_folder / 'config.toml'
     if model_config_path.exists():
-        model_config = du.load_config(model_config_path)
+        model_config = load_config(model_config_path)
     else:
         model_config = local_config
 

@@ -4,14 +4,14 @@ from pathlib import Path
 # Add parent directory to path for imports
 import numpy as np
 import pandas as pd
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.utilities import connectome_loading as cl
 from matplotlib import pyplot as plt
 from drosophila_model.model_definition import neural_models as nm
 
 
 # Load configuration from TOML file
-config = du.load_config()
+config = load_config()
 
 # --- Initialize a current-based model from the standardised connectome loader ---
 ModelClass = nm.compose_model_class('CurrentDynamics')

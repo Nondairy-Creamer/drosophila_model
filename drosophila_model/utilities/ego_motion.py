@@ -284,15 +284,15 @@ def load_viewing_directions(data_folder: str | Path | None = None):
     Args:
         data_folder: Path to the data root containing ``connectome_data/``.
             When ``None``, falls back to
-            ``du.load_config()['data']['data_folder']``.
+            ``load_config()['data']['data_folder']``.
 
     Returns:
         phi, theta: ``(2*N_columns,)`` tensors, with the second half
         mirrored across the midline (``-phi``).
     """
     if data_folder is None:
-        from drosophila_model.utilities import data_utilities as du
-        data_folder = du.load_config()['data']['data_folder']
+        from drosophila_model.config import load_config
+        data_folder = load_config()['data']['data_folder']
     data_folder = Path(data_folder)
     column_info_df = pd.read_parquet(
         data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'

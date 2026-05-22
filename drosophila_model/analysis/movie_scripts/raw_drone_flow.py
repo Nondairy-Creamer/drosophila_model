@@ -19,7 +19,7 @@ _repo_root = str(Path(__file__).parent.parent)
 import numpy as np
 
 from drosophila_model.analysis.drone_analysis.process_drone import load_video_grayscale
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 
 
 def main() -> None:
@@ -41,7 +41,7 @@ def main() -> None:
     if args.data_dir:
         data_dir = Path(args.data_dir)
     else:
-        data_dir = Path(du.load_config()['data']['data_folder']) / 'stimulus' / 'drone_videos'
+        data_dir = Path(load_config()['data']['data_folder']) / 'stimulus' / 'drone_videos'
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

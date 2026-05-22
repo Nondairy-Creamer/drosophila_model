@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 
 
 def _set_git_global(key: str, value: str) -> None:
@@ -24,7 +24,7 @@ def main() -> int:
     # Resolve config relative to this script (the repo root) rather than the
     # current working directory, so the script works from anywhere.
     os.chdir(Path(__file__).resolve().parent)
-    config = du.load_config()
+    config = load_config()
     user = config.get('user', {})
     email = (user.get('email') or '').strip()
     name = (user.get('name') or '').strip()

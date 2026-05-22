@@ -28,11 +28,9 @@ that emits more rows to ``cell_info.parquet`` / ``synapses.parquet`` with
 drop ``<area_name>_*.parquet`` alongside the core bundle.
 """
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
-
-from drosophila_model.utilities.data_utilities import load_config
+from drosophila_model.config import load_config
 
 
 def _process_optic_lobe(

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 
 
 def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
@@ -27,7 +27,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
         )
     )
 
-    config = du.load_config(str(user_config))
+    config = load_config(str(user_config))
 
     assert config["model"]["device"] == "cpu"
     assert config["model"]["readouts"] == ['FlowConv2Readout']

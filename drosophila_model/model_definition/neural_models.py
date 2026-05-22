@@ -49,7 +49,7 @@ import numpy as np
 import torch
 
 from drosophila_model.model_definition import dynamics
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.utilities.connectome_loading import (
     ConnectomeData,
     load_connectome,
@@ -171,7 +171,7 @@ class SerializableModel:
             inputs['device'] = device
         else:
             try:
-                inputs['device'] = du.load_config()['model']['device']
+                inputs['device'] = load_config()['model']['device']
             except Exception:
                 inputs.setdefault('device', 'cpu')
 

@@ -22,7 +22,7 @@ _repo_root = str(Path(__file__).parent.parent)
 import numpy as np
 import torch
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.utilities import stimulus_utilities as su
 
@@ -75,7 +75,7 @@ def main() -> None:
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
 
-    config = du.load_config(args.config) if args.config else du.load_config()
+    config = load_config(args.config) if args.config else load_config()
     model = nm.BaseRnn.load(model_path)
 
     device = model.device

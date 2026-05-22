@@ -12,7 +12,7 @@ import matplotlib
 from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.utilities import model_utilities as mu
 from drosophila_model.utilities.stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave, make_lr_moving_edge, make_ud_moving_edge
 
@@ -172,7 +172,7 @@ activation_overrides = {ct: 'relu' for ct in T4_types + T5_types}
 
 
 # ── Load connectome ───────────────────────────────────────────────────
-config = du.load_config('config.toml')
+config = load_config('config.toml')
 from drosophila_model.utilities import connectome_loading as cl
 connectome = cl.load_connectome(
     area_sides={

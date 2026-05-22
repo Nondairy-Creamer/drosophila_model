@@ -31,7 +31,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from drosophila_model import data_utilities as du
+from drosophila_model.config import load_config
 
 
 _CORE_CELL_INFO_COLS = ('root_id', 'type', 'neurotransmitter', 'area', 'side')
@@ -95,7 +95,7 @@ def load_connectome(
             ``config['data']['data_folder']``.
     """
     if data_folder is None:
-        data_folder = du.load_config()['data']['data_folder']
+        data_folder = load_config()['data']['data_folder']
     folder = Path(data_folder)
 
     baked = folder / 'connectome_data' / 'baked'

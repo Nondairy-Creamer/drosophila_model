@@ -128,9 +128,9 @@ def get_drone_stimulus(model_dt, data_path=None,
     import torch as _torch
 
     if data_path is None:
-        from drosophila_model.utilities import data_utilities as du
+        from drosophila_model.config import load_config
         data_path = (
-            Path(du.load_config()['data']['data_folder'])
+            Path(load_config()['data']['data_folder'])
             / 'stimulus' / 'drone_data.pt'
         )
     data_path = Path(data_path)
@@ -278,9 +278,9 @@ def load_rendered_fly_view_dataset(
             (``np.gradient`` of ``positions`` at native ``fps``).
     """
     if data_path is None:
-        from drosophila_model.utilities import data_utilities as du
+        from drosophila_model.config import load_config
         data_path = (
-            Path(du.load_config()['data']['data_folder'])
+            Path(load_config()['data']['data_folder'])
             / 'stimulus' / 'rendered_fly_view_dataset.pkl'
         )
     path = Path(data_path)
@@ -1414,9 +1414,9 @@ def _load_all_panos(pt_path=None):
         panos: (N, H, W) numpy float64 array of raw panoramic images.
     """
     if pt_path is None:
-        from drosophila_model.utilities import data_utilities as du
+        from drosophila_model.config import load_config
         pt_path = (
-            Path(du.load_config()['data']['data_folder'])
+            Path(load_config()['data']['data_folder'])
             / 'stimulus' / 'all_panoramic.pt'
         )
     pt_path = Path(pt_path)

@@ -5,6 +5,7 @@ from pathlib import Path
 from drosophila_model.utilities import plotting_utilities as pu
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.config import load_config, save_config
 from drosophila_model.utilities import data_utilities as du
 from datetime import datetime
 from drosophila_model.training import training_utilities as tu
@@ -27,7 +28,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     """
 
     # Load configuration from TOML file
-    config = du.load_config(config_path or 'config.toml')
+    config = load_config(config_path or 'config.toml')
 
     # Override device if specified
     if device_override is not None:
@@ -146,7 +147,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # Save seed info to config (filter out None values since TOML doesn't support them)
     run_info = {'seed': seed, 'device': str(device), 'run_id': run_id}
     config['run_info'] = {k: v for k, v in run_info.items() if v is not None}
-    du.save_config(config, model_save_folder / 'config.toml')
+    save_config(config, model_save_folder / 'config.toml')
     torch.save({'cell_inputs': stimulus.detach().cpu(), 'train_mask': train_mask.detach().cpu()},
                model_save_folder / "cell_inputs.pt")
     if type(target) is dict:

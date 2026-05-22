@@ -3,7 +3,7 @@ from pathlib import Path
 import argparse
 import shutil
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.training import training_utilities as tu
 
 parser = argparse.ArgumentParser(description='Continue training a model from checkpoint')
@@ -23,8 +23,8 @@ if new_session:
     shutil.copytree(model_folder, new_folder, dirs_exist_ok=True)
     model_folder = new_folder
 
-local_config = du.load_config()
-config = du.load_config(model_folder / 'config.toml')
+local_config = load_config()
+config = load_config(model_folder / 'config.toml')
 model = nm.BaseRnn.load(model_folder / 'model.pt', freeze_params=False)
 _stim_loaded = torch.load(model_folder / 'cell_inputs.pt')
 if isinstance(_stim_loaded, dict):

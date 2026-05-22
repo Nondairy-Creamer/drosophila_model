@@ -19,13 +19,13 @@ from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 
 
 def _load_all_panos():
     """Load (N, H, W) panoramas from the consolidated .pt file."""
     pt_path = (
-        Path(du.load_config()['data']['data_folder'])
+        Path(load_config()['data']['data_folder'])
         / 'stimulus' / 'all_panoramic.pt'
     )
     if not pt_path.exists():

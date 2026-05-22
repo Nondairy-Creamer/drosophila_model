@@ -7,6 +7,7 @@ import sys
 # Add parent directory to path for imports
 
 
+from drosophila_model.config import load_config
 from drosophila_model.utilities import connectome_loading as cl
 from drosophila_model.utilities import data_utilities as du
 from drosophila_model.model_definition import neural_models as nm
@@ -21,7 +22,7 @@ def _resolve_data_folder(repo_root: Path, data_folder: str) -> Path:
 
 def load_test_config() -> tuple[dict, Path]:
     repo_root = Path(__file__).resolve().parents[1]
-    config = du.load_config(str(repo_root / "tests" / "config_test.toml"))
+    config = load_config(str(repo_root / "tests" / "config_test.toml"))
     return config, repo_root
 
 

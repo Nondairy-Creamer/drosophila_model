@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.utilities import stimulus_utilities as su
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
@@ -69,7 +69,7 @@ def main() -> None:
     if args.stim_index is None:
         args.stim_index = [3] if args.two_eyes else [5]
 
-    config = du.load_config(args.config)
+    config = load_config(args.config)
     data_folder = Path(config['data']['data_folder'])
 
     if args.stim_time is not None:

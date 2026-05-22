@@ -32,7 +32,7 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.utilities.stimulus_utilities import make_lr_edge, make_ud_edge
 from drosophila_model.analysis.model_analysis.analysis_utilities import input_conv_stimulus_timecourse, prepare_xt
@@ -115,7 +115,7 @@ def main():
     args = parser.parse_args()
 
     model_folder = Path(args.model_folder)
-    model_config = du.load_config(model_folder / "config.toml")
+    model_config = load_config(model_folder / "config.toml")
     model = nm.BaseRnn.load(model_folder / "model.pt")
 
     dt = model_config["model"]["dt"]

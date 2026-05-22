@@ -16,7 +16,7 @@ import cv2
 from pathlib import Path
 import argparse
 
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.config import load_config
 from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import uniform_filter1d, gaussian_filter1d
 from scipy.spatial.transform import Rotation
@@ -372,7 +372,7 @@ def main():
                         help='Process only these clip IDs (default: all)')
     args = parser.parse_args()
 
-    data_folder = Path(du.load_config()['data']['data_folder'])
+    data_folder = Path(load_config()['data']['data_folder'])
     data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
     pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
     plot_dir = Path(args.plot_dir)
