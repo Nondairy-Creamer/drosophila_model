@@ -18,7 +18,9 @@ takes the dynamics-mixin name and returns a class that mixes ``ConnectomeModel``
 with that dynamics::
 
     ModelClass = compose_model_class('CurrentDynamics')
-    cdata = connectome_loading.load_connectome({'optic_lobe': 'right'})
+    cdata = connectome_loading.load_connectome(
+        {'optic_lobe': {'neuropils': ['ME', 'LO', 'LOP', 'LA'], 'side': 'right'}}
+    )
     model = ModelClass(connectome=cdata, ...)
 
 Config files name the dynamics + the per-region sides::
@@ -381,11 +383,13 @@ class ConnectomeModel(BaseRnn):
         if not isinstance(connectome, ConnectomeData):
             raise TypeError(
                 f"`connectome` must be a ConnectomeData (build it via "
-                f"connectome_loading.load_connectome({{area: side}})). "
+                f"connectome_loading.load_connectome({{region: {{...}}}})). "
                 f"Got {type(connectome).__name__}."
             )
-        self.area_sides = dict(connectome.area_sides)
-        self.areas = list(connectome.area_sides.keys())
+        self.region_specs = {
+            name: dict(spec) for name, spec in connectome.region_specs.items()
+        }
+        self.regions_loaded = list(connectome.region_specs.keys())
         self.data_folder = connectome.data_folder
 
         # Store the resolved ConnectomeData in init_inputs so saved
@@ -394,22 +398,20 @@ class ConnectomeModel(BaseRnn):
         self.init_inputs['connectome'] = connectome
 
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
-        # Per-area cell-type exclusions are owned by the region classes; the
-        # model just collects them and applies them in preprocessing.
-        neurons_to_exclude_per_area = regions_mod.resolve_neurons_to_exclude(
-            self.areas, self.region_kwargs,
+        # Per-region cell-type exclusions are owned by the region classes;
+        # the model just collects them and applies them in preprocessing.
+        neurons_to_exclude_per_region = regions_mod.resolve_neurons_to_exclude(
+            self.regions_loaded, self.region_kwargs,
         )
         (
             root_ids, cell_types, neurotransmitters,
-            area_per_neuron, side_per_neuron, per_neuron_extras,
-            synapse_counts_coo,
+            region_membership, synapse_counts_coo,
         ) = self._preprocess_connectome(
             connectome.synapse_counts_coo, connectome.root_ids, connectome.cell_types,
             connectome.neurotransmitters,
-            connectome.area_per_neuron, connectome.side_per_neuron,
-            connectome.per_neuron_extras,
+            connectome.region_membership,
             valid_neurotransmitters, count_threshold,
-            neurons_to_exclude_per_area,
+            neurons_to_exclude_per_region,
         )
 
         self.root_ids = root_ids
@@ -425,15 +427,10 @@ class ConnectomeModel(BaseRnn):
         self.unique_transmitters = np.unique(self.transmitters)
         self.num_transmitters = len(self.unique_transmitters)
 
-        self.area_per_neuron = area_per_neuron
-        self.side_per_neuron = side_per_neuron
-        # Universal per-neuron extras forwarded from the bundle. The
-        # optic-lobe column index lives here; future areas may add their own.
-        self.per_neuron_extras = per_neuron_extras
-        self.column_indices_per_neuron = per_neuron_extras.get(
-            'column_index',
-            np.full(self.num_neurons, np.nan),
-        )
+        # Per-region union-membership masks aligned with the model's flat
+        # neuron axis. Same neuron can land in multiple regions; each
+        # RegionView builds its own ``cell_indices`` from its mask.
+        self.region_membership = region_membership
 
         self.register_buffer(
             'steady_state',
@@ -469,14 +466,16 @@ class ConnectomeModel(BaseRnn):
                 device=self.device, dtype=self.dtype,
             )
 
-        # Build per-area RegionView submodules. Each region reads its own
-        # per-area parquet, consumes its own option sub-dict from
+        # Build per-region RegionView submodules. Each region reads its own
+        # per-region parquet, consumes its own option sub-dict from
         # region_kwargs, and owns its area-specific submodules (e.g.
         # OpticLobeRegion builds the input_conv stack when
         # region_kwargs['optic_lobe']['use_input_conv'] is True). Each
         # region also instantiates its own readouts from
-        # region_kwargs[area]['readouts'].
-        self.regions = regions_mod.build_regions(self, self.region_kwargs)
+        # region_kwargs[name]['readouts'].
+        self.regions = regions_mod.build_regions(
+            self, self.region_membership, self.region_specs, self.region_kwargs,
+        )
 
     # ------------------------------------------------------------------
     # Connectome preprocessing
@@ -485,30 +484,36 @@ class ConnectomeModel(BaseRnn):
     @staticmethod
     def _preprocess_connectome(synapse_counts_coo, root_ids, cell_types,
                                neurotransmitters,
-                               area_per_neuron, side_per_neuron,
-                               per_neuron_extras,
+                               region_membership,
                                valid_neurotransmitters, count_threshold,
-                               neurons_to_exclude_per_area):
+                               neurons_to_exclude_per_region):
         """Filter the raw connectome and convert root IDs to matrix indices.
 
         Filtering (in order):
           1. Remove connections below the synapse count threshold.
           2. Remove neurons with invalid neurotransmitters.
-          3. Remove per-area cell-type exclusions (e.g. photoreceptor
+          3. Remove per-region cell-type exclusions (e.g. photoreceptor
              terminals from the optic lobe; see
-             :func:`regions.resolve_neurons_to_exclude`).
+             :func:`regions.resolve_neurons_to_exclude`). A cell type
+             excluded by region R is dropped wherever it appears IN R's
+             union membership (so a photoreceptor that only lives in the
+             optic lobe is dropped globally; a type that also exists in
+             another region keeps its non-R copies).
           4. Remove connections involving removed neurons.
           5. Remove neurons with no remaining connections.
 
-        All per-neuron arrays (including everything in ``per_neuron_extras``)
-        are reduced in lockstep. ``synapse_counts_coo`` is rewritten from
+        All per-neuron arrays (and the per-region membership masks) are
+        reduced in lockstep. ``synapse_counts_coo`` is rewritten from
         root-ID space into matrix-index space.
         """
         import pandas as pd
 
         neurotransmitters = np.array(neurotransmitters)
-        area_per_neuron = np.array(area_per_neuron)
-        side_per_neuron = np.array(side_per_neuron)
+        cell_types = np.array(cell_types)
+        region_membership = {
+            name: np.asarray(mask, dtype=bool)
+            for name, mask in region_membership.items()
+        }
         assert root_ids.dtype == np.int64, 'root_ids must have dtype np.int64'
         assert synapse_counts_coo.dtype == np.int64, \
             'synapse_counts_coo must have dtype np.int64'
@@ -517,11 +522,14 @@ class ConnectomeModel(BaseRnn):
         synapse_counts_coo = synapse_counts_coo[above_threshold]
 
         valid_nt_mask = np.isin(neurotransmitters, valid_neurotransmitters)
-        for area, excluded_types in (neurons_to_exclude_per_area or {}).items():
+        for name, excluded_types in (neurons_to_exclude_per_region or {}).items():
             if not excluded_types:
                 continue
+            in_region = region_membership.get(name)
+            if in_region is None:
+                continue
             valid_nt_mask &= ~(
-                (area_per_neuron == area) & np.isin(cell_types, list(excluded_types))
+                in_region & np.isin(cell_types, list(excluded_types))
             )
         valid_ids = root_ids[valid_nt_mask]
         valid_connections = (
@@ -536,10 +544,8 @@ class ConnectomeModel(BaseRnn):
         root_ids = root_ids[valid_neurons]
         cell_types = cell_types[valid_neurons]
         neurotransmitters = neurotransmitters[valid_neurons]
-        area_per_neuron = area_per_neuron[valid_neurons]
-        side_per_neuron = side_per_neuron[valid_neurons]
-        per_neuron_extras = {
-            k: np.asarray(v)[valid_neurons] for k, v in per_neuron_extras.items()
+        region_membership = {
+            name: mask[valid_neurons] for name, mask in region_membership.items()
         }
 
         root_id_index = pd.Index(root_ids)
@@ -548,8 +554,7 @@ class ConnectomeModel(BaseRnn):
         synapse_counts_coo = np.column_stack([pre_idx, post_idx, synapse_counts_coo[:, 2]])
 
         return (root_ids, cell_types, neurotransmitters,
-                area_per_neuron, side_per_neuron, per_neuron_extras,
-                synapse_counts_coo)
+                region_membership, synapse_counts_coo)
 
     # ------------------------------------------------------------------
     # Readouts (region-owned; aggregated here for convenient lookup)

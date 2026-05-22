@@ -9,7 +9,11 @@ import pytest
 import torch
 
 from drosophila_model.utilities.ego_motion import generate_optic_flow, load_viewing_directions
-from test_model_factory import build_model_from_test_config, load_test_config
+from test_model_factory import (
+    _resolve_data_folder,
+    build_model_from_test_config,
+    load_test_config,
+)
 
 TRANSLATION_THRESHOLD = 1e-5
 
@@ -26,9 +30,7 @@ def _align_translation_sign(T_pred, T_true):
 def viewing_dirs():
     """Load viewing directions once for the whole module."""
     config, repo_root = load_test_config()
-    data_folder = Path(config["data"]["data_folder"])
-    if not data_folder.is_absolute():
-        data_folder = (repo_root / data_folder).resolve()
+    data_folder = _resolve_data_folder(repo_root, config["data"]["data_folder"])
     phi, theta = load_viewing_directions(data_folder)
     return phi, theta
 

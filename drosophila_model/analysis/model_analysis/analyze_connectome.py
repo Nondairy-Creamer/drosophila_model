@@ -8,6 +8,7 @@ from drosophila_model.config import load_config
 from drosophila_model.utilities import connectome_loading as cl
 from matplotlib import pyplot as plt
 from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.model_definition import regions as regions_mod
 
 
 # Load configuration from TOML file
@@ -17,10 +18,7 @@ config = load_config()
 ModelClass = nm.compose_model_class('CurrentDynamics')
 model = ModelClass(
     connectome=cl.load_connectome(
-        area_sides={
-            area: opts.get('side', 'both')
-            for area, opts in config['model'].get('regions', {}).items()
-        },
+        region_specs=regions_mod.build_region_specs(config['model'].get('regions', {})),
         data_folder=config['data']['data_folder'],
     ),
     device='cpu',
@@ -29,7 +27,7 @@ model = ModelClass(
 
 # Extract data from the model (uses filtered neurons/synapses)
 cell_types = model.cell_types
-column_indices = model.column_indices_per_neuron
+column_indices = model.regions['optic_lobe'].column_indices_per_neuron
 column_phi_theta = model.regions['optic_lobe'].column_phi_theta  # (num_columns, 2) with (phi, theta)
 num_neurons = model.num_neurons
 num_columns = model.regions['optic_lobe'].num_columns

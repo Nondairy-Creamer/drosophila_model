@@ -11,13 +11,25 @@ from drosophila_model.config import load_config
 from drosophila_model.utilities import connectome_loading as cl
 from drosophila_model.utilities import data_utilities as du
 from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.model_definition import regions as regions_mod
 
 
 def _resolve_data_folder(repo_root: Path, data_folder: str) -> Path:
     connectome_path = Path(data_folder)
     if connectome_path.is_absolute():
         return connectome_path
-    return (repo_root / connectome_path).resolve()
+    candidate = (repo_root / connectome_path).resolve()
+    if candidate.exists():
+        return candidate
+    # Fall back to the live config.toml's data folder so dev machines
+    # without the in-repo fixture (which only exists on CI) can still run.
+    live_path = repo_root / "config.toml"
+    if live_path.exists():
+        live_cfg = load_config(str(live_path))
+        live_folder = Path(live_cfg["data"]["data_folder"])
+        if live_folder.is_absolute() and live_folder.exists():
+            return live_folder
+    return candidate
 
 
 def load_test_config() -> tuple[dict, Path]:
@@ -52,10 +64,9 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
 
     connectome = cl.load_connectome_from_dataframes(
         cell_info_df, synapses_df,
-        area_sides={
-            area: opts.get("side", "both")
-            for area, opts in config["model"].get("regions", {}).items()
-        },
+        region_specs=regions_mod.build_region_specs(
+            config["model"].get("regions", {})
+        ),
         data_folder=str(data_folder),
     )
 

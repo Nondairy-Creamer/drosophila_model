@@ -22,16 +22,40 @@ def test_optic_lobe_region_registered():
 
 
 def test_optic_lobe_region_indices_consistent():
-    """Region cell/column indices match the model's area assignment."""
+    """Region cell/column indices match the loader's region_membership."""
     model, _, _, _ = build_model_from_test_config(readouts=[])
     region = model.regions["optic_lobe"]
 
-    expected_cells = np.flatnonzero(model.area_per_neuron == "optic_lobe")
+    expected_cells = np.flatnonzero(model.region_membership["optic_lobe"])
     np.testing.assert_array_equal(region.cell_indices, expected_cells)
 
-    col_vals = model.column_indices_per_neuron[model.area_per_neuron == "optic_lobe"]
+    col_vals = region.column_indices_per_neuron[
+        model.region_membership["optic_lobe"]
+    ]
     expected_cols = np.unique(col_vals[~np.isnan(col_vals)]).astype(np.int64)
     np.testing.assert_array_equal(region.column_indices, expected_cols)
+
+
+def test_region_specs_round_trip_to_loader():
+    """build_region_specs + load_connectome plumbing yields the right neuropil set."""
+    from drosophila_model.model_definition import regions as regions_mod
+    from drosophila_model.utilities import connectome_loading as cl
+
+    model, _, _, _ = build_model_from_test_config(readouts=[])
+    spec = model.region_specs["optic_lobe"]
+    resolved = cl.resolve_sided_neuropils(spec["neuropils"], spec["side"])
+    # Right-side optic lobe = right variants of ME/LO/LOP/LA only.
+    assert resolved == {"ME_R", "LO_R", "LOP_R", "LA_R"}
+
+
+def test_union_membership_supports_multiple_regions():
+    """A region's cell_indices comes straight from its membership mask."""
+    model, _, _, _ = build_model_from_test_config(readouts=[])
+    # Every optic-lobe neuron in the membership mask shows up in the region's
+    # cell_indices, and every cell_index points back into the mask.
+    mask = model.region_membership["optic_lobe"]
+    assert mask.sum() == len(model.regions["optic_lobe"].cell_indices)
+    assert mask[model.regions["optic_lobe"].cell_indices.cpu().numpy()].all()
 
 
 def test_optic_lobe_column_phi_theta_two_eyes_mirrored():

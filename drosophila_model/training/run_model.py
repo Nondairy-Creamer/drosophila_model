@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 from drosophila_model.utilities import plotting_utilities as pu
 from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.model_definition import regions as regions_mod
 from drosophila_model.utilities import connectome_loading as cl
 from drosophila_model.config import load_config, save_config
 from drosophila_model.utilities import data_utilities as du
@@ -61,14 +62,11 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
     output_neurons_direction = ['right', 'left', 'up', 'down', 'right', 'left', 'up', 'down']
 
-    area_sides = {
-        area: opts.get('side', 'both')
-        for area, opts in config['model'].get('regions', {}).items()
-    }
+    region_specs = regions_mod.build_region_specs(config['model'].get('regions', {}))
 
     if len(config['model']['use_connectome_subset']) > 0:
         # Connectome subset: load the bundle, filter via DataFrame, then apply
-        # the per-region side filter through load_connectome_from_dataframes.
+        # the per-region neuropil filter through load_connectome_from_dataframes.
         data_folder = Path(config['data']['data_folder'])
         baked = data_folder / 'connectome_data' / 'baked'
         cell_info_df = pd.read_parquet(baked / 'cell_info.parquet')
@@ -86,12 +84,12 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
         connectome = cl.load_connectome_from_dataframes(
             cell_info_df, synapses_df,
-            area_sides=area_sides,
+            region_specs=region_specs,
             data_folder=str(data_folder),
         )
     else:
         connectome = cl.load_connectome(
-            area_sides=area_sides,
+            region_specs=region_specs,
             data_folder=config['data']['data_folder'],
         )
 

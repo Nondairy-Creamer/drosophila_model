@@ -94,6 +94,12 @@ class RegionView(nn.Module):
     # ``ConnectomeModel._preprocess_connectome``. Override per-instance via
     # ``region_kwargs[area]['neurons_to_exclude']``.
     default_neurons_to_exclude: list[str] = []
+    # Bilateral base neuropil names this region claims (no ``_L``/``_R``
+    # suffix; the loader expands by ``side``). Names that already carry a
+    # suffix pass through unchanged. A neuron with at least one synapse in
+    # any of these neuropils is opted into this region (union membership;
+    # see :func:`connectome_loading.resolve_sided_neuropils`).
+    neuropils: list[str] = []
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
                  cell_indices: np.ndarray, side: str,
@@ -301,6 +307,10 @@ class OpticLobeRegion(RegionView):
     # Photoreceptor terminals are the model's stimulus input, not connectome
     # nodes. Stripped from the optic-lobe slice before synapse preprocessing.
     default_neurons_to_exclude = ['R1-6', 'R7', 'R8']
+    # Optic-lobe neuropils (intrinsic): medulla, lobula, lobula plate, lamina.
+    # AME (accessory medulla) is excluded to match the previous
+    # ``category == 'intrinsic'`` filter, which dropped boundary cells.
+    neuropils = ['ME', 'LO', 'LOP', 'LA']
     # Readouts that produce column-aligned visual outputs.
     default_readouts = ['FlowConv2Readout', 'L1Reg']
     default_readout_neurons = [
@@ -328,9 +338,22 @@ class OpticLobeRegion(RegionView):
         self.input_pre_conv_size = int(cfg['input_pre_conv_size'])
         self.num_temporal_modes  = int(cfg['num_temporal_modes'])
 
+        # Per-neuron hex-column index: NaN for any model neuron that the
+        # optic-lobe column assignments don't cover (non-OL neurons, or OL
+        # neurons without a known column). Aligned with model.root_ids.
+        col_idx_df = pd.read_parquet(extras_dir / 'optic_lobe_column_index.parquet')
+        col_map = dict(zip(
+            col_idx_df['root_id'].to_numpy(),
+            col_idx_df['column_index'].to_numpy().astype(np.int64),
+        ))
+        self.column_indices_per_neuron = np.array(
+            [col_map.get(int(rid), np.nan) for rid in model.root_ids],
+            dtype=np.float64,
+        )
+
         # Region-local set of unique column indices (drop NaNs from neurons
-        # without a column assignment, like the boundary cell types).
-        col_per_neuron = model.column_indices_per_neuron[
+        # without a column assignment).
+        col_per_neuron = self.column_indices_per_neuron[
             self.cell_indices.cpu().numpy()
         ]
         col_vals = col_per_neuron[~np.isnan(col_per_neuron)]
@@ -443,7 +466,7 @@ class OpticLobeRegion(RegionView):
         """
         from functools import reduce
         model = self.model
-        col_per_neuron = model.column_indices_per_neuron
+        col_per_neuron = self.column_indices_per_neuron
 
         neuron_indices = np.arange(model.num_neurons)
         per_type_cols = [col_per_neuron[model.cell_types == nt] for nt in neuron_list]
@@ -501,7 +524,7 @@ class OpticLobeRegion(RegionView):
             readout_dict = precomputed_output_mapping
             output_neurons = list(readout_dict.keys())
         else:
-            col_per_neuron = model.column_indices_per_neuron
+            col_per_neuron = self.column_indices_per_neuron
             input_cols = input_meta['stimulus_columns_np']
             neuron_index = np.arange(model.num_neurons)
 
@@ -597,7 +620,7 @@ class OpticLobeRegion(RegionView):
         model = self.model
         kwargs = dict(
             cell_types=model.cell_types,
-            column_indices=model.column_indices_per_neuron,
+            column_indices=self.column_indices_per_neuron,
             column_p_q=self.column_p_q,
             num_neurons=model.num_neurons,
             num_columns=self.num_columns,
@@ -866,13 +889,39 @@ REGION_REGISTRY: dict[str, type[RegionView]] = {
 }
 
 
-def resolve_neurons_to_exclude(
-    areas, region_kwargs: dict[str, dict] | None = None,
-) -> dict[str, list[str]]:
-    """Return ``{area: [cell_type, ...]}`` of neurons to exclude per area.
+def build_region_specs(
+    region_kwargs: dict[str, dict] | None,
+) -> dict[str, dict]:
+    """Translate config-style ``region_kwargs`` into loader ``region_specs``.
 
-    For each area in ``areas`` registered in :data:`REGION_REGISTRY`, uses the
-    per-instance override from ``region_kwargs[area]['neurons_to_exclude']``
+    For each region name present in ``region_kwargs`` and registered in
+    :data:`REGION_REGISTRY`, returns ``{'neuropils': <list>, 'side': <str>}``
+    where ``neuropils`` defaults to the class-level :attr:`RegionView.neuropils`
+    list (overridable per-instance via ``region_kwargs[<name>]['neuropils']``)
+    and ``side`` defaults to ``'both'``. Used by callers to drive
+    :func:`connectome_loading.load_connectome` straight from config.
+    """
+    region_kwargs = region_kwargs or {}
+    specs: dict[str, dict] = {}
+    for name, opts in region_kwargs.items():
+        cls = REGION_REGISTRY.get(name)
+        if cls is None:
+            continue
+        opts = opts or {}
+        specs[name] = {
+            'neuropils': list(opts.get('neuropils', cls.neuropils)),
+            'side': opts.get('side', 'both'),
+        }
+    return specs
+
+
+def resolve_neurons_to_exclude(
+    regions, region_kwargs: dict[str, dict] | None = None,
+) -> dict[str, list[str]]:
+    """Return ``{region: [cell_type, ...]}`` of neurons to exclude per region.
+
+    For each region in ``regions`` registered in :data:`REGION_REGISTRY`, uses
+    the per-instance override from ``region_kwargs[region]['neurons_to_exclude']``
     if set, else the region class's ``default_neurons_to_exclude``. Used by
     :meth:`ConnectomeModel._preprocess_connectome` to strip cell types that
     a region treats as non-connectome inputs (e.g. photoreceptor terminals
@@ -880,61 +929,67 @@ def resolve_neurons_to_exclude(
     """
     region_kwargs = region_kwargs or {}
     out: dict[str, list[str]] = {}
-    for area in areas:
-        cls = REGION_REGISTRY.get(area)
+    for name in regions:
+        cls = REGION_REGISTRY.get(name)
         if cls is None:
             continue
-        override = region_kwargs.get(area, {}).get('neurons_to_exclude')
+        override = region_kwargs.get(name, {}).get('neurons_to_exclude')
         if override is not None:
-            out[area] = list(override)
+            out[name] = list(override)
         else:
-            out[area] = list(cls.default_neurons_to_exclude)
+            out[name] = list(cls.default_neurons_to_exclude)
     return out
 
 
-def build_regions(model: 'ConnectomeModel',
-                  region_kwargs: dict[str, dict] | None = None) -> nn.ModuleDict:
-    """Instantiate one ``RegionView`` per area present in ``model``'s connectome.
+def build_regions(
+    model: 'ConnectomeModel',
+    region_membership: dict[str, np.ndarray],
+    region_specs: dict[str, dict],
+    region_kwargs: dict[str, dict] | None = None,
+) -> nn.ModuleDict:
+    """Instantiate one ``RegionView`` per region in ``region_specs``.
 
     Returns an ``nn.ModuleDict`` so the regions and their submodules land in
-    ``model.state_dict()`` automatically under ``regions.<area>.*``. Each
+    ``model.state_dict()`` automatically under ``regions.<name>.*``. Each
     region's ``__init__`` calls ``_load_extras`` to ingest its own on-disk
     data from ``model.data_folder/connectome_data/baked/`` and to build its
     area-specific submodules.
 
-    ``region_kwargs`` maps area name to that region's option sub-dict (as it
-    appears under ``[model.regions.<area>]`` in the config). ``side`` is
-    pulled out and passed as its own kwarg; everything else is forwarded
-    verbatim to the region's ``_load_extras`` as ``region_opts``. The side
-    must match the side used when loading the connectome (``model.area_sides``)
-    so the region's per-neuron data lines up with the on-disk extras.
+    ``region_membership`` is ``{name: (num_neurons,) bool}`` aligned with the
+    model's flat neuron axis (post-preprocessing) — true where the neuron
+    belongs to that region. Membership is union, so the same neuron can land
+    in multiple regions' ``cell_indices``.
+
+    ``region_kwargs`` maps region name to its config option sub-dict (as it
+    appears under ``[model.regions.<name>]`` in the config). ``side`` and
+    ``neurons_to_exclude`` are consumed upstream; everything else is
+    forwarded verbatim to the region's ``_load_extras`` as ``region_opts``.
     """
     region_kwargs = dict(region_kwargs or {})
     regions = nn.ModuleDict()
-    for area in sorted(set(model.area_per_neuron)):
-        cls = REGION_REGISTRY.get(area)
+    for name, spec in region_specs.items():
+        cls = REGION_REGISTRY.get(name)
         if cls is None:
             continue
 
-        cell_mask = (model.area_per_neuron == area)
-        cell_idx = np.flatnonzero(cell_mask).astype(np.int64)
-
-        opts = dict(region_kwargs.get(area, {}))
-        # ``neurons_to_exclude`` is already consumed by the model's
-        # connectome preprocessing (see resolve_neurons_to_exclude); drop it
-        # here so it doesn't reach the subclass's _load_extras unknown-key
-        # check.
-        opts.pop('neurons_to_exclude', None)
-        side = opts.pop('side', model.area_sides.get(area, 'both'))
-        expected_side = model.area_sides.get(area)
-        if expected_side is not None and side != expected_side:
+        mask = region_membership.get(name)
+        if mask is None:
             raise ValueError(
-                f"Region {area!r} configured with side={side!r} but connectome "
-                f"was loaded with side={expected_side!r}. Keep them in sync."
+                f"region_membership is missing entry for region {name!r}. "
+                f"Loaded regions: {sorted(region_membership)!r}."
             )
+        cell_idx = np.flatnonzero(mask).astype(np.int64)
 
-        regions[area] = cls(
-            name=area, model=model,
+        opts = dict(region_kwargs.get(name, {}))
+        # Consumed upstream / passed as kwargs; drop so subclass _load_extras
+        # unknown-key checks don't see them.
+        opts.pop('neurons_to_exclude', None)
+        opts.pop('neuropils', None)
+        opts.pop('side', None)
+        side = spec.get('side', 'both')
+
+        regions[name] = cls(
+            name=name, model=model,
             cell_indices=cell_idx, side=side,
             region_opts=opts,
         )

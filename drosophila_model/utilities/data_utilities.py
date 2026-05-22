@@ -21,14 +21,19 @@ def get_connectome_subset(
     Filter connectome data to include only specified cell types.
 
     Args:
-        cell_info_df: DataFrame with cell information (must have 'type' and 'root_id' columns)
-        synapse_counts_df: DataFrame with synapse counts (must have 'pre_root_id' and 'post_root_id' columns)
-        cell_types: List of cell type names to keep
+        cell_info_df: DataFrame with cell information (must have 'primary_type'
+            and 'root_id' columns, plus the 'neuropils' column the loader
+            consumes).
+        synapse_counts_df: DataFrame with synapse counts (must have
+            'pre_root_id' and 'post_root_id' columns).
+        cell_types: List of primary cell-type names to keep.
 
     Returns:
         Tuple of (filtered_cell_info_df, filtered_synapse_counts_df)
     """
-    filtered_cell_info_df = cell_info_df[cell_info_df['type'].isin(cell_types)].copy().reset_index(drop=True)
+    filtered_cell_info_df = cell_info_df[
+        cell_info_df['primary_type'].isin(cell_types)
+    ].copy().reset_index(drop=True)
 
     valid_root_ids = set(filtered_cell_info_df['root_id'])
 

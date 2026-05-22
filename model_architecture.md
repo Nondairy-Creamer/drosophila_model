@@ -11,7 +11,7 @@ Overview of the neural model classes.
 | `regions.py` | `RegionView` base + per-area subclasses (`OpticLobeRegion`, `AntennaLobeRegion`, …) and the area-name → region-class registry |
 | `model_layers.py` | Reusable `nn.Module` building blocks: `HexGridConv`, `TemporalLRU`, `CellTypeLayerNorm` |
 | `ego_motion.py` | Flow -> 6-DOF solver (`estimate_from_flow`), rotation math, velocity integration |
-| `connectome_loading.py` | `ConnectomeData` dataclass + `load_connectome(area_sides)` |
+| `connectome_loading.py` | `ConnectomeData` dataclass + `load_connectome(region_specs)` |
 | `engineering_models.py` | `ConvModel` (stateless hex-grid CNN, sister to `BaseRnn`) |
 
 ## Class Hierarchy
@@ -26,9 +26,13 @@ torch.nn.Module
 │  e.g. CurrentDynamics + ConnectomeModel → ConnectomeModel_CurrentDynamics
 │
 │  Anatomical scope is data-driven, not class-driven:
-│      ConnectomeData built with area_sides={'optic_lobe': 'right'}
+│      ConnectomeData built with
+│          region_specs={'optic_lobe': {'neuropils': ['ME','LO','LOP','LA'],
+│                                       'side': 'right'}}
 │      → model.regions = {'optic_lobe': OpticLobeRegion(side='right', ...)}
 │      → optic-lobe-specific methods live on that region object.
+│      Region membership is union-by-neuropil: a neuron belongs to the region
+│      if any of its synapses land in any of the region's resolved neuropils.
 │
 ├── ConvModel                 Engineering hex-grid CNN (no dynamics)
 │
@@ -78,13 +82,21 @@ input_pre_conv_size = 5
 num_temporal_modes  = 4
 ```
 
-The loader (`connectome_loading.load_connectome(area_sides=...)`) takes a
-`{area: side}` mapping and filters the master bundle area-by-area, so different
-regions can be pulled from different hemispheres in the same model. The
-mapping is built at the call site from `config['model']['regions']`:
-`{area: opts.get('side', 'both') for area, opts in regions.items()}`.
+The loader (`connectome_loading.load_connectome(region_specs=...)`) takes a
+`{region_name: {'neuropils': [...], 'side': 'right'|'left'|'both'}}` mapping
+and pulls the union of neurons that have at least one synapse in any of each
+region's resolved neuropils. Each region carries its own side, so different
+regions can come from different hemispheres in the same model. Bilateral
+neuropil base names (e.g. `'ME'`) are expanded to `'ME_R'` / `'ME_L'` per
+`side`; names that already end in `_L` / `_R` (or are central, like `'EB'`)
+pass through unchanged.
 
-`config['model']['regions']` is passed to `ConnectomeModel.__init__` as
+`region_specs` is built at the call site from `config['model']['regions']` via
+`regions.build_region_specs(...)`: that pulls the region class's default
+`neuropils` list (overridable per-instance via
+`config['model']['regions'][<name>]['neuropils']`) and the configured `side`.
+
+`config['model']['regions']` is also passed to `ConnectomeModel.__init__` as
 `region_kwargs={...}` and stored on the model so it round-trips through
 save/load. `config_default.toml` only ships defaults for `optic_lobe`; configs
 that introduce new areas (e.g. antenna lobe) supply their own region sub-table.
@@ -98,15 +110,24 @@ under `config['data']['data_folder']`:
 <data_folder>/
 ├── connectome_data/
 │   ├── raw/                          # raw CSVs consumed by format_connectome_data.py
-│   │   ├── visual_neuron_types_no_threshold.csv
-│   │   ├── connections_no_threshold.csv
-│   │   └── column_assignments_no_threshold.csv
+│   │   ├── consolidated_cell_types.csv    # root_id, primary_type, additional_type(s)
+│   │   ├── connections_no_threshold.csv   # pre_root_id, post_root_id, neuropil, syn_count, nt_type
+│   │   └── column_assignments_no_threshold.csv   # optic-lobe-only column geometry
 │   └── baked/
 │       ├── cell_info.parquet         # emitted by format_connectome_data.py
-│       │     columns: root_id, type, neurotransmitter, area, side, column_index
-│       │     (column_index = NaN for neurons without a hex-grid assignment)
+│       │     columns: root_id, primary_type, neurotransmitter, neuropils
+│       │     - neuropils: list[str] of every neuropil this neuron has at
+│       │       least one synapse in (union; pre + post)
+│       │     - neurotransmitter: per-cell-type dominant pre-synaptic NT
+│       │       (photoreceptors forced to 'HIS'; may be NaN for cell types
+│       │       that never appear pre-synaptically)
 │       ├── synapses.parquet          # emitted by format_connectome_data.py
-│       │     columns: pre_root_id, post_root_id, synapse_counts, nt_type
+│       │     columns: pre_root_id, post_root_id, synapse_counts, nt_type, neuropil
+│       │     - neuropil is kept so the loader can drop edges that don't
+│       │       land in any loaded region's neuropil set
+│       ├── optic_lobe_column_index.parquet  # emitted by format_connectome_data.py
+│       │     columns: root_id, column_index (0-indexed)
+│       │     # loaded by OpticLobeRegion._load_extras
 │       └── optic_lobe_columns.parquet  # sourced from a separate empirical dataset;
 │             columns: column_index, phi, theta, p, q, x, y, z
 │             # loaded by OpticLobeRegion._load_extras
@@ -120,23 +141,27 @@ under `config['data']['data_folder']`:
     └── drone_poses/
 ```
 
-Universal fields land on `ConnectomeData`; anything outside the core set
-(today: only `column_index`) is forwarded verbatim through
-`ConnectomeData.per_neuron_extras`. Per-area geometry is loaded by the
-corresponding `RegionView` subclass from `connectome_data/baked/`, so the model itself
-stays anatomy-agnostic. All visual-specific state and operations
-(`column_phi_theta`, `column_p_q`, `num_columns`, the input-conv stack —
-`input_pre_conv` / `input_spatial_conv` / `temporal_lru` —, `apply_input_conv`,
-`get_shared_columns`, `get_column_xyz`, `estimate_ego_motion_from_flow`,
-`predict_two_eyes`, `estimate_ego_motion_from_image`) live on
-`model.regions['optic_lobe']` and are accessed through it.
+Universal fields land on `ConnectomeData`; per-region union-membership masks
+land in `region_membership` (one bool array per region, aligned with
+`root_ids`). Per-region geometry / per-neuron lookups (today: optic-lobe
+column index and hex geometry) are loaded by the corresponding `RegionView`
+subclass from `connectome_data/baked/`, so the model itself stays
+anatomy-agnostic. All visual-specific state and operations
+(`column_phi_theta`, `column_p_q`, `num_columns`, `column_indices_per_neuron`,
+the input-conv stack — `input_pre_conv` / `input_spatial_conv` / `temporal_lru`
+—, `apply_input_conv`, `get_shared_columns`, `get_column_xyz`,
+`estimate_ego_motion_from_flow`, `predict_two_eyes`,
+`estimate_ego_motion_from_image`) live on `model.regions['optic_lobe']` and
+are accessed through it.
 
 To add an area (e.g. antenna lobe):
-1. Append a section to `format_connectome_data.py` that writes more rows to
-   `cell_info.parquet` / `synapses.parquet` with `area = '<name>'` and (if
-   needed) `connectome_data/baked/<name>_*.parquet` files.
-2. Subclass `RegionView` in `regions.py`, override `_load_extras` to read
-   those files, and register it in `REGION_REGISTRY`.
+1. Subclass `RegionView` in `regions.py`, set its `neuropils = [...]` (bilateral
+   base names; the loader appends `_L` / `_R` per `side`), override
+   `_load_extras` to read any per-area files (and emit them from
+   `format_connectome_data.py` if needed), and register it in
+   `REGION_REGISTRY`. No change to the universal `cell_info.parquet` /
+   `synapses.parquet` is required — region membership is computed at load
+   time from the neuropil column.
 
 ---
 
@@ -147,27 +172,24 @@ Abstract base class for connectome-constrained recurrent neural networks. Handle
 ### Construction
 
 `ConnectomeModel` takes a single `connectome: ConnectomeData` (built via
-`connectome_loading.load_connectome(area_sides)`). The dataclass holds:
+`connectome_loading.load_connectome(region_specs)`). The dataclass holds:
 
 | Field | Description |
 |---|---|
 | `synapse_counts_coo` | `(E, 3)` int64 array — `[pre_root_id, post_root_id, count]` per synapse |
 | `root_ids` | `(N,)` int64 array of neuron root IDs |
-| `cell_types` | `(N,)` string array of cell type labels |
+| `cell_types` | `(N,)` string array of primary cell-type labels |
 | `neurotransmitters` | `(N,)` string array of neurotransmitter labels per neuron |
-| `area_per_neuron` | `(N,)` string array of area names |
-| `side_per_neuron` | `(N,)` string array, one of `'right'`/`'left'`/`'central'` |
-| `per_neuron_extras` | dict of non-core per-neuron columns from `cell_info.parquet` (today: `'column_index'` only) |
-| `area_sides` | input filter: `{area: side}` actually loaded |
-| `areas` | property: `list(area_sides.keys())` |
+| `region_membership` | dict `{region_name: (N,) bool}` — true where the neuron has at least one synapse in any of that region's resolved neuropils (union; the same neuron can belong to multiple regions but only contributes one row to `root_ids`) |
+| `region_specs` | input filter: `{region_name: {neuropils, side}}` actually loaded |
+| `regions` | property: `list(region_specs.keys())` |
 | `data_folder` | path used by `RegionView._load_extras` to find `connectome_data/baked/` |
 
 All visual-column accessors and helpers (`column_phi_theta`, `column_p_q`,
-`num_columns`, `get_shared_columns`, `get_column_xyz`) live on the optic-lobe
-region and are accessed as `model.regions['optic_lobe'].<attr>`. The model
-itself owns only the universal `column_indices_per_neuron` (the per-neuron
-column index with NaNs for non-visual neurons), which sits inside
-`per_neuron_extras` and is forwarded from `cell_info.parquet`.
+`num_columns`, `column_indices_per_neuron`, `get_shared_columns`,
+`get_column_xyz`) live on the optic-lobe region and are accessed as
+`model.regions['optic_lobe'].<attr>`. The model itself owns only the
+universal `region_membership` masks.
 
 Key model-level configuration arguments:
 
@@ -196,11 +218,13 @@ Region-owned configuration arguments (sit in `region_kwargs['<area>']`):
 At construction time the raw connectome is filtered in order:
 1. Remove connections below `count_threshold`.
 2. Remove neurons whose neurotransmitter is not in `excitatory_nt` or `inhibitory_nt`.
-3. Remove per-area cell-type exclusions. Each region exposes a
+3. Remove per-region cell-type exclusions. Each region exposes a
    `default_neurons_to_exclude` class attribute (e.g. `OpticLobeRegion` strips
    `['R1-6', 'R7', 'R8']` since photoreceptor terminals are the model's
-   stimulus input, not connectome nodes). Override via
-   `region_kwargs[<area>]['neurons_to_exclude']`.
+   stimulus input, not connectome nodes). The exclusion is applied wherever
+   the neuron sits inside that region's membership mask, so a cell type that
+   happens to live in another region too keeps its copies there. Override via
+   `region_kwargs[<name>]['neurons_to_exclude']`.
 4. Remove connections involving removed neurons.
 5. Remove neurons with no remaining connections.
 
