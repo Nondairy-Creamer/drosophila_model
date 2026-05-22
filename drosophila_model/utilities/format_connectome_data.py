@@ -16,6 +16,13 @@ Reads raw CSVs from
 - ``column_assignments_no_threshold.csv`` — optic-lobe-only per-neuron
   hex-column assignments. Consumed only for the optic-lobe-private bundle
   files.
+- ``visual_neuron_types_no_threshold.csv`` — read solely to recover the
+  ``CT1_L`` / ``CT1_M`` per-column synthetic neuron IDs that aren't in
+  ``consolidated_cell_types.csv``. CT1 is too large to treat as two
+  whole-neuron entities for optic-lobe modelling, so an upstream split
+  assigns one synthetic ``CT1_L`` and one synthetic ``CT1_M`` neuron per
+  column. Those synthetic root IDs ARE present in the synapse and column
+  CSVs; this is the only place we need them typed.
 
 Writes the baked bundle to
 ``config['data']['data_folder'] / 'connectome_data' / 'baked'``:
@@ -52,6 +59,13 @@ from drosophila_model.config import load_config
 
 _ROOT_ID_DTYPE = np.int64
 _PHOTORECEPTOR_TYPES = ('R1-6', 'R7', 'R8')
+# CT1 per-column synthetic split: these primary types live only in the
+# optic-lobe-specific visual_neuron_types CSV. The synthetic root IDs are
+# referenced in connections + column_assignments as if they were normal
+# neurons, but consolidated_cell_types.csv only has 2 orphan "real CT1"
+# rows (no synapses). We import the split rows here so the universal
+# cell_info has them typed.
+_CT1_SPLIT_TYPES = ('CT1_L', 'CT1_M')
 
 
 def _per_neuron_neuropils(connections_df: pd.DataFrame) -> pd.DataFrame:
@@ -128,6 +142,25 @@ def main() -> None:
         raw_dir / 'column_assignments_no_threshold.csv',
         dtype={'root_id': _ROOT_ID_DTYPE},
     )
+    visual_neurons_df = pd.read_csv(
+        raw_dir / 'visual_neuron_types_no_threshold.csv',
+        dtype={'root_id': _ROOT_ID_DTYPE},
+    )
+
+    # Append CT1_L / CT1_M per-column synthetic neurons from the visual
+    # CSV; they're real first-class IDs in connections + column_assignments
+    # but only typed in this file.
+    ct1_split = visual_neurons_df[
+        visual_neurons_df['type'].isin(_CT1_SPLIT_TYPES)
+    ][['root_id', 'type']].rename(columns={'type': 'primary_type'})
+    ct1_split['additional_type(s)'] = np.nan
+    n_before = len(cell_types_df)
+    cell_types_df = pd.concat(
+        [cell_types_df, ct1_split[cell_types_df.columns.tolist()]],
+        ignore_index=True,
+    )
+    print(f"Appended {len(cell_types_df) - n_before:,} CT1_L/CT1_M synthetic "
+          f"per-column neurons from visual_neuron_types_no_threshold.csv.")
 
     print(f"Loaded {len(cell_types_df):,} typed neurons "
           f"and {len(connections_df):,} synapses.")
