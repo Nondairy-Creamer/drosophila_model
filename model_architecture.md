@@ -101,14 +101,15 @@ under `config['data']['data_folder']`:
 │   │   ├── visual_neuron_types_no_threshold.csv
 │   │   ├── connections_no_threshold.csv
 │   │   └── column_assignments_no_threshold.csv
-│   └── baked/                        # parquets emitted by format_connectome_data.py
-│       ├── cell_info.parquet         # universal, one row per neuron
+│   └── baked/
+│       ├── cell_info.parquet         # emitted by format_connectome_data.py
 │       │     columns: root_id, type, neurotransmitter, area, side, column_index
 │       │     (column_index = NaN for neurons without a hex-grid assignment)
-│       ├── synapses.parquet          # universal, one row per directed edge
+│       ├── synapses.parquet          # emitted by format_connectome_data.py
 │       │     columns: pre_root_id, post_root_id, synapse_counts, nt_type
-│       └── optic_lobe_columns.parquet  # owned by OpticLobeRegion._load_extras
+│       └── optic_lobe_columns.parquet  # sourced from a separate empirical dataset;
 │             columns: column_index, phi, theta, p, q, x, y, z
+│             # loaded by OpticLobeRegion._load_extras
 └── stimulus/                         # stimulus datasets (panoramic images, drone data, etc.)
     ├── all_panoramic.pt
     ├── rendered_fly_view_dataset.pkl
