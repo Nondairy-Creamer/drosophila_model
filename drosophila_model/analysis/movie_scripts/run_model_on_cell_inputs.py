@@ -101,7 +101,7 @@ def main() -> None:
     print(f"  cell_inputs shape: {cell_inputs_all.shape} — {'two-eye' if two_eyes else 'one-eye'} detected")
     print(f"  Using stimulus index {stim_index}")
 
-    output_folder = model_folder / 'optic_flow_movie'
+    output_folder = model_folder / 'figures' / 'run_model_on_cell_inputs'
 
     if two_eyes:
         _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,

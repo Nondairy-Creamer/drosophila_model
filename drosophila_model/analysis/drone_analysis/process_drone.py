@@ -6,7 +6,7 @@ frames at ommatidium locations, and saves all clips as a single .pt file.
 
 Usage:
     python drone_analysis/process_drone.py
-    python drone_analysis/process_drone.py --data-dir ../connectome_data/drone_videos
+    python drone_analysis/process_drone.py --data-dir <data_folder>/stimulus/drone_videos
 """
 
 import numpy as np
@@ -19,6 +19,7 @@ from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
 from drosophila_model.utilities.stimulus_utilities import build_ommatidium_sampling_matrix
+from drosophila_model.utilities import data_utilities as du
 
 BOX_FILTER_SIZE = 4
 
@@ -564,14 +565,18 @@ def test_odometry():
 
 def main():
     parser = argparse.ArgumentParser(description='Process drone stereo videos into tensors')
-    parser.add_argument('--data-dir', type=str, default='../connectome_data/drone_videos',
-                        help='Directory containing left_N.mp4, right_N.mp4')
-    parser.add_argument('--pose-dir', type=str, default='../connectome_data/drone_poses',
-                        help='Directory with batch-opt pose .npz files from drone_pose.py')
-    parser.add_argument('--output-dir', type=str, default='../connectome_data',
-                        help='Output directory for the .pt file')
-    parser.add_argument('--column-info', type=str, default='../connectome_data/area_extras/optic_lobe_columns.parquet',
-                        help='Path to optic-lobe column extras parquet with phi/theta')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory containing left_N.mp4, right_N.mp4 '
+                             '(default: <data_folder>/stimulus/drone_videos)')
+    parser.add_argument('--pose-dir', type=str, default=None,
+                        help='Directory with batch-opt pose .npz files from drone_pose.py '
+                             '(default: <data_folder>/stimulus/drone_poses)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory for the .pt file '
+                             '(default: <data_folder>/stimulus)')
+    parser.add_argument('--column-info', type=str, default=None,
+                        help='Path to optic-lobe column extras parquet with phi/theta '
+                             '(default: <data_folder>/connectome_data/baked/optic_lobe_columns.parquet)')
     parser.add_argument('--filter-std', type=float, default=2.5,
                         help='Gaussian filter std in degrees for ommatidium sampling')
     parser.add_argument('--monocular', action='store_true',
@@ -579,9 +584,14 @@ def main():
                              'Output is saved as drone_data_monocular.pt.')
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
-    pose_dir = Path(args.pose_dir)
-    output_dir = Path(args.output_dir)
+    data_folder = Path(du.load_config()['data']['data_folder'])
+    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
+    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
+    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus'
+    column_info_path = (
+        Path(args.column_info) if args.column_info
+        else data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Camera field-of-view limits (degrees)
@@ -594,10 +604,10 @@ def main():
     theta_lim = np.array(theta_deg) * np.pi / 180
 
     # Load ommatidium positions
-    column_info_df = pd.read_parquet(args.column_info)
+    column_info_df = pd.read_parquet(column_info_path)
     sample_phi = column_info_df['phi'].to_numpy()
     sample_theta = column_info_df['theta'].to_numpy()
-    print(f'Loaded {len(sample_phi)} ommatidium positions from {args.column_info}')
+    print(f'Loaded {len(sample_phi)} ommatidium positions from {column_info_path}')
 
     # Discover clips from video files
     right_ids = set()

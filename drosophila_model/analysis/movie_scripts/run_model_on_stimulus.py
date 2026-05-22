@@ -74,7 +74,7 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to render")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: <model_folder>/stimulus_flow_movie)")
+                        help="Output directory (default: <model_folder>/figures/run_model_on_stimulus)")
     # Ego-motion features (from run_model_on_pano)
     parser.add_argument("--ego-motion", action="store_true",
                         help="Use estimate_ego_motion_from_image (two-eye only) and show rate plots")
@@ -126,7 +126,8 @@ def main() -> None:
         print("WARNING: No flow readout found in model. Using first readout.")
         flow_key = next(iter(model._readout_modules.keys()))
 
-    output_dir = Path(args.output_dir) if args.output_dir else model_folder / "stimulus_flow_movie"
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else model_folder / "figures" / "run_model_on_stimulus")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.two_eyes and args.ego_motion and args.stim_type == "random_pano":

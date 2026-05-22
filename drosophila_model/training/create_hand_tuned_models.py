@@ -179,7 +179,7 @@ connectome = cl.load_connectome(
         area: opts.get('side', 'both')
         for area, opts in config['model'].get('regions', {}).items()
     },
-    connectome_folder=config['data']['connectome_folder'],
+    data_folder=config['data']['data_folder'],
 )
 
 HandTunedModel = nm.compose_model_class('HandTunedDynamics')

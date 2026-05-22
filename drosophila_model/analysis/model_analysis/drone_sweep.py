@@ -148,8 +148,8 @@ def run_drone_sweep(
     device = model.device
     dtype = model.dtype
 
-    connectome_folder = Path(local_config["data"]["connectome_folder"])
-    drone_data_path = connectome_folder / "drone_data.pt"
+    data_folder = Path(local_config["data"]["data_folder"])
+    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
 
     print("Loading drone clips...")
     drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))

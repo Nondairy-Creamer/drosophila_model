@@ -86,7 +86,8 @@ def main():
     )
     parser.add_argument(
         "--save", type=str, default=None,
-        help="Save figure to this path instead of showing interactively.",
+        help="Save figure to this path instead of showing interactively "
+             "(default: <model_folder>/figures/view_stimulus_preprocessing/preprocessing.png).",
     )
     args = parser.parse_args()
 
@@ -96,6 +97,12 @@ def main():
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     dt = model.dt
+
+    if args.save is None:
+        model_path = Path(args.model)
+        model_folder = model_path.parent if model_path.is_file() else model_path
+        args.save = str(model_folder / "figures" / "view_stimulus_preprocessing"
+                        / "preprocessing.png")
 
     center_idx = _central_column_index(
         np.asarray(sample_phi), np.asarray(sample_theta)

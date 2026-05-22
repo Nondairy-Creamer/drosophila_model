@@ -42,7 +42,7 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for figures (default: <model_folder>/figures)",
+        help="Output directory for figures (default: <model_folder>/figures/analyze_decoder)",
     )
     parser.add_argument(
         "--readout",
@@ -75,12 +75,13 @@ def main() -> None:
             raise ValueError(f"Readout {args.readout!r} not found. Available: {list(decoders.keys())}")
         decoders = {args.readout: decoders[args.readout]}
 
-    output_dir = Path(args.output_dir) if args.output_dir else model_folder / "figures"
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else model_folder / "figures" / "analyze_decoder")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for readout_name, decoder in decoders.items():
         print(f"\n=== Analyzing {readout_name} ===")
-        readout_dir = output_dir / "decoder_analysis" / readout_name.lower()
+        readout_dir = output_dir / readout_name.lower()
         readout_dir.mkdir(parents=True, exist_ok=True)
         analyze_readout(decoder, readout_name, readout_dir, readout_name.lower(), args.top_n)
 

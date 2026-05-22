@@ -68,9 +68,10 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     if len(config['model']['use_connectome_subset']) > 0:
         # Connectome subset: load the bundle, filter via DataFrame, then apply
         # the per-region side filter through load_connectome_from_dataframes.
-        connectome_folder = Path(config['data']['connectome_folder'])
-        cell_info_df = pd.read_parquet(connectome_folder / 'cell_info.parquet')
-        synapses_df = pd.read_parquet(connectome_folder / 'synapses.parquet')
+        data_folder = Path(config['data']['data_folder'])
+        baked = data_folder / 'connectome_data' / 'baked'
+        cell_info_df = pd.read_parquet(baked / 'cell_info.parquet')
+        synapses_df = pd.read_parquet(baked / 'synapses.parquet')
 
         cell_info_df, synapses_df = du.get_connectome_subset(
             cell_info_df, synapses_df, config['model']['use_connectome_subset']
@@ -85,12 +86,12 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         connectome = cl.load_connectome_from_dataframes(
             cell_info_df, synapses_df,
             area_sides=area_sides,
-            connectome_folder=str(connectome_folder),
+            data_folder=str(data_folder),
         )
     else:
         connectome = cl.load_connectome(
             area_sides=area_sides,
-            connectome_folder=config['data']['connectome_folder'],
+            data_folder=config['data']['data_folder'],
         )
 
     # Get model class from config: compose ConnectomeModel + dynamics at runtime.

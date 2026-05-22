@@ -2,7 +2,7 @@
 
 A region is a named subset of the model's neurons that:
 
-- owns the area's on-disk geometry (loaded from ``area_extras/`` in
+- owns the area's on-disk geometry (loaded from the baked bundle in
   :meth:`RegionView._load_extras`),
 - owns any area-specific submodules (e.g. the optic-lobe input-conv stack),
 - exposes the area-specific operations (e.g. ``predict_two_eyes``).
@@ -88,6 +88,12 @@ class RegionView(nn.Module):
     default_output_neurons: list[str] = []
     default_readouts: list[str] = []
     default_readout_neurons: list[str] | None = None
+    # Cell types to remove from this region's slice of the connectome before
+    # the model preprocesses synapses. Consumed by
+    # :func:`resolve_neurons_to_exclude` and applied in
+    # ``ConnectomeModel._preprocess_connectome``. Override per-instance via
+    # ``region_kwargs[area]['neurons_to_exclude']``.
+    default_neurons_to_exclude: list[str] = []
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
                  cell_indices: np.ndarray, side: str,
@@ -127,7 +133,7 @@ class RegionView(nn.Module):
         regularizer_parameters_cfg = opts.pop('regularizer_parameters', None)
 
         self._load_extras(
-            Path(model.connectome_folder) / 'area_extras',
+            Path(model.data_folder) / 'connectome_data' / 'baked',
             opts,
         )
 
@@ -162,7 +168,7 @@ class RegionView(nn.Module):
         return m
 
     def _load_extras(self, extras_dir: Path, opts: dict) -> None:
-        """Override to read this region's ``area_extras/`` files and build
+        """Override to read this region's per-area parquet files and build
         any area-specific submodules.
 
         ``opts`` is the per-region config sub-table (from
@@ -265,7 +271,7 @@ class OpticLobeRegion(RegionView):
     - ``input_pre_conv_size`` (default 5): hex diameter of the pre-filter conv.
     - ``num_temporal_modes`` (default 4): complex modes in the temporal LRU.
 
-    Geometry loaded from ``area_extras/optic_lobe_columns.parquet``:
+    Geometry loaded from ``optic_lobe_columns.parquet`` in the baked bundle:
 
     - ``column_indices``: ``(C_r,)`` int64 — unique column indices present in
       this slice of the connectome (de-duped from the per-neuron column index).
@@ -292,6 +298,9 @@ class OpticLobeRegion(RegionView):
     # Visual input/output cell-type defaults for ConnectomeModel.predict.
     default_input_neurons = ['L1', 'L2', 'L3']
     default_output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+    # Photoreceptor terminals are the model's stimulus input, not connectome
+    # nodes. Stripped from the optic-lobe slice before synapse preprocessing.
+    default_neurons_to_exclude = ['R1-6', 'R7', 'R8']
     # Readouts that produce column-aligned visual outputs.
     default_readouts = ['FlowConv2Readout', 'L1Reg']
     default_readout_neurons = [
@@ -841,7 +850,7 @@ class OpticLobeRegion(RegionView):
 
 class AntennaLobeRegion(RegionView):
     """Placeholder antenna-lobe region. Add olfactory-specific methods and
-    ``_load_extras`` to read e.g. ``area_extras/antenna_lobe_glomeruli.parquet``
+    ``_load_extras`` to read e.g. ``antenna_lobe_glomeruli.parquet``
     when antenna-lobe data lands and modeling work begins.
     """
 
@@ -857,6 +866,32 @@ REGION_REGISTRY: dict[str, type[RegionView]] = {
 }
 
 
+def resolve_neurons_to_exclude(
+    areas, region_kwargs: dict[str, dict] | None = None,
+) -> dict[str, list[str]]:
+    """Return ``{area: [cell_type, ...]}`` of neurons to exclude per area.
+
+    For each area in ``areas`` registered in :data:`REGION_REGISTRY`, uses the
+    per-instance override from ``region_kwargs[area]['neurons_to_exclude']``
+    if set, else the region class's ``default_neurons_to_exclude``. Used by
+    :meth:`ConnectomeModel._preprocess_connectome` to strip cell types that
+    a region treats as non-connectome inputs (e.g. photoreceptor terminals
+    for the optic lobe).
+    """
+    region_kwargs = region_kwargs or {}
+    out: dict[str, list[str]] = {}
+    for area in areas:
+        cls = REGION_REGISTRY.get(area)
+        if cls is None:
+            continue
+        override = region_kwargs.get(area, {}).get('neurons_to_exclude')
+        if override is not None:
+            out[area] = list(override)
+        else:
+            out[area] = list(cls.default_neurons_to_exclude)
+    return out
+
+
 def build_regions(model: 'ConnectomeModel',
                   region_kwargs: dict[str, dict] | None = None) -> nn.ModuleDict:
     """Instantiate one ``RegionView`` per area present in ``model``'s connectome.
@@ -864,7 +899,7 @@ def build_regions(model: 'ConnectomeModel',
     Returns an ``nn.ModuleDict`` so the regions and their submodules land in
     ``model.state_dict()`` automatically under ``regions.<area>.*``. Each
     region's ``__init__`` calls ``_load_extras`` to ingest its own on-disk
-    data from ``model.connectome_folder/area_extras/`` and to build its
+    data from ``model.data_folder/connectome_data/baked/`` and to build its
     area-specific submodules.
 
     ``region_kwargs`` maps area name to that region's option sub-dict (as it
@@ -885,6 +920,11 @@ def build_regions(model: 'ConnectomeModel',
         cell_idx = np.flatnonzero(cell_mask).astype(np.int64)
 
         opts = dict(region_kwargs.get(area, {}))
+        # ``neurons_to_exclude`` is already consumed by the model's
+        # connectome preprocessing (see resolve_neurons_to_exclude); drop it
+        # here so it doesn't reach the subclass's _load_extras unknown-key
+        # check.
+        opts.pop('neurons_to_exclude', None)
         side = opts.pop('side', model.area_sides.get(area, 'both'))
         expected_side = model.area_sides.get(area)
         if expected_side is not None and side != expected_side:

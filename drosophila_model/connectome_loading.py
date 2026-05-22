@@ -1,15 +1,16 @@
 """Load slices of the canonical connectome bundle.
 
 The bundle is produced once by :mod:`format_connectome_data` and stored under
-``config['data']['connectome_folder']``:
+``config['data']['data_folder'] / 'connectome_data' / 'baked'``:
 
 - ``cell_info.parquet`` — universal per-neuron table (``root_id, type,
   neurotransmitter, area, side`` plus optional area-specific per-neuron
   columns such as ``column_index``).
 - ``synapses.parquet`` — universal directed edges (``pre_root_id,
   post_root_id, synapse_counts, nt_type``).
-- ``area_extras/<area>_*.parquet`` — per-area geometry / lookups, owned and
-  loaded by the corresponding :class:`regions.RegionView` subclass.
+- ``<area>_*.parquet`` — per-area geometry / lookups, owned and loaded by
+  the corresponding :class:`regions.RegionView` subclass (e.g.
+  ``optic_lobe_columns.parquet``).
 
 :func:`load_connectome` reads ``cell_info.parquet`` + ``synapses.parquet``,
 filters per area according to ``area_sides`` (a ``{area: side}`` dict), and
@@ -43,7 +44,7 @@ class ConnectomeData:
     Anatomy-agnostic: holds only fields that make sense for every brain area.
     Per-area geometry (e.g. optic-lobe ``column_phi_theta``) is loaded by the
     corresponding :class:`regions.RegionView` subclass straight from the
-    on-disk bundle at ``connectome_folder / 'area_extras'``.
+    on-disk bundle at ``data_folder / 'connectome_data' / 'baked'``.
 
     Fields:
         synapse_counts_coo: ``(E, 3)`` int64 — ``[pre_root_id, post_root_id, count]``.
@@ -59,7 +60,7 @@ class ConnectomeData:
         area_sides: ``{area: side}`` filter applied at load. Sides are
             ``'right'`` / ``'left'`` / ``'both'``. Each region owns its own
             side, so different areas can pull from different hemispheres.
-        connectome_folder: bundle path; regions use it to find ``area_extras``.
+        data_folder: bundle path; regions use it to find their per-area parquets.
     """
 
     synapse_counts_coo: np.ndarray
@@ -70,7 +71,7 @@ class ConnectomeData:
     side_per_neuron: np.ndarray
     per_neuron_extras: dict[str, np.ndarray] = field(default_factory=dict)
     area_sides: dict[str, str] = field(default_factory=dict)
-    connectome_folder: str = ''
+    data_folder: str = ''
 
     @property
     def areas(self) -> list[str]:
@@ -81,7 +82,7 @@ class ConnectomeData:
 def load_connectome(
     area_sides: dict[str, str],
     *,
-    connectome_folder: Optional[str] = None,
+    data_folder: Optional[str] = None,
 ) -> ConnectomeData:
     """Load a multi-area slice of the canonical connectome bundle.
 
@@ -90,19 +91,20 @@ def load_connectome(
             ``'right'`` / ``'left'`` / ``'both'``. ``'both'`` keeps every
             side for that area (including non-bilateral / central neurons).
             Example: ``{'optic_lobe': 'right', 'antenna_lobe': 'both'}``.
-        connectome_folder: Override the data folder. Defaults to
-            ``config['data']['connectome_folder']``.
+        data_folder: Override the data folder. Defaults to
+            ``config['data']['data_folder']``.
     """
-    if connectome_folder is None:
-        connectome_folder = du.load_config()['data']['connectome_folder']
-    folder = Path(connectome_folder)
+    if data_folder is None:
+        data_folder = du.load_config()['data']['data_folder']
+    folder = Path(data_folder)
 
-    cell_info_df = pd.read_parquet(folder / 'cell_info.parquet')
-    synapses_df = pd.read_parquet(folder / 'synapses.parquet')
+    baked = folder / 'connectome_data' / 'baked'
+    cell_info_df = pd.read_parquet(baked / 'cell_info.parquet')
+    synapses_df = pd.read_parquet(baked / 'synapses.parquet')
 
     return load_connectome_from_dataframes(
         cell_info_df, synapses_df,
-        area_sides=area_sides, connectome_folder=str(folder),
+        area_sides=area_sides, data_folder=str(folder),
     )
 
 
@@ -111,14 +113,14 @@ def load_connectome_from_dataframes(
     synapses_df: pd.DataFrame,
     *,
     area_sides: dict[str, str],
-    connectome_folder: str = '',
+    data_folder: str = '',
 ) -> ConnectomeData:
     """Build a :class:`ConnectomeData` from already-loaded DataFrames.
 
     Useful for analysis scripts that filtered cell types via
     :func:`data_utilities.get_connectome_subset` before calling this.
-    ``connectome_folder`` should still point at the on-disk bundle so that
-    region subclasses can find their ``area_extras`` files.
+    ``data_folder`` should still point at the on-disk bundle so that
+    region subclasses can find their per-area parquet files.
     """
     if not area_sides:
         raise ValueError("`area_sides` must be a non-empty {area: side} dict.")
@@ -175,5 +177,5 @@ def load_connectome_from_dataframes(
         side_per_neuron=cell_info_df['side'].to_numpy(),
         per_neuron_extras=extras,
         area_sides=dict(area_sides),
-        connectome_folder=connectome_folder,
+        data_folder=data_folder,
     )

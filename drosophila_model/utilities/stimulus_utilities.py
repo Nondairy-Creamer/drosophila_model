@@ -98,7 +98,7 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
     return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
 
 
-def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
+def get_drone_stimulus(model_dt, data_path=None,
                         frame_start=0, frame_end=None):
     """
     Load preprocessed drone clips (already sampled at ommatidium locations)
@@ -127,6 +127,12 @@ def get_drone_stimulus(model_dt, data_path='../connectome_data/drone_data.pt',
     """
     import torch as _torch
 
+    if data_path is None:
+        from drosophila_model.utilities import data_utilities as du
+        data_path = (
+            Path(du.load_config()['data']['data_folder'])
+            / 'stimulus' / 'drone_data.pt'
+        )
     data_path = Path(data_path)
     if not data_path.exists():
         raise FileNotFoundError(f"Drone data file not found: {data_path}")
@@ -242,7 +248,7 @@ def load_rendered_fly_view_dataset(
     drop_first_frame: bool = True,
 ):
     """
-    Load ``../connectome_data/rendered_fly_view_dataset.pkl``.
+    Load the rendered fly-view dataset (``<data_folder>/stimulus/rendered_fly_view_dataset.pkl``).
 
     Columns are **block-packed**: ``[..., :n_eye]`` = all right-eye samples,
     ``[..., n_eye:]`` = all left-eye samples (``n_eye = N // 2``).
@@ -256,7 +262,8 @@ def load_rendered_fly_view_dataset(
         two_eyes: If True, return binocular columns ``[right | left]`` plus ego-motion
             rates derived from ``roll_pitch_yaw`` and ``positions``. If False, return
             right-eye columns only.
-        data_path: Path to the pickle (default: ``../connectome_data/rendered_fly_view_dataset.pkl``).
+        data_path: Path to the pickle. When ``None``, resolves to
+            ``<config['data']['data_folder']>/stimulus/rendered_fly_view_dataset.pkl``.
         drop_first_frame: If True, drop the first time index (matches prior flyview usage).
 
     Returns:
@@ -270,7 +277,13 @@ def load_rendered_fly_view_dataset(
             ``translation_rate`` ``(batch, T, 3)`` in position-units per second
             (``np.gradient`` of ``positions`` at native ``fps``).
     """
-    path = Path(data_path) if data_path is not None else Path('../connectome_data/rendered_fly_view_dataset.pkl')
+    if data_path is None:
+        from drosophila_model.utilities import data_utilities as du
+        data_path = (
+            Path(du.load_config()['data']['data_folder'])
+            / 'stimulus' / 'rendered_fly_view_dataset.pkl'
+        )
+    path = Path(data_path)
     if not path.exists():
         raise FileNotFoundError(f"Rendered fly-view dataset not found: {path.resolve()}")
 
@@ -1387,16 +1400,26 @@ def _random_rotation_matrix(rng):
     return q
 
 
-def _load_all_panos():
+def _load_all_panos(pt_path=None):
     """Load all panoramic images from a single .pt file.
 
     The .pt file contains a (N, H, W) float32 tensor of raw panoramic images
     (created by consolidating the individual .mat files).
 
+    Args:
+        pt_path: Path to ``all_panoramic.pt``. When ``None``, resolves to
+            ``<config['data']['data_folder']>/stimulus/all_panoramic.pt``.
+
     Returns:
         panos: (N, H, W) numpy float64 array of raw panoramic images.
     """
-    pt_path = Path('../connectome_data/all_panoramic.pt')
+    if pt_path is None:
+        from drosophila_model.utilities import data_utilities as du
+        pt_path = (
+            Path(du.load_config()['data']['data_folder'])
+            / 'stimulus' / 'all_panoramic.pt'
+        )
+    pt_path = Path(pt_path)
     if not pt_path.exists():
         raise FileNotFoundError(
             f"Consolidated panoramic file not found at {pt_path.resolve()}. "
@@ -1717,7 +1740,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
     Generate panoramic stimuli with smoothly varying rotational velocity AND
     smoothly varying rotation axis.
 
-    Loads all panoramic images from ``../connectome_data/panoramic/``, applies
+    Loads all panoramic images from ``<data_folder>/stimulus/all_panoramic.pt``, applies
     2D Gaussian spatial filtering (std=2.5 deg), then for **each** panorama
     simulates pure rotation with an independent temporally-smoothed random
     angular velocity vector (omega_x, omega_y, omega_z).  Each of the three
@@ -2144,7 +2167,10 @@ def get_stimulus_one_eye(
 
         elif stim_type == 'flow_360':
             default_length = 98
-            stimulus_path = Path('../connectome_data/flow360_data_right_eye_mapped.pkl')
+            stimulus_path = (
+                Path(config['data']['data_folder'])
+                / 'stimulus' / 'flow360_data_right_eye_mapped.pkl'
+            )
             with open(stimulus_path, 'rb') as f:
                 stimulus_in = pickle.load(f)
 
@@ -2191,7 +2217,10 @@ def get_stimulus_one_eye(
 
         elif stim_type == 'sintel':
             default_length = 100
-            sintel_path = Path('../connectome_data/sintel_data.pkl')
+            sintel_path = (
+                Path(config['data']['data_folder'])
+                / 'stimulus' / 'sintel_data.pkl'
+            )
             with open(sintel_path, 'rb') as f:
                 stimulus_in = pickle.load(f)
 
@@ -2234,7 +2263,7 @@ def get_stimulus_one_eye(
         elif stim_type == 'drone_view':
             if column_phi_theta is None:
                 raise Exception('drone_view requires column_phi_theta input')
-            drone_data_path = Path(config['data']['connectome_folder']) / 'drone_data_monocular.pt'
+            drone_data_path = Path(config['data']['data_folder']) / 'stimulus' / 'drone_data_monocular.pt'
             if not drone_data_path.exists():
                 raise FileNotFoundError(
                     f"Monocular drone data not found: {drone_data_path}. "
@@ -2456,7 +2485,7 @@ def get_stimulus_two_eyes(
                 raise Exception('drone_view requires column_phi_theta input')
 
             stim_time = config['stimulus']['stim_time']
-            drone_data_path = Path(config['data']['connectome_folder']) / 'drone_data.pt'
+            drone_data_path = Path(config['data']['data_folder']) / 'stimulus' / 'drone_data.pt'
             drone_clips = get_drone_stimulus(
                 model_dt, data_path=str(drone_data_path),
             )

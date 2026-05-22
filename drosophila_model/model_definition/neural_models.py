@@ -386,7 +386,7 @@ class ConnectomeModel(BaseRnn):
             )
         self.area_sides = dict(connectome.area_sides)
         self.areas = list(connectome.area_sides.keys())
-        self.connectome_folder = connectome.connectome_folder
+        self.data_folder = connectome.data_folder
 
         # Store the resolved ConnectomeData in init_inputs so saved
         # checkpoints are self-contained (no parquet path required to reload).
@@ -394,6 +394,11 @@ class ConnectomeModel(BaseRnn):
         self.init_inputs['connectome'] = connectome
 
         valid_neurotransmitters = self.excitatory_nt + self.inhibitory_nt
+        # Per-area cell-type exclusions are owned by the region classes; the
+        # model just collects them and applies them in preprocessing.
+        neurons_to_exclude_per_area = regions_mod.resolve_neurons_to_exclude(
+            self.areas, self.region_kwargs,
+        )
         (
             root_ids, cell_types, neurotransmitters,
             area_per_neuron, side_per_neuron, per_neuron_extras,
@@ -404,6 +409,7 @@ class ConnectomeModel(BaseRnn):
             connectome.area_per_neuron, connectome.side_per_neuron,
             connectome.per_neuron_extras,
             valid_neurotransmitters, count_threshold,
+            neurons_to_exclude_per_area,
         )
 
         self.root_ids = root_ids
@@ -464,7 +470,7 @@ class ConnectomeModel(BaseRnn):
             )
 
         # Build per-area RegionView submodules. Each region reads its own
-        # area_extras parquet, consumes its own option sub-dict from
+        # per-area parquet, consumes its own option sub-dict from
         # region_kwargs, and owns its area-specific submodules (e.g.
         # OpticLobeRegion builds the input_conv stack when
         # region_kwargs['optic_lobe']['use_input_conv'] is True). Each
@@ -481,14 +487,18 @@ class ConnectomeModel(BaseRnn):
                                neurotransmitters,
                                area_per_neuron, side_per_neuron,
                                per_neuron_extras,
-                               valid_neurotransmitters, count_threshold):
+                               valid_neurotransmitters, count_threshold,
+                               neurons_to_exclude_per_area):
         """Filter the raw connectome and convert root IDs to matrix indices.
 
         Filtering (in order):
           1. Remove connections below the synapse count threshold.
           2. Remove neurons with invalid neurotransmitters.
-          3. Remove connections involving removed neurons.
-          4. Remove neurons with no remaining connections.
+          3. Remove per-area cell-type exclusions (e.g. photoreceptor
+             terminals from the optic lobe; see
+             :func:`regions.resolve_neurons_to_exclude`).
+          4. Remove connections involving removed neurons.
+          5. Remove neurons with no remaining connections.
 
         All per-neuron arrays (including everything in ``per_neuron_extras``)
         are reduced in lockstep. ``synapse_counts_coo`` is rewritten from
@@ -507,6 +517,12 @@ class ConnectomeModel(BaseRnn):
         synapse_counts_coo = synapse_counts_coo[above_threshold]
 
         valid_nt_mask = np.isin(neurotransmitters, valid_neurotransmitters)
+        for area, excluded_types in (neurons_to_exclude_per_area or {}).items():
+            if not excluded_types:
+                continue
+            valid_nt_mask &= ~(
+                (area_per_neuron == area) & np.isin(cell_types, list(excluded_types))
+            )
         valid_ids = root_ids[valid_nt_mask]
         valid_connections = (
             np.isin(synapse_counts_coo[:, 0], valid_ids)

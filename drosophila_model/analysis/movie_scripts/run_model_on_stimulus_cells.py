@@ -69,7 +69,7 @@ def main() -> None:
     parser.add_argument("--color-percentile", type=float, default=99,
                         help="Percentile for normalizing cell responses")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: <model_folder>/movie)")
+                        help="Output directory (default: <model_folder>/figures/run_model_on_stimulus_cells)")
     args = parser.parse_args()
 
     model_path = Path(args.model_folder)
@@ -98,7 +98,8 @@ def main() -> None:
     frame_rate = int(round(1 / model_dt))
     print(f"Movie frame rate: {frame_rate} fps (model_dt={model_dt})")
 
-    output_dir = Path(args.output_dir) if args.output_dir else model_folder / "movie"
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else model_folder / "figures" / "run_model_on_stimulus_cells")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.stim_type == 'directional_sine':

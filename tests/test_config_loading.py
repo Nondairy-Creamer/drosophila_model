@@ -36,4 +36,4 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
     assert config["training"]["loss_components"] == ['flow_loss']
     assert config["training"]["clip_norm"] is None
     assert config["stimulus"]["seed"] is None
-    assert config["data"]["hemisphere_coverage"] == 0.85
+    assert config["data"]["data_folder"] == "../drosophila_model_data"

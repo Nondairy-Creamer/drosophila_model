@@ -8,7 +8,7 @@ Usage:
     python view_spatial_frequency.py
     python view_spatial_frequency.py --max-panos 10
     python view_spatial_frequency.py --wavelengths 15 30 60 90
-    python view_spatial_frequency.py --save figures/spatial_frequency.png
+    python view_spatial_frequency.py --save figures/view_spatial_frequency/spatial_frequency.png
 """
 import argparse
 from pathlib import Path
@@ -19,10 +19,15 @@ from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
+from drosophila_model.utilities import data_utilities as du
+
 
 def _load_all_panos():
     """Load (N, H, W) panoramas from the consolidated .pt file."""
-    pt_path = Path('../connectome_data/all_panoramic.pt')
+    pt_path = (
+        Path(du.load_config()['data']['data_folder'])
+        / 'stimulus' / 'all_panoramic.pt'
+    )
     if not pt_path.exists():
         raise FileNotFoundError(
             f"Consolidated panoramic file not found at {pt_path.resolve()}. "
@@ -91,9 +96,13 @@ def main():
     )
     parser.add_argument(
         "--save", type=str, default=None,
-        help="Save figure to this path instead of showing interactively.",
+        help="Save figure to this path instead of showing interactively "
+             "(default: figures/view_spatial_frequency/spatial_frequency.png).",
     )
     args = parser.parse_args()
+
+    if args.save is None:
+        args.save = "figures/view_spatial_frequency/spatial_frequency.png"
 
     # ── Load panoramas ────────────────────────────────────────────────
     print("Loading panoramas …")

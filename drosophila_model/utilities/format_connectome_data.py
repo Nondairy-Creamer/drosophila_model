@@ -5,7 +5,10 @@ Reads the raw connectome CSVs and writes the standard layout that
 expect. After this runs the bundle is static; per-model slicing happens
 at load time via the ``areas`` / ``side`` filters.
 
-Output layout (relative to ``config['data']['connectome_folder']``):
+Reads raw CSVs from
+``config['data']['data_folder'] / 'connectome_data' / 'raw'`` and
+writes the baked bundle to
+``config['data']['data_folder'] / 'connectome_data' / 'baked'``:
 
 - ``cell_info.parquet`` — one row per neuron in the connectome.
     columns: ``root_id, type, neurotransmitter, area, side, column_index``
@@ -13,14 +16,14 @@ Output layout (relative to ``config['data']['connectome_folder']``):
     hexagonal visual column; NaN otherwise.
 - ``synapses.parquet`` — one row per directed synaptic edge.
     columns: ``pre_root_id, post_root_id, synapse_counts, nt_type``
-- ``area_extras/optic_lobe_columns.parquet`` — per-column geometry for
-    the optic-lobe hex grid; consumed by ``regions.OpticLobeRegion``.
+- ``optic_lobe_columns.parquet`` — per-column geometry for the optic-lobe
+    hex grid; consumed by ``regions.OpticLobeRegion``.
     columns: ``column_index, phi, theta, p, q, x, y, z``
 
 To add support for another area (e.g. antenna lobe), append a section
 that emits more rows to ``cell_info.parquet`` / ``synapses.parquet`` with
 ``area = '<area_name>'`` and, if the region needs per-element geometry,
-write ``area_extras/<area_name>_*.parquet``.
+write ``<area_name>_*.parquet`` alongside the core bundle.
 """
 from pathlib import Path
 
@@ -36,7 +39,6 @@ def _process_optic_lobe(
     visual_neurons_df: pd.DataFrame,
     synaptic_connections_df: pd.DataFrame,
     columns_df: pd.DataFrame,
-    neurons_to_exclude: list[str],
     hemisphere_coverage: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Return (cell_info, synapses, optic_lobe_columns) frames for the optic lobe.
@@ -45,22 +47,16 @@ def _process_optic_lobe(
     (those that straddle the optic lobe and a neighbouring area) are dropped:
     they're conceptually shared with another region, weren't used by any
     existing model, and would skew the column-geometry projection.
+
+    Per-cell-type modelling exclusions (e.g. R1-6/R7/R8 photoreceptors for the
+    visual model) are NOT applied here — they're a region-level decision and
+    are applied at load time via ``OpticLobeRegion.default_neurons_to_exclude``
+    or ``region_kwargs['optic_lobe']['neurons_to_exclude']``.
     """
     # Boundary cells aren't part of the canonical optic-lobe modelling target.
     visual_neurons_df = visual_neurons_df[
         visual_neurons_df['category'] == 'intrinsic'
     ]
-
-    # Drop photoreceptors (and anything else the user wants removed before any
-    # downstream filtering can see them).
-    excluded_ids = visual_neurons_df.loc[
-        visual_neurons_df['type'].isin(neurons_to_exclude), 'root_id'
-    ].to_numpy()
-    keep_syn = ~(
-        synaptic_connections_df['pre_root_id'].isin(excluded_ids)
-        | synaptic_connections_df['post_root_id'].isin(excluded_ids)
-    )
-    synaptic_connections_df = synaptic_connections_df[keep_syn]
 
     # Limit to synapses where both endpoints are visual neurons.
     visual_ids = set(visual_neurons_df['root_id'].to_numpy().tolist())
@@ -187,28 +183,35 @@ def _build_optic_lobe_columns(columns_df: pd.DataFrame,
             .reset_index(drop=True))
 
 
+# Modelling constants. These are properties of the connectome / projection
+# rather than user-tunable knobs, so they live with the bake step.
+_ROOT_ID_DTYPE = np.int64
+# Eye coverage when projecting hex columns onto the sphere
+# (Lambert-azimuthal max angle = pi/2 * hemisphere_coverage).
+_HEMISPHERE_COVERAGE = 0.85
+
+
 def main() -> None:
     config = load_config()
-    folder = Path(config['data']['connectome_folder'])
-    root_id_dtype = getattr(np, config['data']['root_id_dtype'])
-    neurons_to_exclude = config['data']['neurons_to_exclude']
-    hemisphere_coverage = config['data']['hemisphere_coverage']
+    folder = Path(config['data']['data_folder'])
+    raw_dir = folder / 'connectome_data' / 'raw'
+    baked_dir = folder / 'connectome_data' / 'baked'
 
     visual_neurons_df = pd.read_csv(
-        folder / 'visual_neuron_types_no_threshold.csv',
-        dtype={'root_id': root_id_dtype},
+        raw_dir / 'visual_neuron_types_no_threshold.csv',
+        dtype={'root_id': _ROOT_ID_DTYPE},
     )
     synaptic_connections_df = pd.read_csv(
-        folder / 'connections_no_threshold.csv',
+        raw_dir / 'connections_no_threshold.csv',
         dtype={
-            'pre_root_id': root_id_dtype,
-            'post_root_id': root_id_dtype,
-            'syn_count': root_id_dtype,
+            'pre_root_id': _ROOT_ID_DTYPE,
+            'post_root_id': _ROOT_ID_DTYPE,
+            'syn_count': _ROOT_ID_DTYPE,
         },
     )
     columns_df = pd.read_csv(
-        folder / 'column_assignments_no_threshold.csv',
-        dtype={'root_id': root_id_dtype},
+        raw_dir / 'column_assignments_no_threshold.csv',
+        dtype={'root_id': _ROOT_ID_DTYPE},
     )
 
     cell_info_pieces: list[pd.DataFrame] = []
@@ -218,30 +221,27 @@ def main() -> None:
         visual_neurons_df=visual_neurons_df,
         synaptic_connections_df=synaptic_connections_df,
         columns_df=columns_df,
-        neurons_to_exclude=neurons_to_exclude,
-        hemisphere_coverage=hemisphere_coverage,
+        hemisphere_coverage=_HEMISPHERE_COVERAGE,
     )
     cell_info_pieces.append(ol_cells)
     synapses_pieces.append(ol_syn)
 
     # TODO: add additional areas (antenna lobe, mushroom body, ...) here
     # by appending more frames to cell_info_pieces / synapses_pieces and
-    # writing their extras under area_extras/.
+    # writing their extras alongside the core parquets.
 
     cell_info = pd.concat(cell_info_pieces, ignore_index=True)
     synapses = pd.concat(synapses_pieces, ignore_index=True)
 
-    cell_info.to_parquet(folder / 'cell_info.parquet', index=False)
-    synapses.to_parquet(folder / 'synapses.parquet', index=False)
+    baked_dir.mkdir(parents=True, exist_ok=True)
+    cell_info.to_parquet(baked_dir / 'cell_info.parquet', index=False)
+    synapses.to_parquet(baked_dir / 'synapses.parquet', index=False)
+    ol_columns.to_parquet(baked_dir / 'optic_lobe_columns.parquet', index=False)
 
-    extras_dir = folder / 'area_extras'
-    extras_dir.mkdir(exist_ok=True)
-    ol_columns.to_parquet(extras_dir / 'optic_lobe_columns.parquet', index=False)
-
-    print(f"Wrote {len(cell_info):,} neurons to {folder / 'cell_info.parquet'}")
-    print(f"Wrote {len(synapses):,} synapses to {folder / 'synapses.parquet'}")
+    print(f"Wrote {len(cell_info):,} neurons to {baked_dir / 'cell_info.parquet'}")
+    print(f"Wrote {len(synapses):,} synapses to {baked_dir / 'synapses.parquet'}")
     print(f"Wrote {len(ol_columns):,} optic-lobe columns to "
-          f"{extras_dir / 'optic_lobe_columns.parquet'}")
+          f"{baked_dir / 'optic_lobe_columns.parquet'}")
 
 
 if __name__ == '__main__':

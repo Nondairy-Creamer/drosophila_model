@@ -19,24 +19,29 @@ _repo_root = str(Path(__file__).parent.parent)
 import numpy as np
 
 from drosophila_model.analysis.drone_analysis.process_drone import load_video_grayscale
+from drosophila_model.utilities import data_utilities as du
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize raw drone CSV data as a movie.")
-    parser.add_argument("--data-dir", type=str, default="../connectome_data/drone_videos",
-                        help="Directory with left_N.mp4, right_N.mp4, apriltag_pose_log_N_both.csv")
+    parser.add_argument("--data-dir", type=str, default=None,
+                        help="Directory with left_N.mp4, right_N.mp4, apriltag_pose_log_N_both.csv "
+                             "(default: <data_folder>/stimulus/drone_videos)")
     parser.add_argument("--clip-id", type=int, nargs="+", default=None,
                         help="Clip IDs to visualize (default: all found)")
     parser.add_argument("--fps", type=float, default=None,
                         help="Output movie frame rate (default: native video rate)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of video frames to render")
-    parser.add_argument("--output-dir", type=str, default="figures/raw_drone",
+    parser.add_argument("--output-dir", type=str, default="figures/raw_drone_flow",
                         help="Output directory for the movie")
     args = parser.parse_args()
 
     import csv
-    data_dir = Path(args.data_dir)
+    if args.data_dir:
+        data_dir = Path(args.data_dir)
+    else:
+        data_dir = Path(du.load_config()['data']['data_folder']) / 'stimulus' / 'drone_videos'
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

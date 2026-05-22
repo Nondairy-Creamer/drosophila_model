@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to render")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: <model_folder>/drone_flow_movie)")
+                        help="Output directory (default: <model_folder>/figures/run_model_on_drone)")
     parser.add_argument("--translation", action="store_true",
                         help="Plot rotation-adjusted (translation-only) flow instead of full flow")
     parser.add_argument("--depth", action="store_true",
@@ -64,9 +64,9 @@ def main() -> None:
     model.eval()
 
     model_dt = model.dt
-    connectome_folder = Path(local_config["data"]["connectome_folder"])
-    drone_data_path = connectome_folder / "drone_data.pt"
-    drone_video_dir = connectome_folder / "drone_videos"
+    data_folder = Path(local_config["data"]["data_folder"])
+    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
+    drone_video_dir = data_folder / "stimulus" / "drone_videos"
 
     print("Loading drone clips...")
     drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))
@@ -75,7 +75,8 @@ def main() -> None:
     column_xyz = model.regions['optic_lobe'].get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]
 
-    output_dir = Path(args.output_dir) if args.output_dir else model_folder / "drone_flow_movie"
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else model_folder / "figures" / "run_model_on_drone")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for clip_idx in args.stim_index:

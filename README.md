@@ -16,7 +16,7 @@ Launch multiple runs across all available GPUs:
 python submit_runs.py --runs-per-gpu 4
 ```
 
-Both scripts read parameters from `config.toml` (lives in the `connectome_data` sibling directory by default).
+Both scripts read parameters from `config.toml` (lives in the `drosophila_model_data` sibling directory by default).
 
 ## Repo Structure
 
@@ -61,7 +61,7 @@ python tests/run_tests.py
 
 ## Key Concepts
 
-- **Connectome data** is stored in the sibling `connectome_data/` directory (parquet files for cell info, synapse counts, column positions).
+- **Connectome data** is stored in the sibling `drosophila_model_data/` directory (parquet files for cell info, synapse counts, column positions).
 - **Input neurons**: L1, L2, L3 (lamina cells that receive photoreceptor input).
 - **Output neurons**: T4a-d, T5a-d (direction-selective motion detectors for the four cardinal directions).
 - **Coordinate conventions** are documented in `coordinate_conventions.md`.

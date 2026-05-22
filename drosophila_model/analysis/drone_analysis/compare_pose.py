@@ -15,6 +15,8 @@ import torch
 import cv2
 from pathlib import Path
 import argparse
+
+from drosophila_model.utilities import data_utilities as du
 from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import uniform_filter1d, gaussian_filter1d
 from scipy.spatial.transform import Rotation
@@ -357,21 +359,22 @@ def find_clip_ids(data_dir: Path) -> list[int]:
 def main():
     parser = argparse.ArgumentParser(
         description='Compare CSV, trig, and batch-opt pose estimates')
-    parser.add_argument('--data-dir', type=str,
-                        default='../connectome_data/drone_videos',
-                        help='Directory with videos and CSV files')
-    parser.add_argument('--pose-dir', type=str,
-                        default='../connectome_data/drone_poses',
-                        help='Directory with batch-opt .npz files')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory with videos and CSV files '
+                             '(default: <data_folder>/stimulus/drone_videos)')
+    parser.add_argument('--pose-dir', type=str, default=None,
+                        help='Directory with batch-opt .npz files '
+                             '(default: <data_folder>/stimulus/drone_poses)')
     parser.add_argument('--plot-dir', type=str,
-                        default='figures/drone_pose',
+                        default='figures/compare_pose',
                         help='Output directory for comparison plots')
     parser.add_argument('--clips', type=int, nargs='+', default=None,
                         help='Process only these clip IDs (default: all)')
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
-    pose_dir = Path(args.pose_dir)
+    data_folder = Path(du.load_config()['data']['data_folder'])
+    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
+    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
     plot_dir = Path(args.plot_dir)
 
     all_ids = find_clip_ids(data_dir)

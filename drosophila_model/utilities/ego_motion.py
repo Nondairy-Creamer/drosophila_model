@@ -278,22 +278,24 @@ def integrate_translational_velocity(v, omega_deg, dt):
 # ---------------------------------------------------------------------------
 
 
-def load_viewing_directions(connectome_folder: str | Path | None = None):
+def load_viewing_directions(data_folder: str | Path | None = None):
     """Load optic-lobe column phi/theta and stack both hemispheres.
 
     Args:
-        connectome_folder: Path to the connectome bundle. When ``None``,
-            defaults to ``../connectome_data`` relative to this file.
+        data_folder: Path to the data root containing ``connectome_data/``.
+            When ``None``, falls back to
+            ``du.load_config()['data']['data_folder']``.
 
     Returns:
         phi, theta: ``(2*N_columns,)`` tensors, with the second half
         mirrored across the midline (``-phi``).
     """
-    if connectome_folder is None:
-        connectome_folder = Path(__file__).parent.parent / 'connectome_data'
-    connectome_folder = Path(connectome_folder)
+    if data_folder is None:
+        from drosophila_model.utilities import data_utilities as du
+        data_folder = du.load_config()['data']['data_folder']
+    data_folder = Path(data_folder)
     column_info_df = pd.read_parquet(
-        connectome_folder / 'area_extras' / 'optic_lobe_columns.parquet'
+        data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
     )
 
     theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)

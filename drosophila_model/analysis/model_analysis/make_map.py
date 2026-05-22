@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to use")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: <model_folder>/depth_map)")
+                        help="Output directory (default: <model_folder>/figures/make_map)")
     parser.add_argument("--no-photometric", action="store_true",
                         help="Skip photometric refinement; use the model's "
                              "ego motion directly.")
@@ -77,8 +77,8 @@ def main() -> None:
     model.eval()
     model_dt = model.dt
 
-    connectome_folder = Path(local_config["data"]["connectome_folder"])
-    drone_data_path = connectome_folder / "drone_data.pt"
+    data_folder = Path(local_config["data"]["data_folder"])
+    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
 
     print("Loading drone clips...")
     drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))
@@ -96,7 +96,7 @@ def main() -> None:
         num_frames = min(num_frames, args.max_frames)
 
     output_dir = (Path(args.output_dir) if args.output_dir
-                  else model_folder / "depth_map")
+                  else model_folder / "figures" / "make_map")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     right_input = torch.tensor(

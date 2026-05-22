@@ -43,7 +43,7 @@ def main() -> None:
         "--output-path",
         type=str,
         default=None,
-        help="Optional output file path (default: <model_folder>/figures/input_conv_filters.png)",
+        help="Optional output file path (default: <model_folder>/figures/plot_input_conv_filters/input_conv_filters.png)",
     )
     parser.add_argument(
         "--impulse-steps",
@@ -134,7 +134,11 @@ def main() -> None:
 
     fig.tight_layout()
 
-    figures_dir = Path(args.output_path).parent if args.output_path else (model_path.parent if model_path.is_file() else model_path) / "figures"
+    if args.output_path:
+        figures_dir = Path(args.output_path).parent
+    else:
+        model_root = model_path.parent if model_path.is_file() else model_path
+        figures_dir = model_root / "figures" / "plot_input_conv_filters"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     spatial_path = figures_dir / "input_conv_filters.png"

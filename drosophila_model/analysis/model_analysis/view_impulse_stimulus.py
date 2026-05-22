@@ -155,7 +155,8 @@ def main():
     )
     parser.add_argument(
         "--save-dir", type=str, default=None,
-        help="Save figures to this directory instead of showing interactively.",
+        help="Save figures to this directory instead of showing interactively "
+             "(default: <model_folder>/figures/view_impulse_stimulus).",
     )
     parser.add_argument(
         "--show-inputs-to", type=str, default=None, metavar="CELL_TYPE",
@@ -182,6 +183,11 @@ def main():
     model = nm.BaseRnn.load(args.model)
     print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, "
           f"omega={model.get_omega():.4f}")
+
+    if args.save_dir is None:
+        model_path = Path(args.model)
+        model_folder = model_path.parent if model_path.is_file() else model_path
+        args.save_dir = str(model_folder / "figures" / "view_impulse_stimulus")
 
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]

@@ -25,6 +25,8 @@ from scipy.ndimage import median_filter
 from pathlib import Path
 import argparse
 
+from drosophila_model.utilities import data_utilities as du
+
 from drosophila_model.analysis.drone_analysis.estimate_pose import (
     DualCameraRig, EquirectRig, TagMap, run_pipeline, run_pipeline_auto,
 )
@@ -258,12 +260,12 @@ def get_image_size(data_dir: Path, clip_id: int) -> tuple[int, int]:
 def main():
     parser = argparse.ArgumentParser(
         description='Estimate drone pose for all clips in a directory')
-    parser.add_argument('--data-dir', type=str,
-                        default='../connectome_data/drone_videos',
-                        help='Directory with left_N.mp4 / right_N.mp4 pairs')
-    parser.add_argument('--output-dir', type=str,
-                        default='../connectome_data/drone_poses',
-                        help='Output directory for pose .npz files')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Directory with left_N.mp4 / right_N.mp4 pairs '
+                             '(default: <data_folder>/stimulus/drone_videos)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory for pose .npz files '
+                             '(default: <data_folder>/stimulus/drone_poses)')
     parser.add_argument('--tag-size', type=float, default=0.16,
                         help='AprilTag side length in metres (default: 0.16)')
     parser.add_argument('--tag-map', type=str, default=None,
@@ -286,8 +288,9 @@ def main():
                         help='Process only these clip IDs (default: all)')
     args = parser.parse_args()
 
-    data_dir = Path(args.data_dir)
-    output_dir = Path(args.output_dir)
+    data_folder = Path(du.load_config()['data']['data_folder'])
+    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
+    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus' / 'drone_poses'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Discover clips

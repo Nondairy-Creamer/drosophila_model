@@ -260,7 +260,7 @@ def main():
                         help='Path to model folder or model.pt')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Root output directory '
-                             '(default: <model_folder>/figures/sine_sweep_silencing)')
+                             '(default: <model_folder>/figures/sine_wave_silencing)')
     args = parser.parse_args()
 
     model_path = Path(args.model_folder)
@@ -271,7 +271,7 @@ def main():
     model.eval()
 
     output_root = (Path(args.output_dir) if args.output_dir
-                   else model_folder / 'figures' / 'sine_sweep_silencing')
+                   else model_folder / 'figures' / 'sine_wave_silencing')
 
     # ── Run each silencing configuration ─────────────────────────────
     all_results = {}

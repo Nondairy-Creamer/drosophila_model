@@ -26,10 +26,10 @@ def _align_translation_sign(T_pred, T_true):
 def viewing_dirs():
     """Load viewing directions once for the whole module."""
     config, repo_root = load_test_config()
-    connectome_folder = Path(config["data"]["connectome_folder"])
-    if not connectome_folder.is_absolute():
-        connectome_folder = (repo_root / connectome_folder).resolve()
-    phi, theta = load_viewing_directions(connectome_folder)
+    data_folder = Path(config["data"]["data_folder"])
+    if not data_folder.is_absolute():
+        data_folder = (repo_root / data_folder).resolve()
+    phi, theta = load_viewing_directions(data_folder)
     return phi, theta
 
 

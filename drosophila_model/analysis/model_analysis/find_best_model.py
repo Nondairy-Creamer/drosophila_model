@@ -114,7 +114,7 @@ def find_best_models(models_dir=MODELS_DIR):
         plt.xlim(-0.5, 0.5)
         plt.legend()
 
-        fig_dir = models_dir.parent / 'figures'
+        fig_dir = models_dir.parent / 'figures' / 'find_best_model'
         fig_dir.mkdir(parents=True, exist_ok=True)
         fig_path = fig_dir / f'{prefix}_loss_comparison.png'
         plt.savefig(fig_path, dpi=150, bbox_inches='tight')

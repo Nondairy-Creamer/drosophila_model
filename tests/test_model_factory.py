@@ -12,8 +12,8 @@ from drosophila_model.utilities import data_utilities as du
 from drosophila_model.model_definition import neural_models as nm
 
 
-def _resolve_connectome_folder(repo_root: Path, connectome_folder: str) -> Path:
-    connectome_path = Path(connectome_folder)
+def _resolve_data_folder(repo_root: Path, data_folder: str) -> Path:
+    connectome_path = Path(data_folder)
     if connectome_path.is_absolute():
         return connectome_path
     return (repo_root / connectome_path).resolve()
@@ -34,9 +34,10 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
     config["model"]["regions"]["optic_lobe"]["use_input_conv"] = use_input_conv
     config["model"]["regions"]["optic_lobe"]["readouts"] = readouts
 
-    connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
-    cell_info_df = pd.read_parquet(connectome_folder / "cell_info.parquet")
-    synapses_df = pd.read_parquet(connectome_folder / "synapses.parquet")
+    data_folder = _resolve_data_folder(repo_root, config["data"]["data_folder"])
+    baked = data_folder / "connectome_data" / "baked"
+    cell_info_df = pd.read_parquet(baked / "cell_info.parquet")
+    synapses_df = pd.read_parquet(baked / "synapses.parquet")
 
     input_neurons = ["L1", "L2", "L3"]
     output_neurons = ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]
@@ -54,7 +55,7 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
             area: opts.get("side", "both")
             for area, opts in config["model"].get("regions", {}).items()
         },
-        connectome_folder=str(connectome_folder),
+        data_folder=str(data_folder),
     )
 
     model_class = nm.compose_model_class(

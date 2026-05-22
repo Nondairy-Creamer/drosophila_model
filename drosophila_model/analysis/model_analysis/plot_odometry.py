@@ -135,7 +135,7 @@ def main() -> None:
         n = min(args.num_stimuli, num_total)
         stim_indices = np.linspace(0, num_total - 1, n, dtype=int).tolist()
 
-    output_dir = model_folder / 'figures'
+    output_dir = model_folder / 'figures' / 'plot_odometry'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Plotting odometry for {len(stim_indices)} stimuli (out of {num_total} total)...")

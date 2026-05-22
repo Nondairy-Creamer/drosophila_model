@@ -32,7 +32,7 @@ use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
-readouts            = ['FlowConv2Readout', 'L1Reg']
+readouts            = ['FlowConv2Readout']
 readout_neurons     = [
     'T1', 'T2', 'T2a', 'T3',
     'T4a', 'T4b', 'T4c', 'T4d',
@@ -82,19 +82,4 @@ expanding_dot_num_dark = 50
 expanding_dot_filter_std = 2.5
 
 [data]
-connectome_folder = "../connectome_data"
-# Eye coverage used by format_connectome_data.py when projecting hex columns
-# onto the sphere (Lambert-azimuthal max angle = pi/2 * hemisphere_coverage).
-hemisphere_coverage = 0.85
-normalize_rows = false
-synapse_count_threshold = 0
-# Cell types removed by format_connectome_data.py before baking the bundle.
-neurons_to_exclude = ['R1-6', 'R7', 'R8']
-excitatory_nt = [
-    "ACH",
-]
-inhibitory_nt = [
-    "GABA",
-    "GLUT",
-]
-root_id_dtype = "int64"
+data_folder = "../drosophila_model_data"

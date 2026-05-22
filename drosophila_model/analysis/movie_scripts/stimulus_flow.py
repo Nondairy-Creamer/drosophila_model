@@ -70,7 +70,7 @@ def main() -> None:
         args.stim_index = [3] if args.two_eyes else [5]
 
     config = du.load_config(args.config)
-    connectome_folder = Path(config['data']['connectome_folder'])
+    data_folder = Path(config['data']['data_folder'])
 
     if args.stim_time is not None:
         config["stimulus"]["stim_time"] = args.stim_time
@@ -80,13 +80,12 @@ def main() -> None:
     if args.stim_type == "expanding_dot" and args.stim_index is not None:
         su.trim_expanding_dot_config_for_max_index(config, max(args.stim_index))
 
-    output_folder = Path(args.output_dir) if args.output_dir else (
-        Path("figures/two_eyes") if args.two_eyes else Path("figures/movie"))
+    output_folder = Path(args.output_dir) if args.output_dir else Path("figures/stimulus_flow")
     output_folder.mkdir(parents=True, exist_ok=True)
 
     frame_rate = args.fps if args.fps else int(round(1.0 / config['model']['dt']))
 
-    column_info_df = pd.read_parquet(connectome_folder / 'area_extras' / 'optic_lobe_columns.parquet')
+    column_info_df = pd.read_parquet(data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet')
     column_phi_theta = column_info_df[['phi', 'theta']].to_numpy()
 
     phi = column_phi_theta[:, 0]

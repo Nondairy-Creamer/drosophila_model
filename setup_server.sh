@@ -15,9 +15,6 @@ pip install -r requirements.txt
 # we just installed isn't clobbered by a CPU build from PyPI.
 pip install -e . --no-deps
 
-mkdir -p ../connectome_data/
+mkdir -p ../drosophila_model_data/
 
-gdown --folder "https://drive.google.com/drive/folders/1I5c9Q48eqas6mbjhoTXLPlRk7S4iTR1p" -O ../connectome_data
-
-
-cp ../connectome_data/config.toml .
+gdown --folder "https://drive.google.com/drive/folders/1I5c9Q48eqas6mbjhoTXLPlRk7S4iTR1p" -O ../drosophila_model_data

@@ -302,7 +302,7 @@ def main():
             for di in range(len(directions))
         }
 
-    fig_folder = model_folder / "figures"
+    fig_folder = model_folder / "figures" / "natural_pano_velocity_sweep"
     fig_folder.mkdir(parents=True, exist_ok=True)
 
     x_label = "Velocity (deg/s)" if plot_by_velocity else "Temporal frequency (Hz)"

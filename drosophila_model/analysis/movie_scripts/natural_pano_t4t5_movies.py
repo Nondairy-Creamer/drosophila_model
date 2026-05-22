@@ -138,7 +138,7 @@ def main() -> None:
         "--out-dir",
         type=str,
         default=None,
-        help="Output directory (default: model_folder/movie/natural_pano_t4t5).",
+        help="Output directory (default: <model_folder>/figures/natural_pano_t4t5_movies).",
     )
     parser.add_argument(
         "--highpass-tau",
@@ -233,7 +233,7 @@ def main() -> None:
     out_root = (
         Path(args.out_dir)
         if args.out_dir
-        else model_folder / "movie" / "natural_pano_t4t5"
+        else model_folder / "figures" / "natural_pano_t4t5_movies"
     )
     if not args.keep_existing:
         shutil.rmtree(out_root, ignore_errors=True)

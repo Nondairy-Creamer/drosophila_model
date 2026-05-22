@@ -13,7 +13,7 @@ samples_per_inch = 10
 nx = int(board_dim[0] * samples_per_inch)
 ny = int(board_dim[1] * samples_per_inch)
 
-figures_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "figures")
+figures_dir = os.path.join("figures", "board_stimulus")
 os.makedirs(figures_dir, exist_ok=True)
 
 

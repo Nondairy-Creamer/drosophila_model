@@ -5,9 +5,9 @@ The column is the **middle** of the L1/L2/L3 shared columns sorted by azimuth φ
 plus ``--column-offset``.  Stimulus is chosen with ``--stim-type``:
 
 * **edge** — same as ``edge_sweep``: light **and** dark edges at 240°/s, right & up,
-  FOV 180°, 0.5 s pre-stim (figures under ``figures/t4_input_traces/edge/``).
+  FOV 180°, 0.5 s pre-stim (figures under ``figures/cell_input_traces/edge/``).
 * **sine** — same as ``sine_wave_sweep``: drifting sine (default 4 Hz, 30° wavelength,
-  1 s stim, 0.5 s pre-stim; figures under ``figures/t4_input_traces/sine/``).
+  1 s stim, 0.5 s pre-stim; figures under ``figures/cell_input_traces/sine/``).
 
 Each presynaptic trace is ``W·g_out·g_in·FR``; each motion-detector FR panel includes
 ``(1-ρ)·softplus(Σ+b)`` on a twin axis.  Partners outside the L1/L2/L3 grid yield
@@ -540,7 +540,7 @@ def run_t4_input_traces(
         f"(min-|trace-peak|={min_trace_peak}).",
     )
 
-    fig_folder = model_folder / "figures" / "t4_input_traces" / stim_type
+    fig_folder = model_folder / "figures" / "cell_input_traces" / stim_type
     fig_folder.mkdir(parents=True, exist_ok=True)
 
     stim_start_s = pre_stim

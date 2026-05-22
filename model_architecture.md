@@ -92,24 +92,37 @@ that introduce new areas (e.g. antenna lobe) supply their own region sub-table.
 ## Data layout
 
 The connectome bundle is baked once by `format_connectome_data.py` and lives
-under `config['data']['connectome_folder']`:
+under `config['data']['data_folder']`:
 
 ```
-<connectome_folder>/
-├── cell_info.parquet                 # universal, one row per neuron
-│     columns: root_id, type, neurotransmitter, area, side, column_index
-│     (column_index = NaN for neurons without a hex-grid assignment)
-├── synapses.parquet                  # universal, one row per directed edge
-│     columns: pre_root_id, post_root_id, synapse_counts, nt_type
-└── area_extras/
-    └── optic_lobe_columns.parquet    # owned by OpticLobeRegion._load_extras
-          columns: column_index, phi, theta, p, q, x, y, z
+<data_folder>/
+├── connectome_data/
+│   ├── raw/                          # raw CSVs consumed by format_connectome_data.py
+│   │   ├── visual_neuron_types_no_threshold.csv
+│   │   ├── connections_no_threshold.csv
+│   │   └── column_assignments_no_threshold.csv
+│   └── baked/                        # parquets emitted by format_connectome_data.py
+│       ├── cell_info.parquet         # universal, one row per neuron
+│       │     columns: root_id, type, neurotransmitter, area, side, column_index
+│       │     (column_index = NaN for neurons without a hex-grid assignment)
+│       ├── synapses.parquet          # universal, one row per directed edge
+│       │     columns: pre_root_id, post_root_id, synapse_counts, nt_type
+│       └── optic_lobe_columns.parquet  # owned by OpticLobeRegion._load_extras
+│             columns: column_index, phi, theta, p, q, x, y, z
+└── stimulus/                         # stimulus datasets (panoramic images, drone data, etc.)
+    ├── all_panoramic.pt
+    ├── rendered_fly_view_dataset.pkl
+    ├── flow360_data_right_eye_mapped.pkl
+    ├── sintel_data.pkl
+    ├── drone_data.pt
+    ├── drone_videos/
+    └── drone_poses/
 ```
 
 Universal fields land on `ConnectomeData`; anything outside the core set
 (today: only `column_index`) is forwarded verbatim through
 `ConnectomeData.per_neuron_extras`. Per-area geometry is loaded by the
-corresponding `RegionView` subclass from `area_extras/`, so the model itself
+corresponding `RegionView` subclass from `connectome_data/baked/`, so the model itself
 stays anatomy-agnostic. All visual-specific state and operations
 (`column_phi_theta`, `column_p_q`, `num_columns`, the input-conv stack —
 `input_pre_conv` / `input_spatial_conv` / `temporal_lru` —, `apply_input_conv`,
@@ -120,7 +133,7 @@ stays anatomy-agnostic. All visual-specific state and operations
 To add an area (e.g. antenna lobe):
 1. Append a section to `format_connectome_data.py` that writes more rows to
    `cell_info.parquet` / `synapses.parquet` with `area = '<name>'` and (if
-   needed) `area_extras/<name>_*.parquet` files.
+   needed) `connectome_data/baked/<name>_*.parquet` files.
 2. Subclass `RegionView` in `regions.py`, override `_load_extras` to read
    those files, and register it in `REGION_REGISTRY`.
 
@@ -146,7 +159,7 @@ Abstract base class for connectome-constrained recurrent neural networks. Handle
 | `per_neuron_extras` | dict of non-core per-neuron columns from `cell_info.parquet` (today: `'column_index'` only) |
 | `area_sides` | input filter: `{area: side}` actually loaded |
 | `areas` | property: `list(area_sides.keys())` |
-| `connectome_folder` | path used by `RegionView._load_extras` to find `area_extras/` |
+| `data_folder` | path used by `RegionView._load_extras` to find `connectome_data/baked/` |
 
 All visual-column accessors and helpers (`column_phi_theta`, `column_p_q`,
 `num_columns`, `get_shared_columns`, `get_column_xyz`) live on the optic-lobe
@@ -182,8 +195,13 @@ Region-owned configuration arguments (sit in `region_kwargs['<area>']`):
 At construction time the raw connectome is filtered in order:
 1. Remove connections below `count_threshold`.
 2. Remove neurons whose neurotransmitter is not in `excitatory_nt` or `inhibitory_nt`.
-3. Remove connections involving removed neurons.
-4. Remove neurons with no remaining connections.
+3. Remove per-area cell-type exclusions. Each region exposes a
+   `default_neurons_to_exclude` class attribute (e.g. `OpticLobeRegion` strips
+   `['R1-6', 'R7', 'R8']` since photoreceptor terminals are the model's
+   stimulus input, not connectome nodes). Override via
+   `region_kwargs[<area>]['neurons_to_exclude']`.
+4. Remove connections involving removed neurons.
+5. Remove neurons with no remaining connections.
 
 Root IDs are then converted to dense matrix indices. The result is a sparse `(N, N)` synapse count matrix stored as `self.synapse_counts`.
 

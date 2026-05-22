@@ -21,7 +21,7 @@ model = ModelClass(
             area: opts.get('side', 'both')
             for area, opts in config['model'].get('regions', {}).items()
         },
-        connectome_folder=config['data']['connectome_folder'],
+        data_folder=config['data']['data_folder'],
     ),
     device='cpu',
     init_new_model=False,  # Skip steady state finding for analysis
@@ -93,7 +93,7 @@ for cti in chosen_type_indexes:
 pre_syn = {i: np.concatenate(pre_syn[i], axis=0) for i in chosen_presyn}
 
 # Create output directory
-output_dir = Path('figures/connectome_analysis')
+output_dir = Path('figures/analyze_connectome')
 output_dir.mkdir(parents=True, exist_ok=True)
 
 plt.figure()

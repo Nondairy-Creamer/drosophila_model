@@ -350,7 +350,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir", type=str, default=None,
-        help="Output directory (default: <model_folder>/figures/sine_sweep)",
+        help="Output directory (default: <model_folder>/figures/sine_wave_sweep)",
     )
     parser.add_argument(
         "--zero-center", action="store_true",
@@ -363,7 +363,7 @@ def main():
     model.eval()
 
     output_dir = (Path(args.output_dir) if args.output_dir
-                  else model_folder / "figures" / "sine_sweep")
+                  else model_folder / "figures" / "sine_wave_sweep")
 
     cell_results = run_sine_wave_sweep(
         model,

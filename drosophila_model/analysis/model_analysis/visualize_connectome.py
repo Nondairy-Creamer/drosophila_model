@@ -51,7 +51,10 @@ ax.set_ylabel('Postsynaptic cell type', fontsize=14)
 ax.set_title(f'Average synapse counts between cell types\n({len(cell_types)} cell types)', fontsize=16)
 
 plt.tight_layout()
-plt.savefig(model_folder / 'connectome_matrix.png', dpi=150)
+output_dir = model_folder / 'figures' / 'visualize_connectome'
+output_dir.mkdir(parents=True, exist_ok=True)
+output_path = output_dir / 'connectome_matrix.png'
+plt.savefig(output_path, dpi=150)
 plt.show()
 
-print(f"Saved connectome matrix to {model_folder / 'connectome_matrix.png'}")
+print(f"Saved connectome matrix to {output_path}")

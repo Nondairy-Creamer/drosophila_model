@@ -82,27 +82,27 @@ def main() -> None:
                         help="Output movie frame rate (default: native video rate)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to render (default: all)")
-    parser.add_argument("--output-dir", type=str, default="figures/two_eyes",
+    parser.add_argument("--output-dir", type=str, default="figures/drone_flow",
                         help="Output directory for the movie")
     parser.add_argument("--plot-extra", action="store_true", default=False,
                         help="Show sampled ommatidia and rotation/translation rates")
     parser.add_argument("--pose-dir", type=str, default=None,
                         help="Directory with new pose .npz files (default: "
-                             "<connectome_folder>/drone_poses)")
+                             "<data_folder>/stimulus/drone_poses)")
     args = parser.parse_args()
 
     config = du.load_config(args.config)
-    connectome_folder = Path(config["data"]["connectome_folder"])
+    data_folder = Path(config["data"]["data_folder"])
     output_folder = Path(args.output_dir)
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    column_info_df = pd.read_parquet(connectome_folder / "area_extras" / "optic_lobe_columns.parquet")
+    column_info_df = pd.read_parquet(data_folder / "connectome_data" / "baked" / "optic_lobe_columns.parquet")
     column_phi_theta = column_info_df[["phi", "theta"]].to_numpy()
 
     model_dt = config["model"]["dt"]
-    drone_data_path = connectome_folder / "drone_data.pt"
-    drone_video_dir = connectome_folder / "drone_videos"
-    pose_dir = Path(args.pose_dir) if args.pose_dir else connectome_folder / "drone_poses"
+    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
+    drone_video_dir = data_folder / "stimulus" / "drone_videos"
+    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / "stimulus" / "drone_poses"
 
     print("Loading preprocessed drone clips...")
     drone_clips = su.get_drone_stimulus(

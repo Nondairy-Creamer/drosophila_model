@@ -201,7 +201,7 @@ def main():
     )
     parser.add_argument(
         "--save-dir", type=str, default=None,
-        help="Output directory (default: same directory as the model file).",
+        help="Output directory (default: <model_folder>/figures/run_stimulus_battery).",
     )
     parser.add_argument(
         "--stimuli", type=str, nargs="+", default=ALL_STIMULI,
@@ -223,7 +223,9 @@ def main():
         print(f"ERROR: model not found at {model_path}")
         sys.exit(1)
 
-    save_dir = Path(args.save_dir) if args.save_dir else model_path.parent
+    model_root = model_path.parent if model_path.is_file() else model_path
+    save_dir = (Path(args.save_dir) if args.save_dir
+                else model_root / "figures" / "run_stimulus_battery")
     save_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Model:    {model_path}")
