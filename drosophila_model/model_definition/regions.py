@@ -100,6 +100,14 @@ class RegionView(nn.Module):
     # any of these neuropils is opted into this region (union membership;
     # see :func:`connectome_loading.resolve_sided_neuropils`).
     neuropils: list[str] = []
+    # Anatomy-prior sign overrides applied after NT-based signing. Each
+    # entry is ``(presynaptic_cell_type, postsynaptic_cell_type, factor)``;
+    # ``factor=-1`` flips the sign (e.g. for connections whose bulk-NT
+    # classification disagrees with their functional sign), ``factor=0``
+    # ablates. Consumed by
+    # :meth:`ConnectomeModel._apply_region_sign_overrides`, overridable
+    # per-instance via ``region_kwargs[<name>]['sign_overrides']``.
+    sign_overrides: list[tuple[str, str, float]] = []
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
                  cell_indices: np.ndarray, side: str,
@@ -134,6 +142,8 @@ class RegionView(nn.Module):
             self.default_input_neurons = list(opts.pop('input_neurons'))
         if 'output_neurons' in opts:
             self.default_output_neurons = list(opts.pop('output_neurons'))
+        if 'sign_overrides' in opts:
+            self.sign_overrides = [tuple(t) for t in opts.pop('sign_overrides')]
         readouts_cfg = opts.pop('readouts', None)
         readout_neurons_cfg = opts.pop('readout_neurons', None)
         regularizer_parameters_cfg = opts.pop('regularizer_parameters', None)
@@ -311,6 +321,18 @@ class OpticLobeRegion(RegionView):
     # AME (accessory medulla) is excluded to match the previous
     # ``category == 'intrinsic'`` filter, which dropped boundary cells.
     neuropils = ['ME', 'LO', 'LOP', 'LA']
+    # Anatomy-prior sign corrections. C2 and C3 are GABAergic (so the
+    # bulk-NT classifier signs them negative) but their contacts onto L1
+    # and L2 in the lamina are functionally excitatory — flip them back
+    # to positive. Applied automatically after NT signing for every
+    # dynamics model; override per-instance via
+    # ``region_kwargs['optic_lobe']['sign_overrides']``.
+    sign_overrides = [
+        ('C2', 'L1', -1.0),
+        ('C2', 'L2', -1.0),
+        ('C3', 'L1', -1.0),
+        ('C3', 'L2', -1.0),
+    ]
     # Readouts that produce column-aligned visual outputs.
     default_readouts = ['FlowConv2Readout', 'L1Reg']
     default_readout_neurons = [
@@ -981,8 +1003,8 @@ def build_regions(
         cell_idx = np.flatnonzero(mask).astype(np.int64)
 
         opts = dict(region_kwargs.get(name, {}))
-        # Consumed upstream / passed as kwargs; drop so subclass _load_extras
-        # unknown-key checks don't see them.
+        # Consumed upstream / by RegionView.__init__; drop so subclass
+        # _load_extras unknown-key checks don't see them.
         opts.pop('neurons_to_exclude', None)
         opts.pop('neuropils', None)
         opts.pop('side', None)

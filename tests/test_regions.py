@@ -58,6 +58,54 @@ def test_union_membership_supports_multiple_regions():
     assert mask[model.regions["optic_lobe"].cell_indices.cpu().numpy()].all()
 
 
+def test_optic_lobe_sign_overrides_flip_c2_c3_to_l1_l2():
+    """C2/C3 (GABA) -> L1/L2 are flipped to positive by the OL anatomy prior.
+
+    The OpticLobeRegion declares C2/C3 -> L1/L2 in ``sign_overrides`` so a
+    GABA pre-synaptic NT (raw sign -1) ends up positive after
+    ``_initialize_synapse_signs`` runs.
+    """
+    model, _, _, _ = build_model_from_test_config(readouts=[])
+
+    region = model.regions["optic_lobe"]
+    assert ("C2", "L1", -1.0) in [tuple(t) for t in region.sign_overrides]
+    assert ("C2", "L2", -1.0) in [tuple(t) for t in region.sign_overrides]
+    assert ("C3", "L1", -1.0) in [tuple(t) for t in region.sign_overrides]
+    assert ("C3", "L2", -1.0) in [tuple(t) for t in region.sign_overrides]
+
+    sc = model.synapse_counts
+    pre_n = sc.col_indices()
+    post_n = model._csr_row_indices(sc)
+    pre_types = model.neuron_to_type_index[pre_n].cpu().numpy()
+    post_types = model.neuron_to_type_index[post_n].cpu().numpy()
+    values = sc.values().detach().cpu().numpy()
+
+    def type_idx(name):
+        return model._cell_type_name_to_index(name)
+
+    for pre_name in ("C2", "C3"):
+        pi = type_idx(pre_name)
+        if pi is None:
+            continue
+        # Sanity: C2/C3 should be classified GABA (inhibitory).
+        any_pre = pre_types == pi
+        if not any_pre.any():
+            continue
+        for post_name in ("L1", "L2"):
+            qi = type_idx(post_name)
+            if qi is None:
+                continue
+            edge_mask = any_pre & (post_types == qi)
+            if not edge_mask.any():
+                continue
+            # All edges between this pre/post pair must be non-negative
+            # (the GABA -1 flipped by factor -1 -> positive count).
+            assert (values[edge_mask] >= 0).all(), (
+                f"{pre_name}->{post_name} still has negative weights after "
+                f"region sign override"
+            )
+
+
 def test_optic_lobe_column_phi_theta_two_eyes_mirrored():
     """Single-side host: column_phi_theta_two_eyes mirrors phi for the fake left eye."""
     model, _, _, _ = build_model_from_test_config(readouts=[])

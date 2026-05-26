@@ -24,10 +24,9 @@ def set_taus(model, mi9_tau=0.1, mi4_tau=0.1, ct1_l_tau=0.25, ct1_m_tau=0.25):
     model.set_tau('CT1_M', ct1_m_tau) # 5.0 scaled by dt_ratio
 
 def flip_signs(model):
-    model.flip_sign_between_cell_types('C2', 'L1', factor=-1)
-    model.flip_sign_between_cell_types('C2', 'L2', factor=-1)
-    model.flip_sign_between_cell_types('C3', 'L1', factor=-1)
-    model.flip_sign_between_cell_types('C3', 'L2', factor=-1)
+    # C2/C3 -> L1/L2 are GABAergic-but-functionally-excitatory; that flip
+    # is now declared as an anatomy prior on OpticLobeRegion.sign_overrides
+    # and applied automatically by ConnectomeModel._apply_region_sign_overrides.
     model.flip_sign_between_cell_types('L1', 'R1-6', factor=-1)
     model.flip_sign_between_cell_types('Lai', 'R1-6', factor=-1)
     model.flip_sign_between_cell_types('R1-6', 'R1-6', factor=0)

@@ -648,6 +648,71 @@ class ConnectomeModel(BaseRnn):
             signed_values.detach().cpu().numpy(),
         ])
 
+    def _apply_sign_flip(self, presynaptic_cell_type, postsynaptic_cell_type, factor):
+        """Multiply all edges from ``pre`` cell type to ``post`` cell type by ``factor``.
+
+        Default ``factor=-1`` flips signs. ``factor=0`` ablates. Mutates both
+        ``synapse_counts`` (CSR) and ``synapse_counts_coo`` (numpy). Used by
+        :meth:`_apply_region_sign_overrides` (automatic, anatomy-driven) and
+        by :meth:`HandTunedDynamics.flip_sign_between_cell_types` (manual,
+        per-research-script).
+        """
+        pre_ti = self._cell_type_name_to_index(presynaptic_cell_type)
+        post_ti = self._cell_type_name_to_index(postsynaptic_cell_type)
+        if pre_ti is None or post_ti is None:
+            return
+
+        sc = self.synapse_counts
+        pre_n = sc.col_indices()
+        post_n = self._csr_row_indices(sc)
+        values = sc.values().clone()
+
+        pre_types = self.neuron_to_type_index[pre_n]
+        post_types = self.neuron_to_type_index[post_n]
+        mask = (pre_types == pre_ti) & (post_types == post_ti)
+
+        fac = torch.as_tensor(factor, device=values.device, dtype=values.dtype)
+        values = torch.where(mask, values * fac, values)
+
+        self.synapse_counts = torch.sparse_csr_tensor(
+            sc.crow_indices(), pre_n, values, size=sc.size(),
+        )
+
+        self.synapse_counts_coo = np.column_stack([
+            pre_n.cpu().numpy(),
+            post_n.cpu().numpy(),
+            values.detach().cpu().numpy(),
+        ])
+
+    def _apply_region_sign_overrides(self):
+        """Apply each region's ``sign_overrides`` list to ``synapse_counts``.
+
+        Each region declares anatomy-prior sign corrections — connection types
+        whose biological sign disagrees with the bulk-NT classification (e.g.
+        optic-lobe ``C2`` / ``C3`` are GABAergic but their L1/L2 contacts are
+        functionally excitatory). Each entry is
+        ``(pre_cell_type, post_cell_type, factor)``; ``factor=-1`` flips the
+        sign, ``factor=0`` ablates. Cell types not present in the loaded
+        connectome subset silently no-op via :meth:`_apply_sign_flip`.
+
+        Called automatically after :meth:`_sign_synapses` in each dynamics
+        ``__init__`` so the overrides apply to every dynamics model.
+        """
+        for region in self.regions.values():
+            for pre, post, factor in region.sign_overrides:
+                self._apply_sign_flip(pre, post, factor)
+
+    def _initialize_synapse_signs(self):
+        """Sign synapses by NT, then apply region-level anatomy overrides.
+
+        Single entry point shared by all dynamics ``__init__`` methods and by
+        :meth:`HandTunedDynamics._renormalize_from_raw`. Region overrides run
+        BEFORE any user-driven ``HandTunedDynamics._sign_flips`` so research
+        scripts can still flip on top of the default anatomy priors.
+        """
+        self._sign_synapses()
+        self._apply_region_sign_overrides()
+
     def _silencing_mask(self, neurons_to_silence, invert_silencing=False):
         """Return a boolean mask over cell types for neurons to silence."""
         if not neurons_to_silence:

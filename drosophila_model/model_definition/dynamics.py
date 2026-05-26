@@ -67,8 +67,9 @@ class CurrentDynamics:
     def __init__(self, *, init_new_model=True, **kwargs):
         super().__init__(**kwargs)
 
-        # Convert unsigned connectome counts to signed (excit. +, inhib. -).
-        self._sign_synapses()
+        # Convert unsigned connectome counts to signed (excit. +, inhib. -)
+        # and apply region-level anatomy-prior sign overrides.
+        self._initialize_synapse_signs()
 
         self._save_init_inputs()
 
@@ -592,7 +593,7 @@ class CellAnnDynamics:
     def __init__(self, *, init_new_model=True, cell_ann_depth=1, **kwargs):
         super().__init__(**kwargs)
 
-        self._sign_synapses()
+        self._initialize_synapse_signs()
 
         self._save_init_inputs()
 
@@ -811,7 +812,7 @@ class HandTunedDynamics:
         self._raw_synapse_counts = self.synapse_counts.clone()
         self._sign_flips = []
 
-        self._sign_synapses()
+        self._initialize_synapse_signs()
         self.activation_overrides = activation_overrides
 
         # Per-presynaptic-cell-type amplification (factor > 1 makes a cell
@@ -995,9 +996,15 @@ class HandTunedDynamics:
         self._renormalize_from_raw()
 
     def _renormalize_from_raw(self):
-        """Re-sign, re-flip, and re-normalise from the raw connectome snapshot."""
+        """Re-sign, re-flip, and re-normalise from the raw connectome snapshot.
+
+        Region anatomy overrides are applied inside
+        :meth:`ConnectomeModel._initialize_synapse_signs`; user-driven
+        ``_sign_flips`` are replayed on top, in the order they were
+        registered.
+        """
         self.synapse_counts = self._raw_synapse_counts.clone()
-        self._sign_synapses()
+        self._initialize_synapse_signs()
         for pre, post, fac in self._sign_flips:
             self._apply_sign_flip(pre, post, fac)
         self._normalize_synapse_counts()
@@ -1008,38 +1015,11 @@ class HandTunedDynamics:
         """Scale weights for edges from ``presynaptic`` -> ``postsynaptic``.
 
         Default factor is -1 (flip sign). Recorded for replay across
-        ``_renormalize_from_raw``.
+        ``_renormalize_from_raw``. ``_apply_sign_flip`` itself is inherited
+        from :class:`ConnectomeModel`.
         """
         self._sign_flips.append((presynaptic_cell_type, postsynaptic_cell_type, factor))
         self._apply_sign_flip(presynaptic_cell_type, postsynaptic_cell_type, factor)
-
-    def _apply_sign_flip(self, presynaptic_cell_type, postsynaptic_cell_type, factor):
-        pre_ti = self._cell_type_name_to_index(presynaptic_cell_type)
-        post_ti = self._cell_type_name_to_index(postsynaptic_cell_type)
-        if pre_ti is None or post_ti is None:
-            return
-
-        sc = self.synapse_counts
-        pre_n = sc.col_indices()
-        post_n = self._csr_row_indices(sc)
-        values = sc.values().clone()
-
-        pre_types = self.neuron_to_type_index[pre_n]
-        post_types = self.neuron_to_type_index[post_n]
-        mask = (pre_types == pre_ti) & (post_types == post_ti)
-
-        fac = torch.as_tensor(factor, device=values.device, dtype=values.dtype)
-        values = torch.where(mask, values * fac, values)
-
-        self.synapse_counts = torch.sparse_csr_tensor(
-            sc.crow_indices(), pre_n, values, size=sc.size(),
-        )
-
-        self.synapse_counts_coo = np.column_stack([
-            pre_n.cpu().numpy(),
-            post_n.cpu().numpy(),
-            values.detach().cpu().numpy(),
-        ])
 
     # ----- ablation ------------------------------------------------------
 
