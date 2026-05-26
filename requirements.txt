@@ -1,8 +1,16 @@
---index-url https://download.pytorch.org/whl/cu128
+# torch/torchvision/torchaudio are listed UNPINNED and WITHOUT a custom index
+# on purpose. With no version pin, pip's default "only-if-needed" upgrade
+# strategy makes `pip install -r requirements.txt` a no-op when torch is
+# already installed (e.g. RunPod images ship a torch matched to the pod's GPU
+# -- Blackwell / sm_120 needs a cu128 nightly that the stable cu128 index
+# does not serve, so we must NOT clobber it).
+#
+# On a fresh machine without torch, pip will install the default CPU build
+# from PyPI. GPU users on non-RunPod machines should install their preferred
+# torch wheel BEFORE running setup_server.sh -- pip will then leave it alone.
 torch
 torchvision
 torchaudio
---extra-index-url https://pypi.org/simple
 numpy
 matplotlib
 pandas

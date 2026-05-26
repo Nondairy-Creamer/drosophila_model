@@ -65,7 +65,7 @@ def get_available_gpus():
     return [f'cuda:{i}' for i in range(num_gpus)]
 
 
-def run_training_job(seed, device, run_id, timestamp=None, script_path='run_model.py', log_dir='logs', model_path=None):
+def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log_dir='logs', model_path=None):
     """
     Run a single training job with specified parameters.
     
@@ -74,21 +74,23 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
         device: Device to run on (e.g., 'cuda:0')
         run_id: Identifier for this run
         timestamp: Timestamp string to use for all runs in this batch
-        script_path: Path to the run_model.py script
+        script_path: Optional path to a run_model.py script. If None, runs the
+            installed module ``drosophila_model.training.run_model``.
         log_dir: Directory to store log files
         model_path: Optional path to existing model folder to load
     
     Returns:
         tuple of (subprocess.Popen object, log file handle)
     """
-    cmd = [
-        sys.executable,
-        '-u',  # Unbuffered output so logs appear immediately
-        str(script_path),
+    if script_path is None:
+        cmd = [sys.executable, '-u', '-m', 'drosophila_model.training.run_model']
+    else:
+        cmd = [sys.executable, '-u', str(script_path)]
+    cmd.extend([
         '--seed', str(seed),
         '--device', device,
-        '--run-id', str(run_id)
-    ]
+        '--run-id', str(run_id),
+    ])
     if timestamp is not None:
         cmd.extend(['--timestamp', timestamp])
     if model_path is not None:
@@ -120,14 +122,15 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path='run_mode
     return process, log_file
 
 
-def submit_runs(runs_per_gpu=1, base_seed=0, script_path='run_model.py', model_path=None, tag=None):
+def submit_runs(runs_per_gpu=1, base_seed=0, script_path=None, model_path=None, tag=None):
     """
     Submit multiple training runs across available GPUs.
     
     Args:
         runs_per_gpu: Number of runs to execute per GPU
         base_seed: Base seed value (each run gets base_seed + run_index)
-        script_path: Path to the run_model.py script
+        script_path: Optional path to a run_model.py script. If None, runs the
+            installed module ``drosophila_model.training.run_model``.
         model_path: Optional path to existing model folder to load
         tag: Optional tag to use instead of the auto-generated timestamp
     """
@@ -236,8 +239,9 @@ def main():
     parser.add_argument(
         '--script-path',
         type=str,
-        default='run_model.py',
-        help='Path to run_model.py script (default: run_model.py)'
+        default=None,
+        help='Optional path to a run_model.py script. If omitted, runs the '
+             'installed module drosophila_model.training.run_model.'
     )
     
     parser.add_argument(
@@ -281,11 +285,15 @@ def main():
         print(f"To stop:   kill {proc.pid}")
         sys.exit(0)
     
-    # Validate script path
-    script_path = Path(args.script_path)
-    if not script_path.exists():
-        print(f"Error: Script not found at {script_path}")
-        sys.exit(1)
+    # Validate script path if explicitly provided; otherwise we invoke the
+    # installed module drosophila_model.training.run_model.
+    script_path = None
+    if args.script_path is not None:
+        script_path = Path(args.script_path)
+        if not script_path.exists():
+            print(f"Error: Script not found at {script_path}")
+            sys.exit(1)
+        script_path = str(script_path)
     
     # Validate model path if provided
     model_path = None
@@ -301,7 +309,7 @@ def main():
     submit_runs(
         runs_per_gpu=args.runs_per_gpu,
         base_seed=args.base_seed,
-        script_path=str(script_path),
+        script_path=script_path,
         model_path=model_path,
         tag=args.tag
     )

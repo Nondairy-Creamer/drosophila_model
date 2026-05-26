@@ -1,18 +1,20 @@
 #!/bin/bash
 set -e
 
-# python3 -m venv .venv
-# source .venv/bin/activate
+# We intentionally do NOT create a venv -- on RunPod, the system Python ships
+# with a torch build matched to the pod's GPU (e.g. Blackwell / sm_120 needs a
+# cu128 nightly newer than what the stable cu128 index serves). Running
+# against the system Python lets us inherit that working torch.
 pip install --upgrade pip
 
-# Third-party deps. requirements.txt pins the CUDA 12.8 torch wheel index so
-# we get GPU-enabled torch/torchvision/torchaudio (PyPI's default torch is
-# CPU-only).
+# Third-party deps. torch is listed unpinned in requirements.txt so pip will
+# leave any existing install alone (RunPod) and install the default CPU build
+# on fresh machines without torch.
 pip install -r requirements.txt
 
 # Register this repo as the `drosophila_model` package in editable mode.
-# --no-deps skips re-resolving the deps from pyproject.toml so the cu128 torch
-# we just installed isn't clobbered by a CPU build from PyPI.
+# --no-deps avoids pip re-resolving torch off pyproject.toml's version pin
+# and accidentally replacing the pod's GPU torch with a CPU build from PyPI.
 pip install -e . --no-deps
 
 mkdir -p ../drosophila_model_data/stimulus/
