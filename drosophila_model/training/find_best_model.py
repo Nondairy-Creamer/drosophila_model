@@ -9,7 +9,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 
-MODELS_DIR = Path(__file__).resolve().parent.parent / 'models'
+MODELS_DIR = Path(__file__).resolve().parent.parent.parent / 'models'
 NEAR_ZERO_THRESHOLD = 1e-6
 
 
