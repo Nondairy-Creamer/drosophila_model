@@ -41,6 +41,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
 
     uses_two_eyes = 'odometry_loss' in loss_components
 
+    # Accept the string 'none' (case-insensitive) from TOML configs as a
+    # disable sentinel for the clipping knobs, since TOML has no real null.
+    if isinstance(clip_grad_norm, str) and clip_grad_norm.lower() == 'none':
+        clip_grad_norm = None
+    if isinstance(clip_grad_value, str) and clip_grad_value.lower() == 'none':
+        clip_grad_value = None
+
     if train_mask is None:
         train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
 
@@ -164,8 +171,16 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                     component_vals[name] = outputs[name]
             loss = sum(component_vals.values())
 
-            if torch.isnan(loss):
-                print(f'Warning: NaN loss at step {step + 1}, skipping gradient update')
+            # Skip gradient update on outliers: non-finite losses, or losses
+            # that are >10x the best epoch loss so far. The latter catches
+            # finite-but-explosive batches that would otherwise poison Adam's
+            # momentum and require a full reload to recover.
+            outlier_threshold = 10.0 * best_loss if torch.isfinite(best_loss) else None
+            if not torch.isfinite(loss):
+                print(f'Warning: non-finite loss ({loss.item():.3e}) at step {step + 1}, skipping gradient update')
+            elif outlier_threshold is not None and loss > outlier_threshold:
+                print(f'Warning: outlier loss ({loss.item():.3e} > 10 * best={best_loss.item():.4f}) '
+                      f'at step {step + 1}, skipping gradient update')
             else:
                 loss.backward()
                 if clip_grad_norm is not None:
@@ -229,6 +244,12 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 else:
                     checkpoint = torch.load(model_save_folder / 'model.pt', map_location='cpu', weights_only=False)
                     model.load_state_dict(checkpoint['state_dict'])
+                    # Mirror BaseModel.load(): restore non-state_dict attributes
+                    # (e.g. sparse synapse_counts, sign flips) so the reloaded
+                    # model is truly identical to the one that was saved.
+                    if 'extra_state' in checkpoint:
+                        model._restore_extra_state(
+                            checkpoint['extra_state'], model.device, model.dtype)
 
                     opt_state = torch.load(opt_path, map_location='cpu', weights_only=False)
                     opt.load_state_dict(opt_state['optimizer_state_dict'])
@@ -246,9 +267,14 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                         param_group['lr'] = alpha
 
                     time_since_best = 0
-                    best_loss = torch.tensor(float('inf'), device=model.device, dtype=model.dtype)
+                    # Keep best_loss unchanged: the reloaded checkpoint already
+                    # achieved this loss, so future saves should only fire when
+                    # we actually beat it. Resetting to inf would let the very
+                    # next epoch (always < inf) clobber the best checkpoint
+                    # with a worse one.
                     print(' -------------------------------- ')
-                    print(f'Reloaded best checkpoint. Learning rate reduced to {alpha:.2e}.')
+                    print(f'Reloaded best checkpoint (loss={best_loss.item():.4f}). '
+                          f'Learning rate reduced to {alpha:.2e}.')
                     print(' -------------------------------- ')
 
         if (epoch % save_every == 0) or (step >= num_steps):
