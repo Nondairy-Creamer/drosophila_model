@@ -35,6 +35,9 @@ dependencies = [
 include = ["drosophila_model*"]
 exclude = ["tests*", "models*", "logs*", "figures*", "math*"]
 
+[tool.setuptools.package-data]
+drosophila_model = ["config_default.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

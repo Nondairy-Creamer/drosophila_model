@@ -13,7 +13,9 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
             [
                 "[model]",
                 'device = "cpu"',
-                "readouts = ['FlowConv2Readout']",
+                "",
+                "[model.regions.optic_lobe]",
+                "readouts = ['FlowConv2Readout', 'L1Reg']",
                 "",
                 "[training]",
                 "num_steps = 123",
@@ -30,7 +32,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
     config = load_config(str(user_config))
 
     assert config["model"]["device"] == "cpu"
-    assert config["model"]["readouts"] == ['FlowConv2Readout']
+    assert config["model"]["regions"]["optic_lobe"]["readouts"] == ['FlowConv2Readout', 'L1Reg']
     assert config["training"]["num_steps"] == 123
     assert config["training"]["alpha"] == 0.123
     assert config["training"]["loss_components"] == ['flow_loss']

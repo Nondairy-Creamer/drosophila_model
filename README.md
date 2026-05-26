@@ -16,7 +16,7 @@ Launch multiple runs across all available GPUs:
 python submit_runs.py --runs-per-gpu 4
 ```
 
-Both scripts read parameters from `config.toml` (lives in the `drosophila_model_data` sibling directory by default).
+Both scripts read parameters from `config.toml` at the repo root, which overlays `drosophila_model/config_default.toml` (shipped inside the package). `config.toml` is gitignored — create your own from the defaults. Connectome data lives in the sibling `drosophila_model_data/` directory (path set by `[data].data_folder` in the config).
 
 ## Repo Structure
 

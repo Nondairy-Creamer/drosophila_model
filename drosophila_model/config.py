@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 import warnings
+from importlib import resources
 from pathlib import Path
 from typing import Any, Dict
 
@@ -26,9 +27,38 @@ except ImportError:  # pragma: no cover - tomli_w present per requirements for <
     toml_writer = None
 
 
+# Paths under which a user config may introduce keys that aren't in
+# config_default.toml. Used by :func:`_validate_user_keys`.
+#
+#   ('model', 'regions') -- region names are user-defined (the default only
+#       ships ``optic_lobe``; configs that introduce another area such as
+#       ``antenna_lobe`` add their own sub-table). The keys *inside* each
+#       region sub-table are validated at runtime by the corresponding
+#       ``RegionView._load_extras`` (see model_definition/regions.py), which
+#       raises on unknown region opts. So we stop validating at this depth.
+#
+#   ('run_info',) -- added programmatically by ``run_model.py`` to record
+#       per-run provenance (seed, device, run_id) and persisted into saved
+#       configs. Not part of the user-editable schema; allow any contents.
+_EXTENSIBLE_PATHS: frozenset[tuple[str, ...]] = frozenset({
+    ('model', 'regions'),
+    ('run_info',),
+})
+
+
 def load_config(config_path: str = 'config.toml') -> dict:
     '''
     Load configuration by merging default config with user config.
+
+    The default lives inside the installed package as
+    ``drosophila_model/config_default.toml`` and is located via
+    ``importlib.resources``, so it is findable regardless of CWD. The user
+    overlay (``config_path``, default ``config.toml``) is resolved relative to
+    CWD (or absolute) and is optional.
+
+    Every key in the user overlay must already exist in the default, except
+    for the extensible paths declared in :data:`_EXTENSIBLE_PATHS`. Unknown
+    keys raise ``ValueError`` to catch silent typos / dead config.
 
     The GPU/CPU device for the model is ``config['model']['device']``. A
     ``[run_info]`` table (if present) is only provenance from saved runs and is
@@ -37,17 +67,15 @@ def load_config(config_path: str = 'config.toml') -> dict:
     Returns:
         Dictionary containing the merged configuration
     '''
-    default_path = Path('config_default.toml')
-    if not default_path.exists():
-        raise FileNotFoundError(f'Default configuration file not found: {default_path}')
-
-    with open(default_path, 'rb') as f:
+    default_resource = resources.files('drosophila_model').joinpath('config_default.toml')
+    with default_resource.open('rb') as f:
         config = tomllib.load(f)
 
     user_path = Path(config_path)
     if user_path.exists():
         with open(user_path, 'rb') as f:
             user_config = tomllib.load(f)
+        _validate_user_keys(user_config, config, source=str(user_path))
         config = _merge_configs(config, user_config)
     elif config_path != 'config.toml':
         warnings.warn(
@@ -107,6 +135,55 @@ def _merge_configs(default: dict, user: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def _validate_user_keys(user: dict, default: dict, *, source: str,
+                        path: tuple[str, ...] = ()) -> None:
+    '''Strict-validate user config keys against the default schema.
+
+    Every key in ``user`` (recursively) must exist at the same path in
+    ``default``. Tables under :data:`_EXTENSIBLE_PATHS` are not recursed into;
+    their contents are validated elsewhere (e.g. region opts are validated by
+    ``RegionView._load_extras``).
+
+    Raises:
+        ValueError: with all unknown key paths joined into one message so the
+            user sees every problem at once instead of one-by-one.
+    '''
+    unknown: list[str] = []
+    _collect_unknown_keys(user, default, path, unknown)
+    if unknown:
+        joined = ', '.join(unknown)
+        raise ValueError(
+            f"Unknown config key(s) in {source} not present in "
+            f"config_default.toml: {joined}. Add them to "
+            f"drosophila_model/config_default.toml first if intentional."
+        )
+
+
+def _collect_unknown_keys(user: dict, default: dict, path: tuple[str, ...],
+                          unknown: list[str]) -> None:
+    '''Walker for :func:`_validate_user_keys`; appends dotted unknown paths.
+
+    A path in :data:`_EXTENSIBLE_PATHS` is treated as a closed leaf for
+    validation purposes: it (and its descendants) are accepted without
+    further checks. This lets the user introduce new region tables under
+    ``[model.regions.<name>]`` (per-region inner keys are validated by
+    :class:`drosophila_model.model_definition.regions.RegionView`) and lets
+    saved-run configs round-trip a programmatic ``[run_info]`` table.
+    '''
+    if path in _EXTENSIBLE_PATHS:
+        return
+    for key, user_val in user.items():
+        full = path + (key,)
+        if full in _EXTENSIBLE_PATHS:
+            continue
+        if key not in default:
+            unknown.append('.'.join(full))
+            continue
+        default_val = default[key]
+        if isinstance(user_val, dict) and isinstance(default_val, dict):
+            _collect_unknown_keys(user_val, default_val, full, unknown)
 
 
 def _convert_none_strings(config: dict | list | Any) -> dict | list | Any:
