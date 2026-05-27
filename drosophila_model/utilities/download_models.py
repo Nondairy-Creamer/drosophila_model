@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
-_LOCAL_MODELS_DIR = Path(__file__).resolve().parent / 'models'
+_LOCAL_MODELS_DIR = Path(__file__).resolve().parents[2] / 'models'
 _REMOTE_MODELS_DIR = '/workspace/drosophila_model/models'
 _SSH_CONFIG_PATH = Path.home() / '.ssh' / 'config'
 _SSH_KEY_PATH = '~/.ssh/id_ed25519'
