@@ -237,14 +237,14 @@ def load_connectome_from_dataframes(
     }
 
     kept_ids = set(cell_info_df['root_id'].to_numpy().tolist())
-    # Also drop synapses whose neuropil isn't claimed by any region — they
-    # can't drive any cell-of-interest connection and would otherwise pull
-    # in spurious edges through neurons that span regions.
-    claimed_neuropils: set[str] = set().union(*resolved.values())
+    # Region membership defines the *neuron* set (neurons with at least one
+    # synapse in a claimed neuropil). Connectivity is then a property of those
+    # neurons: keep every synapse between two kept neurons regardless of which
+    # neuropil it sits in. A synapse between two AL neurons that happens to be
+    # made outside the AL is still part of this circuit and must be included.
     syn = synapses_df[
         synapses_df['pre_root_id'].isin(kept_ids)
         & synapses_df['post_root_id'].isin(kept_ids)
-        & synapses_df['neuropil'].isin(claimed_neuropils)
     ]
 
     return ConnectomeData(
