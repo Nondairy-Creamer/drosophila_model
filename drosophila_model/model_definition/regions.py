@@ -894,10 +894,198 @@ class OpticLobeRegion(RegionView):
 
 
 class AntennaLobeRegion(RegionView):
-    """Placeholder antenna-lobe region. Add olfactory-specific methods and
-    ``_load_extras`` to read e.g. ``antenna_lobe_glomeruli.parquet``
-    when antenna-lobe data lands and modeling work begins.
+    """Antenna-lobe region. Claims every neuron with at least one synapse
+    in ``AL_L`` / ``AL_R`` (the connectome's only AL neuropil pair) — so
+    ORNs, LNs, and PNs all land in the same region via union membership.
+
+    Defaults for ``predict``:
+
+    - ``default_input_neurons``: every ORN glomerulus type in this slice
+      (cell types starting with ``'ORN_'``).
+    - ``default_output_neurons``: every projection-neuron type in this
+      slice (cell types whose name contains ``'PN'`` — captures
+      ``DA1_lPN``, ``VA1d_adPN``, ``VC5_lvPN``, ``M_vPNml53``,
+      ``VP3+_l2PN``, etc.).
+
+    Both are computed in :meth:`_load_extras` against the actual cell
+    types loaded into this region instead of being hard-coded class
+    constants — the connectome ships ~53 ORN types and ~43 PN types and
+    their exact set drifts with each upstream re-typing. User overrides
+    via ``[model.regions.antenna_lobe].input_neurons`` /
+    ``.output_neurons`` still win (see :meth:`RegionView.__init__`).
+
+    Predict-time hooks: one stimulus channel per input cell type
+    (i.e. one channel per glomerular ORN type) and per-cell-type recording
+    buffers shaped ``(B, T, N_ct)`` — no NaN padding because, unlike the
+    optic lobe, there is no shared geometry to align across cell types.
     """
+
+    neuropils = ['AL']
+
+    _ORN_PREFIX = 'ORN_'
+    _PN_SUBSTRING = 'PN'
+    # Minimum cell count per type for inclusion in dynamic defaults.
+    # The substring rule matches a long tail of singleton/doubleton
+    # types from ad-hoc upstream typing (a primary type with 1 cell
+    # named ``something_PN`` is rarely a real projection-neuron
+    # population). Five matches the canonical >=5-cells-per-type bar
+    # used elsewhere in the codebase to define ``common'' AL types.
+    _MIN_CELLS_PER_TYPE = 5
+
+    _DEFAULT_OPTS: dict = {}
+
+    def _load_extras(self, extras_dir: Path, opts: dict) -> None:
+        unknown = set(opts) - set(self._DEFAULT_OPTS)
+        if unknown:
+            raise ValueError(
+                f"AntennaLobeRegion got unknown region_opts keys: {sorted(unknown)}. "
+                f"Accepted keys: {sorted(self._DEFAULT_OPTS)}."
+            )
+
+        model = self.model
+        slice_types = model.cell_types[self.cell_indices.cpu().numpy()]
+        unique_types, type_counts = np.unique(slice_types, return_counts=True)
+        common_types = {
+            str(t) for t, c in zip(unique_types, type_counts)
+            if c >= self._MIN_CELLS_PER_TYPE
+        }
+
+        # Only fill in defaults the user didn't already pin via
+        # region_opts (RegionView.__init__ assigns those before us).
+        if not self.default_input_neurons:
+            self.default_input_neurons = sorted(
+                t for t in common_types if t.startswith(self._ORN_PREFIX)
+            )
+        if not self.default_output_neurons:
+            self.default_output_neurons = sorted(
+                t for t in common_types if self._PN_SUBSTRING in t
+            )
+
+    # ------------------------------------------------------------------
+    # Predict-time hooks
+    # ------------------------------------------------------------------
+
+    @property
+    def input_stim_size(self) -> int:
+        """One stimulus channel per input cell type (per glomerulus).
+
+        Counts only the cell types from :attr:`default_input_neurons`
+        that are actually present in the model's cell-type universe
+        after preprocessing (a glomerulus dropped by the synapse-count
+        threshold won't be drivable).
+        """
+        present = set(self.model.unique_cell_types)
+        return sum(1 for t in self.default_input_neurons if t in present)
+
+    def build_input_mapping(self, input_neurons):
+        """Map each input cell type to one stimulus channel.
+
+        Channel ``j`` drives every neuron of cell type
+        ``input_neurons[j]`` in this region. Cell types not present in
+        the model after preprocessing are silently skipped — their
+        channel index is reused by the next present type so the
+        stimulus axis stays contiguous.
+        """
+        model = self.model
+        cell_types_np = model.cell_types
+        region_neuron_set = set(self.cell_indices.cpu().numpy().tolist())
+
+        neuron_indices: list[int] = []
+        stimulus_indices: list[int] = []
+        present_types: list[str] = []
+        for ct in input_neurons:
+            type_neurons = np.flatnonzero(cell_types_np == ct)
+            type_neurons = [int(n) for n in type_neurons if int(n) in region_neuron_set]
+            if not type_neurons:
+                continue
+            channel = len(present_types)
+            present_types.append(ct)
+            neuron_indices.extend(type_neurons)
+            stimulus_indices.extend([channel] * len(type_neurons))
+
+        if not present_types:
+            return None
+
+        stim_to_cell_mapping = {
+            'neuron_index': torch.tensor(
+                neuron_indices, device=model.device, dtype=torch.int64,
+            ),
+            'stimulus_index': torch.tensor(
+                stimulus_indices, device=model.device, dtype=torch.int64,
+            ),
+        }
+        return stim_to_cell_mapping, {'input_neurons': list(present_types)}
+
+    def initialize_recording(self, num_batches, num_time, output_neurons,
+                             input_meta, record_synaptic,
+                             precomputed_output_mapping=None):
+        """Allocate per-cell-type ``(B, T, N_ct)`` voltage / firing-rate buffers.
+
+        No NaN padding (unlike :class:`OpticLobeRegion`) since AL has no
+        shared geometric axis to align across cell types — each output
+        type carries its own trailing axis sized to its own neuron count.
+        """
+        model = self.model
+        device, dtype = model.device, model.dtype
+        cell_types_np = model.cell_types
+        region_neuron_set = set(self.cell_indices.cpu().numpy().tolist())
+
+        if precomputed_output_mapping is not None:
+            readout_dict = precomputed_output_mapping
+            output_neurons = list(readout_dict.keys())
+        else:
+            readout_dict = {}
+            for ct in output_neurons:
+                type_neurons = np.flatnonzero(cell_types_np == ct)
+                type_neurons = np.array(
+                    [int(n) for n in type_neurons if int(n) in region_neuron_set],
+                    dtype=np.int64,
+                )
+                if type_neurons.size == 0:
+                    continue
+                readout_dict[ct] = {
+                    'neuron_indices': torch.tensor(
+                        type_neurons, device=device, dtype=torch.int64,
+                    ),
+                }
+            output_neurons = list(readout_dict.keys())
+
+        region_outputs: dict = {'voltage': {}, 'firing_rate': {}}
+        if record_synaptic:
+            region_outputs['synaptic_current'] = {}
+        for ct in output_neurons:
+            n_ct = readout_dict[ct]['neuron_indices'].numel()
+            shape = (num_batches, num_time, n_ct)
+            region_outputs['voltage'][ct] = torch.zeros(
+                shape, device=device, dtype=dtype,
+            )
+            region_outputs['firing_rate'][ct] = torch.zeros(
+                shape, device=device, dtype=dtype,
+            )
+            if record_synaptic:
+                region_outputs['synaptic_current'][ct] = torch.zeros(
+                    shape, device=device, dtype=dtype,
+                )
+
+        region_mapping = {
+            'input_mapping': None,  # filled in by predict()
+            'output_mapping': readout_dict,
+            'output_neurons': list(output_neurons),
+            'record_synaptic': record_synaptic,
+        }
+        return region_outputs, region_mapping
+
+    def record_step(self, t, v, fr, syn_current, region_outputs, region_mapping):
+        """Per-step writer: copy each output type's neurons into its buffer."""
+        readout_dict = region_mapping['output_mapping']
+        record_synaptic = region_mapping['record_synaptic']
+
+        for ct in region_mapping['output_neurons']:
+            ni = readout_dict[ct]['neuron_indices']
+            region_outputs['voltage'][ct][:, t, :] = v[:, ni]
+            region_outputs['firing_rate'][ct][:, t, :] = fr[:, ni]
+            if record_synaptic:
+                region_outputs['synaptic_current'][ct][:, t, :] = syn_current[:, ni]
 
 
 # ---------------------------------------------------------------------------

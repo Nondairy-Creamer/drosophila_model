@@ -218,6 +218,250 @@ class CurrentDynamics:
 
 
 # ---------------------------------------------------------------------------
+# CurrentDivisiveDynamics
+# ---------------------------------------------------------------------------
+
+
+class CurrentDivisiveDynamics:
+    """Current-based dynamics with divisive normalisation by inhibition.
+
+    Update rule::
+
+        v_{t+1} = p * v_t + (1 - p) * (
+            (W+ @ g(v_t) + stim) / (W- @ g(v_t) + sigma)
+            + offset
+        )
+
+    where ``W+`` / ``W-`` are the positive and negative parts of the
+    signed connectome weight matrix (``W-`` stored as a positive-magnitude
+    sparse tensor). Synaptic weights and per-cell-type input/output
+    strengths are parameterised exactly like :class:`CurrentDynamics`;
+    ``sigma`` is a per-cell-type positive semi-saturation constant
+    (stored in log space) that sets the gain at low inhibitory drive.
+
+    The numerator and denominator both feed off the same row-normalised
+    sum of presynaptic firing rates, so this is a Carandini-Heeger-style
+    canonical normalisation rather than a shunting-conductance model
+    (compare :class:`ConductanceDynamics`, where division by ``g_tot``
+    falls out of biophysical reversal-potential dynamics). The stimulus
+    enters the numerator alongside the excitatory recurrent drive, so the
+    feedforward input is divisively normalised by inhibition too — the
+    Carandini-Heeger form where the driving input is what gets normalised.
+    Offset is added *outside* the ratio.
+    """
+
+    def __init__(self, *, init_new_model=True, **kwargs):
+        super().__init__(**kwargs)
+
+        # Sign synapses (excit. +, inhib. -) and apply region anatomy
+        # overrides before splitting; identical to CurrentDynamics so the
+        # signs and overrides stay consistent across dynamics flavours.
+        self._initialize_synapse_signs()
+
+        self._save_init_inputs()
+
+        self._build_signed_split()
+
+        # Power vector for spectral-norm calculation (used by set_sigma_max).
+        power_vec_np = self.rng.standard_normal(self.num_neurons)
+        power_vec = torch.tensor(power_vec_np, device=self.device, dtype=self.dtype)
+        power_vec = power_vec / (power_vec.norm() + 1e-12)
+        self.register_buffer('_power_vec', power_vec)
+
+        def logit(p, eps=1e-6):
+            p = np.clip(p, eps, 1 - eps)
+            return np.log(p / (1 - p))
+
+        persistence_init = 0.5
+        stimulus_strength_init = 10.0
+        offset_init = 0.0
+        # Sigma sets the divisive gain at low inhibitory drive: at
+        # W- @ g(v) ~ 0, the divisive term collapses to (W+ @ g(v)) / sigma.
+        # Initialised to 1.0 so init looks like CurrentDynamics minus the
+        # negative path, then training pulls it down as inhibition kicks in.
+        sigma_init = 1.0
+
+        self.persistence_logit = torch.full(
+            (self.num_cell_types,), logit(persistence_init),
+            dtype=self.dtype, device=self.device,
+        )
+        self.stimulus_strength_log = torch.full(
+            (self.num_cell_types,), np.log(stimulus_strength_init),
+            dtype=self.dtype, device=self.device,
+        )
+        self.offset = torch.full(
+            (self.num_cell_types,), offset_init,
+            dtype=self.dtype, device=self.device,
+        )
+        self.sigma_log = torch.full(
+            (self.num_cell_types,), np.log(sigma_init),
+            dtype=self.dtype, device=self.device,
+        )
+
+        # Same fan-in / fan-out init as CurrentDynamics. We deliberately
+        # use the full signed-magnitude row/col sums here so a neuron's
+        # init scaling reflects its total connectome footprint, not just
+        # the excitatory or inhibitory share.
+        synapses_in_per_neuron, synapses_out_per_neuron = self._csr_abs_row_col_sums(
+            self.synapse_counts
+        )
+
+        synapses_in_per_cell_type = torch.zeros(
+            self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            synapses_in_per_cell_type[cti] = synapses_in_per_neuron[ct_mask].mean().clamp_min(1.0)
+        self.input_strength_log = torch.log(synapses_in_per_cell_type.pow(-1 / 2))
+
+        synapses_out_per_cell_type = torch.zeros(
+            self.num_cell_types, device=self.device, dtype=self.dtype)
+        for cti, ct in enumerate(self.unique_cell_types):
+            ct_mask = torch.from_numpy(self.cell_types == ct).to(device=self.device)
+            synapses_out_per_cell_type[cti] = synapses_out_per_neuron[ct_mask].mean().clamp_min(1.0)
+        self.output_strength_log = torch.log(synapses_out_per_cell_type.pow(-1 / 2))
+
+        self.persistence_logit = torch.nn.Parameter(self.persistence_logit)
+        self.stimulus_strength_log = torch.nn.Parameter(self.stimulus_strength_log)
+        self.offset = torch.nn.Parameter(self.offset)
+        self.input_strength_log = torch.nn.Parameter(self.input_strength_log)
+        self.output_strength_log = torch.nn.Parameter(self.output_strength_log)
+        self.sigma_log = torch.nn.Parameter(self.sigma_log)
+
+        self.add_noise_to_parameters(self.init_std)
+
+        if init_new_model:
+            with torch.no_grad():
+                self.set_sigma_max()
+
+    def _build_signed_split(self):
+        """Split signed ``synapse_counts`` into ``W+`` and ``|W-|`` CSRs.
+
+        ``W-`` is stored as positive magnitudes so it can sit inside the
+        divisor without sign-flipping at every forward pass. Zero-valued
+        entries (e.g. ablations from sign overrides) end up in neither.
+        """
+        sc = self.synapse_counts.to_sparse_coo().coalesce()
+        idx = sc.indices()
+        vals = sc.values()
+
+        pos_mask = vals > 0
+        neg_mask = vals < 0
+
+        size = sc.size()
+        self.synapse_counts_pos = torch.sparse_coo_tensor(
+            idx[:, pos_mask], vals[pos_mask],
+            size=size, dtype=self.dtype, device=self.device,
+        ).coalesce().to_sparse_csr()
+        self.synapse_counts_neg = torch.sparse_coo_tensor(
+            idx[:, neg_mask], -vals[neg_mask],
+            size=size, dtype=self.dtype, device=self.device,
+        ).coalesce().to_sparse_csr()
+
+    def _apply_sigma_scale(self, scale_factor):
+        """Shift ``output_strength_log`` by ``log(scale_factor)``."""
+        self.output_strength_log.add_(torch.log(scale_factor))
+
+    def calc_sigma_max(self, max_iter=100, eps=1e-12):
+        """Spectral norm of the linearised one-step Jacobian at v=0.
+
+        Linearises around ``v_0 = 0`` with ``f'(v_0) = 1`` (the same
+        slope-1 hack :class:`ConductanceDynamics` uses to avoid ReLU's
+        zero derivative at threshold). At ``v_0 = 0`` the inhibitory
+        denominator collapses to ``sigma`` since ``g(0) = 0``, which gives
+        a strict upper bound on the recurrent gain (the denominator only
+        grows with activity). The spectral target therefore constrains
+        the worst-case excitatory gain — which is what we want for the
+        init-time rescaling.
+        """
+        A_pos = self.synapse_counts_pos
+        A_pos_T = A_pos.t().to_sparse_csr()
+
+        D_in = self.input_strength_log.exp()[self.neuron_to_type_index]
+        D_out = self.output_strength_log.exp()[self.neuron_to_type_index]
+        sigma = self.sigma_log.exp()[self.neuron_to_type_index]
+        d = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        one_minus_d = 1.0 - d
+        gain = D_in / sigma
+
+        def apply_M(v):
+            v_scaled = v * D_out
+            y = torch.sparse.mm(A_pos, v_scaled.unsqueeze(1)).squeeze(1)
+            return y * gain
+
+        def apply_M_T(v):
+            v_scaled = v * gain
+            y = torch.sparse.mm(A_pos_T, v_scaled.unsqueeze(1)).squeeze(1)
+            return y * D_out
+
+        def apply_S(v):
+            return d * v + one_minus_d * apply_M(v)
+
+        def apply_S_T(v):
+            return d * v + apply_M_T(one_minus_d * v)
+
+        x = self._power_vec.clone()
+        x = x / (x.norm() + eps)
+
+        for _ in range(max_iter):
+            y = apply_S(x)
+            x = apply_S_T(y)
+            x = x / (x.norm() + eps)
+
+        y = apply_S(x)
+        sigma_max = y.norm()
+
+        self._power_vec.copy_(x.detach())
+        return sigma_max
+
+    def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
+        chosen = self._silencing_mask(neurons_to_silence, invert_silencing)
+        if chosen is not None:
+            with torch.no_grad():
+                self.output_strength_log.data[chosen] = np.log(self.silence_val)
+                if silence_inputs:
+                    self.input_strength_log.data[chosen] = np.log(self.silence_val)
+
+    def firing_rate(self, v):
+        return self.nonlinearity(v)
+
+    def forward(self, v_prev, u_t, stim_to_cell_mapping=None):
+        persistence = self.persistence_logit.sigmoid()[self.neuron_to_type_index]
+        input_strength = self.input_strength_log.exp()[self.neuron_to_type_index]
+        output_strength = self.output_strength_log.exp()[self.neuron_to_type_index]
+        stimulus_strength = self.stimulus_strength_log.exp()[self.neuron_to_type_index]
+        offset_all = self.offset[self.neuron_to_type_index]
+        sigma = self.sigma_log.exp()[self.neuron_to_type_index]
+
+        fr_scaled = self.nonlinearity(v_prev) * output_strength[None, :]
+
+        z_pos = torch.sparse.mm(
+            self.synapse_counts_pos, fr_scaled.transpose(0, 1),
+        ).transpose(0, 1) * input_strength[None, :]
+        z_neg = torch.sparse.mm(
+            self.synapse_counts_neg, fr_scaled.transpose(0, 1),
+        ).transpose(0, 1) * input_strength[None, :]
+
+        stim = torch.zeros_like(v_prev)
+        if stim_to_cell_mapping is None:
+            stim = u_t * stimulus_strength[None, :]
+        else:
+            cell_idx = stim_to_cell_mapping['neuron_index']
+            stim_idx = stim_to_cell_mapping['stimulus_index']
+            valid = (cell_idx >= 0) & (stim_idx >= 0)
+            if torch.any(valid):
+                ci = cell_idx[valid]
+                si = stim_idx[valid]
+                stim.index_add_(1, ci, u_t[:, si] * stimulus_strength[None, ci])
+
+        divisive = (z_pos + stim) / (z_neg + sigma[None, :])
+
+        v_next = persistence[None, :] * v_prev + (1 - persistence[None, :]) * (
+            divisive + offset_all[None, :]
+        )
+        return v_next
+
+
+# ---------------------------------------------------------------------------
 # ConductanceDynamics
 # ---------------------------------------------------------------------------
 

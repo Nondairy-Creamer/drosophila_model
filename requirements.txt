@@ -27,3 +27,4 @@ pytest
 h5py
 opencv-python
 pupil-apriltags
+scikit-learn
