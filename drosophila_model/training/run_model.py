@@ -20,7 +20,8 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     Run a single model training with specified seed and device.
 
     Args:
-        seed: Random seed for reproducibility. If None, uses current time.
+        seed: Random seed for reproducibility. If None, falls back to
+            config['training']['base_seed'].
         device_override: Override device from config (e.g., 'cuda:0', 'cuda:1', 'cpu')
         run_id: Optional identifier for this run (appended to timestamp)
         timestamp: Optional timestamp string. If None, generates a new timestamp.
@@ -30,6 +31,10 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
     # Load configuration from TOML file
     config = load_config(config_path or 'config.toml')
+
+    # Fall back to the config's base_seed when no seed was passed on the CLI.
+    if seed is None:
+        seed = config['training'].get('base_seed')
 
     # Override device if specified
     if device_override is not None:
@@ -177,7 +182,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a neural model')
-    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
+    parser.add_argument('--seed', type=int, default=None, help="Random seed for reproducibility. If omitted, uses config['training']['base_seed'].")
     parser.add_argument('--device', type=str, default=None, help='Device override (e.g., cuda:0, cuda:1, cpu)')
     parser.add_argument('--run-id', type=str, default=None, help='Optional identifier for this run')
     parser.add_argument('--timestamp', type=str, default=None, help='Tag or timestamp string for model folder naming')

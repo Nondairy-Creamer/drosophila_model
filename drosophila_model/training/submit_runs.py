@@ -122,18 +122,25 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
     return process, log_file
 
 
-def submit_runs(runs_per_gpu=1, base_seed=0, script_path=None, model_path=None, tag=None):
+def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None):
     """
     Submit multiple training runs across available GPUs.
     
     Args:
         runs_per_gpu: Number of runs to execute per GPU
-        base_seed: Base seed value (each run gets base_seed + run_index)
+        base_seed: Base seed value (each run gets base_seed + run_index). If
+            None, falls back to config['training']['base_seed'].
         script_path: Optional path to a run_model.py script. If None, runs the
             installed module ``drosophila_model.training.run_model``.
         model_path: Optional path to existing model folder to load
         tag: Optional tag to use instead of the auto-generated timestamp
     """
+    # Fall back to the config's base_seed when none was passed on the CLI.
+    if base_seed is None:
+        from drosophila_model.config import load_config
+        base_seed = load_config()['training'].get('base_seed', 0)
+        print(f"Using base seed from config: {base_seed}")
+
     timestamp = tag if tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
     print(f"Using tag for all runs: {timestamp}")
     
@@ -214,10 +221,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
     Examples:
-    # Run 4 jobs per GPU with base seed 0
+    # Run 4 jobs per GPU using the base seed from config
     python submit_runs.py --runs-per-gpu 4
     
-    # Run 10 jobs per GPU with custom seed
+    # Run 10 jobs per GPU with custom base seed
     python submit_runs.py --runs-per-gpu 10 --base-seed 100
                 """
     )
@@ -232,8 +239,9 @@ def main():
     parser.add_argument(
         '--base-seed',
         type=int,
-        default=0,
-        help='Base seed value. Each run gets base_seed + run_index (default: 0)'
+        default=None,
+        help="Base seed value. Each run gets base_seed + run_index. If omitted, "
+             "uses config['training']['base_seed']."
     )
     
     parser.add_argument(
