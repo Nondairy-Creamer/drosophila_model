@@ -65,7 +65,7 @@ def get_available_gpus():
     return [f'cuda:{i}' for i in range(num_gpus)]
 
 
-def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log_dir='logs', model_path=None):
+def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log_dir='logs', model_path=None, config_path=None):
     """
     Run a single training job with specified parameters.
     
@@ -78,6 +78,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
             installed module ``drosophila_model.training.run_model``.
         log_dir: Directory to store log files
         model_path: Optional path to existing model folder to load
+        config_path: Optional path to a config TOML passed through to run_model.
     
     Returns:
         tuple of (subprocess.Popen object, log file handle)
@@ -95,6 +96,8 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
         cmd.extend(['--timestamp', timestamp])
     if model_path is not None:
         cmd.extend(['--model-folder', model_path])
+    if config_path is not None:
+        cmd.extend(['--config-path', config_path])
     
     print(f"Starting run: seed={seed}, device={device}, run_id={run_id}")
     print(f"Command: {' '.join(cmd)}")
@@ -122,7 +125,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
     return process, log_file
 
 
-def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None):
+def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None, config_path=None):
     """
     Submit multiple training runs across available GPUs.
     
@@ -134,11 +137,13 @@ def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=Non
             installed module ``drosophila_model.training.run_model``.
         model_path: Optional path to existing model folder to load
         tag: Optional tag to use instead of the auto-generated timestamp
+        config_path: Optional path to a config TOML. Used to resolve the base
+            seed and passed through to each run_model subprocess.
     """
     # Fall back to the config's base_seed when none was passed on the CLI.
     if base_seed is None:
         from drosophila_model.config import load_config
-        base_seed = load_config()['training'].get('base_seed', 0)
+        base_seed = load_config(config_path or 'config.toml')['training'].get('base_seed', 0)
         print(f"Using base seed from config: {base_seed}")
 
     timestamp = tag if tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -186,7 +191,8 @@ def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=Non
             run_id=run_config['run_id'],
             timestamp=timestamp,
             script_path=script_path,
-            model_path=model_path
+            model_path=model_path,
+            config_path=config_path
         )
         _running_processes.append((process, run_config, log_file))
     
@@ -267,6 +273,15 @@ def main():
     )
     
     parser.add_argument(
+        '--config-path',
+        type=str,
+        default=None,
+        help='Path to config TOML to use for all runs (default: config.toml). '
+             'Passed through to each run_model subprocess and used to resolve '
+             'the base seed.'
+    )
+    
+    parser.add_argument(
         '--foreground', '--fg',
         action='store_true',
         default=False,
@@ -313,13 +328,23 @@ def main():
             sys.exit(1)
         model_path = str(model_path)
     
+    # Validate config path if provided
+    config_path = None
+    if args.config_path is not None:
+        config_path = Path(args.config_path)
+        if not config_path.exists():
+            print(f"Error: Config file not found at {config_path}")
+            sys.exit(1)
+        config_path = str(config_path)
+    
     # Submit runs
     submit_runs(
         runs_per_gpu=args.runs_per_gpu,
         base_seed=args.base_seed,
         script_path=script_path,
         model_path=model_path,
-        tag=args.tag
+        tag=args.tag,
+        config_path=config_path
     )
 
 
