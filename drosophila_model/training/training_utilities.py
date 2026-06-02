@@ -171,16 +171,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                     component_vals[name] = outputs[name]
             loss = sum(component_vals.values())
 
-            # Skip gradient update on outliers: non-finite losses, or losses
-            # that are >10x the best epoch loss so far. The latter catches
-            # finite-but-explosive batches that would otherwise poison Adam's
-            # momentum and require a full reload to recover.
-            outlier_threshold = 10.0 * best_loss if torch.isfinite(best_loss) else None
+            # Skip gradient update only on non-finite losses: a NaN/Inf
+            # backward() would propagate through every weight and the loss
+            # would stay non-finite forever. Finite-but-large outlier batches
+            # are left in; if they actually harm training, the plateau
+            # detection below reloads the best checkpoint and drops the LR.
             if not torch.isfinite(loss):
                 print(f'Warning: non-finite loss ({loss.item():.3e}) at step {step + 1}, skipping gradient update')
-            elif outlier_threshold is not None and loss > outlier_threshold:
-                print(f'Warning: outlier loss ({loss.item():.3e} > 10 * best={best_loss.item():.4f}) '
-                      f'at step {step + 1}, skipping gradient update')
             else:
                 loss.backward()
                 if clip_grad_norm is not None:
