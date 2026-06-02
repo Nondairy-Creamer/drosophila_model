@@ -208,11 +208,20 @@ class TemporalLRU(torch.nn.Module):
 
     _COMPLEX_DTYPE = {torch.float32: torch.complex64, torch.float64: torch.complex128}
 
-    def __init__(self, num_modes=4, dt=0.01, device='cpu', dtype='float32'):
+    def __init__(self, num_modes=4, dt=0.01, device='cpu', dtype='float32', rng=None):
         super().__init__()
         self.num_modes = num_modes
         self.dt = dt
         pt_dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+
+        # Initialise b_re / c_re from the supplied numpy generator so a model's
+        # single seeded ``self.rng`` drives every random init (matching the rest
+        # of the codebase). Fall back to the global torch RNG only when no
+        # generator is passed (e.g. standalone use outside a seeded model).
+        def _randn(shape):
+            if rng is None:
+                return torch.randn(shape, device=device, dtype=pt_dtype)
+            return torch.tensor(rng.standard_normal(shape), device=device, dtype=pt_dtype)
 
         self.log_gamma = torch.nn.Parameter(
             torch.zeros(num_modes, device=device, dtype=pt_dtype)
@@ -220,15 +229,11 @@ class TemporalLRU(torch.nn.Module):
         self.logit_omega = torch.nn.Parameter(
             torch.zeros(num_modes, device=device, dtype=pt_dtype)
         )
-        self.b_re = torch.nn.Parameter(
-            torch.randn(num_modes, device=device, dtype=pt_dtype) * 0.1
-        )
+        self.b_re = torch.nn.Parameter(_randn(num_modes) * 0.1)
         self.b_im = torch.nn.Parameter(
             torch.zeros(num_modes, device=device, dtype=pt_dtype)
         )
-        self.c_re = torch.nn.Parameter(
-            torch.randn(num_modes, device=device, dtype=pt_dtype) * 0.1
-        )
+        self.c_re = torch.nn.Parameter(_randn(num_modes) * 0.1)
         self.c_im = torch.nn.Parameter(
             torch.zeros(num_modes, device=device, dtype=pt_dtype)
         )

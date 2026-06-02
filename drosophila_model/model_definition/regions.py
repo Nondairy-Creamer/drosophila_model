@@ -462,7 +462,7 @@ class OpticLobeRegion(RegionView):
 
         self.temporal_lru = TemporalLRU(
             num_modes=self.num_temporal_modes, dt=model.dt,
-            device=model.device, dtype=model.dtype,
+            device=model.device, dtype=model.dtype, rng=model.rng,
         )
 
     def apply_input_conv(self, u_t, filter_state=None):

@@ -30,7 +30,7 @@ class StimulusDataset(Dataset):
 
 def train_model(model, inputs, target, output_neurons, input_neurons,
                 loss_components,
-                rng=np.random.default_rng(0), model_save_folder=None,
+                rng=None, model_save_folder=None,
                 num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, clip_grad_value=None,
                 reload_best_on_loss_jump=True,
@@ -38,6 +38,9 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 opt_state_dict=None, loss_history=None,
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0,
                 batch_size=None, train_mask=None):
+
+    if rng is None:
+        rng = np.random.default_rng(0)
 
     uses_two_eyes = 'odometry_loss' in loss_components
 
@@ -84,11 +87,17 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
     num_stimuli = inputs.shape[0]
     if batch_size is None or batch_size > num_stimuli:
         batch_size = num_stimuli
+    # Seed the DataLoader's shuffle from the same numpy generator so batch
+    # order is reproducible across runs with the same seed (otherwise shuffle
+    # draws from the un-seeded global torch RNG).
+    shuffle_generator = torch.Generator()
+    shuffle_generator.manual_seed(int(rng.integers(0, 2**63 - 1)))
     dataloader = DataLoader(
         StimulusDataset(inputs, target, train_mask),
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
+        generator=shuffle_generator,
     )
 
     step = 0
