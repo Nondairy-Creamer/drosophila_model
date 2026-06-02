@@ -68,6 +68,7 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
             config["model"].get("regions", {})
         ),
         data_folder=str(data_folder),
+        count_threshold=config["model"]["synapse_count_threshold"],
     )
 
     model_class = nm.compose_model_class(

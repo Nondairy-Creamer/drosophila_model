@@ -125,6 +125,7 @@ def build_model():
     connectome = cl.load_connectome(
         region_specs=region_specs,
         data_folder=data_folder,
+        count_threshold=2,
     )
 
     ModelClass = nm.compose_model_class('CurrentDivisiveDynamics')

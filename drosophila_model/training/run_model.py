@@ -86,11 +86,13 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             cell_info_df, synapses_df,
             region_specs=region_specs,
             data_folder=str(data_folder),
+            count_threshold=config['model']['synapse_count_threshold'],
         )
     else:
         connectome = cl.load_connectome(
             region_specs=region_specs,
             data_folder=config['data']['data_folder'],
+            count_threshold=config['model']['synapse_count_threshold'],
         )
 
     # Get model class from config: compose ConnectomeModel + dynamics at runtime.

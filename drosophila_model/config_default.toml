@@ -28,6 +28,11 @@ use_connectome_subset = []
 # since their structure (e.g. column alignment) is region-specific.
 [model.regions.optic_lobe]
 side                = 'right'
+# Membership stringency. false (default): a neuron joins this region if it
+# has >=1 above-threshold (synapse_count_threshold) connection in the
+# region's neuropils. true: only neurons whose every above-threshold
+# connection lies within the region (much more restrictive).
+intrinsic           = false
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5

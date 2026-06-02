@@ -177,6 +177,7 @@ from drosophila_model.utilities import connectome_loading as cl
 connectome = cl.load_connectome(
     region_specs=regions_mod.build_region_specs(config['model'].get('regions', {})),
     data_folder=config['data']['data_folder'],
+    count_threshold=config['model']['synapse_count_threshold'],
 )
 
 HandTunedModel = nm.compose_model_class('HandTunedDynamics')

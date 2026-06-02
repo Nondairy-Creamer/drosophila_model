@@ -100,6 +100,17 @@ class RegionView(nn.Module):
     # any of these neuropils is opted into this region (union membership;
     # see :func:`connectome_loading.resolve_sided_neuropils`).
     neuropils: list[str] = []
+    # Membership stringency, consumed at load time by
+    # :func:`connectome_loading.load_connectome_from_dataframes` (overridable
+    # per-instance via ``[model.regions.<area>].intrinsic``):
+    #   False (default): a neuron is in this region if it has at least one
+    #       above-threshold connection in any of this region's neuropils.
+    #   True: a neuron is in this region only if EVERY one of its
+    #       above-threshold connections lies within this region's neuropils
+    #       (much more restrictive — keeps only neurons intrinsic to the area).
+    # "Above-threshold" uses the model's ``synapse_count_threshold`` so the
+    # same thresholded matrix that drives the dynamics drives membership.
+    intrinsic: bool = False
     # Anatomy-prior sign overrides applied after NT-based signing. Each
     # entry is ``(presynaptic_cell_type, postsynaptic_cell_type, factor)``;
     # ``factor=-1`` flips the sign (e.g. for connections whose bulk-NT
@@ -1105,11 +1116,14 @@ def build_region_specs(
     """Translate config-style ``region_kwargs`` into loader ``region_specs``.
 
     For each region name present in ``region_kwargs`` and registered in
-    :data:`REGION_REGISTRY`, returns ``{'neuropils': <list>, 'side': <str>}``
-    where ``neuropils`` defaults to the class-level :attr:`RegionView.neuropils`
-    list (overridable per-instance via ``region_kwargs[<name>]['neuropils']``)
-    and ``side`` defaults to ``'both'``. Used by callers to drive
-    :func:`connectome_loading.load_connectome` straight from config.
+    :data:`REGION_REGISTRY`, returns ``{'neuropils': <list>, 'side': <str>,
+    'intrinsic': <bool>}`` where ``neuropils`` defaults to the class-level
+    :attr:`RegionView.neuropils` list (overridable per-instance via
+    ``region_kwargs[<name>]['neuropils']``), ``side`` defaults to ``'both'``,
+    and ``intrinsic`` defaults to the class-level :attr:`RegionView.intrinsic`
+    flag (overridable via ``region_kwargs[<name>]['intrinsic']``). Used by
+    callers to drive :func:`connectome_loading.load_connectome` straight from
+    config.
     """
     region_kwargs = region_kwargs or {}
     specs: dict[str, dict] = {}
@@ -1121,6 +1135,7 @@ def build_region_specs(
         specs[name] = {
             'neuropils': list(opts.get('neuropils', cls.neuropils)),
             'side': opts.get('side', 'both'),
+            'intrinsic': bool(opts.get('intrinsic', cls.intrinsic)),
         }
     return specs
 
@@ -1192,10 +1207,12 @@ def build_regions(
 
         opts = dict(region_kwargs.get(name, {}))
         # Consumed upstream / by RegionView.__init__; drop so subclass
-        # _load_extras unknown-key checks don't see them.
+        # _load_extras unknown-key checks don't see them. ``intrinsic`` and
+        # ``neuropils`` / ``side`` are membership knobs applied at load time.
         opts.pop('neurons_to_exclude', None)
         opts.pop('neuropils', None)
         opts.pop('side', None)
+        opts.pop('intrinsic', None)
         side = spec.get('side', 'both')
 
         regions[name] = cls(
@@ -1203,4 +1220,8 @@ def build_regions(
             cell_indices=cell_idx, side=side,
             region_opts=opts,
         )
+        # Record the resolved membership stringency used by the loader so
+        # it's introspectable on the built region (membership itself is
+        # already baked into ``cell_indices``).
+        regions[name].intrinsic = bool(spec.get('intrinsic', cls.intrinsic))
     return regions

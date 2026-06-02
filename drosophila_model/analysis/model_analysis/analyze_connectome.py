@@ -20,6 +20,7 @@ model = ModelClass(
     connectome=cl.load_connectome(
         region_specs=regions_mod.build_region_specs(config['model'].get('regions', {})),
         data_folder=config['data']['data_folder'],
+        count_threshold=config['model']['synapse_count_threshold'],
     ),
     device='cpu',
     init_new_model=False,  # Skip steady state finding for analysis
