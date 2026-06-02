@@ -1,0 +1,90 @@
+# Per-user identity used by `register_git_on_server.py`. Leave blank in the
+# default; users override in their local (gitignored) `config.toml`.
+[user]
+email = ''
+name  = ''
+
+[model]
+# Default model: visual-system only, single right eye, current-based dynamics.
+# This is a boilerplate that user configs override per-key. The [model.regions.*]
+# sub-tables below cover only the regions defaulted here (optic_lobe). Configs
+# that use other areas (e.g. antenna_lobe) supply their own region sub-table.
+model_type = 'ConnectomeModel'
+dynamics_type = 'CurrentDynamics'
+device = "cuda"
+dtype = "float32"
+use_layer_norm = false
+nonlinearity = "ReLU"
+dt = 0.01
+synapse_count_threshold = 2
+use_connectome_subset = []
+
+# Per-region option sub-tables. The set of region keys here drives which
+# areas get loaded by `connectome_loading.load_connectome` and which
+# RegionView subclasses get built. Each region owns its own `side`
+# ('right' | 'left' | 'both'); all other keys are forwarded verbatim to
+# that region's RegionView._load_extras (see regions.py). Each region
+# also owns its own `readouts` / `readout_neurons` / regularizer params
+# since their structure (e.g. column alignment) is region-specific.
+[model.regions.optic_lobe]
+side                = 'right'
+# Membership stringency. false (default): a neuron joins this region if it
+# has >=1 above-threshold (synapse_count_threshold) connection in the
+# region's neuropils. true: only neurons whose every above-threshold
+# connection lies within the region (much more restrictive).
+intrinsic           = false
+use_input_conv      = true
+conv_size_x         = 7
+input_pre_conv_size = 5
+num_temporal_modes  = 4
+readouts            = ['FlowConv2Readout']
+readout_neurons     = [
+    'T1', 'T2', 'T2a', 'T3',
+    'T4a', 'T4b', 'T4c', 'T4d',
+    'T5a', 'T5b', 'T5c', 'T5d',
+    'Tm1', 'Tm2', 'Tm3', 'Tm4',
+    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+]
+# Optional per-region overrides for ConnectomeModel.predict defaults. If
+# unset, the region's class-level defaults are used
+# (OpticLobeRegion: L1/L2/L3 inputs, T4/T5 outputs).
+# input_neurons  = ['L1', 'L2', 'L3']
+# output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+
+[model.regions.optic_lobe.regularizer_parameters]
+input_layer_l1 = 0.0
+
+[training]
+num_steps = 100000
+save_every = 1
+loss_components = ['flow_loss']
+input_noise_std = 0.0
+contrast_std = 0.0
+luminance_std = 0.0
+random_flip_input = false
+alpha = 0.01
+clip_norm = 1.0
+use_synthetic_data = false
+batch_size = 'none'
+
+[stimulus]
+stimulus_type = 'random_sine'
+stim_time = 1.0
+pre_stim_time = 0.0
+post_stim_time = 0.0
+seed = 0
+velocity_amp = 100.0
+velocity_time_scale = 0.5
+num_repeats = 1
+temporal_frequencies = [
+    2,
+    4,
+    8,
+]
+# expanding_dot stimulus: trials per polarity (default 50 light + 50 dark)
+expanding_dot_num_light = 50
+expanding_dot_num_dark = 50
+expanding_dot_filter_std = 2.5
+
+[data]
+data_folder = "../drosophila_model_data"

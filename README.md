@@ -16,7 +16,7 @@ Launch multiple runs across all available GPUs:
 python submit_runs.py --runs-per-gpu 4
 ```
 
-Both scripts read parameters from `config.toml` (lives in the `connectome_data` sibling directory by default).
+Both scripts read parameters from `config.toml` at the repo root, which overlays `drosophila_model/config_default.toml` (shipped inside the package). `config.toml` is gitignored — create your own from the defaults. Connectome data lives in the sibling `drosophila_model_data/` directory (path set by `[data].data_folder` in the config).
 
 ## Repo Structure
 
@@ -28,11 +28,12 @@ Both scripts read parameters from `config.toml` (lives in the `connectome_data` 
 | `run_model.py` | Entry point — loads config, builds model, generates stimulus, runs training loop |
 | `submit_runs.py` | Multi-GPU launcher — distributes `run_model.py` jobs across GPUs with different seeds |
 | `continue_training.py` | Resume training from a saved checkpoint |
-| `neural_models.py` | Model definitions (`NeuralModel`, `CurrentModel`, etc.) — connectome-constrained RNNs with decoders (see [model_architecture.md](model_architecture.md)) |
+| `neural_models.py` | Model definitions (`BaseRnn`, `CurrentModel`, etc.) — connectome-constrained RNNs with decoders (see [model_architecture.md](model_architecture.md)) |
 | `training_utilities.py` | Training loop, gradient updates, checkpointing |
 | `loss_functions.py` | Loss functions (MSE, correlation, cosine, combined) |
 | `stimulus_utilities.py` | Stimulus generation — random panoramas, sine gratings, drone footage, optic flow computation |
-| `data_utilities.py` | Config loading/saving, connectome data helpers |
+| `config.py` | Config loading/saving (`load_config`, `save_config`) |
+| `data_utilities.py` | Connectome data helpers |
 | `model_utilities.py` | Git provenance, misc model helpers |
 | `plotting_utilities.py` | Plotting helpers used during training |
 | `movie_utilities.py` | Video/animation utilities |
@@ -61,7 +62,7 @@ python tests/run_tests.py
 
 ## Key Concepts
 
-- **Connectome data** is stored in the sibling `connectome_data/` directory (parquet files for cell info, synapse counts, column positions).
+- **Connectome data** is stored in the sibling `drosophila_model_data/` directory (parquet files for cell info, synapse counts, column positions).
 - **Input neurons**: L1, L2, L3 (lamina cells that receive photoreceptor input).
 - **Output neurons**: T4a-d, T5a-d (direction-selective motion detectors for the four cardinal directions).
 - **Coordinate conventions** are documented in `coordinate_conventions.md`.

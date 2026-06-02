@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-import training_utilities as tu
+from drosophila_model.training import training_utilities as tu
 from tests.test_model_factory import build_model_from_test_config
 
 
@@ -13,8 +13,8 @@ def test_train_model_plateau_reload(capsys, tmp_path):
     if len(output_neurons) == 0:
         raise AssertionError("No output neurons available for plateau test")
 
-    inputs = torch.zeros((1, 1, model.num_columns), dtype=model.dtype, device=model.device)
-    target = {'optic_flow': torch.zeros((1, 1, model.num_columns, 2), dtype=model.dtype, device=model.device)}
+    inputs = torch.zeros((1, 1, model.regions['optic_lobe'].num_columns), dtype=model.dtype, device=model.device)
+    target = {'optic_flow': torch.zeros((1, 1, model.regions['optic_lobe'].num_columns, 2), dtype=model.dtype, device=model.device)}
 
     trained_model, loss_history, opt_state, info = tu.train_model(
         model,

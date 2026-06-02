@@ -1,9 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "drosophila-model"
+name = "connectome-model"
 version = "0.1.0"
-description = "Add your description here"
+description = "Drosophila connectome-based recurrent neural models."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 dependencies = [
     "av>=17.0.0",
     "debugpy>=1.8.20",
@@ -26,3 +30,14 @@ dependencies = [
     "torchaudio>=2.11.0",
     "torchvision>=0.26.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["drosophila_model*"]
+exclude = ["tests*", "models*", "logs*", "figures*", "math*"]
+
+[tool.setuptools.package-data]
+drosophila_model = ["config_default.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import data_utilities as du
+from drosophila_model.config import load_config
 
 
 def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
@@ -13,7 +13,9 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
             [
                 "[model]",
                 'device = "cpu"',
-                "readouts = ['FlowConv2Readout']",
+                "",
+                "[model.regions.optic_lobe]",
+                "readouts = ['FlowConv2Readout', 'L1Reg']",
                 "",
                 "[training]",
                 "num_steps = 123",
@@ -27,13 +29,13 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
         )
     )
 
-    config = du.load_config(str(user_config))
+    config = load_config(str(user_config))
 
     assert config["model"]["device"] == "cpu"
-    assert config["model"]["readouts"] == ['FlowConv2Readout']
+    assert config["model"]["regions"]["optic_lobe"]["readouts"] == ['FlowConv2Readout', 'L1Reg']
     assert config["training"]["num_steps"] == 123
     assert config["training"]["alpha"] == 0.123
     assert config["training"]["loss_components"] == ['flow_loss']
     assert config["training"]["clip_norm"] is None
     assert config["stimulus"]["seed"] is None
-    assert config["data"]["fly_eye"] == "right"
+    assert config["data"]["data_folder"] == "../drosophila_model_data"

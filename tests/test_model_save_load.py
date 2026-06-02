@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-import neural_models as nm
+from drosophila_model.model_definition import neural_models as nm
 from tests.test_model_factory import build_model_from_test_config
 
 
@@ -11,7 +11,7 @@ def test_model_save_load_roundtrip(tmp_path):
     model_path = Path(tmp_path) / "model.pt"
 
     model.save(model_path)
-    loaded = nm.NeuralModel.load(model_path, device="cpu", dtype="float32", freeze_params=False)
+    loaded = nm.BaseRnn.load(model_path, device="cpu", dtype="float32", freeze_params=False)
 
     original_state = model.state_dict()
     loaded_state = loaded.state_dict()

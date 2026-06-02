@@ -5,23 +5,36 @@ import pandas as pd
 import sys
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-import data_utilities as du
-import neural_models as nm
+from drosophila_model.config import load_config
+from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.utilities import data_utilities as du
+from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.model_definition import regions as regions_mod
 
 
-def _resolve_connectome_folder(repo_root: Path, connectome_folder: str) -> Path:
-    connectome_path = Path(connectome_folder)
+def _resolve_data_folder(repo_root: Path, data_folder: str) -> Path:
+    connectome_path = Path(data_folder)
     if connectome_path.is_absolute():
         return connectome_path
-    return (repo_root / connectome_path).resolve()
+    candidate = (repo_root / connectome_path).resolve()
+    if candidate.exists():
+        return candidate
+    # Fall back to the live config.toml's data folder so dev machines
+    # without the in-repo fixture (which only exists on CI) can still run.
+    live_path = repo_root / "config.toml"
+    if live_path.exists():
+        live_cfg = load_config(str(live_path))
+        live_folder = Path(live_cfg["data"]["data_folder"])
+        if live_folder.is_absolute() and live_folder.exists():
+            return live_folder
+    return candidate
 
 
 def load_test_config() -> tuple[dict, Path]:
     repo_root = Path(__file__).resolve().parents[1]
-    config = du.load_config(str(repo_root / "tests" / "config_test.toml"))
+    config = load_config(str(repo_root / "tests" / "config_test.toml"))
     return config, repo_root
 
 
@@ -30,41 +43,46 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
         readouts = ['FlowConv2Readout']
     config, repo_root = load_test_config()
     config["model"]["device"] = "cpu"
-    config["model"]["readouts"] = readouts
-    config["model"]["use_input_conv"] = use_input_conv
+    config["model"].setdefault("regions", {}).setdefault("optic_lobe", {})
+    config["model"]["regions"]["optic_lobe"]["use_input_conv"] = use_input_conv
+    config["model"]["regions"]["optic_lobe"]["readouts"] = readouts
 
-    connectome_folder = _resolve_connectome_folder(repo_root, config["data"]["connectome_folder"])
-    cell_info_df = pd.read_parquet(connectome_folder / "optic_lobes_cell_info.parquet")
-    synapse_counts_df = pd.read_parquet(connectome_folder / "optic_lobes_synapse_counts.parquet")
-    column_info_df = pd.read_parquet(connectome_folder / "optic_lobes_column_info.parquet")
+    data_folder = _resolve_data_folder(repo_root, config["data"]["data_folder"])
+    baked = data_folder / "connectome_data" / "baked"
+    cell_info_df = pd.read_parquet(baked / "cell_info.parquet")
+    synapses_df = pd.read_parquet(baked / "synapses.parquet")
 
     input_neurons = ["L1", "L2", "L3"]
     output_neurons = ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]
 
     if len(config["model"]["use_connectome_subset"]) > 0:
-        cell_info_df, synapse_counts_df = du.get_connectome_subset(
-            cell_info_df, synapse_counts_df, config["model"]["use_connectome_subset"]
+        cell_info_df, synapses_df = du.get_connectome_subset(
+            cell_info_df, synapses_df, config["model"]["use_connectome_subset"]
         )
         input_neurons = [i for i in input_neurons if i in config["model"]["use_connectome_subset"]]
         output_neurons = [i for i in output_neurons if i in config["model"]["use_connectome_subset"]]
 
-    model_type = config["model"].get("model_type")
-    model_class = getattr(nm, model_type)
+    connectome = cl.load_connectome_from_dataframes(
+        cell_info_df, synapses_df,
+        region_specs=regions_mod.build_region_specs(
+            config["model"].get("regions", {})
+        ),
+        data_folder=str(data_folder),
+        count_threshold=config["model"]["synapse_count_threshold"],
+    )
+
+    model_class = nm.compose_model_class(
+        dynamics_type=config["model"]["dynamics_type"],
+        model_type=config["model"]["model_type"],
+    )
 
     model = model_class(
-        synapse_counts_coo=synapse_counts_df[["pre_root_id", "post_root_id", "synapse_counts"]].to_numpy(),
-        root_ids=cell_info_df["root_id"].to_numpy(),
-        cell_types=cell_info_df["type"].to_numpy(),
-        neurotransmitters=cell_info_df["neurotransmitter"].to_numpy(),
-        column_indices=cell_info_df["column_index"].to_numpy(),
-        column_phi_theta=column_info_df[["phi", "theta"]].to_numpy(),
-        column_p_q=column_info_df[["p", "q"]].to_numpy(),
+        connectome=connectome,
         nonlinearity=config["model"]["nonlinearity"],
         count_threshold=config["model"]["synapse_count_threshold"],
         device=config["model"]["device"],
         dtype=config["model"]["dtype"],
-        readouts=config["model"]["readouts"],
-        use_input_conv=config["model"]["use_input_conv"],
+        region_kwargs=config["model"].get("regions", {}),
         dt=config["model"]["dt"],
         seed=0,
         commit_hash=None,
