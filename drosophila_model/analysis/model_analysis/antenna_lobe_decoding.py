@@ -39,13 +39,13 @@ NUM_TRIALS = 10
 # input channels with abs-Gaussian weights. Mirrors sparse glomerular
 # activation in real ORN responses and keeps the input non-negative so
 # the network's ReLU doesn't throw half of every pattern away.
-INPUT_SPARSITY = 0.1
+INPUT_SPARSITY = 0.3
 # Per-trial concentration is log-uniform across LOG_INT_LO..LOG_INT_HI
 # decades. This is the variable PN divisive normalisation is supposed
 # to compensate for — without it, ORN vs PN decoding is measured at a
 # single operating point and div norm has little reason to help.
-LOG_INT_LO = -1.5
-LOG_INT_HI = 1.5
+LOG_INT_LO = -3.0
+LOG_INT_HI = 1.0
 # Transduction-style noise on the stimulus *channels* (one channel per ORN
 # type, shared across all cells of that type).
 INPUT_NOISE_STD = 0.0
@@ -61,16 +61,29 @@ EVAL_START_S = STIM_ONSET_S + 0.25
 EVAL_END_S = STIM_DURATION_S
 # Trials per predict() call. Logical batch dim is NUM_ODORS*NUM_TRIALS;
 # we chunk it to keep the per-call activity tensor (B*T*N_neurons floats)
-# bounded.
-BATCH_SIZE = 200
+# bounded. Set to NUM_ODORS * NUM_TRIALS to run the whole set in a single
+# predict() call (no chunking).
+BATCH_SIZE = int(NUM_ODORS * NUM_TRIALS / 2)
 # 50/50 train/test.
 TEST_FRAC = 0.5
 SEED = 0
 
+# Inverse L2 regularization strength for the logistic decoder (sklearn's
+# ``C``). Larger = weaker penalty; ``np.inf`` disables regularization
+# entirely (the sklearn-1.8 recommended way, replacing ``penalty=None``).
+LOGREG_C = 5.0
+
+# Restrict both decoders to N glomeruli that have BOTH an ORN type and a
+# PN type, matched 1-to-1 (column j of the ORN feature matrix and column j
+# of the PN feature matrix are the same glomerulus). Fewer features ->
+# lower accuracy and less overfitting. Set to ``None`` to decode from all
+# available cell types (ORN and PN columns then need not correspond).
+N_DECODE_GLOMERULI = 40
+
 # Per-cell-type dynamics parameters. ``set_sigma_max`` is skipped and the
 # scalar input/output strength overrides below replace the per-cell-type
 # fan-in / fan-out init, giving a single global recurrent gain knob.
-INIT_SIGMA = 1e0
+INIT_SIGMA = 1e-1
 INIT_OFFSET = 0.0
 INIT_INPUT_STRENGTH = 1e-3
 INIT_OUTPUT_STRENGTH = 1.0
@@ -82,13 +95,38 @@ INIT_PERSISTENCE = 0.75
 # constructor default of ~10 swamps the divisive term).
 INIT_STIMULUS_STRENGTH = 1.0
 
+# Dynamics flavour for the AL model, passed straight to
+# ``compose_model_class``. Options:
+#   'CurrentDivisiveDynamics' -> excitation divided by inhibition
+#                                (Carandini-Heeger normalisation).
+#   'CurrentDynamics'         -> subtractive: inhibition enters as
+#                                negative current.
+#   'ConductanceDynamics'     -> biophysical conductance model
+#                                (per-transmitter reversal potentials,
+#                                leak conductance, capacitance, threshold).
+# The current/divisive pair share the uniform-gain parameterisation pinned
+# by ``initialize_parameters``; the conductance model has a different
+# parameter set (no persistence/offset/sigma) and keeps its own
+# biophysical defaults instead (see ``_CURRENT_FAMILY`` / main).
+DYNAMICS_TYPE = 'CurrentDivisiveDynamics'
+
+# Dynamics that share the current-style uniform-gain init pinned by
+# ``initialize_parameters``. ConductanceDynamics is intentionally absent:
+# its biophysical defaults are already sensible and on a different scale.
+_CURRENT_FAMILY = ('CurrentDynamics', 'CurrentDivisiveDynamics')
+# DYNAMICS_TYPE = 'CurrentDynamics'
+
 # Minimum cells-per-type to include a PN-substring type in the readout.
 # Region default is 5; lowering to 2 recovers the long tail of singleton
 # / doubleton PN types so PN feature dim matches ORN's.
 MIN_CELLS_PER_PN_TYPE = 5
 
-DEVICE = 'cpu'
-DTYPE = 'float32'
+# Device/dtype come from the local config (config.toml overlaying
+# config_default.toml) via load_config(), so the GPU/CPU choice is set in
+# one place — config['model']['device'] — rather than hard-coded here.
+_CONFIG = load_config()
+DEVICE = _CONFIG['model']['device']
+DTYPE = _CONFIG['model']['dtype']
 
 # Concentration-binned accuracy and demo concentration sweep.
 N_CONC_BINS = 8
@@ -103,6 +141,7 @@ TRACE_LOG_INT = 1.0
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OUT_DIR = _PROJECT_ROOT / 'figures' / 'antenna_lobe_decoding'
 OUT_PNG = OUT_DIR / 'decoding_accuracy.png'
+OUT_PNG_TRAIN = OUT_DIR / 'decoding_accuracy_train.png'
 OUT_PNG_TRACES = OUT_DIR / 'time_traces.png'
 
 ORN_COLOR = '#d35'
@@ -110,9 +149,8 @@ PN_COLOR = '#3a9'
 
 
 def build_model():
-    """Compose CurrentDivisiveDynamics + AntennaLobeRegion and return it."""
-    config = load_config()
-    data_folder = config['data']['data_folder']
+    """Compose ``DYNAMICS_TYPE`` + AntennaLobeRegion and return it."""
+    data_folder = _CONFIG['data']['data_folder']
 
     region_specs = {
         'antenna_lobe': {
@@ -128,7 +166,7 @@ def build_model():
         count_threshold=2,
     )
 
-    ModelClass = nm.compose_model_class('CurrentDivisiveDynamics')
+    ModelClass = nm.compose_model_class(DYNAMICS_TYPE)
     model = ModelClass(
         connectome=connectome,
         nonlinearity='ReLU',
@@ -186,16 +224,27 @@ def initialize_parameters(
     — i.e. a clean global gain knob. Sigma, offset, persistence, and
     stimulus_strength are pinned to uniform values too. Must be called
     *before* ``find_steady_state``.
+
+    ``sigma`` is only meaningful for the divisive dynamics (the divisive
+    denominator's semi-saturation constant); the subtractive
+    ``CurrentDynamics`` has no ``sigma_log`` parameter, so it's pinned only
+    when present.
     """
     import math
     p = float(np.clip(persistence, 1e-6, 1 - 1e-6))
     persistence_logit = math.log(p / (1 - p))
     with torch.no_grad():
-        model.sigma_log.fill_(math.log(sigma))
-        model.offset.fill_(offset)
+        # Guard each attribute: the current/divisive models share these
+        # parameters, but other dynamics (e.g. ConductanceDynamics) omit
+        # some of them, so only pin what the instance actually has.
+        if hasattr(model, 'sigma_log'):
+            model.sigma_log.fill_(math.log(sigma))
+        if hasattr(model, 'offset'):
+            model.offset.fill_(offset)
+        if hasattr(model, 'persistence_logit'):
+            model.persistence_logit.fill_(persistence_logit)
         model.input_strength_log.fill_(math.log(input_strength))
         model.output_strength_log.fill_(math.log(output_strength))
-        model.persistence_logit.fill_(persistence_logit)
         model.stimulus_strength_log.fill_(math.log(stimulus_strength))
 
 
@@ -427,6 +476,101 @@ def collect_type_averaged_activity(model, trials, noise_std=0.0):
     return orn_features, pn_features, orn_types, pn_types
 
 
+def _glomerulus_maps(model, orn_types, pn_types):
+    """Parse glomerulus labels from ORN/PN type names.
+
+    ORN types are named ``ORN_<glom>`` (so ``ORN_DA1`` -> glomerulus
+    ``DA1``); PN types embed the glomerulus as the prefix before the first
+    underscore (``DA1_lPN`` -> ``DA1``, ``VA1d_adPN`` -> ``VA1d``,
+    ``M_vPNml53`` -> ``M`` for multiglomerular PNs).
+
+    Returns ``(orn_by_glom, pn_by_glom, count_of)`` where ``orn_by_glom``
+    maps glomerulus -> ORN type, ``pn_by_glom`` maps glomerulus -> list of
+    PN types, and ``count_of`` maps cell-type name -> cell count.
+    """
+    region = model.regions['antenna_lobe']
+    slice_types = model.cell_types[region.cell_indices.cpu().numpy()]
+    uniq, cnts = np.unique(slice_types, return_counts=True)
+    count_of = {str(t): int(c) for t, c in zip(uniq, cnts)}
+
+    orn_by_glom = {
+        t[len('ORN_'):]: t for t in orn_types if t.startswith('ORN_')
+    }
+    pn_by_glom: dict[str, list[str]] = {}
+    for t in pn_types:
+        pn_by_glom.setdefault(t.split('_', 1)[0], []).append(t)
+    return orn_by_glom, pn_by_glom, count_of
+
+
+def match_orn_pn_by_glomerulus(model, orn_types, pn_types, n_glomeruli):
+    """Pair ORN and PN feature columns that share a glomerulus.
+
+    A glomerulus is matchable when both an ORN type and at least one PN
+    type exist for it. When a glomerulus has multiple PN types, the one
+    with the most cells is chosen — the largest PN population for that
+    glomerulus. See :func:`_glomerulus_maps` for the name-parsing rules.
+
+    ``orn_types`` / ``pn_types`` are the feature-column label lists (in
+    column order) returned by :func:`collect_type_averaged_activity`.
+
+    Returns ``(glomeruli, orn_sel, pn_sel)`` truncated to the first
+    ``n_glomeruli`` shared glomeruli (sorted by name); ``orn_sel[j]`` and
+    ``pn_sel[j]`` are the ORN and PN cell-type names for ``glomeruli[j]``.
+    Pass ``n_glomeruli=None`` to keep every shared glomerulus.
+    """
+    orn_by_glom, pn_by_glom, count_of = _glomerulus_maps(
+        model, orn_types, pn_types,
+    )
+
+    glomeruli = sorted(set(orn_by_glom) & set(pn_by_glom))
+    if n_glomeruli is not None:
+        glomeruli = glomeruli[:n_glomeruli]
+
+    orn_sel = [orn_by_glom[g] for g in glomeruli]
+    pn_sel = [
+        max(pn_by_glom[g], key=lambda t: count_of.get(t, 0))
+        for g in glomeruli
+    ]
+    return glomeruli, orn_sel, pn_sel
+
+
+def report_orn_pn_matching(model, orn_types, pn_types):
+    """Print every matched ORN<->PN glomerulus pair, then the ORN types
+    and PN types that have no partner in the other population.
+
+    Uses the same name-parsing as :func:`match_orn_pn_by_glomerulus` so the
+    report reflects exactly what the matcher would pair (no truncation).
+    """
+    orn_by_glom, pn_by_glom, count_of = _glomerulus_maps(
+        model, orn_types, pn_types,
+    )
+    matched = sorted(set(orn_by_glom) & set(pn_by_glom))
+    orn_only = sorted(set(orn_by_glom) - set(pn_by_glom))
+    pn_only = sorted(set(pn_by_glom) - set(orn_by_glom))
+
+    print(f"\nMatched ORN<->PN pairs ({len(matched)} glomeruli):")
+    for g in matched:
+        orn = orn_by_glom[g]
+        pns = pn_by_glom[g]
+        best = max(pns, key=lambda t: count_of.get(t, 0))
+        extra = (f"  [also {[p for p in pns if p != best]}]"
+                 if len(pns) > 1 else '')
+        print(f"  {g:6s}  {orn} (n={count_of.get(orn)})  <->  "
+              f"{best} (n={count_of.get(best)}){extra}")
+
+    print(f"\nUnmatched ORN types (no PN in this slice) "
+          f"({len(orn_only)}):")
+    for g in orn_only:
+        print(f"  {orn_by_glom[g]} (n={count_of.get(orn_by_glom[g])})")
+
+    n_pn_types = sum(len(pn_by_glom[g]) for g in pn_only)
+    print(f"\nUnmatched PN types (no ORN in this slice) "
+          f"({n_pn_types} types across {len(pn_only)} glomerulus labels):")
+    for g in pn_only:
+        for p in sorted(pn_by_glom[g]):
+            print(f"  {p} (n={count_of.get(p)})  [glom={g}]")
+
+
 def decode(features, odor_id, name):
     """Train/test split, fit logistic regression.
 
@@ -434,9 +578,17 @@ def decode(features, odor_id, name):
     * NUM_TRIALS. Stratified split keeps each odor-identity class evenly
     represented in train and test.
 
-    Returns ``(acc, predictions, test_idx, y_test)``. ``test_idx`` indexes
-    into the original ``features`` / ``odor_id`` arrays so callers can
-    align other per-trial metadata (e.g. log-intensity) with predictions.
+    Returns a dict with both splits' accuracy, predictions, original-array
+    indices, and ground-truth labels::
+
+        {
+            'train_acc', 'train_pred', 'train_idx', 'y_train',
+            'test_acc',  'test_pred',  'test_idx',  'y_test',
+        }
+
+    The ``*_idx`` arrays index into the original ``features`` / ``odor_id``
+    arrays so callers can align other per-trial metadata (e.g.
+    log-intensity) with predictions for either split.
     """
     idx = np.arange(len(odor_id))
     idx_train, idx_test = train_test_split(
@@ -445,18 +597,27 @@ def decode(features, odor_id, name):
     X_train, X_test = features[idx_train], features[idx_test]
     y_train, y_test = odor_id[idx_train], odor_id[idx_test]
 
-    # Multinomial logistic regression on the raw firing-rate features. No
-    # z-scoring -- the decoder is allowed to lean on absolute firing rate.
-    # sklearn 1.7 dropped multi_class (lbfgs is multinomial by default);
-    # 1.8 dropped n_jobs for LogisticRegression.
-    clf = LogisticRegression(C=1.0, max_iter=1000, solver='lbfgs')
+    # Multinomial logistic regression. Features are expected to be
+    # pre-scaled by the caller (each population divided by a single global
+    # STD; see main) so ORN and PN sit on equal footing without per-feature
+    # (per-glomerulus) standardization. sklearn 1.7 dropped multi_class
+    # (lbfgs is multinomial by default); 1.8 dropped n_jobs.
+    clf = LogisticRegression(C=LOGREG_C, max_iter=1000, solver='lbfgs')
     clf.fit(X_train, y_train)
-    pred = clf.predict(X_test)
-    acc = float((pred == y_test).mean())
-    print(f"  {name}: test accuracy = {acc:.4f} "
+    train_pred = clf.predict(X_train)
+    test_pred = clf.predict(X_test)
+    train_acc = float((train_pred == y_train).mean())
+    test_acc = float((test_pred == y_test).mean())
+    print(f"  {name}: train accuracy = {train_acc:.4f}, "
+          f"test accuracy = {test_acc:.4f} "
           f"(features: {features.shape[1]}, train: {len(y_train)}, "
           f"test: {len(y_test)})")
-    return acc, pred, idx_test, y_test
+    return {
+        'train_acc': train_acc, 'train_pred': train_pred,
+        'train_idx': idx_train, 'y_train': y_train,
+        'test_acc': test_acc, 'test_pred': test_pred,
+        'test_idx': idx_test, 'y_test': y_test,
+    }
 
 
 def accuracy_by_log_intensity(pred, y_test, log_intensity_test):
@@ -480,9 +641,15 @@ def plot_results(
     demo_log_conc, demo_orn, demo_pn,
     n_orn_types, n_pn_types,
     out_path,
+    split_label='test',
 ):
     """Three-panel figure: overall accuracy, accuracy-vs-concentration,
-    and per-type concentration tuning for one demo odor."""
+    and per-type concentration tuning for one demo odor.
+
+    ``split_label`` ('train' or 'test') only affects titles/suptitle; the
+    same function renders either split so train and test figures stay
+    visually identical apart from the label.
+    """
     chance = 1.0 / NUM_ODORS
     fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
@@ -498,7 +665,7 @@ def plot_results(
                     label=f'chance = {chance:.3f}')
     axes[0].set_ylabel('classification accuracy')
     axes[0].set_ylim(0, 1.05)
-    axes[0].set_title('Overall identity decoding')
+    axes[0].set_title(f'Overall identity decoding ({split_label})')
     axes[0].legend(loc='upper right', fontsize=9)
 
     # Panel 2: accuracy vs log10 concentration.
@@ -510,7 +677,7 @@ def plot_results(
     axes[1].set_xlabel(r'$\log_{10}$ concentration')
     axes[1].set_ylabel('accuracy')
     axes[1].set_ylim(0, 1.05)
-    axes[1].set_title('Accuracy vs concentration')
+    axes[1].set_title(f'Accuracy vs concentration ({split_label})')
     axes[1].legend(loc='lower right', fontsize=9)
 
     # Panel 3: per-type response of one odor across concentrations.
@@ -526,7 +693,8 @@ def plot_results(
     )
 
     fig.suptitle(
-        f'AL CurrentDivisive: {NUM_ODORS} odors x {NUM_TRIALS} trials, '
+        f'AL {DYNAMICS_TYPE} [{split_label}]: '
+        f'{NUM_ODORS} odors x {NUM_TRIALS} trials, '
         f'noise={INPUT_NOISE_STD}, sparsity={INPUT_SPARSITY}, '
         f'log10 conc in [{LOG_INT_LO}, {LOG_INT_HI}]',
         fontsize=10, y=1.02,
@@ -578,7 +746,7 @@ def plot_time_traces(
 
 def main():
     rng = np.random.default_rng(SEED)
-    print("Building AL-only CurrentDivisiveDynamics model ...")
+    print(f"Building AL-only {DYNAMICS_TYPE} model ...")
     model = build_model()
     region = model.regions['antenna_lobe']
     pn_types = expand_pn_output_types(model)
@@ -590,13 +758,21 @@ def main():
           f"num_input_types = {len(region.default_input_neurons)}, "
           f"num_output_types (PN) = {len(region.default_output_neurons)}")
 
-    print(f"Initializing parameters (uniform): "
-          f"input_strength={INIT_INPUT_STRENGTH}, "
-          f"output_strength={INIT_OUTPUT_STRENGTH}, "
-          f"sigma={INIT_SIGMA}, offset={INIT_OFFSET}, "
-          f"persistence={INIT_PERSISTENCE} "
-          f"(skipping set_sigma_max)")
-    initialize_parameters(model)
+    if DYNAMICS_TYPE in _CURRENT_FAMILY:
+        print(f"Initializing parameters (uniform): "
+              f"input_strength={INIT_INPUT_STRENGTH}, "
+              f"output_strength={INIT_OUTPUT_STRENGTH}, "
+              f"sigma={INIT_SIGMA}, offset={INIT_OFFSET}, "
+              f"persistence={INIT_PERSISTENCE} "
+              f"(skipping set_sigma_max)")
+        initialize_parameters(model)
+    else:
+        # ConductanceDynamics: keep the biophysical defaults (reversal
+        # potentials, leak conductance, capacitance, threshold), which are
+        # already spectral-normalised via set_sigma_max in its __init__ and
+        # live on a different scale than the current-style gain knobs.
+        print(f"Using {DYNAMICS_TYPE} built-in biophysical init "
+              f"(no uniform parameter pinning)")
 
     print("Finding steady state ...")
     model.find_steady_state()
@@ -624,19 +800,59 @@ def main():
     print(f"  PN features shape:  {pn_features.shape} "
           f"(types: {len(pn_types)})")
 
-    print("Decoding odor identity ...")
-    orn_acc, orn_pred, orn_test_idx, orn_y_test = decode(
-        orn_features, odor_id, name='ORN type-averaged',
-    )
-    pn_acc, pn_pred, pn_test_idx, pn_y_test = decode(
-        pn_features, odor_id, name='PN  type-averaged',
-    )
+    report_orn_pn_matching(model, orn_types, pn_types)
 
-    bin_centers, orn_per_bin = accuracy_by_log_intensity(
-        orn_pred, orn_y_test, log_intensity[orn_test_idx],
+    # Optionally restrict both decoders to N glomeruli that have both an
+    # ORN and a PN type, matched 1-to-1 by glomerulus so ORN column j and
+    # PN column j refer to the same glomerulus. The simulation still runs
+    # the full network; we just hand each decoder a matched subset of the
+    # type-averaged readouts.
+    if N_DECODE_GLOMERULI is not None:
+        gloms, orn_sel, pn_sel = match_orn_pn_by_glomerulus(
+            model, orn_types, pn_types, N_DECODE_GLOMERULI,
+        )
+        orn_cols = [orn_types.index(t) for t in orn_sel]
+        pn_cols = [pn_types.index(t) for t in pn_sel]
+        orn_features = orn_features[:, orn_cols]
+        pn_features = pn_features[:, pn_cols]
+        print(f"Restricting decoder to {len(gloms)} ORN<->PN matched "
+              f"glomeruli: {gloms}")
+        print(f"  ORN cols: {orn_sel}")
+        print(f"  PN  cols: {pn_sel}")
+
+    # Put ORN and PN on equal footing with a single per-population scale:
+    # divide each whole feature matrix by one global STD (not per feature),
+    # so the lower-magnitude population isn't disadvantaged by the L2
+    # penalty while relative magnitudes *across* glomeruli are preserved.
+    orn_scale = float(orn_features.std())
+    pn_scale = float(pn_features.std())
+    orn_features = orn_features / orn_scale
+    pn_features = pn_features / pn_scale
+    print(f"Per-population scaling: ORN /= {orn_scale:.4g}, "
+          f"PN /= {pn_scale:.4g} (single global STD each)")
+
+    print("Decoding odor identity ...")
+    orn_res = decode(orn_features, odor_id, name='ORN type-averaged')
+    pn_res = decode(pn_features, odor_id, name='PN  type-averaged')
+
+    # Per-bin accuracy for both splits. Each split uses its own split's
+    # predictions, ground-truth labels, and the log-intensity rows the
+    # split's indices point at.
+    bin_centers, orn_test_per_bin = accuracy_by_log_intensity(
+        orn_res['test_pred'], orn_res['y_test'],
+        log_intensity[orn_res['test_idx']],
     )
-    _, pn_per_bin = accuracy_by_log_intensity(
-        pn_pred, pn_y_test, log_intensity[pn_test_idx],
+    _, pn_test_per_bin = accuracy_by_log_intensity(
+        pn_res['test_pred'], pn_res['y_test'],
+        log_intensity[pn_res['test_idx']],
+    )
+    _, orn_train_per_bin = accuracy_by_log_intensity(
+        orn_res['train_pred'], orn_res['y_train'],
+        log_intensity[orn_res['train_idx']],
+    )
+    _, pn_train_per_bin = accuracy_by_log_intensity(
+        pn_res['train_pred'], pn_res['y_train'],
+        log_intensity[pn_res['train_idx']],
     )
 
     print(f"Running concentration sweep for demo odor {DEMO_ODOR_IDX} "
@@ -645,11 +861,18 @@ def main():
     demo_orn, demo_pn, _, _ = collect_type_averaged_activity(model, demo_trials)
 
     plot_results(
-        orn_acc, pn_acc,
-        bin_centers, orn_per_bin, pn_per_bin,
+        orn_res['test_acc'], pn_res['test_acc'],
+        bin_centers, orn_test_per_bin, pn_test_per_bin,
         demo_log_conc, demo_orn, demo_pn,
         len(orn_types), len(pn_types),
-        OUT_PNG,
+        OUT_PNG, split_label='test',
+    )
+    plot_results(
+        orn_res['train_acc'], pn_res['train_acc'],
+        bin_centers, orn_train_per_bin, pn_train_per_bin,
+        demo_log_conc, demo_orn, demo_pn,
+        len(orn_types), len(pn_types),
+        OUT_PNG_TRAIN, split_label='train',
     )
 
     print(f"Recording time traces for demo odor {DEMO_ODOR_IDX} "
