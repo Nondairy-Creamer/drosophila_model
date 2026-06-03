@@ -55,13 +55,13 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
         train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
 
     opt = torch.optim.Adam(model.parameters(), lr=alpha)
-    # Per-region cached mappings. Initialised with cell-type-name lists for
-    # the first iteration; predict() returns the rebuilt mapping dicts which
-    # we reuse on subsequent iterations.
-    cached_mappings = {'optic_lobe': {
-        'input_mapping': input_neurons,
-        'output_mapping': output_neurons,
-    }}
+    
+    # Region-agnostic mapping round-trip. The first iteration passes the
+    # caller-provided cell-type-name lists; predict() rebuilds the per-region
+    # stim<->cell mappings and we reuse those on every later iteration so the
+    # index work happens only once, regardless of which regions exist.
+    predict_input_neurons = input_neurons
+    predict_output_neurons = output_neurons
 
     if opt_state_dict is not None:
         opt.load_state_dict(opt_state_dict)
@@ -160,15 +160,27 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 outputs['pred_rotation'] = pred_rot
                 outputs['pred_translation'] = pred_trans
             else:
-                optic_cache = cached_mappings.get('optic_lobe', {})
                 result = model.predict(
                     inputs_batch,
-                    input_neurons=optic_cache.get('input_mapping'),
-                    output_neurons=optic_cache.get('output_mapping'))
-                # Today the loss functions consume the optic-lobe region's
-                # readouts; flatten to that region's dict for them.
-                outputs = result['outputs'].get('optic_lobe', {})
-                cached_mappings = result['mappings']
+                    input_neurons=predict_input_neurons,
+                    output_neurons=predict_output_neurons)
+                # Flatten every region's readouts into one dict for the loss
+                # functions; readout names are unique across regions.
+                outputs = {}
+                for region_outputs in result['outputs'].values():
+                    outputs.update(region_outputs)
+                # Round-trip the rebuilt mappings: output mappings are
+                # per-region, while the single combined input mapping comes
+                # from whichever region actually builds one.
+                mappings = result['mappings']
+                predict_output_neurons = {
+                    name: m['output_mapping'] for name, m in mappings.items()
+                }
+                predict_input_neurons = next(
+                    (m['input_mapping'] for m in mappings.values()
+                     if m.get('input_mapping') is not None),
+                    None,
+                )
 
             component_vals = {
                 name: getattr(lf, name)(model, outputs, target_batch,
