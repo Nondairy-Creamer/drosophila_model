@@ -180,6 +180,16 @@ class SerializableModel:
         if dtype is not None:
             inputs['dtype'] = dtype
 
+        # The saved connectome carries the data_folder frozen at training
+        # time (often a stale relative path). Refresh it from the current
+        # config so region parquets resolve against the live data bundle.
+        connectome = inputs.get('connectome', None)
+        if connectome is not None and hasattr(connectome, 'data_folder'):
+            try:
+                connectome.data_folder = load_config()['data']['data_folder']
+            except Exception:
+                pass
+
         model_cls = cls._resolve_class_from_payload(data)
         inputs['init_new_model'] = False
 

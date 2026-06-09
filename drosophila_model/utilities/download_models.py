@@ -97,9 +97,12 @@ def _rsync_base(port: str, identity_file: str) -> list[str]:
       -P  --partial + --progress (resumable + live progress)
       --inplace  write directly to destination file (faster, less disk churn,
                  and resumes cleanly mid-file when combined with --partial)
+      --no-o --no-g  don't preserve owner/group. Container filesystems (e.g.
+                 RunPod) reject chown, which otherwise makes rsync exit
+                 non-zero even though the data transferred fine.
     '''
     return [
-        'rsync', '-ahP', '--inplace',
+        'rsync', '-ahP', '--inplace', '--no-o', '--no-g',
         '-e', _build_ssh_arg(port, identity_file),
     ]
 
