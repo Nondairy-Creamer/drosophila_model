@@ -90,6 +90,32 @@ class ConnectomeData:
         """Regions loaded into this payload, in insertion order of ``region_specs``."""
         return list(self.region_specs.keys())
 
+    def drop_cell_types(self, cell_types_to_remove) -> "ConnectomeData":
+        """Return a copy with every neuron of ``cell_types_to_remove`` removed.
+
+        Drops the matching per-neuron rows (and the edges touching them) so a
+        smaller model can be rebuilt from the result. ``synapse_counts_coo`` is
+        in root-ID space, so edges are filtered against the retained root IDs.
+        """
+        remove = np.asarray(list(cell_types_to_remove))
+        keep = ~np.isin(self.cell_types, remove)
+        kept_root_ids = self.root_ids[keep]
+        coo = self.synapse_counts_coo
+        edge_keep = (
+            np.isin(coo[:, 0], kept_root_ids) & np.isin(coo[:, 1], kept_root_ids)
+        )
+        return ConnectomeData(
+            synapse_counts_coo=coo[edge_keep],
+            root_ids=self.root_ids[keep],
+            cell_types=self.cell_types[keep],
+            neurotransmitters=self.neurotransmitters[keep],
+            region_membership={
+                name: mask[keep] for name, mask in self.region_membership.items()
+            },
+            region_specs={name: dict(spec) for name, spec in self.region_specs.items()},
+            data_folder=self.data_folder,
+        )
+
 
 def resolve_sided_neuropils(
     neuropils: list[str],
