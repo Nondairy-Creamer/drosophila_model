@@ -62,7 +62,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from drosophila_model.config import load_config
-from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.model_definition import connectome_loading as cl
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
 

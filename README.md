@@ -33,9 +33,9 @@ Both scripts read parameters from `config.toml` at the repo root, which overlays
 | `loss_functions.py` | Loss functions (MSE, correlation, cosine, combined) |
 | `stimulus_utilities.py` | Stimulus generation — random panoramas, sine gratings, drone footage, optic flow computation |
 | `config.py` | Config loading/saving (`load_config`, `save_config`) |
-| `data_utilities.py` | Connectome data helpers |
-| `model_utilities.py` | Git provenance, misc model helpers |
+| `connectome_loading.py` | `ConnectomeData` + `load_connectome` / `get_connectome_subset` (in `model_definition/`) |
 | `plotting_utilities.py` | Plotting helpers used during training |
+| `download_models.py` | Rsync model artifacts to/from a remote server (in `training/`) |
 | `movie_utilities.py` | Video/animation utilities |
 
 ### Analysis

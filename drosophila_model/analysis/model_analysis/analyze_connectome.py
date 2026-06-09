@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from drosophila_model.config import load_config
-from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.model_definition import connectome_loading as cl
 from matplotlib import pyplot as plt
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod

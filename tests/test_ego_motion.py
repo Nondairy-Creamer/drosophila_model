@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from drosophila_model.utilities.ego_motion import generate_optic_flow, load_viewing_directions
+from drosophila_model.model_definition.ego_motion import generate_optic_flow, load_viewing_directions
 from test_model_factory import (
     _resolve_data_folder,
     build_model_from_test_config,

@@ -17,9 +17,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from drosophila_model.utilities import data_utilities as du
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import ego_motion as em
+from drosophila_model.model_definition import ego_motion as em
 from drosophila_model.utilities import stimulus_utilities as su
 
 

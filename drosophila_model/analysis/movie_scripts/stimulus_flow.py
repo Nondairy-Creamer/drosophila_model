@@ -126,7 +126,7 @@ def _run_one_eye(args, config, column_phi_theta, output_folder, frame_rate,
 
 def _run_two_eyes(args, config, column_phi_theta, output_folder, frame_rate,
                   cell_x, cell_y, cell_z):
-    from drosophila_model.utilities.ego_motion import generate_optic_flow
+    from drosophila_model.model_definition.ego_motion import generate_optic_flow
 
     N = column_phi_theta.shape[0]
     model_dt = config["model"]["dt"]

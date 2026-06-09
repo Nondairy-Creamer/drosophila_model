@@ -33,7 +33,7 @@ region's ``cell_indices`` from those.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
@@ -89,6 +89,22 @@ class ConnectomeData:
     def regions(self) -> list[str]:
         """Regions loaded into this payload, in insertion order of ``region_specs``."""
         return list(self.region_specs.keys())
+
+    def to_serializable_dict(self) -> dict:
+        """Return this connectome's fields as a plain dict for serialization.
+
+        Every field is already plain data (numpy arrays, dicts, str), so the
+        result carries no reference to this class. Saved models store *this*
+        rather than the object itself, so a model file never couples to where
+        :class:`ConnectomeData` lives. Rebuild with ``ConnectomeData(**d)`` (or
+        :meth:`from_serializable_dict`).
+        """
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_serializable_dict(cls, d: dict) -> "ConnectomeData":
+        """Rebuild a :class:`ConnectomeData` from :meth:`to_serializable_dict`."""
+        return cls(**d)
 
     def drop_cell_types(self, cell_types_to_remove) -> "ConnectomeData":
         """Return a copy with every neuron of ``cell_types_to_remove`` removed.
@@ -208,7 +224,7 @@ def load_connectome_from_dataframes(
     """Build a :class:`ConnectomeData` from already-loaded DataFrames.
 
     Used by analysis scripts that pre-filter cell types via
-    :func:`data_utilities.get_connectome_subset` before calling this.
+    :func:`get_connectome_subset` before calling this.
     ``data_folder`` should still point at the on-disk bundle so region
     subclasses can find their per-area parquet files.
 
@@ -355,3 +371,38 @@ def load_connectome_from_dataframes(
         region_specs={name: dict(spec) for name, spec in region_specs.items()},
         data_folder=data_folder,
     )
+
+
+def get_connectome_subset(
+    cell_info_df: pd.DataFrame,
+    synapse_counts_df: pd.DataFrame,
+    cell_types: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Filter connectome data to include only specified cell types.
+
+    Used by analysis/training scripts to pre-filter cell types before calling
+    :func:`load_connectome_from_dataframes`.
+
+    Args:
+        cell_info_df: DataFrame with cell information (must have 'primary_type'
+            and 'root_id' columns, plus the 'neuropils' column the loader
+            consumes).
+        synapse_counts_df: DataFrame with synapse counts (must have
+            'pre_root_id' and 'post_root_id' columns).
+        cell_types: List of primary cell-type names to keep.
+
+    Returns:
+        Tuple of (filtered_cell_info_df, filtered_synapse_counts_df).
+    """
+    filtered_cell_info_df = cell_info_df[
+        cell_info_df['primary_type'].isin(cell_types)
+    ].copy().reset_index(drop=True)
+
+    valid_root_ids = set(filtered_cell_info_df['root_id'])
+
+    filtered_synapse_counts_df = synapse_counts_df[
+        synapse_counts_df['pre_root_id'].isin(valid_root_ids) &
+        synapse_counts_df['post_root_id'].isin(valid_root_ids)
+    ].copy().reset_index(drop=True)
+
+    return filtered_cell_info_df, filtered_synapse_counts_df

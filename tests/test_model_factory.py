@@ -8,8 +8,7 @@ import sys
 
 
 from drosophila_model.config import load_config
-from drosophila_model.utilities import connectome_loading as cl
-from drosophila_model.utilities import data_utilities as du
+from drosophila_model.model_definition import connectome_loading as cl
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
 
@@ -56,7 +55,7 @@ def build_model_from_test_config(readouts=None, use_input_conv=True):
     output_neurons = ["T4a", "T4b", "T4c", "T4d", "T5a", "T5b", "T5c", "T5d"]
 
     if len(config["model"]["use_connectome_subset"]) > 0:
-        cell_info_df, synapses_df = du.get_connectome_subset(
+        cell_info_df, synapses_df = cl.get_connectome_subset(
             cell_info_df, synapses_df, config["model"]["use_connectome_subset"]
         )
         input_neurons = [i for i in input_neurons if i in config["model"]["use_connectome_subset"]]

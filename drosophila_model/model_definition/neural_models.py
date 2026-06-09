@@ -52,7 +52,7 @@ import torch
 
 from drosophila_model.model_definition import dynamics
 from drosophila_model.config import load_config
-from drosophila_model.utilities.connectome_loading import (
+from drosophila_model.model_definition.connectome_loading import (
     ConnectomeData,
     load_connectome,
     load_connectome_from_dataframes,
@@ -156,8 +156,16 @@ class SerializableModel:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
 
+        # Serialize the connectome as plain data (dict of arrays) rather than
+        # the ConnectomeData object, so a saved model never couples to that
+        # class's import path. Rebuilt in load() via from_serializable_dict.
+        inputs = dict(self.init_inputs)
+        connectome = inputs.get('connectome', None)
+        if isinstance(connectome, ConnectomeData):
+            inputs['connectome'] = connectome.to_serializable_dict()
+
         payload = {
-            'inputs': self.init_inputs,
+            'inputs': inputs,
             'state_dict': {k: v.detach().cpu() for k, v in self.state_dict().items()},
             'extra_state': self._collect_extra_state(),
             **self._save_class_identity(),
@@ -202,10 +210,15 @@ class SerializableModel:
         if dtype is not None:
             inputs['dtype'] = dtype
 
+        # Rebuild the ConnectomeData from its plain-data dict (see save()).
+        connectome = inputs.get('connectome', None)
+        if isinstance(connectome, dict):
+            connectome = ConnectomeData.from_serializable_dict(connectome)
+            inputs['connectome'] = connectome
+
         # The saved connectome carries the data_folder frozen at training
         # time (often a stale relative path). Refresh it from the current
         # config so region parquets resolve against the live data bundle.
-        connectome = inputs.get('connectome', None)
         if connectome is not None and hasattr(connectome, 'data_folder'):
             try:
                 connectome.data_folder = load_config()['data']['data_folder']

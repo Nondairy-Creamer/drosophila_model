@@ -39,7 +39,7 @@ def test_optic_lobe_region_indices_consistent():
 def test_region_specs_round_trip_to_loader():
     """build_region_specs + load_connectome plumbing yields the right neuropil set."""
     from drosophila_model.model_definition import regions as regions_mod
-    from drosophila_model.utilities import connectome_loading as cl
+    from drosophila_model.model_definition import connectome_loading as cl
 
     model, _, _, _ = build_model_from_test_config(readouts=[])
     spec = model.region_specs["optic_lobe"]

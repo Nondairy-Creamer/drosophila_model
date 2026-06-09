@@ -32,7 +32,7 @@ import pandas as pd
 import torch
 from torch import nn
 
-from drosophila_model.utilities import ego_motion
+from drosophila_model.model_definition import ego_motion
 from drosophila_model.model_definition.model_layers import HexGridConv, TemporalLRU
 
 if TYPE_CHECKING:

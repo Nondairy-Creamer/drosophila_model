@@ -35,7 +35,7 @@ import torch
 
 from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import ego_motion as em
+from drosophila_model.model_definition import ego_motion as em
 from drosophila_model.utilities import stimulus_utilities as su
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
@@ -286,7 +286,7 @@ def _run_two_eyes(args, model, config, output_dir,
         if np.all(np.isnan(flow_right[pre_stim_steps:])):
             print(f"  Stim {stim_index}: ground-truth flow unavailable — "
                   "synthesizing from odometry (Z=1)")
-            from drosophila_model.utilities.ego_motion import generate_optic_flow
+            from drosophila_model.model_definition.ego_motion import generate_optic_flow
             observer_translation_np = observer_translation.cpu().numpy()
             omega_t = torch.tensor(
                 observer_rotation_np[stim_index] * np.pi / 180.0, dtype=torch.float32)

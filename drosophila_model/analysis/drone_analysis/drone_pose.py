@@ -110,7 +110,7 @@ def compute_all(
     Velocities are differentiated and expressed in the instantaneous body
     frame, then median-filtered when *median_kernel* > 0.  Positions and
     rotations are derived directly from the raw poses (use
-    ``drosophila_model.utilities.ego_motion.integrate_angular_velocity`` /
+    ``drosophila_model.model_definition.ego_motion.integrate_angular_velocity`` /
     ``integrate_translational_velocity`` to reintegrate from the filtered
     velocities when needed).
 

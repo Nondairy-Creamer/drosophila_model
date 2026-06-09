@@ -24,6 +24,170 @@ from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.utilities import stimulus_utilities as su
 
 
+def compute_average_connections(model):
+    """
+    Compute the average synapse count between each pair of cell types.
+
+    Handles both connectome layouts: a single sparse ``synapse_counts`` tensor
+    (most models) and a list of per-neurotransmitter sparse tensors
+    (e.g. ``ConductanceDynamics``), which are summed into one signed matrix.
+
+    Returns:
+        ave_con: numpy array of shape (num_cell_types, num_cell_types)
+                 where ave_con[post_type, pre_type] is the average synapse count
+                 from pre_type to post_type
+    """
+    sc = model.synapse_counts
+    mats = sc if isinstance(sc, (list, tuple)) else [sc]
+
+    # Normalise each tensor (CSR or COO) to coalesced COO and merge. The
+    # per-transmitter matrices have disjoint presynaptic columns, so stacking
+    # the entries and coalescing reconstructs the full signed count matrix.
+    index_parts = []
+    value_parts = []
+    for mat in mats:
+        coo = mat.to_sparse_coo().coalesce()
+        index_parts.append(coo.indices())
+        value_parts.append(coo.values())
+
+    merged = torch.sparse_coo_tensor(
+        torch.cat(index_parts, dim=1),
+        torch.cat(value_parts),
+        size=(model.num_neurons, model.num_neurons),
+    ).coalesce()
+
+    indices = merged.indices().cpu().numpy()  # shape (2, nnz)
+    values = merged.values().cpu().numpy()    # shape (nnz,)
+
+    # Get cell type index for each pre and post neuron in the synapse list
+    # indices[0] = rows = postsynaptic, indices[1] = cols = presynaptic
+    post_types = model.neuron_to_type_index[indices[0]].cpu().numpy()
+    pre_types = model.neuron_to_type_index[indices[1]].cpu().numpy()
+
+    # Use pandas groupby to compute mean for each (pre_type, post_type) pair
+    synapse_df = pd.DataFrame({
+        'pre_type': pre_types,
+        'post_type': post_types,
+        'count': values
+    })
+    ave_con_df = synapse_df.groupby(['post_type', 'pre_type'])['count'].mean()
+
+    # Fill the ave_con matrix
+    ave_con = np.zeros((model.num_cell_types, model.num_cell_types))
+    for (post_type, pre_type), mean_val in ave_con_df.items():
+        ave_con[int(post_type), int(pre_type)] = mean_val
+
+    return ave_con
+
+
+def path_from_a_to_b(model, start_names, end_names, top_n=20, max_iterations=20, n_extra_steps=3, verbose=True):
+    """
+    Find the neurons needed to connect start neurons to end neurons by iteratively
+    following the top N outgoing connections.
+
+    Args:
+        model: CurrentModel model
+        start_names: list of starting cell type names
+        end_names: list of ending cell type names
+        top_n: number of top connections to follow from each neuron
+        max_iterations: maximum number of iterations before giving up
+        n_extra_steps: number of extra iterations after finding all end neurons
+                       (to capture major outputs of destination neurons)
+        verbose: if True, print progress
+
+    Returns:
+        path_neurons: list of all unique neuron names in the path
+    """
+    # Compute average connections matrix
+    ave_con = compute_average_connections(model)
+
+    # Get input strengths for all cell types (for weighting outgoing connections)
+    all_input_strengths = model.input_strength_log.exp().detach().cpu().numpy()
+
+    # Create name to index mapping
+    name_to_idx = {name: i for i, name in enumerate(model.unique_cell_types)}
+
+    # Helper function to do one iteration of expansion
+    def expand_frontier(current_neurons, all_neurons):
+        new_neurons = set()
+        for neuron_name in current_neurons:
+            if neuron_name not in name_to_idx:
+                continue
+            cell_index = name_to_idx[neuron_name]
+
+            # Get outgoing connections weighted by input strength of receivers
+            # ave_con[:, cell_index] gives connections FROM cell_index TO each post_type
+            outgoing_weighted = ave_con[:, cell_index] * all_input_strengths
+
+            # Get top N connections (by absolute value, in case of negative weights)
+            top_indices = np.argsort(np.abs(outgoing_weighted))[::-1][:top_n]
+
+            for idx in top_indices:
+                if outgoing_weighted[idx] > 0:  # only include if there's a connection
+                    target_name = model.unique_cell_types[idx]
+                    if target_name not in all_neurons:
+                        new_neurons.add(target_name)
+        return new_neurons
+
+    # Initialize with start neurons
+    current_neurons = set(start_names)  # frontier: neurons to explore this iteration
+    all_neurons = set(start_names)      # all discovered neurons
+    end_names_set = set(end_names)
+
+    iteration = 0
+    found_all = False
+
+    # Phase 1: expand until we find all end neurons
+    while not end_names_set.issubset(all_neurons) and iteration < max_iterations:
+        iteration += 1
+        new_neurons = expand_frontier(current_neurons, all_neurons)
+        all_neurons.update(new_neurons)
+
+        if verbose:
+            found_ends = end_names_set.intersection(all_neurons)
+            print(f"Iteration {iteration}: {len(new_neurons)} new neurons, "
+                  f"{len(all_neurons)} total, {len(found_ends)}/{len(end_names)} targets found")
+
+        current_neurons = new_neurons
+
+        if len(new_neurons) == 0:
+            if verbose:
+                print("No new neurons found, stopping.")
+            break
+
+    found_all = end_names_set.issubset(all_neurons)
+
+    if verbose:
+        if found_all:
+            print(f"\nFound all {len(end_names)} target neurons in {iteration} iterations")
+        else:
+            missing = end_names_set - all_neurons
+            print(f"\nCould not find {len(missing)} target neurons: {missing}")
+
+    # Phase 2: do extra steps to capture outputs of destination neurons
+    if n_extra_steps > 0 and verbose:
+        print(f"\nDoing {n_extra_steps} extra steps to capture outputs...")
+
+    for extra in range(n_extra_steps):
+        new_neurons = expand_frontier(current_neurons, all_neurons)
+        all_neurons.update(new_neurons)
+
+        if verbose:
+            print(f"Extra step {extra + 1}: {len(new_neurons)} new neurons, {len(all_neurons)} total")
+
+        current_neurons = new_neurons
+
+        if len(new_neurons) == 0:
+            if verbose:
+                print("No new neurons found, stopping extra steps.")
+            break
+
+    if verbose:
+        print(f"Total neurons in path: {len(all_neurons)}")
+
+    return sorted(all_neurons)
+
+
 def get_flow_key(model):
     """Return the output key for the first flow (eye-asymmetric) readout."""
     return next(
@@ -304,7 +468,7 @@ def run_model_on_stimuli(
 
 # NOTE: `generate_optic_flow`, `load_viewing_directions`, and the
 # `cross_matrix` helper formerly lived here. They moved to
-# `drosophila_model.utilities.ego_motion` (canonical home — sister to
+# `drosophila_model.model_definition.ego_motion` (canonical home — sister to
 # `estimate_from_flow`). Import them from there.
 
 

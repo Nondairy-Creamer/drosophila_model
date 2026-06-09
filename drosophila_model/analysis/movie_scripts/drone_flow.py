@@ -23,7 +23,7 @@ import torch
 
 from drosophila_model.config import load_config
 from drosophila_model.utilities import stimulus_utilities as su
-from drosophila_model.utilities.ego_motion import (
+from drosophila_model.model_definition.ego_motion import (
     integrate_angular_velocity, integrate_translational_velocity,
 )
 from scipy.spatial.transform import Rotation

@@ -22,7 +22,7 @@ from scipy.ndimage import uniform_filter1d, gaussian_filter1d
 from scipy.spatial.transform import Rotation
 
 from drosophila_model.analysis.drone_analysis.process_drone import extract_odometry
-from drosophila_model.utilities.ego_motion import (
+from drosophila_model.model_definition.ego_motion import (
     integrate_angular_velocity, integrate_translational_velocity,
 )
 

@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
 from drosophila_model.config import load_config
-from drosophila_model.utilities import model_utilities as mu
+from drosophila_model.training import training_utilities as tu
 from drosophila_model.utilities.stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave, make_lr_moving_edge, make_ud_moving_edge
 
 def set_taus(model, mi9_tau=0.1, mi4_tau=0.1, ct1_l_tau=0.25, ct1_m_tau=0.25):
@@ -173,7 +173,7 @@ activation_overrides = {ct: 'relu' for ct in T4_types + T5_types}
 
 # ── Load connectome ───────────────────────────────────────────────────
 config = load_config('config.toml')
-from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.model_definition import connectome_loading as cl
 connectome = cl.load_connectome(
     region_specs=regions_mod.build_region_specs(config['model'].get('regions', {})),
     data_folder=config['data']['data_folder'],
@@ -199,7 +199,7 @@ for name, operations in model_configs.items():
         omega_init=omega,
         tau_default=tau_default,
         activation_overrides=activation_overrides,
-        commit_hash=mu.get_git_commit_hash(),
+        commit_hash=tu.get_git_commit_hash(),
         excitatory_nt=['ACH'],   
         inhibitory_nt=['GLUT', 'GABA',"HIS"],
     )

@@ -16,8 +16,7 @@ from pathlib import Path
 import torch
 import numpy as np
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import data_utilities as du
-from drosophila_model.utilities import model_utilities as mu
+from drosophila_model.analysis.model_analysis import analysis_utilities as au
 from drosophila_model.training import loss_functions as lf
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -61,7 +60,7 @@ print("Calculating cell type importance scores...")
 
 # Get average connections matrix (num_cell_types, num_cell_types)
 # ave_con[post_type, pre_type] = average synapse count from pre_type to post_type
-ave_con = mu.compute_average_connections(model)
+ave_con = au.compute_average_connections(model)
 
 # Get input and output strengths per cell type (already at cell type level)
 input_strength = model.input_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,) or (num_transmitters, num_cell_types)

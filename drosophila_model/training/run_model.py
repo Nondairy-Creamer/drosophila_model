@@ -5,13 +5,11 @@ from pathlib import Path
 from drosophila_model.utilities import plotting_utilities as pu
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
-from drosophila_model.utilities import connectome_loading as cl
+from drosophila_model.model_definition import connectome_loading as cl
 from drosophila_model.config import load_config, save_config
-from drosophila_model.utilities import data_utilities as du
 from datetime import datetime
 from drosophila_model.training import training_utilities as tu
 from drosophila_model.utilities import stimulus_utilities as su
-from drosophila_model.utilities import model_utilities as mu
 import argparse
 
 
@@ -77,7 +75,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         cell_info_df = pd.read_parquet(baked / 'cell_info.parquet')
         synapses_df = pd.read_parquet(baked / 'synapses.parquet')
 
-        cell_info_df, synapses_df = du.get_connectome_subset(
+        cell_info_df, synapses_df = cl.get_connectome_subset(
             cell_info_df, synapses_df, config['model']['use_connectome_subset']
         )
         input_neurons = [i for i in input_neurons if i in config['model']['use_connectome_subset']]
@@ -107,7 +105,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     )
     
     # Get current git commit hash for provenance tracking
-    commit_hash = mu.get_git_commit_hash()
+    commit_hash = tu.get_git_commit_hash()
     if commit_hash:
         print(f"Git commit: {commit_hash[:8]}")
 

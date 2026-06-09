@@ -6,15 +6,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import data_utilities as du
-from drosophila_model.utilities import model_utilities as mu
+from drosophila_model.analysis.model_analysis import analysis_utilities as au
 
 # Load the model
 model_folder = Path('models/20260126_131210')
 model = nm.BaseRnn.load(model_folder / 'model.pt', device='cpu')
 
 # Compute average connections between cell types
-ave_con = mu.compute_average_connections(model)
+ave_con = au.compute_average_connections(model)
 
 # Get cell type labels
 cell_types = model.unique_cell_types
