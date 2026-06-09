@@ -24,13 +24,36 @@ def compute_average_connections(model):
     """
     Compute the average synapse count between each pair of cell types.
     
+    Handles both connectome layouts: a single sparse ``synapse_counts`` tensor
+    (most models) and a list of per-neurotransmitter sparse tensors
+    (e.g. ``ConductanceDynamics``), which are summed into one signed matrix.
+    
     Returns:
         ave_con: numpy array of shape (num_cell_types, num_cell_types)
                  where ave_con[post_type, pre_type] is the average synapse count
                  from pre_type to post_type
     """
-    indices = model.synapse_counts.indices().cpu().numpy()  # shape (2, nnz)
-    values = model.synapse_counts.values().cpu().numpy()    # shape (nnz,)
+    sc = model.synapse_counts
+    mats = sc if isinstance(sc, (list, tuple)) else [sc]
+
+    # Normalise each tensor (CSR or COO) to coalesced COO and merge. The
+    # per-transmitter matrices have disjoint presynaptic columns, so stacking
+    # the entries and coalescing reconstructs the full signed count matrix.
+    index_parts = []
+    value_parts = []
+    for mat in mats:
+        coo = mat.to_sparse_coo().coalesce()
+        index_parts.append(coo.indices())
+        value_parts.append(coo.values())
+
+    merged = torch.sparse_coo_tensor(
+        torch.cat(index_parts, dim=1),
+        torch.cat(value_parts),
+        size=(model.num_neurons, model.num_neurons),
+    ).coalesce()
+
+    indices = merged.indices().cpu().numpy()  # shape (2, nnz)
+    values = merged.values().cpu().numpy()    # shape (nnz,)
 
     # Get cell type index for each pre and post neuron in the synapse list
     # indices[0] = rows = postsynaptic, indices[1] = cols = presynaptic
