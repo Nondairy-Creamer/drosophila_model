@@ -7,6 +7,7 @@ Neurons are ranked by importance. We binary search over the count of least-impor
 neurons to silence, finding the maximum number removable before loss exceeds a threshold.
 """
 import sys
+import shutil
 import argparse
 from pathlib import Path
 
@@ -21,6 +22,9 @@ from drosophila_model.training import loss_functions as lf
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('model_folder', type=str, help='Path to the model folder')
+parser.add_argument('--output', type=str, default=None,
+                    help='Output folder for the trimmed model '
+                         '(default: <model_folder>_trimmed)')
 args = parser.parse_args()
 
 # --- Configuration ---
@@ -60,8 +64,13 @@ print("Calculating cell type importance scores...")
 ave_con = mu.compute_average_connections(model)
 
 # Get input and output strengths per cell type (already at cell type level)
-input_strength = model.input_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,)
+input_strength = model.input_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,) or (num_transmitters, num_cell_types)
 output_strength = model.output_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,)
+
+# ConductanceDynamics stores input strength per (transmitter, cell type).
+# Collapse to one value per cell type for the importance heuristic.
+if input_strength.ndim == 2:
+    input_strength = input_strength.mean(axis=0)  # (num_cell_types,)
 
 # Effective incoming weight to type k: input_strength[k] * Σ_i |ave_con[k,i]| * output_strength[i]
 effective_incoming = input_strength * (np.abs(ave_con) @ output_strength)  # (num_cell_types,)
@@ -167,5 +176,29 @@ print(f"\nMax removable neurons: {max_removable} / {len(candidates)}")
 print(f"Final loss ratio: {final_ratio:.4f}")
 print(f"Retained cell types: {len(candidates) - max_removable + len(skipped_types)}")
 print(f"\nSilenced cell types: {sorted(silenced_cell_types)}")
+
+# --- Build the trimmed model by fully removing the selected cell types ---
+# The binary search above used silencing to rank/measure; here we structurally
+# delete those neurons so the saved model is genuinely smaller.
+print("\nBuilding trimmed model (removing neurons)...")
+trimmed_model = model.remove_cell_types(silenced_cell_types)
+print(f"Neurons: {model.num_neurons} -> {trimmed_model.num_neurons}")
+print(f"Cell types: {model.num_cell_types} -> {trimmed_model.num_cell_types}")
+
+# Resting state shifts once neurons are gone; recompute before evaluating/saving.
+trimmed_model.find_steady_state()
+with torch.no_grad():
+    trimmed_loss = compute_loss(trimmed_model, stimulus).item()
+print(f"Trimmed model loss ratio (removal): {trimmed_loss / initial_loss:.4f}")
+
+# --- Copy the model folder (files only, no sub-folders) and save trimmed model ---
+src_dir = Path(model_path)
+out_dir = Path(args.output) if args.output else Path(str(src_dir).rstrip('/') + '_trimmed')
+out_dir.mkdir(parents=True, exist_ok=True)
+for item in src_dir.iterdir():
+    if item.is_file():
+        shutil.copy2(item, out_dir / item.name)
+trimmed_model.save(out_dir / 'model.pt')
+print(f"\nTrimmed model saved to: {out_dir}")
 
 print("\nDone!")
