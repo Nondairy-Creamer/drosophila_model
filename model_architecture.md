@@ -262,8 +262,8 @@ Subclasses must implement:
 | `save(path)` / `load(path)` | Serialize/deserialize the model (constructor args + state dict). `load` re-composes the concrete class from the saved `dynamics_type` string via `compose_model_class`. |
 | `silence_neurons(names)` | Zero the input and output strength of specified cell types (for lesion experiments). |
 | `get_shared_columns(neuron_list)` | Find columns that contain all specified cell types; returns neuron and column index arrays. |
-| `regions['optic_lobe'].estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | Solve for 6-DOF ego-motion from optic flow via least-squares rotation estimation followed by SVD-based translation estimation. Lives on the region (and ultimately on `ego_motion.estimate_from_flow`) because flow is an optic-lobe concept. |
-| `model.regions['optic_lobe'].estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline (lives on `OpticLobeRegion`): run both eyes through the model, decode optic flow, then solve for rotation and translation. |
+| `regions['optic_lobe'].estimate_ego_motion_from_flow(phi, theta, d_right, d_up)` | Solve for 6-DOF ego-motion from one eye's optic flow (zero offset) via least-squares rotation estimation followed by SVD-based translation estimation; translation up to scale. Wraps `ego_motion.estimate_from_flow` (which takes a list of `EyeFlow`, each with a body-frame camera `offset`). |
+| `model.regions['optic_lobe'].estimate_ego_motion_from_image(...)` | Two-eye ego-motion pipeline (lives on `OpticLobeRegion`): run both eyes through the model, decode optic flow, then solve rotation + translation. Each eye carries its body-frame camera offset (loaded from `model_definition/eye_geometry.json`, mirrored per eye), so the rotation-induced inter-eye parallax recovers absolute translational scale, not just direction. |
 | `model.regions['optic_lobe'].predict_two_eyes(inputs_right, inputs_left, ...)` | Per-eye `predict()` results; mirror-trick on single-eye hosts, native slice on two-eye hosts. |
 
 ### `predict` in detail

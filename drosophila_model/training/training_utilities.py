@@ -54,7 +54,7 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 patience=10, alpha_factor=0.5,
                 opt_state_dict=None, loss_history=None,
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0,
-                batch_size=None, train_mask=None):
+                batch_size=None, train_mask=None, eye_offset=None):
 
     if rng is None:
         rng = np.random.default_rng(0)
@@ -156,7 +156,8 @@ def train_model(model, inputs, target, output_neurons, input_neurons,
                 oob = ~train_mask_batch.any(dim=1).any(dim=0)
                 pred_rot, pred_trans, right_res, left_res = \
                     model.regions['optic_lobe'].estimate_ego_motion_from_image(
-                        right_batch, left_batch, oob_columns=oob)
+                        right_batch, left_batch, oob_columns=oob,
+                        camera_offset=eye_offset)
 
                 # Per-region outputs: concatenate right+left readouts on the
                 # column axis for the two-eye loss terms.

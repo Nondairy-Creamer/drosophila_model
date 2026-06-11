@@ -410,8 +410,51 @@ class OpticLobeRegion(RegionView):
             torch.tensor(two_eye[:, 1], device=model.device),
         )
 
+        self._load_eye_geometry()
+
         if self.use_input_conv:
             self._initialize_input_conv()
+
+    # Fixed anatomical constant (versioned with the code, not the connectome
+    # bundle): the vector from the body center of mass to each eye's camera.
+    _EYE_GEOMETRY_FILE = Path(__file__).resolve().parent / 'eye_geometry.json'
+
+    def _load_eye_geometry(self) -> None:
+        """Load the default camera offset and mirror it onto the two eyes.
+
+        The data file stores one vector (the right-eye camera, body frame
+        +x forward / +y left / +z up). This is only the *default* used when a
+        caller does not supply a dataset-specific offset; the camera offset is
+        really a property of the rig that produced the flow (0 for
+        single-viewpoint renders, the physical half-baseline for a two-camera
+        rig), so training/eval pass it in per dataset.
+        """
+        import json
+
+        with open(self._EYE_GEOMETRY_FILE) as f:
+            geom = json.load(f)
+        self.camera_offset = np.asarray(geom['camera_offset_mm'], dtype=np.float64)
+        self.eye_offsets = self.mirror_camera_offset(self.camera_offset)
+
+    @staticmethod
+    def mirror_camera_offset(camera_offset) -> dict:
+        """Per-eye offsets from a single right-eye camera offset.
+
+        The left eye is the sagittal mirror (``+y`` is left, so ``y`` flips).
+        Accepts any length-3 array-like; returns ``{'right': ..., 'left': ...}``
+        as float64 numpy vectors. These feed :class:`ego_motion.EyeFlow` so the
+        two-eye solver accounts for the rotation-induced velocity
+        ``Omega x offset`` at each (off-center) eye.
+        """
+        offset = np.asarray(camera_offset, dtype=np.float64)
+        if offset.shape != (3,):
+            raise ValueError(
+                f"camera offset must be a length-3 vector, got shape {offset.shape}"
+            )
+        return {
+            'right': offset.copy(),
+            'left': offset * np.array([1.0, -1.0, 1.0]),
+        }
 
     @property
     def num_eyes(self) -> int:
@@ -684,14 +727,39 @@ class OpticLobeRegion(RegionView):
     @staticmethod
     def estimate_ego_motion_from_flow(phi, theta, d_right, d_up,
                                       terms=('rotation', 'trans')):
-        """Solve 6-DOF ego motion from optic flow over the eye's sphere.
+        """Solve 6-DOF ego motion from optic flow over a single eye's sphere.
 
         Thin wrapper around :func:`ego_motion.estimate_from_flow`; lives on the
         optic-lobe region because flow is an optic-lobe concept (no other
-        region produces optic flow).
+        region produces optic flow). Treats the columns as one eye centered at
+        the body (zero offset), so translation is recovered up to scale. The
+        offset-aware two-eye path lives in
+        :meth:`estimate_ego_motion_from_image`.
         """
-        return ego_motion.estimate_from_flow(
-            phi, theta, d_right, d_up, terms=terms,
+        eye = ego_motion.EyeFlow(phi=phi, theta=theta, d_right=d_right, d_up=d_up)
+        return ego_motion.estimate_from_flow([eye], terms=terms)
+
+    def _eye_flow_from_optic_flow(self, optic_flow_eye, phi_eye, theta_eye,
+                                  offset, oob_eye, S):
+        """Pack one eye's decoded optic flow into an :class:`ego_motion.EyeFlow`.
+
+        Drops columns with NaN flow (and any flagged out-of-FOV), flattens the
+        ``(S, T)`` batch into the solver's leading time axis, and attaches the
+        eye's body-frame ``offset``.
+        """
+        valid = (~torch.isnan(optic_flow_eye[0, 0, :, 0])
+                 & ~torch.isnan(optic_flow_eye[0, 0, :, 1]))
+        if oob_eye is not None:
+            valid = valid & ~oob_eye
+        T_len = optic_flow_eye.shape[1]
+        d_right = optic_flow_eye[:, :, valid, 0].reshape(S * T_len, -1)
+        d_up = optic_flow_eye[:, :, valid, 1].reshape(S * T_len, -1)
+        offset_t = torch.tensor(
+            offset, device=optic_flow_eye.device, dtype=optic_flow_eye.dtype,
+        )
+        return ego_motion.EyeFlow(
+            phi=phi_eye[valid], theta=theta_eye[valid],
+            d_right=d_right, d_up=d_up, offset=offset_t,
         )
 
     # ------------------------------------------------------------------
@@ -786,15 +854,27 @@ class OpticLobeRegion(RegionView):
                                        initial_filter_state_left=None,
                                        oob_columns=None, cached_mappings=None,
                                        eyes=('right', 'left'),
-                                       terms=('rotation', 'trans')):
+                                       terms=('rotation', 'trans'),
+                                       camera_offset=None):
         """Ego-motion from raw per-eye image inputs.
 
-        Supports both eyes (concatenated flow with mirrored phi) or a single
-        eye (flow mirrored to the shared frame). When only ``'trans'`` is
-        requested, rotation is not subtracted from the flow before solving
-        for translation.
+        Supports both eyes (each eye solved with its own viewing columns and
+        body-frame camera offset, so absolute translational scale is
+        recoverable from the inter-eye parallax) or a single eye (flow mirrored
+        to the shared frame, translation up to scale). When only ``'trans'`` is
+        requested, rotation is not subtracted from the flow before solving for
+        translation.
+
+        ``camera_offset`` is the right-eye camera offset for the dataset that
+        produced these images (the left eye is its sagittal mirror). It is a
+        property of the rig, so pass it per dataset; when ``None`` the region's
+        default (:attr:`eye_offsets`, from ``eye_geometry.json``) is used.
         """
         model = self.model
+        eye_offsets = (
+            self.eye_offsets if camera_offset is None
+            else self.mirror_camera_offset(camera_offset)
+        )
         eyes = tuple(eyes)
         if not eyes or not set(eyes).issubset({'right', 'left'}):
             raise ValueError(
@@ -837,10 +917,27 @@ class OpticLobeRegion(RegionView):
 
             optic_flow_right = right_region_out[flow_key]
             optic_flow_left = left_region_out[flow_key]
-            optic_flow = torch.cat((optic_flow_right, optic_flow_left), dim=2)
+            dtype = optic_flow_right.dtype
 
-            phi_tensor = self.column_phi_theta_two_eyes[0].to(dtype=optic_flow.dtype)
-            theta_tensor = self.column_phi_theta_two_eyes[1].to(dtype=optic_flow.dtype)
+            # Per-eye viewing columns: column_phi_theta_two_eyes is
+            # [right (phi); left (-phi)] of length 2 * num_columns.
+            N = self.num_columns
+            phi_2e = self.column_phi_theta_two_eyes[0].to(dtype=dtype)
+            theta_2e = self.column_phi_theta_two_eyes[1].to(dtype=dtype)
+            oob_r = oob_columns[:N] if oob_columns is not None else None
+            oob_l = oob_columns[N:] if oob_columns is not None else None
+
+            eye_flows = [
+                self._eye_flow_from_optic_flow(
+                    optic_flow_right, phi_2e[:N], theta_2e[:N],
+                    eye_offsets['right'], oob_r, S,
+                ),
+                self._eye_flow_from_optic_flow(
+                    optic_flow_left, phi_2e[N:], theta_2e[N:],
+                    eye_offsets['left'], oob_l, S,
+                ),
+            ]
+            T_len = optic_flow_right.shape[1]
         else:
             eye = eyes[0]
             inputs = eye_inputs_map[eye]
@@ -877,22 +974,18 @@ class OpticLobeRegion(RegionView):
             phi_tensor = torch.tensor(phi_np, device=model.device, dtype=optic_flow.dtype)
             theta_tensor = torch.tensor(theta_np, device=model.device, dtype=optic_flow.dtype)
 
+            eye_flows = [
+                self._eye_flow_from_optic_flow(
+                    optic_flow, phi_tensor, theta_tensor,
+                    eye_offsets[eye], oob_columns, S,
+                ),
+            ]
+            T_len = optic_flow.shape[1]
+
             right_result = result if eye == 'right' else None
             left_result = result if eye == 'left' else None
 
-        valid_mask = ~torch.isnan(optic_flow[0, 0, :, 0]) & ~torch.isnan(optic_flow[0, 0, :, 1])
-        if oob_columns is not None:
-            valid_mask = valid_mask & ~oob_columns
-        phi_valid = phi_tensor[valid_mask]
-        theta_valid = theta_tensor[valid_mask]
-
-        T_len = optic_flow.shape[1]
-        d_right = optic_flow[:, :, valid_mask, 0].reshape(S * T_len, -1)
-        d_up = optic_flow[:, :, valid_mask, 1].reshape(S * T_len, -1)
-
-        rot_flat, trans_flat, _ = self.estimate_ego_motion_from_flow(
-            phi_valid, theta_valid, d_right, d_up, terms=terms,
-        )
+        rot_flat, trans_flat, _ = ego_motion.estimate_from_flow(eye_flows, terms=terms)
         rotations = rot_flat.reshape(S, T_len, 3)
         translations = trans_flat.reshape(S, T_len, 3)
 

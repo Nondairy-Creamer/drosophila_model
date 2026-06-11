@@ -546,5 +546,256 @@ In a fixed environment,
  Absolute scale is not recovered, but relative speeds and directions are.
 \end_layout
 
+\begin_layout Section*
+Two offset eyes (binocular)
+\end_layout
+
+\begin_layout Standard
+The derivation above places the sensor at the observer's center of rotation.
+ A real head carries two eyes at fixed body-frame offsets 
+\begin_inset Formula $\mathbf{r}_{L},\mathbf{r}_{R}$
+\end_inset
+
+ from the center of mass.
+ For a rigid body with angular velocity 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ and center-of-mass velocity 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+, the eye at offset 
+\begin_inset Formula $\mathbf{r}_{e}$
+\end_inset
+
+ moves at 
+\begin_inset Formula $\mathbf{v}_{e}=\mathbf{T}+\boldsymbol{\Omega}\times\mathbf{r}_{e}$
+\end_inset
+
+.
+ So eye 
+\begin_inset Formula $e$
+\end_inset
+
+ sees flow
+\begin_inset Formula 
+\[
+\mathbf{u}_{i}=-\boldsymbol{\Omega}\times\mathbf{d}_{i}-\frac{1}{Z_{i}}\Pi_{i}\big(\mathbf{T}+\boldsymbol{\Omega}\times\mathbf{r}_{e}\big),\qquad i\in\text{eye }e.
+\]
+
+\end_inset
+
+Each eye shares 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ and the same spherical basis; only the translation term gains the rigid-body
+ velocity 
+\begin_inset Formula $\boldsymbol{\Omega}\times\mathbf{r}_{e}$
+\end_inset
+
+.
+ Write the per-eye effective translation as 
+\begin_inset Formula $\mathbf{T}_{e}=\mathbf{T}+\mathbf{b}_{e}$
+\end_inset
+
+ with 
+\begin_inset Formula $\mathbf{b}_{e}=\boldsymbol{\Omega}\times\mathbf{r}_{e}$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Subsection*
+What changes
+\end_layout
+
+\begin_layout Standard
+Steps 1–2 are unchanged: rotation is shared across the eyes and is independent
+ of the offset, so stacking both eyes' columns in the least-squares for 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ and the per-point de-rotation work exactly as before.
+ Only the translation step changes, and it stays a 
+\series bold
+single joint optimization
+\series default
+ over both eyes — the eyes are 
+\emph on
+not
+\emph default
+ reduced to per-eye directions and then merged.
+\end_layout
+
+\begin_layout Subsection*
+Joint translation with absolute scale
+\end_layout
+
+\begin_layout Standard
+The de-rotated flow 
+\begin_inset Formula $\mathbf{v}_{i}\approx-\frac{1}{Z_{i}}\Pi_{i}\mathbf{T}_{e}$
+\end_inset
+
+ is colinear with 
+\begin_inset Formula $\Pi_{i}\mathbf{T}_{e}$
+\end_inset
+
+, so the cross product vanishes and the unknown depth drops out:
+\begin_inset Formula 
+\[
+[\mathbf{v}_{i}]_{\times}\Pi_{i}\big(\mathbf{T}+\mathbf{b}_{e}\big)=\mathbf{0}\quad\Longrightarrow\quad\underbrace{[\mathbf{v}_{i}]_{\times}\Pi_{i}}_{C_{i}}\,\mathbf{T}=-C_{i}\,\mathbf{b}_{e}.
+\]
+
+\end_inset
+
+The crucial point is that 
+\begin_inset Formula $\mathbf{b}_{e}=\boldsymbol{\Omega}\times\mathbf{r}_{e}$
+\end_inset
+
+ is known in 
+\series bold
+absolute
+\series default
+ units: 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ comes out of step 1 with no scale ambiguity and 
+\begin_inset Formula $\mathbf{r}_{e}$
+\end_inset
+
+ is fixed geometry.
+ The right-hand side is therefore a known, non-zero vector, turning the
+ homogeneous (direction-only) monocular problem into an inhomogeneous one
+ that pins down 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+ outright.
+\end_layout
+
+\begin_layout Standard
+Stack the constraint over 
+\series bold
+every column of every eye
+\series default
+ and solve one least-squares for the body translation 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+ directly:
+\begin_inset Formula 
+\[
+C=\begin{bmatrix}\vdots\\
+C_{i}\\
+\vdots
+\end{bmatrix},\qquad\mathbf{d}=\begin{bmatrix}\vdots\\
+-C_{i}\mathbf{b}_{e(i)}\\
+\vdots
+\end{bmatrix},\qquad\mathbf{T}^{*}=\arg\min_{\mathbf{T}}\,\|C\mathbf{T}-\mathbf{d}\|^{2}=(C^{\intercal}C)^{-1}C^{\intercal}\mathbf{d}.
+\]
+
+\end_inset
+
+This uses all columns at once — each weighted by its own flow magnitude
+ — rather than collapsing each eye to a single estimated direction first.
+ The normal matrix accumulates per eye as 
+\begin_inset Formula $C^{\intercal}C=\sum_{e}\sum_{i\in e}C_{i}^{\intercal}C_{i}$
+\end_inset
+
+ and 
+\begin_inset Formula $C^{\intercal}\mathbf{d}=-\sum_{e}\big(\sum_{i\in e}C_{i}^{\intercal}C_{i}\big)\mathbf{b}_{e}$
+\end_inset
+
+.
+ Because the sign of 
+\begin_inset Formula $\mathbf{b}_{e}$
+\end_inset
+
+ is fixed, 
+\begin_inset Formula $\mathbf{T}^{*}$
+\end_inset
+
+ comes out with the correct sign as well — no separate depth-positivity
+ disambiguation is needed.
+\end_layout
+
+\begin_layout Standard
+
+\series bold
+Focus-of-expansion mask.
+\series default
+ Columns near each eye's focus of expansion have 
+\begin_inset Formula $\Pi_{i}\hat{\mathbf{t}}_{e}\approx\mathbf{0}$
+\end_inset
+
+ and carry almost no translation signal.
+ A second pass drops them — keep only 
+\begin_inset Formula $\|\Pi_{i}\hat{\mathbf{t}}_{e}\|^{2}=1-(\mathbf{d}_{i}\cdot\hat{\mathbf{t}}_{e})^{2}>\tau$
+\end_inset
+
+ with 
+\begin_inset Formula $\hat{\mathbf{t}}_{e}$
+\end_inset
+
+ the direction of the first-pass 
+\begin_inset Formula $\mathbf{T}^{*}+\mathbf{b}_{e}$
+\end_inset
+
+ — and re-solves (
+\begin_inset Formula $\tau\approx0.1$
+\end_inset
+
+).
+ The per-point inverse depth 
+\begin_inset Formula $\rho_{i}=\|\mathbf{T}_{e}\|/Z_{i}=-\mathbf{v}_{i}\cdot\Pi_{i}\hat{\mathbf{t}}_{e}/\|\Pi_{i}\hat{\mathbf{t}}_{e}\|^{2}$
+\end_inset
+
+ then follows from the final 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+.
+\end_layout
+
+\begin_layout Standard
+
+\series bold
+Degeneracy.
+\series default
+ When 
+\begin_inset Formula $\boldsymbol{\Omega}\times(\mathbf{r}_{L}-\mathbf{r}_{R})\approx\mathbf{0}$
+\end_inset
+
+ — no rotation, or the inter-eye baseline parallel to 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ — both eyes see the same translation direction, 
+\begin_inset Formula $\mathbf{d}\to\mathbf{0}$
+\end_inset
+
+, and 
+\begin_inset Formula $C$
+\end_inset
+
+ becomes rank-deficient along that shared direction (reciprocal condition
+ number of 
+\begin_inset Formula $C^{\intercal}C$
+\end_inset
+
+ near zero).
+ Absolute scale is then unrecoverable and the solver falls back to the homogeneou
+s single-sphere estimate (direction via the smallest right singular vector,
+ magnitude via median 
+\begin_inset Formula $\rho$
+\end_inset
+
+).
+ A single eye, or zero offsets, reduces exactly to the monocular result.
+\end_layout
+
 \end_body
 \end_document

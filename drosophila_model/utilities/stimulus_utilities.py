@@ -2407,6 +2407,36 @@ def get_stimulus_one_eye(
     return stimulus, optic_flow, train_mask
 
 
+# Right-eye camera offset (body frame +x forward / +y left / +z up, in the
+# same length units as the dataset's translation/depth) per two-eye stimulus
+# type. The offset is a property of the rig that produced the flow: renders
+# from a single viewpoint have zero offset, while a real two-camera rig carries
+# its physical half-baseline. The left-eye offset is the sagittal mirror,
+# applied by OpticLobeRegion.mirror_camera_offset. Unknown types default to
+# zero (single viewpoint).
+STIMULUS_CAMERA_OFFSETS = {
+    'random_pano': (0.0, 0.0, 0.0),
+    'drone_view': (0.0, 0.0, 0.0),
+    'rpi_drone': (50.0, -50.0, 13.0),
+}
+
+
+def camera_offset_for_stimulus(stimulus_type: str | list[str]):
+    """Right-eye camera offset for a two-eye ``stimulus_type`` (or list).
+
+    Returns a length-3 tuple. A list of types must share one offset (you cannot
+    train a single rig geometry on a mix of rigs); otherwise raises.
+    """
+    types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)
+    offsets = {STIMULUS_CAMERA_OFFSETS.get(t, (0.0, 0.0, 0.0)) for t in types}
+    if len(offsets) > 1:
+        raise ValueError(
+            f"Mixed camera offsets across stimulus types {types}: {sorted(offsets)}. "
+            "Train one rig geometry at a time."
+        )
+    return offsets.pop()
+
+
 def get_stimulus_two_eyes(
     stimulus_type: str | list[str],
     config,

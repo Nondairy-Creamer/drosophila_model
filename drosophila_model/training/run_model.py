@@ -134,10 +134,15 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         )
 
     # --- Build target dict ---
+    eye_offset = None
     if uses_two_eyes:
         stimulus, optic_flow, target_rotation, target_translation, train_mask = \
             su.get_stimulus_two_eyes(config['stimulus']['stimulus_type'], config, model.regions['optic_lobe'].column_phi_theta)
         target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
+        # Camera offset is a property of the rig that generated this dataset
+        # (0 for single-viewpoint renders, the physical half-baseline for a
+        # two-camera rig). Feed it to the two-eye ego-motion solver.
+        eye_offset = su.camera_offset_for_stimulus(config['stimulus']['stimulus_type'])
     else:
         stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.regions['optic_lobe'].column_phi_theta)
 
@@ -175,6 +180,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
         luminance_std=config['training']['luminance_std'],
         batch_size=config['training']['batch_size'],
         train_mask=train_mask,
+        eye_offset=eye_offset,
     )
 
 
