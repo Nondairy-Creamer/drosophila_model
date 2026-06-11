@@ -2408,24 +2408,36 @@ def get_stimulus_one_eye(
 
 
 # Right-eye camera offset (body frame +x forward / +y left / +z up, in the
-# same length units as the dataset's translation/depth) per two-eye stimulus
-# type. The offset is a property of the rig that produced the flow: renders
-# from a single viewpoint have zero offset, while a real two-camera rig carries
-# its physical half-baseline. The left-eye offset is the sagittal mirror,
-# applied by OpticLobeRegion.mirror_camera_offset. Unknown types default to
-# zero (single viewpoint).
-STIMULUS_CAMERA_OFFSETS = {
-    'random_pano': (0.0, 0.0, 0.0),
-    'drone_view': (0.0, 0.0, 0.0),
-    'rpi_drone': (50.0, -50.0, 13.0),
-}
+# dataset's translation/depth length units) per two-eye stimulus type. The
+# offset is a property of the rig that produced the flow: a single-viewpoint
+# render has none, a real two-camera rig carries its physical half-baseline.
+# Populated by the @camera_offset decorator on each stimulus loader (keyed by
+# loader name = stimulus_type); loaders without the decorator are assumed
+# (0, 0, 0). The left-eye offset is the sagittal mirror, applied by
+# OpticLobeRegion.mirror_camera_offset.
+STIMULUS_CAMERA_OFFSETS: dict[str, tuple[float, float, float]] = {}
+
+
+def camera_offset(x=0.0, y=0.0, z=0.0):
+    """Decorator: register a stimulus loader's right-eye camera offset.
+
+    The loader's ``__name__`` is used as the ``stimulus_type`` key. A loader
+    without this decorator defaults to ``(0, 0, 0)`` (single viewpoint, no
+    parallax baseline).
+    """
+    def decorator(func):
+        STIMULUS_CAMERA_OFFSETS[func.__name__] = (float(x), float(y), float(z))
+        return func
+    return decorator
 
 
 def camera_offset_for_stimulus(stimulus_type: str | list[str]):
     """Right-eye camera offset for a two-eye ``stimulus_type`` (or list).
 
-    Returns a length-3 tuple. A list of types must share one offset (you cannot
-    train a single rig geometry on a mix of rigs); otherwise raises.
+    Returns a length-3 tuple, defaulting to ``(0, 0, 0)`` for any type whose
+    loader was not decorated with ``@camera_offset``. A list of types must share
+    one offset (you cannot train a single rig geometry on a mix of rigs);
+    otherwise raises.
     """
     types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)
     offsets = {STIMULUS_CAMERA_OFFSETS.get(t, (0.0, 0.0, 0.0)) for t in types}
@@ -2435,6 +2447,22 @@ def camera_offset_for_stimulus(stimulus_type: str | list[str]):
             "Train one rig geometry at a time."
         )
     return offsets.pop()
+
+
+@camera_offset(50, -50, 13)
+def rpi_drone(config, column_phi_theta, model_dt, device, dtype):
+    """Two-eye loader for the ``rpi_drone`` dataset
+    (``<data_folder>/stimulus/rpi_drone``).
+
+    A real two-camera rig; the ``@camera_offset`` above declares its right-eye
+    half-baseline (mm). Not yet implemented.
+
+    Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
+    train_mask)`` to match the other two-eye loaders.
+    """
+    raise NotImplementedError(
+        "rpi_drone two-eye stimulus loader is not implemented yet."
+    )
 
 
 def get_stimulus_two_eyes(
@@ -2697,11 +2725,17 @@ def get_stimulus_two_eyes(
             observer_translation = torch.zeros((n_ex, Tlen, 3), device=device, dtype=dtype)
             train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
 
+        elif stim_type == 'rpi_drone':
+            if column_phi_theta is None:
+                raise Exception('rpi_drone requires column_phi_theta input')
+            stimulus, optic_flow, observer_rotation, observer_translation, train_mask = \
+                rpi_drone(config, column_phi_theta, model_dt, device, dtype)
+
         else:
             raise ValueError(
                 f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
                 "Expected one of: random_pano, drone_view, edge, flyview, full_field_step, "
-                "full_field_flicker, counterphase_sine, expanding_dot."
+                "full_field_flicker, counterphase_sine, expanding_dot, rpi_drone."
             )
 
         stim_list.append(stimulus)
