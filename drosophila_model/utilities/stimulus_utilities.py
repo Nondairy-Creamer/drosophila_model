@@ -98,8 +98,103 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
     return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
 
 
+def build_calibrated_sampling_matrix(image_shape, calib_u, calib_v,
+                                     calib_phi, calib_theta,
+                                     sample_phi, sample_theta, filter_std=2.5):
+    """Ommatidium sampler for a camera with a scattered (pixel <-> angle) calibration.
+
+    Unlike ``build_ommatidium_sampling_matrix`` (which assumes a linear
+    equirectangular pixel->angle grid), this handles a rig — e.g. a dome — whose
+    mapping is only known at a sparse set of calibration points. We interpolate:
+        * an inverse map (phi, theta) -> (u, v) to place each ommatidium's pixel
+          center (columns outside the calibration convex hull are out of FOV);
+        * a forward per-pixel map (u, v) -> (phi, theta) used to weight pixels
+          near each center by (flat phi/theta) angular distance with the same
+          Gaussian ``filter_std`` (degrees) convention used elsewhere.
+
+    Args:
+        image_shape: (H, W) of the video frame.
+        calib_u, calib_v: (M,) pixel coordinates of the calibration points.
+        calib_phi, calib_theta: (M,) viewing angles (radians) at those pixels.
+        sample_phi, sample_theta: (N,) ommatidium angles (radians) to sample.
+        filter_std: Gaussian filter std in degrees.
+
+    Returns:
+        W: csr_matrix (N, H*W). Usage: sampled = W @ image.ravel().
+        in_fov: (N,) bool, True where the column maps inside the calibration.
+    """
+    from scipy.interpolate import LinearNDInterpolator, griddata
+
+    H, W_img = image_shape
+    filter_std_rad = filter_std * np.pi / 180
+    cutoff_rad = 2 * filter_std_rad
+
+    calib_u = np.asarray(calib_u, dtype=float)
+    calib_v = np.asarray(calib_v, dtype=float)
+    calib_phi = np.asarray(calib_phi, dtype=float)
+    calib_theta = np.asarray(calib_theta, dtype=float)
+    sample_phi = np.asarray(sample_phi, dtype=float)
+    sample_theta = np.asarray(sample_theta, dtype=float)
+    N = len(sample_phi)
+
+    calib_px = np.column_stack([calib_u, calib_v])
+    calib_ang = np.column_stack([calib_phi, calib_theta])
+
+    # Inverse map angle -> pixel for each ommatidium center (NaN outside hull).
+    inv_interp = LinearNDInterpolator(calib_ang, calib_px)
+    centers = inv_interp(np.column_stack([sample_phi, sample_theta]))  # (N, 2)
+    in_fov = np.isfinite(centers).all(axis=1)
+
+    # Forward per-pixel angle maps for angular-distance weighting.
+    grid_u, grid_v = np.meshgrid(np.arange(W_img), np.arange(H))
+    phi_map = griddata(calib_px, calib_phi, (grid_u, grid_v), method='linear')
+    theta_map = griddata(calib_px, calib_theta, (grid_u, grid_v), method='linear')
+
+    # Pixels-per-radian (global estimate) to size the search window in pixels.
+    span_phi = max(calib_phi.max() - calib_phi.min(), 1e-6)
+    span_theta = max(calib_theta.max() - calib_theta.min(), 1e-6)
+    ppr = max((calib_u.max() - calib_u.min()) / span_phi,
+              (calib_v.max() - calib_v.min()) / span_theta)
+    window = int(np.ceil(cutoff_rad * ppr)) + 1
+
+    rows, cols, vals = [], [], []
+    for i in range(N):
+        if not in_fov[i]:
+            continue
+        u0, v0 = centers[i]
+        k_lo = max(0, int(np.floor(u0)) - window)
+        k_hi = min(W_img - 1, int(np.ceil(u0)) + window)
+        j_lo = max(0, int(np.floor(v0)) - window)
+        j_hi = min(H - 1, int(np.ceil(v0)) + window)
+
+        phi_patch = phi_map[j_lo:j_hi + 1, k_lo:k_hi + 1]
+        theta_patch = theta_map[j_lo:j_hi + 1, k_lo:k_hi + 1]
+        d_sq = (phi_patch - sample_phi[i]) ** 2 + (theta_patch - sample_theta[i]) ** 2
+
+        weights = np.exp(-d_sq / (2 * filter_std_rad ** 2))
+        weights[~np.isfinite(d_sq)] = 0
+        weights[d_sq > cutoff_rad ** 2] = 0
+
+        weight_sum = weights.sum()
+        if weight_sum <= 0:
+            in_fov[i] = False
+            continue
+        weights /= weight_sum
+
+        nz_mask = weights > 0
+        local_rows, local_cols = np.where(nz_mask)
+        flat_indices = (local_rows + j_lo) * W_img + (local_cols + k_lo)
+        n_nz = flat_indices.size
+        rows.extend([i] * n_nz)
+        cols.extend(flat_indices.tolist())
+        vals.extend(weights[nz_mask].tolist())
+
+    W = csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
+    return W, in_fov
+
+
 def get_drone_stimulus(model_dt, data_path=None,
-                        frame_start=0, frame_end=None):
+                        frame_start=0, frame_end=None, dataset='small_drone'):
     """
     Load preprocessed drone clips (already sampled at ommatidium locations)
     and temporally interpolate to model_dt.
@@ -113,6 +208,9 @@ def get_drone_stimulus(model_dt, data_path=None,
         data_path: path to drone_data.pt from process_drone.py.
         frame_start: first model time step to include (after interpolation).
         frame_end: last model time step to include (None = end of clip).
+        dataset: which dataset's clips to load when ``drone_data.pt`` is a dict
+            keyed by dataset name (e.g. ``'small_drone'``, ``'rpi_drone'``).
+            Ignored for the legacy list format.
 
     Returns:
         List of dicts, one per clip, each with keys:
@@ -137,7 +235,16 @@ def get_drone_stimulus(model_dt, data_path=None,
     if not data_path.exists():
         raise FileNotFoundError(f"Drone data file not found: {data_path}")
 
-    clips = _torch.load(data_path, weights_only=False)
+    loaded = _torch.load(data_path, weights_only=False)
+    if isinstance(loaded, dict):
+        if dataset not in loaded:
+            raise KeyError(
+                f"Dataset '{dataset}' not found in {data_path}; "
+                f"available: {sorted(loaded)}."
+            )
+        clips = loaded[dataset]
+    else:
+        clips = loaded  # legacy single-dataset list
     results = []
 
     for clip in clips:
@@ -2449,20 +2556,81 @@ def camera_offset_for_stimulus(stimulus_type: str | list[str]):
     return offsets.pop()
 
 
+def _drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype):
+    """Segment preprocessed drone clips into a two-eye stimulus tensor.
+
+    Shared by every two-eye loader backed by ``process_drone.py`` output
+    (``drone_view``, ``rpi_drone``): each clip is chopped into non-overlapping
+    ``stim_time`` segments, right/left eyes concatenated along the column axis,
+    and the ground-truth rotation/translation rates carried alongside.
+
+    Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
+    train_mask)``; optic_flow is all-NaN (real flow is recovered downstream).
+    """
+    in_fov = torch.cat([
+        drone_clips[0]['in_fov_right'],
+        drone_clips[0]['in_fov_left'],
+    ], dim=0)  # (2*N,) True = in field of view
+
+    seg_len = int(round(stim_time / model_dt))
+    max_clip_len = max(clip['right'].shape[0] for clip in drone_clips)
+    if seg_len > max_clip_len:
+        warnings.warn(
+            f"stim_time={stim_time}s ({seg_len} steps) exceeds longest "
+            f"drone clip ({max_clip_len} steps = {max_clip_len * model_dt:.1f}s). "
+            f"Capping to {max_clip_len * model_dt:.1f}s."
+        )
+        seg_len = max_clip_len
+
+    seg_rights, seg_lefts, seg_rots, seg_trans = [], [], [], []
+    n_segments = 0
+    for clip in drone_clips:
+        T_clip = clip['right'].shape[0]
+        num_segments = T_clip // seg_len
+        if num_segments == 0:
+            continue
+        usable = num_segments * seg_len
+        n_segments += num_segments
+        seg_rights.append(clip['right'][:usable].reshape(num_segments, seg_len, -1))
+        seg_lefts.append(clip['left'][:usable].reshape(num_segments, seg_len, -1))
+        seg_rots.append(clip['rotation_rate'][:usable].reshape(num_segments, seg_len, 3))
+        seg_trans.append(clip['translation_rate'][:usable].reshape(num_segments, seg_len, 3))
+
+    stim_right = np.concatenate(seg_rights, axis=0)
+    stim_left = np.concatenate(seg_lefts, axis=0)
+    true_rotation = np.concatenate(seg_rots, axis=0)
+    true_translation = np.concatenate(seg_trans, axis=0)
+
+    stimulus = torch.tensor(
+        np.concatenate([stim_right, stim_left], axis=-1), device=device, dtype=dtype,
+    )
+    optic_flow = torch.full((*stimulus.shape, 2), float('nan'), device=device, dtype=dtype)
+    observer_rotation = torch.tensor(true_rotation, device=device, dtype=dtype)
+    observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
+    train_mask = in_fov.unsqueeze(0).unsqueeze(0).expand(
+        n_segments, seg_len, -1).to(device=device)
+
+    return stimulus, optic_flow, observer_rotation, observer_translation, train_mask
+
+
 @camera_offset(50, -50, 13)
 def rpi_drone(config, column_phi_theta, model_dt, device, dtype):
     """Two-eye loader for the ``rpi_drone`` dataset
     (``<data_folder>/stimulus/rpi_drone``).
 
     A real two-camera rig; the ``@camera_offset`` above declares its right-eye
-    half-baseline (mm). Not yet implemented.
+    half-baseline (mm). Backed by the ``'rpi_drone'`` entry of ``drone_data.pt``
+    produced by ``process_drone.py``.
 
     Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
     train_mask)`` to match the other two-eye loaders.
     """
-    raise NotImplementedError(
-        "rpi_drone two-eye stimulus loader is not implemented yet."
+    stim_time = config['stimulus']['stim_time']
+    drone_data_path = Path(config['data']['data_folder']) / 'stimulus' / 'drone_data.pt'
+    drone_clips = get_drone_stimulus(
+        model_dt, data_path=str(drone_data_path), dataset='rpi_drone',
     )
+    return _drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
 
 
 def get_stimulus_two_eyes(
@@ -2545,55 +2713,10 @@ def get_stimulus_two_eyes(
             stim_time = config['stimulus']['stim_time']
             drone_data_path = Path(config['data']['data_folder']) / 'stimulus' / 'drone_data.pt'
             drone_clips = get_drone_stimulus(
-                model_dt, data_path=str(drone_data_path),
+                model_dt, data_path=str(drone_data_path), dataset='small_drone',
             )
-
-            # FOV mask from the first clip (same geometry for all clips)
-            in_fov = torch.cat([
-                drone_clips[0]['in_fov_right'],
-                drone_clips[0]['in_fov_left'],
-            ], dim=0)  # (2*N,) True = in field of view
-
-            seg_len = int(round(stim_time / model_dt))
-            max_clip_len = max(clip['right'].shape[0] for clip in drone_clips)
-            if seg_len > max_clip_len:
-                import warnings
-                warnings.warn(
-                    f"stim_time={stim_time}s ({seg_len} steps) exceeds longest "
-                    f"drone clip ({max_clip_len} steps = {max_clip_len * model_dt:.1f}s). "
-                    f"Capping to {max_clip_len * model_dt:.1f}s."
-                )
-                seg_len = max_clip_len
-
-            seg_rights, seg_lefts, seg_rots, seg_trans = [], [], [], []
-            n_drone_segments = 0
-            for clip in drone_clips:
-                T_clip = clip['right'].shape[0]
-                num_segments = T_clip // seg_len
-                if num_segments == 0:
-                    continue
-                usable = num_segments * seg_len
-                n_drone_segments += num_segments
-
-                seg_rights.append(clip['right'][:usable].reshape(num_segments, seg_len, -1))
-                seg_lefts.append(clip['left'][:usable].reshape(num_segments, seg_len, -1))
-                seg_rots.append(clip['rotation_rate'][:usable].reshape(num_segments, seg_len, 3))
-                seg_trans.append(clip['translation_rate'][:usable].reshape(num_segments, seg_len, 3))
-
-            stim_right = np.concatenate(seg_rights, axis=0)
-            stim_left = np.concatenate(seg_lefts, axis=0)
-            true_rotation = np.concatenate(seg_rots, axis=0)
-            true_translation = np.concatenate(seg_trans, axis=0)
-
-            stimulus = torch.tensor(
-                np.concatenate([stim_right, stim_left], axis=-1), device=device, dtype=dtype,
-            )
-            optic_flow = torch.full((*stimulus.shape, 2), float('nan'), device=device, dtype=dtype)
-            observer_rotation = torch.tensor(true_rotation, device=device, dtype=dtype)
-            observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
-
-            train_mask = in_fov.unsqueeze(0).unsqueeze(0).expand(
-                n_drone_segments, seg_len, -1).to(device=device)
+            stimulus, optic_flow, observer_rotation, observer_translation, train_mask = \
+                _drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
 
         elif stim_type == 'edge':
             if column_phi_theta is None:

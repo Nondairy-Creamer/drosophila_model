@@ -1,8 +1,22 @@
-"""Process drone stereo video data into preprocessed tensors.
+"""Process drone video datasets into preprocessed tensors.
 
-Loads each pair of left/right stereo videos, loads batch-optimised pose
-estimates from drone_pose.py (running estimation if needed), samples
-frames at ommatidium locations, and saves all clips as a single .pt file.
+Two datasets are supported, each producing a list of ommatidium-sampled clips:
+
+* ``small_drone`` — equirectangular stereo rig in the ``drone_videos`` folder.
+  Left/right videos plus batch-optimised pose from ``drone_pose.py`` (run on
+  demand); pixels map to angles through a linear FOV grid.
+* ``rpi_drone`` — real two-camera (dome) rig at
+  ``<data_folder>/stimulus/rpi_drone``, one ``recording_*`` folder per clip.
+  One video per eye, sampled at the fly ommatidia through the per-eye dome
+  calibration in ``rpi_drone/dome_calib`` (``dome_right.csv`` / ``dome_left.csv``,
+  columns x, y, theta_deg, phi_deg), rotated into the body frame. Ground truth is
+  the angular velocity (``gyro_x/y/z`` in ``imu.csv``) and linear velocity /
+  position (``vx/vy/vz_mps``, ``x/y/z_m`` in ``estimate.csv``), aligned to video
+  frames by timestamp.
+
+``main`` calls a dedicated function per dataset and saves their outputs to a
+single ``drone_data.pt`` keyed by dataset name:
+``{'small_drone': [...], 'rpi_drone': [...]}``.
 
 Usage:
     python drone_analysis/process_drone.py
@@ -18,7 +32,10 @@ import argparse
 from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import gaussian_filter1d, uniform_filter1d
 
-from drosophila_model.utilities.stimulus_utilities import build_ommatidium_sampling_matrix
+from drosophila_model.utilities.stimulus_utilities import (
+    build_ommatidium_sampling_matrix,
+    build_calibrated_sampling_matrix,
+)
 from drosophila_model.config import load_config
 
 BOX_FILTER_SIZE = 4
@@ -563,60 +580,40 @@ def test_odometry():
     print('=== end debug test ===\n')
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Process drone stereo videos into tensors')
-    parser.add_argument('--data-dir', type=str, default=None,
-                        help='Directory containing left_N.mp4, right_N.mp4 '
-                             '(default: <data_folder>/stimulus/drone_videos)')
-    parser.add_argument('--pose-dir', type=str, default=None,
-                        help='Directory with batch-opt pose .npz files from drone_pose.py '
-                             '(default: <data_folder>/stimulus/drone_poses)')
-    parser.add_argument('--output-dir', type=str, default=None,
-                        help='Output directory for the .pt file '
-                             '(default: <data_folder>/stimulus)')
-    parser.add_argument('--column-info', type=str, default=None,
-                        help='Path to optic-lobe column extras parquet with phi/theta '
-                             '(default: <data_folder>/connectome_data/baked/optic_lobe_columns.parquet)')
-    parser.add_argument('--filter-std', type=float, default=2.5,
-                        help='Gaussian filter std in degrees for ommatidium sampling')
-    parser.add_argument('--monocular', action='store_true',
-                        help='Process right_*.mp4 only (no left video, no pose). '
-                             'Output is saved as drone_data_monocular.pt.')
-    args = parser.parse_args()
+def process_small_drone_dataset(data_dir, pose_dir, sample_phi, sample_theta,
+                                filter_std=2.5, monocular=False):
+    """Process the equirectangular ``small_drone`` dataset into sampled clips.
 
-    data_folder = Path(load_config()['data']['data_folder'])
-    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
-    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
-    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus'
-    column_info_path = (
-        Path(args.column_info) if args.column_info
-        else data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
+    Reads the ``drone_videos`` folder: discovers ``left_N.mp4`` / ``right_N.mp4``
+    pairs, loads (or estimates) pose,
+    builds linear-FOV ommatidium sampling matrices, and returns a list of
+    sampled clip dicts. In ``monocular`` mode only the right videos/pose-free
+    path is used.
 
-    # Camera field-of-view limits (degrees)
-    phi_right_deg = (-30, -150)
-    phi_left_deg = (150, 30)
-    theta_deg = (45, 135)
+    Args:
+        data_dir: directory containing the stereo videos.
+        pose_dir: directory of batch-opt pose ``.npz`` files from drone_pose.py.
+        sample_phi, sample_theta: (N,) ommatidium angles (radians).
+        filter_std: Gaussian filter std in degrees.
+        monocular: process only right videos (no left, no pose).
 
-    phi_right_lim = np.array(phi_right_deg) * np.pi / 180
-    phi_left_lim = np.array(phi_left_deg) * np.pi / 180
-    theta_lim = np.array(theta_deg) * np.pi / 180
+    Returns:
+        List of sampled clip dicts (empty if no clips are found).
+    """
+    data_dir = Path(data_dir)
 
-    # Load ommatidium positions
-    column_info_df = pd.read_parquet(column_info_path)
-    sample_phi = column_info_df['phi'].to_numpy()
-    sample_theta = column_info_df['theta'].to_numpy()
-    print(f'Loaded {len(sample_phi)} ommatidium positions from {column_info_path}')
+    # Camera field-of-view limits (degrees) for the equirectangular rig.
+    phi_right_lim = np.array((-30, -150)) * np.pi / 180
+    phi_left_lim = np.array((150, 30)) * np.pi / 180
+    theta_lim = np.array((45, 135)) * np.pi / 180
 
-    # Discover clips from video files
     right_ids = set()
     for p in data_dir.glob('right_*.mp4'):
         try:
             right_ids.add(int(p.stem.split('_')[1]))
         except (ValueError, IndexError):
             continue
-    if args.monocular:
+    if monocular:
         clip_ids = sorted(right_ids)
     else:
         left_ids = set()
@@ -626,56 +623,330 @@ def main():
             except (ValueError, IndexError):
                 continue
         clip_ids = sorted(left_ids & right_ids)
-    print(f'Found {len(clip_ids)} clips: {clip_ids}')
+    print(f'[small_drone] Found {len(clip_ids)} clips: {clip_ids}')
 
     raw_clips = []
     for clip_id in clip_ids:
-        print(f'Loading clip {clip_id}...')
-        clip = process_clip(clip_id, data_dir, pose_dir, monocular=args.monocular)
+        print(f'[small_drone] Loading clip {clip_id}...')
+        clip = process_clip(clip_id, data_dir, pose_dir, monocular=monocular)
         if clip is not None:
             raw_clips.append(clip)
 
     if not raw_clips:
-        print('No valid clips found.')
-        return
+        print('[small_drone] No valid clips found.')
+        return []
 
-    # Build sampling matrices (all clips share the same resolution)
     _, image_height, image_width = raw_clips[0]['right'].shape
-
-    print(f'Building sampling matrices for {image_height}x{image_width} frames...')
+    print(f'[small_drone] Building sampling matrices for {image_height}x{image_width} frames...')
     W_right = build_ommatidium_sampling_matrix(
         (image_height, image_width), phi_right_lim, theta_lim,
-        sample_phi, sample_theta, filter_std=args.filter_std,
+        sample_phi, sample_theta, filter_std=filter_std,
     )
     in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
 
-    if args.monocular:
+    if monocular:
         W_left, in_fov_left = None, None
     else:
         W_left = build_ommatidium_sampling_matrix(
             (image_height, image_width), phi_left_lim, theta_lim,
-            -sample_phi, sample_theta, filter_std=args.filter_std,
+            -sample_phi, sample_theta, filter_std=filter_std,
         )
         in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
 
     clips = []
     for raw_clip in raw_clips:
-        print(f'Sampling clip {raw_clip["clip_id"]}...')
+        print(f'[small_drone] Sampling clip {raw_clip["clip_id"]}...')
         clips.append(sample_clip(raw_clip, W_right, in_fov_right, W_left, in_fov_left))
+    return clips
 
-    out_name = 'drone_data_monocular.pt' if args.monocular else 'drone_data.pt'
-    out_path = output_dir / out_name
-    torch.save(clips, out_path)
-    size_mb = out_path.stat().st_size / 1e6
 
-    print(f'\n{"="*60}')
-    print(f'Saved {len(clips)} clips to {out_path} ({size_mb:.0f} MB)')
+def _rot_y(deg):
+    """Rotation matrix about the +y axis by ``deg`` degrees."""
+    a = np.radians(deg)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+
+def _rot_z(deg):
+    """Rotation matrix about the +z axis by ``deg`` degrees."""
+    a = np.radians(deg)
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
+def load_dome_calibration(csv_path, phi_offset_deg):
+    """Load a dome-calibration CSV and rotate it into the body frame.
+
+    The cleaned calibration CSVs (``dome_right.csv`` / ``dome_left.csv``) give,
+    per labelled pixel: ``x`` (horizontal, +right), ``y`` (vertical, +down),
+    ``theta_deg`` (polar angle from the image-center pole = optical axis), and
+    ``phi_deg`` (azimuth around that pole). These describe directions in the
+    camera frame where the optical axis is the north pole (+z).
+
+    The camera is then placed in the body frame (+x forward, +y left, +z up):
+    the optical axis is rotated +90 deg in theta (from straight up to the
+    horizon) and by ``phi_offset_deg`` in phi. Per the rig geometry the right
+    eye uses -80 deg (faces right, -y, with a 10 deg inward/forward tilt) and
+    the left eye uses +80 deg (faces left, +y, same tilt). After this the angles
+    are in the standard convention used everywhere else.
+
+    Returns ``(u, v, phi, theta)``: pixel coords and body-frame angles (radians).
+    """
+    df = pd.read_csv(csv_path)
+    u = df['x'].to_numpy(dtype=float)
+    v = df['y'].to_numpy(dtype=float)
+    theta_cam = np.radians(df['theta_deg'].to_numpy(dtype=float))  # polar from pole
+    phi_cam = np.radians(df['phi_deg'].to_numpy(dtype=float))      # azimuth around pole
+
+    d_cam = np.column_stack([
+        np.sin(theta_cam) * np.cos(phi_cam),
+        np.sin(theta_cam) * np.sin(phi_cam),
+        np.cos(theta_cam),
+    ])
+    rotation = _rot_z(phi_offset_deg) @ _rot_y(90.0)
+    d_body = d_cam @ rotation.T
+
+    phi = np.arctan2(d_body[:, 1], d_body[:, 0])
+    theta = np.arccos(np.clip(d_body[:, 2], -1.0, 1.0))
+    return u, v, phi, theta
+
+
+def load_rpi_ground_truth(recording_dir, gyro_scale=1.0):
+    """Load rpi_drone ground truth aligned to video frames by timestamp.
+
+    Frame timestamps come from ``stereo_frames.csv`` (one row per video frame).
+    Angular velocity (``gyro_x/y/z`` in ``imu.csv``) and position / linear
+    velocity (``x/y/z_m``, ``vx/vy/vz_mps`` in ``estimate.csv``) are linearly
+    interpolated onto those frame times using each file's ``time_s`` column, so
+    differing sample rates between the IMU, the state estimate, and the video
+    are handled correctly.
+
+    Axes are taken to already be in the body frame (+x forward, +y left,
+    +z up) used by the model; adjust here if the rig differs.
+
+    Args:
+        recording_dir: directory with imu.csv, estimate.csv, stereo_frames.csv.
+        gyro_scale: multiplier converting raw gyro units to deg/s (the
+            ``rotation`` rate convention used by the rest of the pipeline).
+            The raw IMU units are unknown; defaults to 1.0 (treated as deg/s).
+
+    Returns:
+        rotation_rate: (T, 3) angular velocity in deg/s.
+        translation_rate: (T, 3) linear velocity in m/s.
+        positions: (T, 3) position in m.
+        frame_times: (T,) video frame times in seconds.
+    """
+    recording_dir = Path(recording_dir)
+    frames = pd.read_csv(recording_dir / 'stereo_frames.csv')
+    frames = frames.sort_values('video_frame_index')
+    frame_times = frames['time_s'].to_numpy(dtype=float)
+
+    imu = pd.read_csv(recording_dir / 'imu.csv')
+    est = pd.read_csv(recording_dir / 'estimate.csv')
+
+    def interp_cols(df, cols):
+        t = df['time_s'].to_numpy(dtype=float)
+        return np.column_stack([
+            np.interp(frame_times, t, df[c].to_numpy(dtype=float)) for c in cols
+        ])
+
+    rotation_rate = interp_cols(imu, ['gyro_x', 'gyro_y', 'gyro_z']) * gyro_scale
+    translation_rate = interp_cols(est, ['vx_mps', 'vy_mps', 'vz_mps'])
+    positions = interp_cols(est, ['x_m', 'y_m', 'z_m'])
+    return rotation_rate, translation_rate, positions, frame_times
+
+
+def process_rpi_drone_dataset(data_dir, calib_dir, sample_phi, sample_theta,
+                              filter_std=2.5, gyro_scale=1.0):
+    """Process the ``rpi_drone`` two-camera dome dataset into sampled clips.
+
+    Each ``recording_*`` subfolder of ``data_dir`` is one clip with ``right.mp4``
+    / ``left.mp4`` plus ``imu.csv`` / ``estimate.csv`` / ``stereo_frames.csv``.
+    Fly ommatidia are mapped into each video through the per-eye dome
+    calibration in ``calib_dir`` (``dome_right.csv`` / ``dome_left.csv``), which
+    is rotated into the body frame by :func:`load_dome_calibration`.
+
+    The right eye is sampled at the right-eye columns ``(sample_phi,
+    sample_theta)`` and the left eye at their sagittal mirror ``(-sample_phi,
+    sample_theta)``.
+
+    Returns:
+        List of sampled clip dicts (one per recording).
+    """
+    data_dir = Path(data_dir)
+    calib_dir = Path(calib_dir)
+
+    recording_dirs = sorted(p for p in data_dir.glob('recording_*') if p.is_dir())
+    if not recording_dirs:
+        print(f'[rpi_drone] No recording_* folders found in {data_dir}.')
+        return []
+    print(f'[rpi_drone] Found {len(recording_dirs)} recordings.')
+
+    # Right/left calibration rotated into the body frame (rig geometry: right
+    # eye faces -y with 10 deg inward tilt, left eye faces +y).
+    cu_r, cv_r, cphi_r, cth_r = load_dome_calibration(calib_dir / 'dome_right.csv', -80.0)
+    cu_l, cv_l, cphi_l, cth_l = load_dome_calibration(calib_dir / 'dome_left.csv', 80.0)
+
+    sampler_cache = {}
+
+    def get_samplers(image_height, image_width):
+        key = (image_height, image_width)
+        if key not in sampler_cache:
+            print(f'[rpi_drone] Building calibrated sampling matrices for '
+                  f'{image_height}x{image_width} frames...')
+            W_right, in_fov_right = build_calibrated_sampling_matrix(
+                key, cu_r, cv_r, cphi_r, cth_r,
+                sample_phi, sample_theta, filter_std=filter_std,
+            )
+            W_left, in_fov_left = build_calibrated_sampling_matrix(
+                key, cu_l, cv_l, cphi_l, cth_l,
+                -sample_phi, sample_theta, filter_std=filter_std,
+            )
+            sampler_cache[key] = (W_right, in_fov_right, W_left, in_fov_left)
+        return sampler_cache[key]
+
+    clips = []
+    for rec in recording_dirs:
+        print(f'[rpi_drone] Loading {rec.name}...')
+        right = load_video_grayscale(rec / 'right.mp4')
+        left = load_video_grayscale(rec / 'left.mp4')
+
+        cap = cv2.VideoCapture(str(rec / 'right.mp4'))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+        video_dt = 1.0 / float(fps)
+
+        rotation_rate, translation_rate, positions, _ = load_rpi_ground_truth(
+            rec, gyro_scale=gyro_scale,
+        )
+
+        n_frames = min(len(right), len(left), len(rotation_rate))
+        right = right[:n_frames]
+        left = left[:n_frames]
+        rotation_rate = rotation_rate[:n_frames]
+        translation_rate = translation_rate[:n_frames]
+        positions = positions[:n_frames]
+
+        raw_clip = {
+            'right': torch.from_numpy(right),
+            'left': torch.from_numpy(left),
+            'rotation': torch.from_numpy(rotation_rate.astype(np.float32)),
+            'translation': torch.from_numpy(translation_rate.astype(np.float32)),
+            'translation_location': torch.from_numpy(positions.astype(np.float32)),
+            'video_dt': video_dt,
+            'clip_id': rec.name,
+        }
+        print(f'[rpi_drone] {rec.name}: {n_frames} frames ({n_frames * video_dt:.1f}s)')
+
+        W_right, in_fov_right, W_left, in_fov_left = get_samplers(
+            right.shape[1], right.shape[2])
+        clips.append(sample_clip(raw_clip, W_right, in_fov_right, W_left, in_fov_left))
+    return clips
+
+
+def _print_dataset_summary(name, clips):
+    """Print a per-clip frame/ommatidium/duration summary for one dataset."""
+    if not clips:
+        print(f'{name}: no clips')
+        return
     N = clips[0]['right'].shape[1]
+    print(f'{name}: {len(clips)} clips')
     print(f'{"Clip":>6} {"Frames":>8} {"Ommatidia":>10} {"Duration":>10}')
     for clip in clips:
         T = clip['right'].shape[0]
         dt = clip['video_dt']
         print(f'{clip["clip_id"]:>6} {T:>8} {N:>10} {T*dt:>9.1f}s')
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Process drone video datasets into tensors')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='drone_videos directory with left_N.mp4, right_N.mp4 '
+                             '(default: <data_folder>/stimulus/drone_videos)')
+    parser.add_argument('--pose-dir', type=str, default=None,
+                        help='Directory with batch-opt pose .npz files from drone_pose.py '
+                             '(default: <data_folder>/stimulus/drone_poses)')
+    parser.add_argument('--rpi-dir', type=str, default=None,
+                        help='rpi_drone directory of recording_* folders '
+                             '(default: <data_folder>/stimulus/rpi_drone)')
+    parser.add_argument('--calib-dir', type=str, default=None,
+                        help='Dome calibration directory with dome_right.csv, dome_left.csv '
+                             '(default: <rpi-dir>/dome_calib)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory for the .pt file '
+                             '(default: <data_folder>/stimulus)')
+    parser.add_argument('--column-info', type=str, default=None,
+                        help='Path to optic-lobe column extras parquet with phi/theta '
+                             '(default: <data_folder>/connectome_data/baked/optic_lobe_columns.parquet)')
+    parser.add_argument('--filter-std', type=float, default=2.5,
+                        help='Gaussian filter std in degrees for ommatidium sampling')
+    parser.add_argument('--monocular', action='store_true',
+                        help='Process drone_videos right_*.mp4 only (no left video, no pose). '
+                             'Output is saved as drone_data_monocular.pt.')
+    args = parser.parse_args()
+
+    data_folder = Path(load_config()['data']['data_folder'])
+    drone_videos_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
+    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
+    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'rpi_drone'
+    calib_dir = Path(args.calib_dir) if args.calib_dir else rpi_dir / 'dome_calib'
+    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus'
+    column_info_path = (
+        Path(args.column_info) if args.column_info
+        else data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    column_info_df = pd.read_parquet(column_info_path)
+    sample_phi = column_info_df['phi'].to_numpy()
+    sample_theta = column_info_df['theta'].to_numpy()
+    print(f'Loaded {len(sample_phi)} ommatidium positions from {column_info_path}')
+
+    # Monocular mode keeps its own single-dataset (list) output for back-compat.
+    if args.monocular:
+        clips = process_small_drone_dataset(
+            drone_videos_dir, pose_dir, sample_phi, sample_theta,
+            filter_std=args.filter_std, monocular=True,
+        )
+        if not clips:
+            print('No valid clips found.')
+            return
+        out_path = output_dir / 'drone_data_monocular.pt'
+        torch.save(clips, out_path)
+        print(f'\n{"="*60}')
+        print(f'Saved to {out_path} ({out_path.stat().st_size / 1e6:.0f} MB)')
+        _print_dataset_summary('small_drone (monocular)', clips)
+        return
+
+    datasets = {}
+    datasets['small_drone'] = process_small_drone_dataset(
+        drone_videos_dir, pose_dir, sample_phi, sample_theta,
+        filter_std=args.filter_std,
+    )
+
+    if rpi_dir.exists():
+        try:
+            datasets['rpi_drone'] = process_rpi_drone_dataset(
+                rpi_dir, calib_dir, sample_phi, sample_theta,
+                filter_std=args.filter_std,
+            )
+        except Exception as exc:  # keep small_drone output even if rpi fails
+            print(f'[rpi_drone] Skipping: {exc}')
+    else:
+        print(f'[rpi_drone] Directory not found at {rpi_dir}, skipping.')
+
+    if not any(datasets.values()):
+        print('No valid clips found in any dataset.')
+        return
+
+    out_path = output_dir / 'drone_data.pt'
+    torch.save(datasets, out_path)
+    size_mb = out_path.stat().st_size / 1e6
+
+    print(f'\n{"="*60}')
+    print(f'Saved datasets {sorted(datasets)} to {out_path} ({size_mb:.0f} MB)')
+    for name, clips in datasets.items():
+        _print_dataset_summary(name, clips)
 
 
 if __name__ == '__main__':

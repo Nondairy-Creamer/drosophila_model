@@ -1,5 +1,12 @@
 """
-Visualize two-eyes stimuli (e.g. drone_view) as a movie.
+Visualize processed two-eye drone data as a movie.
+
+Works on either dataset in drone_data.pt via --dataset:
+  * small_drone (equirectangular rig, raw videos in stimulus/drone_videos)
+  * rpi_drone   (dome rig, raw videos in stimulus/rpi_drone/<recording>/)
+
+Example:
+    python analysis/movie_scripts/visualize_drone_data.py --dataset rpi_drone --plot-extra
 
 Default layout (2x2):
   Row 0:  raw left camera frame  |  raw right camera frame
@@ -76,13 +83,16 @@ def main() -> None:
         description="Make a movie showing two-eye stimulus with raw video and sampled ommatidia."
     )
     parser.add_argument("--config", type=str, default="config.toml", help="Path to config file")
+    parser.add_argument("--dataset", type=str, default="small_drone",
+                        choices=["small_drone", "rpi_drone"],
+                        help="Which dataset in drone_data.pt to visualize")
     parser.add_argument("--stim-index", type=int, nargs="+", default=[0],
                         help="Clip indices to visualize (into the list of processed clips)")
     parser.add_argument("--fps", type=float, default=None,
                         help="Output movie frame rate (default: native video rate)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to render (default: all)")
-    parser.add_argument("--output-dir", type=str, default="figures/drone_flow",
+    parser.add_argument("--output-dir", type=str, default="figures/visualize_drone_data",
                         help="Output directory for the movie")
     parser.add_argument("--plot-extra", action="store_true", default=False,
                         help="Show sampled ommatidia and rotation/translation rates")
@@ -104,9 +114,9 @@ def main() -> None:
     drone_video_dir = data_folder / "stimulus" / "drone_videos"
     pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / "stimulus" / "drone_poses"
 
-    print("Loading preprocessed drone clips...")
+    print(f"Loading preprocessed drone clips (dataset={args.dataset})...")
     drone_clips = su.get_drone_stimulus(
-        model_dt, data_path=str(drone_data_path),
+        model_dt, data_path=str(drone_data_path), dataset=args.dataset,
     )
     print(f"Found {len(drone_clips)} clips")
 
@@ -124,9 +134,14 @@ def main() -> None:
         clip_id = sampled["clip_id"]
         video_dt = sampled["video_dt"]
 
-        from drone_analysis.process_drone import load_video_grayscale
-        raw_left = load_video_grayscale(drone_video_dir / f"left_{clip_id}.mp4")
-        raw_right = load_video_grayscale(drone_video_dir / f"right_{clip_id}.mp4")
+        from drosophila_model.analysis.drone_analysis.process_drone import load_video_grayscale
+        if args.dataset == "rpi_drone":
+            rec_dir = data_folder / "stimulus" / "rpi_drone" / str(clip_id)
+            raw_left = load_video_grayscale(rec_dir / "left.mp4")
+            raw_right = load_video_grayscale(rec_dir / "right.mp4")
+        else:
+            raw_left = load_video_grayscale(drone_video_dir / f"left_{clip_id}.mp4")
+            raw_right = load_video_grayscale(drone_video_dir / f"right_{clip_id}.mp4")
         raw = {"left": torch.from_numpy(raw_left), "right": torch.from_numpy(raw_right)}
 
         num_frames_raw = raw["left"].shape[0]
@@ -149,7 +164,7 @@ def main() -> None:
             return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
 
         pose_npz = pose_dir / f"pose_{clip_id}.npz"
-        if pose_npz.exists():
+        if args.dataset == "small_drone" and pose_npz.exists():
             rot_pos, trans_pos, rot_rate, trans_rate = _load_new_pose(
                 pose_npz, num_frames_sampled, model_dt)
             print(f"  Using new pose estimates from {pose_npz}")
