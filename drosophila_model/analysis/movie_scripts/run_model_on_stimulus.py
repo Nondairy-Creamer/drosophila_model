@@ -70,7 +70,7 @@ def main() -> None:
     parser.add_argument("--stim-index", type=int, nargs="+", default=[0],
                         help="Stimulus indices to visualize (space-separated)")
     parser.add_argument("--fps", type=float, default=None,
-                        help="Output movie frame rate (default: half the model rate)")
+                        help="Output movie frame rate (default: the model's base rate)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to render")
     parser.add_argument("--output-dir", type=str, default=None,
@@ -116,7 +116,7 @@ def main() -> None:
         print(f"Overriding config device {cfg_device!r} -> model device {str(device)!r}")
         config['model']['device'] = str(device)
 
-    frame_rate = args.fps or max(1, int(round((1 / model_dt) / 2)))
+    frame_rate = args.fps or max(1, round(1 / model_dt))
 
     column_xyz = model.regions['optic_lobe'].get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]

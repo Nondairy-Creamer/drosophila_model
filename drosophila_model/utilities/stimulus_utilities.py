@@ -346,7 +346,7 @@ def resample_time_to_length(data, n_out: int):
     return out
 
 
-def load_rendered_fly_view_dataset(
+def load_fly_view_dataset(
     model_dt: float,
     stim_time: float,
     *,
@@ -355,23 +355,25 @@ def load_rendered_fly_view_dataset(
     drop_first_frame: bool = True,
 ):
     """
-    Load the rendered fly-view dataset (``<data_folder>/stimulus/rendered_fly_view_dataset.pkl``).
+    Load the fly-view dataset (``<data_folder>/stimulus/fib_fly_view_dataset.pkl``).
 
     Columns are **block-packed**: ``[..., :n_eye]`` = all right-eye samples,
     ``[..., n_eye:]`` = all left-eye samples (``n_eye = N // 2``).
 
-    ``forward_flows`` are in radians per video frame (see key ``flow_units`` in the file);
-    they are converted to deg/s before temporal interpolation to ``model_dt``.
+    ``forward_flows`` are in radians per video frame (see key ``flow_units`` in the
+    file); they are converted to deg/s before temporal interpolation to ``model_dt``.
+    Both flow components (x and y) are sign-flipped to match the model basis.
 
     Args:
         model_dt: Model time step (seconds).
-        stim_time: Duration of each training segment (seconds).
+        stim_time: Duration of each segment (seconds). Use a value >= the native
+            clip duration to keep each clip as a single segment.
         two_eyes: If True, return binocular columns ``[right | left]`` plus ego-motion
             rates derived from ``roll_pitch_yaw`` and ``positions``. If False, return
             right-eye columns only.
         data_path: Path to the pickle. When ``None``, resolves to
-            ``<config['data']['data_folder']>/stimulus/rendered_fly_view_dataset.pkl``.
-        drop_first_frame: If True, drop the first time index (matches prior flyview usage).
+            ``<config['data']['data_folder']>/stimulus/fib_fly_view_dataset.pkl``.
+        drop_first_frame: If True, drop the first time index.
 
     Returns:
         If ``two_eyes`` is False:
@@ -388,11 +390,11 @@ def load_rendered_fly_view_dataset(
         from drosophila_model.config import load_config
         data_path = (
             Path(load_config()['data']['data_folder'])
-            / 'stimulus' / 'rendered_fly_view_dataset.pkl'
+            / 'stimulus' / 'fib_fly_view_dataset.pkl'
         )
     path = Path(data_path)
     if not path.exists():
-        raise FileNotFoundError(f"Rendered fly-view dataset not found: {path.resolve()}")
+        raise FileNotFoundError(f"Fly-view dataset not found: {path.resolve()}")
 
     with open(path, 'rb') as f:
         d = pickle.load(f)
@@ -413,20 +415,10 @@ def load_rendered_fly_view_dataset(
         raise ValueError(f"Expected an even column count (R|L); got {n_cols}")
     n_eye = n_cols // 2
 
-    if two_eyes:
-        left_probe = np.asarray(d['responses'][0])[:, n_eye:]
-        if left_probe.size and float(np.nanstd(left_probe)) < 1e-6:
-            warnings.warn(
-                "rendered_fly_view_dataset.pkl: second column block is (near-)constant — "
-                "this build does not contain real left-eye samples. "
-                "Two-eye flyview will show a flat/empty left panel; use one-eye flyview "
-                "or a binocular source (e.g. drone_view).",
-                UserWarning,
-                stacklevel=2,
-            )
-
     # Ideal native frame count for stim_time; clips may be shorter — we upsample later.
     n_frames_requested = max(1, int(round(stim_time / stimulus_dt)))
+
+    print("assuming x and y flow vectors are flipped in flyview. inverting")
 
     stim_list, flow_list = [], []
     rot_list, trans_list = [], []
@@ -452,7 +444,8 @@ def load_rendered_fly_view_dataset(
 
         bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
         resp = np.nan_to_num(resp, nan=0.0)
-        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s
+        # Invert both flow components (x and y) to match the model basis.
+        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s * -1.0
 
         resp_r, resp_l = resp[:, :n_eye], resp[:, n_eye:]
         flow_r, flow_l = flow_deg_s[:, :n_eye], flow_deg_s[:, n_eye:]
@@ -478,8 +471,6 @@ def load_rendered_fly_view_dataset(
                 f = flow_r[sl]
                 b = bad_r[sl]
 
-            f = f.copy()
-            f[..., 0] *= -1.0
             s = s.copy()
             s[b] = 0.0
             f = np.where(b[..., np.newaxis], 0.0, f)
@@ -2405,7 +2396,7 @@ def get_stimulus_one_eye(
         elif stim_type == 'flyview':
             if column_phi_theta is None:
                 raise Exception('flyview requires column_phi_theta input')
-            stimulus_np, optic_flow_np = load_rendered_fly_view_dataset(
+            stimulus_np, optic_flow_np = load_fly_view_dataset(
                 model_dt, stim_time, two_eyes=False,
             )
             n_cols_expect = column_phi_theta.shape[0]
@@ -2802,7 +2793,7 @@ def get_stimulus_two_eyes(
             if column_phi_theta is None:
                 raise Exception('flyview requires column_phi_theta input')
             stim_time = config['stimulus']['stim_time']
-            stimulus_np, optic_flow_np, rot_np, trans_np = load_rendered_fly_view_dataset(
+            stimulus_np, optic_flow_np, rot_np, trans_np = load_fly_view_dataset(
                 model_dt, stim_time, two_eyes=True,
             )
             n_expect = 2 * column_phi_theta.shape[0]
@@ -2909,9 +2900,15 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
         Interpolated data with new time dimension matching model_dt
         
     Raises:
-        ValueError: If model_dt > stimulus_dt (cannot upsample in time)
+        ValueError: If model_dt is meaningfully larger than stimulus_dt (would
+            fabricate temporal resolution). A small relative tolerance allows
+            datasets recorded at ~the model rate (e.g. 30.303 Hz data vs 30 Hz model).
     """
-    if model_dt > stimulus_dt:
+    # Treat rates within rel_tol as the same sampling rate; resample_time_to_length
+    # handles the final exact length. This avoids hard-failing on negligible
+    # rate mismatches while still blocking genuine upsampling.
+    rel_tol = 0.05
+    if model_dt > stimulus_dt * (1.0 + rel_tol):
         raise ValueError(
             f"model_dt ({model_dt}) cannot be larger than stimulus_dt ({stimulus_dt}). "
             f"Cannot upsample temporal resolution."

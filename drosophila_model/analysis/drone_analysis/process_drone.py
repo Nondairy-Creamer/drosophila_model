@@ -40,6 +40,12 @@ from drosophila_model.config import load_config
 
 BOX_FILTER_SIZE = 4
 
+# Raw flight-controller gyro samples are int16 ADC counts, not deg/s. The IMU
+# runs at +-2000 deg/s full scale, so full-scale int16 (32768) maps to 2000
+# deg/s; dividing by this gives deg/s. Without it the rates come out ~16x too
+# large (thousands of deg/s).
+GYRO_COUNTS_PER_DEG_S = 32768 / 2000
+
 
 def load_video_grayscale(path):
     """Load video as grayscale uint8 frames."""
@@ -690,6 +696,12 @@ def load_dome_calibration(csv_path, phi_offset_deg):
     the left eye uses +80 deg (faces left, +y, same tilt). After this the angles
     are in the standard convention used everywhere else.
 
+    A final 180 deg roll about the optical axis is applied: the calibration
+    azimuth is measured from image-up, and rotating the pole down to the horizon
+    via ``Ry(90)`` would otherwise carry image-up to the ground (the sampled eye
+    view comes out rotated 180 deg). The roll keeps scene-up aligned with body
+    +z.
+
     Returns ``(u, v, phi, theta)``: pixel coords and body-frame angles (radians).
     """
     df = pd.read_csv(csv_path)
@@ -703,7 +715,7 @@ def load_dome_calibration(csv_path, phi_offset_deg):
         np.sin(theta_cam) * np.sin(phi_cam),
         np.cos(theta_cam),
     ])
-    rotation = _rot_z(phi_offset_deg) @ _rot_y(90.0)
+    rotation = _rot_z(phi_offset_deg) @ _rot_y(90.0) @ _rot_z(180.0)
     d_body = d_cam @ rotation.T
 
     phi = np.arctan2(d_body[:, 1], d_body[:, 0])
@@ -711,7 +723,7 @@ def load_dome_calibration(csv_path, phi_offset_deg):
     return u, v, phi, theta
 
 
-def load_rpi_ground_truth(recording_dir, gyro_scale=1.0):
+def load_rpi_ground_truth(recording_dir):
     """Load rpi_drone ground truth aligned to video frames by timestamp.
 
     Frame timestamps come from ``stereo_frames.csv`` (one row per video frame).
@@ -721,14 +733,13 @@ def load_rpi_ground_truth(recording_dir, gyro_scale=1.0):
     differing sample rates between the IMU, the state estimate, and the video
     are handled correctly.
 
-    Axes are taken to already be in the body frame (+x forward, +y left,
-    +z up) used by the model; adjust here if the rig differs.
-
-    Args:
-        recording_dir: directory with imu.csv, estimate.csv, stereo_frames.csv.
-        gyro_scale: multiplier converting raw gyro units to deg/s (the
-            ``rotation`` rate convention used by the rest of the pipeline).
-            The raw IMU units are unknown; defaults to 1.0 (treated as deg/s).
+    The gyro is stored as raw flight-controller counts, so it is divided by
+    :data:`GYRO_COUNTS_PER_DEG_S` to get deg/s (matching the ``small_drone``
+    dataset, which stores ``rotation_deg_s``). Axes map to the body frame
+    (+x forward roll, +y left pitch, +z up yaw); the gyro z-axis is inverted
+    relative to the estimator's +z-up yaw, so it is negated. These were
+    verified against the time-derivative of the estimated ``fc_*`` attitude
+    angles (corr > 0.95 per axis); adjust here if the rig differs.
 
     Returns:
         rotation_rate: (T, 3) angular velocity in deg/s.
@@ -750,14 +761,16 @@ def load_rpi_ground_truth(recording_dir, gyro_scale=1.0):
             np.interp(frame_times, t, df[c].to_numpy(dtype=float)) for c in cols
         ])
 
-    rotation_rate = interp_cols(imu, ['gyro_x', 'gyro_y', 'gyro_z']) * gyro_scale
+    rotation_rate = interp_cols(imu, ['gyro_x', 'gyro_y', 'gyro_z'])
+    rotation_rate /= GYRO_COUNTS_PER_DEG_S  # raw counts -> deg/s
+    rotation_rate[:, 2] *= -1.0  # gyro z is inverted vs +z-up yaw convention
     translation_rate = interp_cols(est, ['vx_mps', 'vy_mps', 'vz_mps'])
     positions = interp_cols(est, ['x_m', 'y_m', 'z_m'])
     return rotation_rate, translation_rate, positions, frame_times
 
 
 def process_rpi_drone_dataset(data_dir, calib_dir, sample_phi, sample_theta,
-                              filter_std=2.5, gyro_scale=1.0):
+                              filter_std=2.5):
     """Process the ``rpi_drone`` two-camera dome dataset into sampled clips.
 
     Each ``recording_*`` subfolder of ``data_dir`` is one clip with ``right.mp4``
@@ -816,9 +829,7 @@ def process_rpi_drone_dataset(data_dir, calib_dir, sample_phi, sample_theta,
         cap.release()
         video_dt = 1.0 / float(fps)
 
-        rotation_rate, translation_rate, positions, _ = load_rpi_ground_truth(
-            rec, gyro_scale=gyro_scale,
-        )
+        rotation_rate, translation_rate, positions, _ = load_rpi_ground_truth(rec)
 
         n_frames = min(len(right), len(left), len(rotation_rate))
         right = right[:n_frames]

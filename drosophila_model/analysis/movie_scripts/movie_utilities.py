@@ -121,6 +121,50 @@ def ylim_from_data(data, margin_frac=0.1, min_margin=0.01):
     return lo - margin, hi + margin
 
 
+def init_rate_comparison_axis(ax, true_rate, pred_rate, labels, model_dt,
+                              colors=None, ylabel="", title=""):
+    """Plot full true (solid) vs predicted (dashed) (T, C) time series.
+
+    Adds a vertical time cursor at t=0 and returns it; advance it per frame via
+    ``cursor.set_xdata([t, t])`` (see :func:`update_time_cursor`). Used to overlay
+    odometry (rotation/translation rate) ground truth against model predictions.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    true_rate, pred_rate : (T, C) arrays
+    labels : list of C channel labels
+    model_dt : seconds per time step
+    colors : optional list of per-channel colors
+    ylabel, title : axis labels
+    """
+    true_rate = np.asarray(true_rate)
+    pred_rate = np.asarray(pred_rate)
+    T = true_rate.shape[0]
+    times = np.arange(T) * model_dt
+    if colors is None:
+        colors = ["#e41a1c", "#377eb8", "#4daf4a"]
+    for i, label in enumerate(labels):
+        c = colors[i % len(colors)]
+        ax.plot(times, true_rate[:, i], color=c, linewidth=1.5, label=f"true {label}")
+        ax.plot(times, pred_rate[:, i], color=c, linewidth=1.2, linestyle="--",
+                label=f"pred {label}")
+    ax.set_xlim(times[0], times[-1] if T > 1 else times[0] + model_dt)
+    ax.set_ylim(*ylim_from_data(np.concatenate([true_rate, pred_rate], axis=0)))
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(loc="upper left", fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    return ax.axvline(times[0], color="k", linewidth=1.0, alpha=0.6)
+
+
+def update_time_cursor(cursor, t, model_dt):
+    """Move a vertical time-cursor line (from :func:`init_rate_comparison_axis`)."""
+    x = t * model_dt
+    cursor.set_xdata([x, x])
+
+
 def get_fov(in_fov, t):
     """Index a field-of-view mask that may be static (N,) or time-varying (T, N)."""
     if in_fov.ndim == 2:

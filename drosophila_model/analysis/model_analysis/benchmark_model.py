@@ -1,12 +1,14 @@
 """
 Full model benchmark suite.
 
-Runs all five analyses on a trained model:
+Runs all analyses on a trained model:
   1. edge_sweep             — edge velocity tuning curves
   2. pano_sweep             — panoramic ego-motion estimation (5 stimuli)
   3. drone_sweep            — drone video ego-motion estimation (3 clips)
   4. white_noise_silencing  — STA filter recovery + silencing comparison
   5. sine_wave_silencing    — tuning curves + silencing comparison
+  6. performance_sweep      — flow + ego-motion cosine on sine waves,
+                              random pano, and flyview
 
 All figures are saved under <model_folder>/figures/.
 
@@ -48,6 +50,8 @@ def main() -> None:
                         help="Skip white noise silencing analysis")
     parser.add_argument("--skip-sine-silencing", action="store_true",
                         help="Skip sine wave silencing analysis")
+    parser.add_argument("--skip-performance", action="store_true",
+                        help="Skip performance sweep (flow + ego cosine)")
     parser.add_argument("--num-panos", type=int, default=5,
                         help="Number of pano stimuli (default: 5)")
     parser.add_argument("--num-clips", type=int, default=3,
@@ -107,6 +111,16 @@ def main() -> None:
             num_clips=args.num_clips,
         )
 
+    # --- Performance sweep (import directly to capture metrics) ---
+    performance_results = None
+    if not args.skip_performance:
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print(f"  Performance Sweep")
+        print(f"{sep}\n")
+        from drosophila_model.analysis.model_analysis.performance_sweep import run_performance_sweep
+        performance_results = run_performance_sweep(model_folder)
+
     # --- Cell polarity from baseline STA ---
     on_cells = []
     off_cells = []
@@ -137,6 +151,21 @@ def main() -> None:
     if drone_results is not None:
         print(f"  Drone rotation  median cos sim: {drone_results['median_rot_cos']:.4f}")
         print(f"  Drone translation median cos sim: {drone_results['median_trans_cos']:.4f}")
+
+    if performance_results is not None:
+        flow_cos = performance_results['flow_cos']
+        ego_cos = performance_results['ego_cos']
+        print("  Performance (cosine similarity):")
+        for name in dict.fromkeys(list(flow_cos) + list(ego_cos)):
+            parts = []
+            if name in flow_cos:
+                parts.append(f"flow {flow_cos[name]:.4f}")
+            ego = ego_cos.get(name, {})
+            if ego.get('rot') is not None:
+                parts.append(f"ego rot {ego['rot']:.4f}")
+            if ego.get('trans') is not None:
+                parts.append(f"ego trans {ego['trans']:.4f}")
+            print(f"    {name:<14}{'  '.join(parts)}")
 
     print(f"\n  Figures saved to {Path(model_folder) / 'figures'}")
     print(f"{'='*60}")
