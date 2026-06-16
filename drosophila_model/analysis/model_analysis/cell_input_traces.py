@@ -38,7 +38,7 @@ from matplotlib import pyplot as plt
 from drosophila_model.config import load_config
 from drosophila_model.model_definition import dynamics as dm
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities.stimulus_utilities import make_lr_edge, make_ud_edge, make_lr_sine_wave, make_ud_sine_wave
+from drosophila_model.data_handling.stimulus_generators import make_lr_edge, make_ud_edge, make_lr_sine_wave, make_ud_sine_wave
 
 # --- Edge defaults (match edge_sweep / former t4_input_edge_traces) ---
 VELOCITY_DEG_S = 240.0

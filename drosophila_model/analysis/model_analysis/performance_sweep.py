@@ -30,9 +30,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from drosophila_model.config import load_config
+from drosophila_model.config import load_config, get_data_config
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import stimulus_generators as su
 from drosophila_model.training.loss_functions import cos_loss
 from drosophila_model.analysis.model_analysis.analysis_utilities import (
     predict_optic_flow,
@@ -61,20 +61,27 @@ def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom) if denom > 1e-12 else 0.0
 
 
-def _eval_config(model_folder: Path, model: nm.BaseRnn) -> dict:
-    """Load the model's config and force device/dt to match the loaded model.
+def _eval_config(model_folder: Path, model: nm.BaseRnn) -> tuple[dict, dict]:
+    """Load the model's config + data config, forcing device/dt to the model.
 
-    Pre-stimulus is dropped so the metric reflects the driven response.
+    Pre-stimulus is dropped (in the data config) so the metric reflects the
+    driven response. Returns ``(config, data_config)``.
     """
     config = load_config(model_folder / "config.toml")
     config["model"]["device"] = str(model.device)
     config["model"]["dt"] = model.dt
-    config["stimulus"]["pre_stim_time"] = 0.0
-    return config
+    data_config = get_data_config()
+    data_config["shared"]["pre_stim_time"] = 0.0
+    return config, data_config
 
 
-def run_performance_sweep(model_path: str | Path) -> dict:
+def run_performance_sweep(model_path: str | Path,
+                          max_examples: int = 1) -> dict:
     """Run the performance sweep and return a metrics dict.
+
+    Args:
+        max_examples: number of stimulus examples to evaluate per family
+            (default 1 — keep the benchmark short).
 
     Returns:
         dict with keys 'flow_cos' (name -> float) and 'ego_cos'
@@ -87,7 +94,7 @@ def run_performance_sweep(model_path: str | Path) -> dict:
     model = nm.BaseRnn.load(model_path)
     model.eval()
 
-    config = _eval_config(model_folder, model)
+    config, data_config = _eval_config(model_folder, model)
     column_phi_theta = model.regions["optic_lobe"].column_phi_theta
     N = column_phi_theta.shape[0]
 
@@ -95,8 +102,10 @@ def run_performance_sweep(model_path: str | Path) -> dict:
     for name, stim_type in FLOW_STIMULI:
         print(f"\n--- Flow cosine: {name} ({stim_type}) ---")
         stimulus, optic_flow, _ = su.get_stimulus_one_eye(
-            stim_type, config, column_phi_theta,
+            stim_type, config, column_phi_theta, data_config=data_config,
         )
+        stimulus = stimulus[:max_examples]
+        optic_flow = optic_flow[:max_examples]
         print(f"  {stimulus.shape[0]} examples, {stimulus.shape[1]} frames")
         pred_flow = predict_optic_flow(model, stimulus)
         cos = 1.0 - float(cos_loss(optic_flow, pred_flow))
@@ -107,8 +116,11 @@ def run_performance_sweep(model_path: str | Path) -> dict:
     for name, stim_type, has_trans in EGO_STIMULI:
         print(f"\n--- Ego-motion cosine: {name} ({stim_type}) ---")
         stimulus, _, true_rot, true_trans, _ = su.get_stimulus_two_eyes(
-            stim_type, config, column_phi_theta,
+            stim_type, config, column_phi_theta, data_config=data_config,
         )
+        stimulus = stimulus[:max_examples]
+        true_rot = true_rot[:max_examples]
+        true_trans = true_trans[:max_examples]
         right = stimulus[:, :, :N]
         left = stimulus[:, :, N:]
         print(f"  {stimulus.shape[0]} examples, {stimulus.shape[1]} frames")
@@ -162,8 +174,10 @@ def main() -> None:
     )
     parser.add_argument("model_folder", type=str,
                         help="Path to model folder or model.pt")
+    parser.add_argument("--max-examples", type=int, default=1,
+                        help="Examples to evaluate per stimulus family (default: 1)")
     args = parser.parse_args()
-    run_performance_sweep(args.model_folder)
+    run_performance_sweep(args.model_folder, max_examples=args.max_examples)
 
 
 if __name__ == "__main__":

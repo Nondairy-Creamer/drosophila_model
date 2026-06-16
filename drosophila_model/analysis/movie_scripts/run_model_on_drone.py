@@ -1,7 +1,8 @@
 """
 Run a trained model on drone data and visualize predicted flow + odometry.
 
-Loads drone_data.pt, runs the model on the sampled stimulus, and renders:
+Processes the raw small_drone videos, runs the model on the sampled stimulus,
+and renders:
 
   Row 0: Left eye stimulus       |  Right eye stimulus
   Row 1: Left eye predicted flow |  Right eye predicted flow
@@ -23,7 +24,7 @@ import torch
 from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import ego_motion as em
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import drone_utilities as du
 
 
 from drosophila_model.analysis.model_analysis.analysis_utilities import (
@@ -65,11 +66,11 @@ def main() -> None:
 
     model_dt = model.dt
     data_folder = Path(local_config["data"]["data_folder"])
-    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
-    drone_video_dir = data_folder / "stimulus" / "drone_videos"
+    drone_video_dir = data_folder / "stimulus" / "raw" / "drone_videos"
 
-    print("Loading drone clips...")
-    drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))
+    print("Processing drone clips...")
+    drone_clips = du.get_drone_stimulus(
+        model_dt, dataset="small_drone", data_folder=data_folder)
     print(f"Found {len(drone_clips)} clips")
 
     column_xyz = model.regions['optic_lobe'].get_column_xyz()
@@ -161,7 +162,7 @@ def main() -> None:
             output_dir / f"drone_integrated_clip_{clip_idx}.png",
         )
 
-        # Load raw stereo videos (TEMP: copied from drone_analysis/process_drone.py).
+        # Load raw stereo videos (uses a local frame-capped loader).
         # Number of raw video frames corresponding to num_frames model steps.
         num_video_frames = int(np.ceil(num_frames * model_dt / video_dt)) + 1
         raw_left_path = drone_video_dir / f"left_{clip_id}.mp4"
@@ -244,7 +245,7 @@ def main() -> None:
 
 
 def _load_video_grayscale(path, max_frames=None):
-    """Load video as grayscale uint8 frames. Copied from drone_analysis/process_drone.py."""
+    """Load video as grayscale uint8 frames, optionally capped at max_frames."""
     import cv2
     cap = cv2.VideoCapture(str(path))
     frames = []

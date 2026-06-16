@@ -19,7 +19,7 @@ import torch
 
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import ego_motion as em
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import stimulus_generators as su
 
 
 def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:

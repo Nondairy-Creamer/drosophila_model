@@ -2,14 +2,14 @@ import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from drosophila_model.utilities import plotting_utilities as pu
+from drosophila_model.training import plotting_utilities as pu
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
 from drosophila_model.model_definition import connectome_loading as cl
 from drosophila_model.config import load_config, save_config
 from datetime import datetime
 from drosophila_model.training import training_utilities as tu
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import stimulus_generators as su
 import argparse
 
 
@@ -133,19 +133,27 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
             commit_hash=commit_hash,
         )
 
-    # --- Build target dict ---
-    eye_offset = None
-    if uses_two_eyes:
-        stimulus, optic_flow, target_rotation, target_translation, train_mask = \
-            su.get_stimulus_two_eyes(config['stimulus']['stimulus_type'], config, model.regions['optic_lobe'].column_phi_theta)
-        target = {'rotation': target_rotation, 'translation': target_translation, 'optic_flow': optic_flow}
-        # Camera offset is a property of the rig that generated this dataset
-        # (0 for single-viewpoint renders, the physical half-baseline for a
-        # two-camera rig). Feed it to the two-eye ego-motion solver.
-        eye_offset = su.camera_offset_for_stimulus(config['stimulus']['stimulus_type'])
-    else:
-        stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(config['stimulus']['stimulus_type'], config, model.regions['optic_lobe'].column_phi_theta)
+    # --- Load the pre-baked stimulus dataset (no on-the-fly generation) ---
+    # Bake with: python drosophila_model/data_handling/create_training_data.py <type>
+    baked = tu.load_processed_stimulus(
+        config, device=device, dtype=getattr(torch, config['model']['dtype']))
+    stimulus = baked['stimulus']
+    optic_flow = baked['optic_flow']
+    train_mask = baked['train_mask']
+    # Camera offset is a property of the rig that generated this dataset
+    # (0 for single-viewpoint renders, the physical half-baseline for a
+    # two-camera rig). Feed it to the two-eye ego-motion solver.
+    eye_offset = baked['eye_offset']
 
+    # --- Build target dict ---
+    if uses_two_eyes:
+        if baked['num_eyes'] != 2:
+            raise ValueError(
+                "odometry_loss requires a two-eye baked stimulus, but "
+                f"'{config['stimulus']['stimulus_type']}' was baked as one eye."
+            )
+        target = {'rotation': baked['rotation'], 'translation': baked['translation'], 'optic_flow': optic_flow}
+    else:
         if config['training'].get('use_synthetic_data', False):
             target, target_model = su.get_synthetic_data(model, stimulus, input_neurons, output_neurons)
             target_model.save(model_save_folder / 'target_model.pt')

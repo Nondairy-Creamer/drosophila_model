@@ -1,6 +1,6 @@
 """Overlay detected AprilTag locations on the rpi_drone camera videos.
 
-Runs the dome-calibrated tag extractor (:mod:`drone_analysis.extract_tags`),
+Runs the dome-calibrated tag extractor (:mod:`data_handling.extract_tags`),
 then renders a movie of the raw left/right camera frames with each detection
 drawn on top: the tag outline, a dot at its centre, and a label with the tag
 id, the spherical-PnP range, and the body-frame bearing (phi, theta).
@@ -22,7 +22,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from drosophila_model.config import load_config
-from drosophila_model.analysis.drone_analysis.extract_tags import (
+from drosophila_model.data_handling.extract_tags import (
     DEFAULT_TAG_SIZE,
     compute_board_trajectory,
     extract_tags_from_recording,
@@ -295,7 +295,7 @@ def main():
         description='Overlay detected AprilTag locations on rpi_drone videos')
     parser.add_argument('--rpi-dir', type=str, default=None,
                         help='rpi_drone directory of recording_* folders '
-                             '(default: <data_folder>/stimulus/rpi_drone)')
+                             '(default: <data_folder>/stimulus/raw/rpi_drone)')
     parser.add_argument('--calib-dir', type=str, default=None,
                         help='Dome calibration directory (default: <rpi-dir>/dome_calib)')
     parser.add_argument('--recording', type=str, default=None,
@@ -321,7 +321,7 @@ def main():
     args = parser.parse_args()
 
     data_folder = Path(load_config()['data']['data_folder'])
-    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'rpi_drone'
+    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'raw' / 'rpi_drone'
     calib_dir = Path(args.calib_dir) if args.calib_dir else rpi_dir / 'dome_calib'
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

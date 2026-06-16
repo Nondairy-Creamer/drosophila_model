@@ -4,7 +4,7 @@ The dome lens is *not* a pinhole camera, so we never form a flat
 intrinsics/PnP projection. Instead we treat each camera as a spherical
 observer: the per-eye dome calibration (``dome_right.csv`` / ``dome_left.csv``,
 loaded and rotated into the body frame by
-:func:`process_drone.load_dome_calibration`) gives, for a scattered set of
+:func:`drone_utilities.load_dome_calibration`) gives, for a scattered set of
 pixels, the viewing direction on the unit sphere. We interpolate that map so
 any detected tag pixel becomes a unit direction in the body frame
 (+x forward, +y left, +z up). A tag's "location" is therefore the bearing
@@ -15,8 +15,8 @@ This is intentionally just the detection/bearing-extraction step; pose
 estimation (e.g. :mod:`estimate_pose`) is a separate downstream problem.
 
 Usage:
-    python drone_analysis/extract_tags.py
-    python drone_analysis/extract_tags.py --recording recording_20260611_234117
+    python -m drosophila_model.data_handling.extract_tags
+    python -m drosophila_model.data_handling.extract_tags --recording recording_20260611_234117
 """
 
 import argparse
@@ -32,16 +32,16 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
 from drosophila_model.config import load_config
-from drosophila_model.analysis.drone_analysis.process_drone import (
+from drosophila_model.data_handling.drone_utilities import (
     load_dome_calibration,
 )
-from drosophila_model.analysis.drone_analysis.estimate_pose import (
+from drosophila_model.data_handling.estimate_pose import (
     detect_tags_in_frame,
     _tag_local_corners,
 )
 
 # Per-eye azimuth offset placing the dome optical axis in the body frame,
-# matching process_drone.process_rpi_drone_dataset (right faces -y, left +y).
+# matching drone_utilities.process_rpi_drone_dataset (right faces -y, left +y).
 CAMERA_CALIB = {
     'right': ('dome_right.csv', -80.0),
     'left': ('dome_left.csv', 80.0),
@@ -630,7 +630,7 @@ def main():
         description='Extract AprilTag bearings from rpi_drone dome videos')
     parser.add_argument('--rpi-dir', type=str, default=None,
                         help='rpi_drone directory of recording_* folders '
-                             '(default: <data_folder>/stimulus/rpi_drone)')
+                             '(default: <data_folder>/stimulus/raw/rpi_drone)')
     parser.add_argument('--calib-dir', type=str, default=None,
                         help='Dome calibration directory with dome_right.csv, '
                              'dome_left.csv (default: <rpi-dir>/dome_calib)')
@@ -666,7 +666,7 @@ def main():
     )
 
     data_folder = Path(load_config()['data']['data_folder'])
-    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'rpi_drone'
+    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'raw' / 'rpi_drone'
     calib_dir = Path(args.calib_dir) if args.calib_dir else rpi_dir / 'dome_calib'
     output_dir = Path(args.output_dir)
 

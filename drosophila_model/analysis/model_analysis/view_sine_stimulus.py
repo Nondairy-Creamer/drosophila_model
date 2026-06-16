@@ -24,7 +24,7 @@ import matplotlib
 from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities.stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave
+from drosophila_model.data_handling.stimulus_generators import make_lr_sine_wave, make_ud_sine_wave
 
 # ── Defaults ──────────────────────────────────────────────────────────
 DEFAULT_MODEL_PATH = "models/hand_tuned/model.pt"

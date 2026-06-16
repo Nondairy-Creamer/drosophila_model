@@ -73,23 +73,11 @@ use_synthetic_data = false
 batch_size = 32
 
 [stimulus]
+# Which baked dataset(s) to train on (string or list). Stimulus *generation*
+# parameters (stim_time, velocities, temporal_frequencies, ...) live in the
+# data config: data_config_default.toml + data_config.toml, loaded via
+# drosophila_model.config.get_data_config().
 stimulus_type = 'random_sine'
-stim_time = 1.0
-pre_stim_time = 0.0
-post_stim_time = 0.0
-seed = 0
-velocity_amp = 100.0
-velocity_time_scale = 0.5
-num_repeats = 1
-temporal_frequencies = [
-    2,
-    4,
-    8,
-]
-# expanding_dot stimulus: trials per polarity (default 50 light + 50 dark)
-expanding_dot_num_light = 50
-expanding_dot_num_dark = 50
-expanding_dot_filter_std = 2.5
 
 [data]
 data_folder = "../drosophila_model_data"

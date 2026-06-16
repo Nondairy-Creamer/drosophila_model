@@ -1,9 +1,9 @@
 """
 Visualize processed two-eye drone data as a movie.
 
-Works on either dataset in drone_data.pt via --dataset:
-  * small_drone (equirectangular rig, raw videos in stimulus/drone_videos)
-  * rpi_drone   (dome rig, raw videos in stimulus/rpi_drone/<recording>/)
+Processes raw drone videos on the fly via --dataset:
+  * small_drone (equirectangular rig, raw videos in stimulus/raw/drone_videos)
+  * rpi_drone   (dome rig, raw videos in stimulus/raw/rpi_drone/<recording>/)
 
 Example:
     python analysis/movie_scripts/visualize_drone_data.py --dataset rpi_drone --plot-extra
@@ -29,7 +29,7 @@ import pandas as pd
 import torch
 
 from drosophila_model.config import load_config
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import drone_utilities as du
 from drosophila_model.model_definition.ego_motion import (
     integrate_angular_velocity, integrate_translational_velocity,
 )
@@ -85,7 +85,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="config.toml", help="Path to config file")
     parser.add_argument("--dataset", type=str, default="small_drone",
                         choices=["small_drone", "rpi_drone"],
-                        help="Which dataset in drone_data.pt to visualize")
+                        help="Which raw drone dataset to process and visualize")
     parser.add_argument("--stim-index", type=int, nargs="+", default=[0],
                         help="Clip indices to visualize (into the list of processed clips)")
     parser.add_argument("--fps", type=float, default=None,
@@ -98,7 +98,7 @@ def main() -> None:
                         help="Show sampled ommatidia and rotation/translation rates")
     parser.add_argument("--pose-dir", type=str, default=None,
                         help="Directory with new pose .npz files (default: "
-                             "<data_folder>/stimulus/drone_poses)")
+                             "<data_folder>/stimulus/raw/drone_poses)")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -110,13 +110,13 @@ def main() -> None:
     column_phi_theta = column_info_df[["phi", "theta"]].to_numpy()
 
     model_dt = config["model"]["dt"]
-    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
-    drone_video_dir = data_folder / "stimulus" / "drone_videos"
-    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / "stimulus" / "drone_poses"
+    drone_video_dir = data_folder / "stimulus" / "raw" / "drone_videos"
+    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / "stimulus" / "raw" / "drone_poses"
 
-    print(f"Loading preprocessed drone clips (dataset={args.dataset})...")
-    drone_clips = su.get_drone_stimulus(
-        model_dt, data_path=str(drone_data_path), dataset=args.dataset,
+    print(f"Processing raw drone clips (dataset={args.dataset})...")
+    drone_clips = du.get_drone_stimulus(
+        model_dt, dataset=args.dataset, data_folder=data_folder,
+        sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
     )
     print(f"Found {len(drone_clips)} clips")
 
@@ -134,9 +134,9 @@ def main() -> None:
         clip_id = sampled["clip_id"]
         video_dt = sampled["video_dt"]
 
-        from drosophila_model.analysis.drone_analysis.process_drone import load_video_grayscale
+        from drosophila_model.data_handling.drone_utilities import load_video_grayscale
         if args.dataset == "rpi_drone":
-            rec_dir = data_folder / "stimulus" / "rpi_drone" / str(clip_id)
+            rec_dir = data_folder / "stimulus" / "raw" / "rpi_drone" / str(clip_id)
             raw_left = load_video_grayscale(rec_dir / "left.mp4")
             raw_right = load_video_grayscale(rec_dir / "right.mp4")
         else:

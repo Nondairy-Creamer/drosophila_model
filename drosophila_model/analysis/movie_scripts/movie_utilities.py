@@ -75,6 +75,38 @@ def masked_rgba(values, mask, cmap=None, norm=None):
     return rgba
 
 
+def synthesize_two_eye_flow_from_odometry(rotation_deg_s, translation, phi, theta):
+    """Predicted two-eye optic flow (degrees) from per-frame odometry at depth Z=1.
+
+    Used by the no-/with-model two-eye movie scripts as a fallback when a
+    stimulus carries ground-truth ego-motion but no ground-truth optic flow
+    (e.g. the drone rigs, whose stored ``optic_flow`` is all-NaN). The left eye
+    is the sagittal mirror of the right (``phi -> -phi``).
+
+    Args:
+        rotation_deg_s: (T, 3) observer rotation rate in deg/s.
+        translation: (T, 3) observer translation rate.
+        phi, theta: (N,) right-eye column angles (radians).
+
+    Returns:
+        ``(flow_right, flow_left)``, each (T, N, 2) in degrees.
+    """
+    import torch
+    from drosophila_model.model_definition.ego_motion import generate_optic_flow
+
+    phi_right_t = torch.tensor(phi, dtype=torch.float32)
+    theta_right_t = torch.tensor(theta, dtype=torch.float32)
+    phi_left_t = torch.tensor(-phi, dtype=torch.float32)
+    omega_t = torch.tensor(np.asarray(rotation_deg_s) * np.pi / 180.0, dtype=torch.float32)
+    trans_t = torch.tensor(np.asarray(translation), dtype=torch.float32)
+
+    ur_r, uu_r = generate_optic_flow(phi_right_t, theta_right_t, omega_t, trans_t, 1.0)
+    ur_l, uu_l = generate_optic_flow(phi_left_t, theta_right_t, omega_t, trans_t, 1.0)
+    flow_right = np.stack([ur_r.numpy(), uu_r.numpy()], axis=-1) * (180.0 / np.pi)
+    flow_left = np.stack([ur_l.numpy(), uu_l.numpy()], axis=-1) * (180.0 / np.pi)
+    return flow_right, flow_left
+
+
 def setup_eye_axes(ax_left, ax_right, cell_x, cell_z, x_margin=None, z_margin=None):
     """Configure a pair of left/right eye axes (canonical convention).
 

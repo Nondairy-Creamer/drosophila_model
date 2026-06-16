@@ -12,7 +12,6 @@ Usage:
 import numpy as np
 import pandas as pd
 import torch
-import cv2
 from pathlib import Path
 import argparse
 
@@ -21,7 +20,7 @@ from scipy.integrate import cumulative_trapezoid
 from scipy.ndimage import uniform_filter1d, gaussian_filter1d
 from scipy.spatial.transform import Rotation
 
-from drosophila_model.analysis.drone_analysis.process_drone import extract_odometry
+from drosophila_model.data_handling.drone_utilities import extract_odometry, get_image_size
 from drosophila_model.model_definition.ego_motion import (
     integrate_angular_velocity, integrate_translational_velocity,
 )
@@ -33,7 +32,7 @@ THETA_DEG = (45, 135)
 BOX_FILTER_SIZE = 4
 
 
-# ── Utilities (copied from process_drone, will be removed there) ─────────
+# ── Utilities (local copies of the flow-geometry helpers) ─────────
 
 def pixels_to_angles(u_px, v_px, image_width, image_height, phi_lim, theta_lim):
     """Convert pixel coordinates to spherical angles."""
@@ -332,16 +331,6 @@ def plot_pose_comparison(clip_id: int,
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def get_image_size(data_dir: Path, clip_id: int) -> tuple[int, int]:
-    """Read one frame from right_{clip_id}.mp4 to get (height, width)."""
-    cap = cv2.VideoCapture(str(data_dir / f'right_{clip_id}.mp4'))
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        raise RuntimeError(f'Cannot read frame from right_{clip_id}.mp4')
-    return frame.shape[0], frame.shape[1]
-
-
 def find_clip_ids(data_dir: Path) -> list[int]:
     """Find clip IDs that have an apriltag_pose_log CSV."""
     ids = set()
@@ -361,10 +350,10 @@ def main():
         description='Compare CSV, trig, and batch-opt pose estimates')
     parser.add_argument('--data-dir', type=str, default=None,
                         help='Directory with videos and CSV files '
-                             '(default: <data_folder>/stimulus/drone_videos)')
+                             '(default: <data_folder>/stimulus/raw/drone_videos)')
     parser.add_argument('--pose-dir', type=str, default=None,
                         help='Directory with batch-opt .npz files '
-                             '(default: <data_folder>/stimulus/drone_poses)')
+                             '(default: <data_folder>/stimulus/raw/drone_poses)')
     parser.add_argument('--plot-dir', type=str,
                         default='figures/compare_pose',
                         help='Output directory for comparison plots')
@@ -373,8 +362,8 @@ def main():
     args = parser.parse_args()
 
     data_folder = Path(load_config()['data']['data_folder'])
-    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
-    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'drone_poses'
+    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'raw' / 'drone_videos'
+    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / 'stimulus' / 'raw' / 'drone_poses'
     plot_dir = Path(args.plot_dir)
 
     all_ids = find_clip_ids(data_dir)

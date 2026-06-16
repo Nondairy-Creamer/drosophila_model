@@ -19,10 +19,15 @@ and adds rotation/translation rate trailing-window plots:
   Row 1: Left predicted flow  | Right predicted flow
   Row 2: Rotation rate        | Translation rate
 
+When --ego-motion is set with a two-eye stimulus that carries ground-truth
+odometry (e.g. --stim-type flyview), the model's estimated rotation/translation
+rates are overlaid against the ground truth.
+
 Usage:
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --stim-type random_sine
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --stim-type random_pano
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --ego-motion --stim-type random_pano
+    python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --ego-motion --stim-type flyview
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --ego-motion --translation
 """
 import argparse
@@ -33,16 +38,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from drosophila_model.config import load_config
+from drosophila_model.config import load_config, get_data_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import ego_motion as em
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import stimulus_generators as su
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
     masked_rgba,
     write_movie,
     ylim_from_data,
     subtract_rotation_flow,
+    synthesize_two_eye_flow_from_odometry,
     fig_to_rgb,
     get_flow_key,
     prepare_eye_quiver,
@@ -96,6 +102,7 @@ def main() -> None:
     model_folder = model_path.parent if model_path.is_file() else model_path
 
     config = load_config(args.config) if args.config else load_config()
+    data_config = get_data_config()
     model = nm.BaseRnn.load(model_path)
 
     device = model.device
@@ -131,15 +138,19 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.two_eyes and args.ego_motion and args.stim_type == "random_pano":
-        _run_ego_motion_pano(args, model, config, model_folder, output_dir,
+        _run_ego_motion_pano(args, model, config, data_config, model_folder, output_dir,
                              device, dtype, model_dt, column_phi_theta, N,
                              cell_x, cell_y, cell_z, frame_rate, flow_key)
+    elif args.two_eyes and args.ego_motion:
+        _run_ego_motion_two_eyes(args, model, config, data_config, output_dir,
+                                 device, dtype, model_dt, column_phi_theta, N,
+                                 cell_x, cell_y, cell_z, frame_rate, flow_key)
     elif args.two_eyes:
-        _run_two_eyes(args, model, config, output_dir,
+        _run_two_eyes(args, model, config, data_config, output_dir,
                       device, dtype, model_dt, column_phi_theta, N,
                       cell_x, cell_y, cell_z, frame_rate, flow_key)
     else:
-        _run_one_eye(args, model, config, output_dir,
+        _run_one_eye(args, model, config, data_config, output_dir,
                      device, dtype, model_dt, column_phi_theta,
                      cell_x, cell_y, cell_z, frame_rate, flow_key)
 
@@ -148,7 +159,7 @@ def main() -> None:
 # One-eye path
 # ---------------------------------------------------------------------------
 
-def _run_one_eye(args, model, config, output_dir,
+def _run_one_eye(args, model, config, data_config, output_dir,
                  device, dtype, model_dt, column_phi_theta,
                  cell_x, cell_y, cell_z, frame_rate, flow_key):
     if args.stim_type == 'directional_sine':
@@ -157,7 +168,7 @@ def _run_one_eye(args, model, config, output_dir,
         for d in directions:
             print(f"Generating stimulus (type={args.stim_type}, direction={d})...")
             s, f, m = su.get_stimulus_one_eye(
-                args.stim_type, config, column_phi_theta, sine_direction=d)
+                args.stim_type, config, column_phi_theta, data_config=data_config, sine_direction=d)
             stim_parts.append(s)
             flow_parts.append(f)
             mask_parts.append(m)
@@ -204,7 +215,7 @@ def _run_one_eye(args, model, config, output_dir,
 
     print(f"Generating stimulus (type={args.stim_type})...")
     stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(
-        args.stim_type, config, column_phi_theta,
+        args.stim_type, config, column_phi_theta, data_config=data_config,
     )
     stimulus_np = stimulus.cpu().numpy()
     optic_flow_np = optic_flow.cpu().numpy()
@@ -250,12 +261,12 @@ def _run_one_eye(args, model, config, output_dir,
 # Two-eye path
 # ---------------------------------------------------------------------------
 
-def _run_two_eyes(args, model, config, output_dir,
+def _run_two_eyes(args, model, config, data_config, output_dir,
                   device, dtype, model_dt, column_phi_theta, N,
                   cell_x, cell_y, cell_z, frame_rate, flow_key):
     print(f"Generating two-eye stimulus (type={args.stim_type})...")
     stimulus, optic_flow, observer_rotation, observer_translation, train_mask = (
-        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta)
+        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta, data_config=data_config)
     )
     stimulus_np = stimulus.cpu().numpy()
     optic_flow_np = optic_flow.cpu().numpy()
@@ -264,12 +275,9 @@ def _run_two_eyes(args, model, config, output_dir,
     n_examples = stimulus_np.shape[0]
     print(f"  Generated {n_examples} stimulus examples, shape {stimulus_np.shape}")
 
-    pre_stim_steps = int(config["stimulus"].get("pre_stim_time", 0) / model_dt)
+    pre_stim_steps = int(data_config["shared"]["pre_stim_time"] / model_dt)
     phi = column_phi_theta[:, 0]
     theta = column_phi_theta[:, 1]
-    phi_right_t = torch.tensor(phi, dtype=torch.float32)
-    theta_right_t = torch.tensor(theta, dtype=torch.float32)
-    phi_left_t = torch.tensor(-phi, dtype=torch.float32)
 
     for stim_index in args.stim_index:
         if stim_index >= n_examples:
@@ -286,17 +294,10 @@ def _run_two_eyes(args, model, config, output_dir,
         if np.all(np.isnan(flow_right[pre_stim_steps:])):
             print(f"  Stim {stim_index}: ground-truth flow unavailable — "
                   "synthesizing from odometry (Z=1)")
-            from drosophila_model.model_definition.ego_motion import generate_optic_flow
             observer_translation_np = observer_translation.cpu().numpy()
-            omega_t = torch.tensor(
-                observer_rotation_np[stim_index] * np.pi / 180.0, dtype=torch.float32)
-            trans_t = torch.tensor(
-                observer_translation_np[stim_index], dtype=torch.float32)
-
-            pred_ur_r, pred_uu_r = generate_optic_flow(phi_right_t, theta_right_t, omega_t, trans_t, 1.0)
-            pred_ur_l, pred_uu_l = generate_optic_flow(phi_left_t, theta_right_t, omega_t, trans_t, 1.0)
-            flow_right = np.stack([pred_ur_r.numpy(), pred_uu_r.numpy()], axis=-1) * (180.0 / np.pi)
-            flow_left = np.stack([pred_ur_l.numpy(), pred_uu_l.numpy()], axis=-1) * (180.0 / np.pi)
+            flow_right, flow_left = synthesize_two_eye_flow_from_odometry(
+                observer_rotation_np[stim_index], observer_translation_np[stim_index],
+                phi, theta)
             flow_label = "Flow (from odometry, Z=1)"
         else:
             flow_label = "True Flow"
@@ -338,7 +339,7 @@ def _run_two_eyes(args, model, config, output_dir,
 # Ego-motion pano path (from run_model_on_pano.py)
 # ---------------------------------------------------------------------------
 
-def _run_ego_motion_pano(args, model, config, model_folder, output_dir,
+def _run_ego_motion_pano(args, model, config, data_config, model_folder, output_dir,
                          device, dtype, model_dt, column_phi_theta, N,
                          cell_x, cell_y, cell_z, frame_rate, flow_key):
     from drosophila_model.model_definition import neural_models as nm
@@ -346,10 +347,11 @@ def _run_ego_motion_pano(args, model, config, model_folder, output_dir,
     both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
     both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
 
-    stim_time = config['stimulus']['stim_time']
-    velocity_amp = config['stimulus']['velocity_amp']
-    velocity_time_scale = config['stimulus']['velocity_time_scale']
-    pre_stim_time = config['stimulus'].get('pre_stim_time', 0.0)
+    pano_params = data_config['random_pano']
+    stim_time = data_config['shared']['stim_time']
+    velocity_amp = pano_params['velocity_amp']
+    velocity_time_scale = pano_params['velocity_time_scale']
+    pre_stim_time = data_config['shared']['pre_stim_time']
 
     print(f"Generating random pano stimulus "
           f"(stim_time={stim_time}s, velocity_amp={velocity_amp}, "
@@ -467,6 +469,96 @@ def _run_ego_motion_pano(args, model, config, model_folder, output_dir,
             true_mag_right, true_mag_left,
             pred_mag_right, pred_mag_left,
             model_dt, output_dir / "pano_magnitude.png")
+
+
+# ---------------------------------------------------------------------------
+# Ego-motion path for two-eye stimuli with ground-truth odometry (e.g. flyview)
+# ---------------------------------------------------------------------------
+
+def _run_ego_motion_two_eyes(args, model, config, data_config, output_dir,
+                             device, dtype, model_dt, column_phi_theta, N,
+                             cell_x, cell_y, cell_z, frame_rate, flow_key):
+    """Run ego-motion estimation on a generated two-eye stimulus that carries
+    ground-truth odometry (e.g. ``flyview``) and compare true vs predicted rates.
+
+    This is the path that used to live in ``run_model_on_cell_inputs.py`` under
+    ``--flyview``: it generates the stimulus on the fly via
+    :func:`get_stimulus_two_eyes`, runs ``estimate_ego_motion_from_image``, and
+    renders a stimulus + predicted-flow + rotation/translation-rate movie.
+    """
+    print(f"Generating two-eye stimulus (type={args.stim_type})...")
+    stimulus, optic_flow, observer_rotation, observer_translation, train_mask = (
+        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta, data_config=data_config)
+    )
+    stimulus_np = stimulus.cpu().numpy()
+    observer_rotation_np = observer_rotation.cpu().numpy()
+    observer_translation_np = observer_translation.cpu().numpy()
+    train_mask_np = train_mask.cpu().numpy()
+    n_examples = stimulus_np.shape[0]
+    print(f"  Generated {n_examples} stimulus examples, shape {stimulus_np.shape}")
+
+    for stim_index in args.stim_index:
+        if stim_index >= n_examples:
+            print(f"Skipping stim {stim_index}: only {n_examples} examples available")
+            continue
+
+        stim_right = stimulus_np[stim_index, :, :N]
+        stim_left = stimulus_np[stim_index, :, N:]
+        mask_right = train_mask_np[stim_index, :, :N]
+        mask_left = train_mask_np[stim_index, :, N:]
+
+        num_frames = stim_right.shape[0]
+        if args.max_frames is not None:
+            num_frames = min(num_frames, args.max_frames)
+        stim_right = stim_right[:num_frames]
+        stim_left = stim_left[:num_frames]
+        mask_right = mask_right[:num_frames]
+        mask_left = mask_left[:num_frames]
+
+        right_input = torch.tensor(stim_right, device=device, dtype=dtype).unsqueeze(0)
+        left_input = torch.tensor(stim_left, device=device, dtype=dtype).unsqueeze(0)
+
+        print(f"\nEstimating ego-motion for stimulus {stim_index} "
+              f"({num_frames} frames, N={N})...")
+        with torch.no_grad():
+            pred_rot, pred_trans, right_res, left_res = \
+                model.regions['optic_lobe'].estimate_ego_motion_from_image(
+                    right_input, left_input)
+        pred_flow_right = right_res["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()[:num_frames]
+        pred_flow_left = left_res["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()[:num_frames]
+        pred_rot_np = pred_rot[0].cpu().numpy()[:num_frames]
+        pred_trans_np = pred_trans[0].cpu().numpy()[:num_frames]
+
+        true_rot = observer_rotation_np[stim_index][:num_frames]
+        true_trans = observer_translation_np[stim_index][:num_frames]
+        # Translation is recovered only up to scale; match GT magnitude for overlay.
+        trans_scale = np.std(true_trans) / (np.std(pred_trans_np) + 1e-12)
+        pred_trans_np = pred_trans_np * trans_scale
+
+        def _cos(a, b):
+            a, b = np.asarray(a).ravel(), np.asarray(b).ravel()
+            return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+        print(f"  Rotation cosine similarity:    {_cos(true_rot, pred_rot_np):.4f}")
+        print(f"  Translation cosine similarity: {_cos(true_trans, pred_trans_np):.4f}")
+
+        if args.save_figures:
+            _save_rate_figure(true_rot, pred_rot_np, true_trans, pred_trans_np,
+                              model_dt, stim_index, output_dir / f"{args.stim_type}_rate_stim_{stim_index}.png")
+            _save_integrated_figure(true_rot, pred_rot_np, true_trans, pred_trans_np,
+                                    model_dt, stim_index, output_dir / f"{args.stim_type}_integrated_stim_{stim_index}.png")
+
+        out_path = output_dir / f"{args.stim_type}_ego_motion_stim_{stim_index}.mp4"
+        print(f"  Creating movie -> {out_path}")
+        _make_ego_motion_movie(
+            stimulus_left=stim_left, stimulus_right=stim_right,
+            pred_flow_left=pred_flow_left, pred_flow_right=pred_flow_right,
+            true_rot=true_rot, pred_rot=pred_rot_np,
+            true_trans=true_trans, pred_trans=pred_trans_np,
+            cell_x=cell_x, cell_y=cell_y, cell_z=cell_z,
+            in_fov_left=mask_left, in_fov_right=mask_right,
+            output_path=out_path, frame_rate=frame_rate,
+            model_dt=model_dt, flow_label="predicted flow",
+        )
 
 
 # ---------------------------------------------------------------------------

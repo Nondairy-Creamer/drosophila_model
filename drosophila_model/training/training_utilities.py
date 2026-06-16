@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from drosophila_model.utilities import plotting_utilities as pu
+from drosophila_model.training import plotting_utilities as pu
 import numpy as np
 from drosophila_model.model_definition import neural_models as nm
 import time
@@ -26,6 +26,72 @@ def get_git_commit_hash():
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
     return None
+
+
+def load_processed_stimulus(config, device=None, dtype=None):
+    """Load pre-baked stimulus dataset(s) for training.
+
+    Reads ``config['stimulus']['stimulus_type']`` (a string or list of
+    strings), loads each baked file from
+    ``<data_folder>/stimulus/baked/<type>.pt`` (produced by
+    ``create_training_data.py``), validates that all share the same eye
+    count and camera offset, and concatenates them along the example axis.
+    Stimuli are no longer generated on the fly during training.
+
+    Returns a dict with keys ``stimulus``, ``optic_flow``, ``train_mask``,
+    ``rotation``, ``translation``, ``num_eyes``, ``eye_offset``.
+    ``rotation``/``translation`` are ``None`` for one-eye datasets.
+    """
+    if device is None:
+        device = torch.device(config['model']['device'])
+    if dtype is None:
+        dtype = getattr(torch, config['model']['dtype'])
+
+    baked_dir = Path(config['data']['data_folder']) / 'stimulus' / 'baked'
+
+    stimulus_type = config['stimulus']['stimulus_type']
+    stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)
+
+    stim_list, flow_list, mask_list, rot_list, trans_list = [], [], [], [], []
+    num_eyes_set, eye_offsets = set(), set()
+    for stim_type in stimulus_types:
+        baked_path = baked_dir / f'{stim_type}.pt'
+        if not baked_path.exists():
+            raise FileNotFoundError(
+                f"Baked stimulus not found: {baked_path}. Generate it first with: "
+                f"python drosophila_model/data_handling/create_training_data.py {stim_type}"
+            )
+        data = torch.load(baked_path, map_location='cpu', weights_only=False)
+        num_eyes_set.add(data['num_eyes'])
+        eye_offsets.add(tuple(data['eye_offset']) if data['eye_offset'] is not None else None)
+        stim_list.append(data['stimulus'].to(device=device, dtype=dtype))
+        flow_list.append(data['optic_flow'].to(device=device, dtype=dtype))
+        mask_list.append(data['train_mask'].to(device=device))
+        if data['rotation'] is not None:
+            rot_list.append(data['rotation'].to(device=device, dtype=dtype))
+            trans_list.append(data['translation'].to(device=device, dtype=dtype))
+
+    if len(num_eyes_set) > 1:
+        raise ValueError(
+            f"Mixed eye counts across baked stimulus types {stimulus_types}: "
+            f"{sorted(num_eyes_set)}. Train one eye geometry at a time."
+        )
+    if len(eye_offsets) > 1:
+        raise ValueError(
+            f"Mixed camera offsets across baked stimulus types {stimulus_types}: "
+            f"{sorted(o for o in eye_offsets if o is not None)}. "
+            "Train one rig geometry at a time."
+        )
+
+    return {
+        'stimulus': torch.cat(stim_list, dim=0),
+        'optic_flow': torch.cat(flow_list, dim=0),
+        'train_mask': torch.cat(mask_list, dim=0),
+        'rotation': torch.cat(rot_list, dim=0) if rot_list else None,
+        'translation': torch.cat(trans_list, dim=0) if trans_list else None,
+        'num_eyes': num_eyes_set.pop(),
+        'eye_offset': eye_offsets.pop(),
+    }
 
 
 class StimulusDataset(Dataset):

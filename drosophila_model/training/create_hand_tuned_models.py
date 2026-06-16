@@ -15,7 +15,7 @@ from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
 from drosophila_model.config import load_config
 from drosophila_model.training import training_utilities as tu
-from drosophila_model.utilities.stimulus_utilities import make_lr_sine_wave, make_ud_sine_wave, make_lr_moving_edge, make_ud_moving_edge
+from drosophila_model.data_handling.stimulus_generators import make_lr_sine_wave, make_ud_sine_wave, make_lr_moving_edge, make_ud_moving_edge
 
 def set_taus(model, mi9_tau=0.1, mi4_tau=0.1, ct1_l_tau=0.25, ct1_m_tau=0.25):
     model.set_tau('Mi9', mi9_tau)    # 2.0 scaled by dt_ratio

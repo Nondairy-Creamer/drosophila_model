@@ -26,7 +26,7 @@ def _load_all_panos():
     """Load (N, H, W) panoramas from the consolidated .pt file."""
     pt_path = (
         Path(load_config()['data']['data_folder'])
-        / 'stimulus' / 'all_panoramic.pt'
+        / 'stimulus' / 'raw' / 'all_panoramic.pt'
     )
     if not pt_path.exists():
         raise FileNotFoundError(

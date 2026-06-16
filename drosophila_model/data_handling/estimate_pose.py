@@ -19,7 +19,7 @@ Dependencies:
     pip install numpy scipy opencv-python pupil-apriltags
 
 Usage:
-    python drone_analysis/estimate_pose.py \\
+    python -m drosophila_model.data_handling.estimate_pose \\
         --left-video left_0.mp4 --right-video right_0.mp4 \\
         --calibration calibration.json --tag-map tags.json \\
         --output trajectory.npz
@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import argparse
 import json
+
+from drosophila_model.data_handling.drone_utilities import load_video_grayscale
 
 
 # ── Pose helpers ─────────────────────────────────────────────────────────
@@ -262,21 +264,6 @@ class EquirectRig:
 
 
 # ── Detection ────────────────────────────────────────────────────────────
-
-def load_video_grayscale(path: str) -> np.ndarray:
-    """Load a video as (T, H, W) uint8 grayscale."""
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise FileNotFoundError(f'Cannot open video: {path}')
-    frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-    cap.release()
-    return np.stack(frames)
-
 
 def detect_tags_in_frame(frame_gray: np.ndarray, camera_id: int,
                          frame_idx: int, detector) -> list[TagDetection]:

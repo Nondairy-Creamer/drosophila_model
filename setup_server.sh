@@ -17,22 +17,24 @@ pip install -r requirements.txt
 # and accidentally replacing the pod's GPU torch with a CPU build from PyPI.
 pip install -e . --no-deps
 
-mkdir -p ../drosophila_model_data/stimulus/
+mkdir -p ../drosophila_model_data/stimulus/baked
 
 # Minimal dataset: only what's needed to train the default optic_lobe model.
+# Stimuli are no longer generated on the fly -- training loads pre-baked
+# datasets from stimulus/baked (see data_handling/create_training_data.py),
+# so we download that folder instead of the raw stimulus source files.
+#
 # gdown can fail on individual files when Google Drive hits its per-file daily
 # download cap. Don't let that abort the whole setup -- just warn and continue
 # so the config copy below still runs. Re-run setup_server.sh later to retry.
 #
 # Drive IDs (from the source folder listing):
-#   baked/         folder  1lkj3q3awKuCOqNnGticnufXqDHMV5f67
-#   all_panoramic.pt       1-y4Lt0Ps7xRCl2JmT_gJWoMVHJH5emMa
-#   drone_data.pt          1oh-srfSyASfcpbMQVLpMgvu0q7M1Q0O7
-#   config.toml            17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k
+#   connectome_data/baked/  folder  1lkj3q3awKuCOqNnGticnufXqDHMV5f67
+#   stimulus/baked/         folder  1VnciFS4X9BXU0NAgxj-obnpQyPxixkwc
+#   config.toml                     17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k
 set +e
 gdown --folder "https://drive.google.com/drive/folders/1lkj3q3awKuCOqNnGticnufXqDHMV5f67" -O ../drosophila_model_data/connectome_data/baked
-gdown "1-y4Lt0Ps7xRCl2JmT_gJWoMVHJH5emMa" -O ../drosophila_model_data/stimulus/all_panoramic.pt
-gdown "1oh-srfSyASfcpbMQVLpMgvu0q7M1Q0O7" -O ../drosophila_model_data/stimulus/drone_data.pt
+gdown --folder "https://drive.google.com/drive/folders/1VnciFS4X9BXU0NAgxj-obnpQyPxixkwc" -O ../drosophila_model_data/stimulus/baked
 gdown "17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k" -O ../drosophila_model_data/config.toml
 set -e
 

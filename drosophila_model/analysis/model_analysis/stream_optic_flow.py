@@ -339,7 +339,7 @@ def main() -> int:
         import torch  # type: ignore[no-redef]
 
         from drosophila_model.model_definition import neural_models as nm # type: ignore[no-redef]
-        from drosophila_model.utilities.stimulus_utilities import build_ommatidium_sampling_matrix # type: ignore[no-redef]
+        from drosophila_model.data_handling.sampling import build_ommatidium_sampling_matrix # type: ignore[no-redef]
     except ModuleNotFoundError as exc:
         print(
             "Missing runtime dependency while starting stream_optic_flow: "

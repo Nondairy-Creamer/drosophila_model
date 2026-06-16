@@ -1,0 +1,53 @@
+# Stimulus / dataset generation parameters (git-tracked default).
+#
+# Mirrors the config.toml / config_default.toml pattern: this file is the
+# default that ships with the package; the user's gitignored overlay lives at
+# the repo root as `data_config.toml`. Load both (merged) with
+# `drosophila_model.config.get_data_config()`.
+#
+# Layout:
+#   [shared]            -- parameters common to every dataset (stim_time,
+#                          pre/post-stim padding, generation seed).
+#   [<stimulus_type>]   -- one table per generator, holding only the
+#                          parameters that generator actually uses (e.g.
+#                          temporal_frequencies for the sine/flicker stimuli,
+#                          velocity_* for the panoramas). Datasets with no
+#                          extra parameters (flyview, full_field_step,
+#                          small_drone, rpi_drone, ...) need no table; the
+#                          generators fall back to [shared] alone.
+#
+# Every key in the user overlay must already exist here (strict validation),
+# so add new generator parameters to this file first.
+
+[shared]
+stim_time = 1.0
+pre_stim_time = 0.5
+post_stim_time = 0.0
+seed = 0
+
+[random_pano]
+velocity_amp = 100.0
+velocity_time_scale = 0.5
+num_repeats = 1
+
+[random_sine]
+velocity_amp = 100.0
+velocity_time_scale = 0.5
+num_repeats = 1
+
+[static_sine]
+temporal_frequencies = [2, 4, 8]
+
+[edge]
+edge_velocities = [30, 60, 120, 240]
+
+[counterphase_sine]
+temporal_frequencies = [2, 4, 8]
+
+[full_field_flicker]
+flicker_temporal_frequencies = [1.0]
+
+[expanding_dot]
+num_light = 50
+num_dark = 50
+filter_std = 2.5

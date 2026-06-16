@@ -2,7 +2,7 @@
 
 Top-level so it's obvious where to import from:
 
-    from drosophila_model.config import load_config, save_config
+    from drosophila_model.config import load_config, get_data_config, save_config
 """
 
 from __future__ import annotations
@@ -82,6 +82,46 @@ def load_config(config_path: str = 'config.toml') -> dict:
             f'User config file not found: {user_path.resolve()!s}. '
             'Using only config_default.toml (no overlay). '
             'Did you mean config.toml?',
+            stacklevel=2,
+        )
+
+    config = _convert_none_strings(config)
+    return config
+
+
+def get_data_config(config_path: str = 'data_config.toml') -> dict:
+    '''
+    Load the stimulus/dataset generation config (default + user overlay).
+
+    Same two-file pattern as :func:`load_config`: the default ships inside the
+    package as ``drosophila_model/data_config_default.toml`` (located via
+    ``importlib.resources``), and the optional user overlay (``config_path``,
+    default ``data_config.toml`` at the repo root) is gitignored and resolved
+    relative to CWD.
+
+    The schema is a ``[shared]`` table of parameters common to every dataset
+    plus one ``[<stimulus_type>]`` table per generator for its specific
+    parameters (see ``data_config_default.toml``). Every key in the overlay
+    must already exist in the default, or ``ValueError`` is raised.
+
+    Returns:
+        Merged data-config dict (``"none"`` strings converted to ``None``).
+    '''
+    default_resource = resources.files('drosophila_model').joinpath('data_config_default.toml')
+    with default_resource.open('rb') as f:
+        config = tomllib.load(f)
+
+    user_path = Path(config_path)
+    if user_path.exists():
+        with open(user_path, 'rb') as f:
+            user_config = tomllib.load(f)
+        _validate_user_keys(user_config, config, source=str(user_path))
+        config = _merge_configs(config, user_config)
+    elif config_path != 'data_config.toml':
+        warnings.warn(
+            f'Data config file not found: {user_path.resolve()!s}. '
+            'Using only data_config_default.toml (no overlay). '
+            'Did you mean data_config.toml?',
             stacklevel=2,
         )
 

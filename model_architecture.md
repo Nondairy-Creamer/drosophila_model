@@ -131,14 +131,20 @@ under `config['data']['data_folder']`:
 │       └── optic_lobe_columns.parquet  # sourced from a separate empirical dataset;
 │             columns: column_index, phi, theta, p, q, x, y, z
 │             # loaded by OpticLobeRegion._load_extras
-└── stimulus/                         # stimulus datasets (panoramic images, drone data, etc.)
-    ├── all_panoramic.pt
-    ├── rendered_fly_view_dataset.pkl
-    ├── flow360_data_right_eye_mapped.pkl
-    ├── sintel_data.pkl
-    ├── drone_data.pt
-    ├── drone_videos/
-    └── drone_poses/
+└── stimulus/                         # stimulus datasets (panoramic images, drone rigs, etc.)
+    ├── raw/                          # source data + process_raw_data.py caches
+    │   ├── all_panoramic.pt          # cache from panorama_*.mat (process_raw_data.py random_pano)
+    │   ├── panoramic/                # raw panorama_*.mat source images
+    │   ├── small_drone.pt            # sampled-clip cache (process_raw_data.py small_drone)
+    │   ├── rpi_drone.pt              # sampled-clip cache (process_raw_data.py rpi_drone)
+    │   ├── fib_fly_view_dataset.pkl
+    │   ├── flyview.pt
+    │   ├── drone_videos/             # small_drone equirectangular rig (left_N/right_N.mp4)
+    │   ├── drone_poses/              # small_drone batch-opt pose .npz
+    │   └── rpi_drone/                # rpi_drone dome rig recordings + dome_calib/
+    └── baked/                        # fixed training datasets from create_training_data.py
+        ├── small_drone.pt            # one <stimulus_type>.pt per baked type
+        └── rpi_drone.pt
 ```
 
 Universal fields land on `ConnectomeData`; per-region union-membership masks

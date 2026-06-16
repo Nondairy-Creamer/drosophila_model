@@ -19,9 +19,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from drosophila_model.config import load_config
+from drosophila_model.config import load_config, get_data_config
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import stimulus_generators as su
 
 
 def compute_average_connections(model):
@@ -383,6 +383,7 @@ def run_model_on_stimuli(
     model_path = Path(model_path)
     model_folder = model_path.parent if model_path.is_file() else model_path
     config = load_config(model_folder / "config.toml")
+    data_config = get_data_config()
     model = nm.BaseRnn.load(model_path, device=device)
 
     column_phi_theta = model.regions['optic_lobe'].column_phi_theta
@@ -414,10 +415,13 @@ def run_model_on_stimuli(
     for spec in stimulus_specs:
         stim_config = deepcopy(config)
         stim_config["model"]["device"] = str(model.device)
-        stim_config["stimulus"]["pre_stim_time"] = 0.0
         stim_config = _apply_config_overrides(
             stim_config, spec.get("config_overrides")
         )
+        # Generation params come from the data config; drop pre-stim so the
+        # response reflects the driven portion only.
+        stim_data_config = deepcopy(data_config)
+        stim_data_config["shared"]["pre_stim_time"] = 0.0
         column_info = spec.get("column_info")
         if column_info == "column_phi_theta":
             column_info = column_phi_theta
@@ -426,6 +430,7 @@ def run_model_on_stimuli(
             spec["stimulus_type"],
             stim_config,
             column_info,
+            data_config=stim_data_config,
             **stimulus_kwargs,
         )
         if stimulus.shape[0] > 1:

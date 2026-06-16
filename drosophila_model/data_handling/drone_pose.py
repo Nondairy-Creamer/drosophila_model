@@ -13,13 +13,12 @@ Only requires the tag side length (default 16 cm).
 Use compare_pose.py for comparison plots across estimation methods.
 
 Usage:
-    python drone_analysis/drone_pose.py
-    python drone_analysis/drone_pose.py --clips 32
-    python drone_analysis/drone_pose.py --data-dir /path/to/videos --tag-size 0.16
+    python -m drosophila_model.data_handling.drone_pose
+    python -m drosophila_model.data_handling.drone_pose --clips 32
+    python -m drosophila_model.data_handling.drone_pose --data-dir /path/to/videos --tag-size 0.16
 """
 
 import numpy as np
-import cv2
 from scipy.spatial.transform import Rotation
 from scipy.ndimage import median_filter
 from pathlib import Path
@@ -27,9 +26,10 @@ import argparse
 
 from drosophila_model.config import load_config
 
-from drosophila_model.analysis.drone_analysis.estimate_pose import (
+from drosophila_model.data_handling.estimate_pose import (
     DualCameraRig, EquirectRig, TagMap, run_pipeline, run_pipeline_auto,
 )
+from drosophila_model.data_handling.drone_utilities import get_image_size
 
 
 # ── Clip discovery ───────────────────────────────────────────────────────
@@ -245,16 +245,6 @@ def save_clip_result(result: dict, output_dir: Path):
     print(f'  Saved → {path}')
 
 
-def get_image_size(data_dir: Path, clip_id: int) -> tuple[int, int]:
-    """Read one frame from right_{clip_id}.mp4 to get (height, width)."""
-    cap = cv2.VideoCapture(str(data_dir / f'right_{clip_id}.mp4'))
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        raise RuntimeError(f'Cannot read frame from right_{clip_id}.mp4')
-    return frame.shape[0], frame.shape[1]
-
-
 # ── CLI ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -262,10 +252,10 @@ def main():
         description='Estimate drone pose for all clips in a directory')
     parser.add_argument('--data-dir', type=str, default=None,
                         help='Directory with left_N.mp4 / right_N.mp4 pairs '
-                             '(default: <data_folder>/stimulus/drone_videos)')
+                             '(default: <data_folder>/stimulus/raw/drone_videos)')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory for pose .npz files '
-                             '(default: <data_folder>/stimulus/drone_poses)')
+                             '(default: <data_folder>/stimulus/raw/drone_poses)')
     parser.add_argument('--tag-size', type=float, default=0.16,
                         help='AprilTag side length in metres (default: 0.16)')
     parser.add_argument('--tag-map', type=str, default=None,
@@ -289,8 +279,8 @@ def main():
     args = parser.parse_args()
 
     data_folder = Path(load_config()['data']['data_folder'])
-    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'drone_videos'
-    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus' / 'drone_poses'
+    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'raw' / 'drone_videos'
+    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus' / 'raw' / 'drone_poses'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Discover clips

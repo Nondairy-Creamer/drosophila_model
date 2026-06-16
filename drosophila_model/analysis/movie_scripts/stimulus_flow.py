@@ -17,7 +17,7 @@ If ground-truth flow is unavailable (all NaN), predicted flow from odometry
 
 Usage:
     python movie_scripts/stimulus_flow.py --stim-type flyview
-    python movie_scripts/stimulus_flow.py --two-eyes --stim-type drone_view
+    python movie_scripts/stimulus_flow.py --two-eyes --stim-type small_drone
 """
 import argparse
 import sys
@@ -26,10 +26,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 
-from drosophila_model.config import load_config
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.config import load_config, get_data_config
+from drosophila_model.data_handling import stimulus_generators as su
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
     masked_rgba,
@@ -37,6 +36,7 @@ from drosophila_model.analysis.movie_scripts.movie_utilities import (
     ylim_from_data,
     fig_to_rgb,
     make_stimulus_flow_movie,
+    synthesize_two_eye_flow_from_odometry,
     prepare_eye_quiver,
     setup_eye_axis,
     init_eye_quiver,
@@ -57,7 +57,7 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=None,
                         help="Output movie frame rate (default: 1/dt from config)")
     parser.add_argument("--stim-type", type=str, default=None,
-                        help="Stimulus type (default: flyview for 1-eye, drone_view for 2-eye)")
+                        help="Stimulus type (default: flyview for 1-eye, small_drone for 2-eye)")
     parser.add_argument("--stim-time", type=float, default=None,
                         help="Override stim_time from config (seconds)")
     parser.add_argument("--output-dir", type=str, default=None,
@@ -65,20 +65,21 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.stim_type is None:
-        args.stim_type = "drone_view" if args.two_eyes else "flyview"
+        args.stim_type = "small_drone" if args.two_eyes else "flyview"
     if args.stim_index is None:
         args.stim_index = [3] if args.two_eyes else [5]
 
     config = load_config(args.config)
+    data_config = get_data_config()
     data_folder = Path(config['data']['data_folder'])
 
     if args.stim_time is not None:
-        config["stimulus"]["stim_time"] = args.stim_time
+        data_config["shared"]["stim_time"] = args.stim_time
 
     # expanding_dot: training config often requests 50 light + 50 dark; movies only
     # need the requested --stim-index rows — trim batch so load is ~1 trial, not 100.
     if args.stim_type == "expanding_dot" and args.stim_index is not None:
-        su.trim_expanding_dot_config_for_max_index(config, max(args.stim_index))
+        su.trim_expanding_dot_config_for_max_index(data_config, max(args.stim_index))
 
     output_folder = Path(args.output_dir) if args.output_dir else Path("figures/stimulus_flow")
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -95,18 +96,18 @@ def main() -> None:
     cell_z = np.cos(theta)
 
     if args.two_eyes:
-        _run_two_eyes(args, config, column_phi_theta, output_folder, frame_rate,
+        _run_two_eyes(args, config, data_config, column_phi_theta, output_folder, frame_rate,
                       cell_x, cell_y, cell_z)
     else:
-        _run_one_eye(args, config, column_phi_theta, output_folder, frame_rate,
+        _run_one_eye(args, config, data_config, column_phi_theta, output_folder, frame_rate,
                      cell_x, cell_y, cell_z)
 
 
-def _run_one_eye(args, config, column_phi_theta, output_folder, frame_rate,
+def _run_one_eye(args, config, data_config, column_phi_theta, output_folder, frame_rate,
                  cell_x, cell_y, cell_z):
     print("Loading stimulus and optic flow...")
     stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(
-        args.stim_type, config, column_phi_theta)
+        args.stim_type, config, column_phi_theta, data_config=data_config)
     stimulus = stimulus.cpu().numpy()
     optic_flow = optic_flow.cpu().numpy()
     train_mask = train_mask.cpu().numpy()
@@ -124,17 +125,15 @@ def _run_one_eye(args, config, column_phi_theta, output_folder, frame_rate,
         )
 
 
-def _run_two_eyes(args, config, column_phi_theta, output_folder, frame_rate,
+def _run_two_eyes(args, config, data_config, column_phi_theta, output_folder, frame_rate,
                   cell_x, cell_y, cell_z):
-    from drosophila_model.model_definition.ego_motion import generate_optic_flow
-
     N = column_phi_theta.shape[0]
     model_dt = config["model"]["dt"]
-    pre_stim_steps = int(config["stimulus"].get("pre_stim_time", 0) / model_dt)
+    pre_stim_steps = int(data_config["shared"]["pre_stim_time"] / model_dt)
 
     print("Loading two-eye stimulus and odometry...")
     stimulus, optic_flow, observer_rotation, observer_translation, train_mask = (
-        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta)
+        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta, data_config=data_config)
     )
     stimulus = stimulus.numpy()
     observer_rotation = observer_rotation.numpy()
@@ -146,9 +145,6 @@ def _run_two_eyes(args, config, column_phi_theta, output_folder, frame_rate,
 
     phi = column_phi_theta[:, 0]
     theta = column_phi_theta[:, 1]
-    phi_right_t = torch.tensor(phi, dtype=torch.float32)
-    theta_right_t = torch.tensor(theta, dtype=torch.float32)
-    phi_left_t = torch.tensor(-phi, dtype=torch.float32)
 
     for stim_index in args.stim_index:
         if stim_index >= stimulus.shape[0]:
@@ -167,14 +163,8 @@ def _run_two_eyes(args, config, column_phi_theta, output_folder, frame_rate,
 
         if np.all(np.isnan(flow_right[pre_stim_steps:])):
             print("  Ground truth flow unavailable — using predicted flow from odometry (Z=1)")
-            omega_t = torch.tensor(
-                observer_rotation[stim_index] * np.pi / 180.0, dtype=torch.float32)
-            trans_t = torch.tensor(
-                observer_translation[stim_index], dtype=torch.float32)
-            pred_ur_r, pred_uu_r = generate_optic_flow(phi_right_t, theta_right_t, omega_t, trans_t, 1.0)
-            pred_ur_l, pred_uu_l = generate_optic_flow(phi_left_t, theta_right_t, omega_t, trans_t, 1.0)
-            flow_right = np.stack([pred_ur_r.numpy(), pred_uu_r.numpy()], axis=-1) * (180.0 / np.pi)
-            flow_left = np.stack([pred_ur_l.numpy(), pred_uu_l.numpy()], axis=-1) * (180.0 / np.pi)
+            flow_right, flow_left = synthesize_two_eye_flow_from_odometry(
+                observer_rotation[stim_index], observer_translation[stim_index], phi, theta)
             flow_label = "Predicted Flow (Z=1)"
         else:
             flow_label = "Flow"

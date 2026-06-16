@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities.stimulus_utilities import make_lr_moving_edge, make_ud_moving_edge
+from drosophila_model.data_handling.stimulus_generators import make_lr_moving_edge, make_ud_moving_edge
 
 
 # ── Defaults ──────────────────────────────────────────────────────────

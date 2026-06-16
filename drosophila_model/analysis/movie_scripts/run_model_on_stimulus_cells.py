@@ -24,7 +24,7 @@ import torch
 
 from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import stimulus_generators as su
 
 from drosophila_model.analysis.model_analysis.analysis_utilities import interp_nan_column
 

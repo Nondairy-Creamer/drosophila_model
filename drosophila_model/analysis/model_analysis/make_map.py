@@ -34,7 +34,7 @@ from scipy.spatial import cKDTree
 from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import ego_motion as em
-from drosophila_model.utilities import stimulus_utilities as su
+from drosophila_model.data_handling import drone_utilities as du
 
 
 def main() -> None:
@@ -78,10 +78,10 @@ def main() -> None:
     model_dt = model.dt
 
     data_folder = Path(local_config["data"]["data_folder"])
-    drone_data_path = data_folder / "stimulus" / "drone_data.pt"
 
-    print("Loading drone clips...")
-    drone_clips = su.get_drone_stimulus(model_dt, data_path=str(drone_data_path))
+    print("Processing drone clips...")
+    drone_clips = du.get_drone_stimulus(
+        model_dt, dataset="small_drone", data_folder=data_folder)
     if args.clip_index >= len(drone_clips):
         raise ValueError(
             f"Clip {args.clip_index} requested but only {len(drone_clips)} "

@@ -52,10 +52,10 @@ def main() -> None:
                         help="Skip sine wave silencing analysis")
     parser.add_argument("--skip-performance", action="store_true",
                         help="Skip performance sweep (flow + ego cosine)")
-    parser.add_argument("--num-panos", type=int, default=5,
-                        help="Number of pano stimuli (default: 5)")
-    parser.add_argument("--num-clips", type=int, default=3,
-                        help="Number of drone clips (default: 3)")
+    parser.add_argument("--num-panos", type=int, default=1,
+                        help="Number of pano stimuli (default: 1)")
+    parser.add_argument("--num-clips", type=int, default=1,
+                        help="Number of drone clips (default: 1)")
     parser.add_argument("--pano-stim-time", type=float, default=5.0,
                         help="Pano stimulus duration in seconds (default: 5.0)")
     args = parser.parse_args()
