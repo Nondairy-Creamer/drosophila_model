@@ -624,7 +624,7 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
     Load cached ommatidium-sampled clips for ``dataset`` and temporally
     interpolate them to ``model_dt``.
 
-    Reads the cache ``<data_folder>/stimulus/raw/<dataset>.pt`` produced by
+    Reads the cache ``<data_folder>/stimulus/baked/<dataset>.pt`` produced by
     ``process_raw_data.py`` (the expensive raw-video decode + ommatidium spatial
     sampling is done there, once). The cache holds clips at the native video
     frame rate; this function does the cheap temporal interpolation to
@@ -666,7 +666,7 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
         raise ValueError(
             f"Unknown drone dataset '{dataset}'; expected 'small_drone' or 'rpi_drone'.")
 
-    cache_path = data_folder / 'stimulus' / 'raw' / f'{dataset}.pt'
+    cache_path = data_folder / 'stimulus' / 'baked' / f'{dataset}.pt'
     if not cache_path.exists():
         raise FileNotFoundError(
             f"Drone cache not found: {cache_path}. Build it first with:\n"

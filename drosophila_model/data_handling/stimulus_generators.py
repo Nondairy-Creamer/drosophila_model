@@ -1182,7 +1182,7 @@ def _load_all_panos(pt_path=None):
 
     Args:
         pt_path: Path to ``all_panoramic.pt``. When ``None``, resolves to
-            ``<config['data']['data_folder']>/stimulus/raw/all_panoramic.pt``.
+            ``<config['data']['data_folder']>/stimulus/baked/all_panoramic.pt``.
 
     Returns:
         panos: (N, H, W) numpy float64 array of raw panoramic images.
@@ -1191,7 +1191,7 @@ def _load_all_panos(pt_path=None):
         from drosophila_model.config import load_config
         pt_path = (
             Path(load_config()['data']['data_folder'])
-            / 'stimulus' / 'raw' / 'all_panoramic.pt'
+            / 'stimulus' / 'baked' / 'all_panoramic.pt'
         )
     pt_path = Path(pt_path)
     if not pt_path.exists():
@@ -1515,7 +1515,7 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
     Generate panoramic stimuli with smoothly varying rotational velocity AND
     smoothly varying rotation axis.
 
-    Loads all panoramic images from ``<data_folder>/stimulus/raw/all_panoramic.pt``, applies
+    Loads all panoramic images from ``<data_folder>/stimulus/baked/all_panoramic.pt``, applies
     2D Gaussian spatial filtering (std=2.5 deg), then for **each** panorama
     simulates pure rotation with an independent temporally-smoothed random
     angular velocity vector (omega_x, omega_y, omega_z).  Each of the three
@@ -2094,7 +2094,7 @@ def camera_offset_for_stimulus(stimulus_type: str | list[str]):
 def small_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
     """Two-eye loader for the equirectangular ``small_drone`` rig.
 
-    Loads the cached clips from ``<data_folder>/stimulus/raw/small_drone.pt``
+    Loads the cached clips from ``<data_folder>/stimulus/baked/small_drone.pt``
     (built by ``process_raw_data.py``) via
     :func:`drone_utilities.get_drone_stimulus`.
 
@@ -2115,7 +2115,7 @@ def rpi_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
 
     A real two-camera rig; the ``@camera_offset`` above declares its right-eye
     half-baseline (mm). Loads the cached clips from
-    ``<data_folder>/stimulus/raw/rpi_drone.pt`` (built by
+    ``<data_folder>/stimulus/baked/rpi_drone.pt`` (built by
     ``process_raw_data.py``) via :func:`drone_utilities.get_drone_stimulus`.
 
     Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,

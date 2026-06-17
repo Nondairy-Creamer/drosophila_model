@@ -1,5 +1,5 @@
 config.toml
-data_config.toml
+config_data.toml
 figures/*
 !figures/.gitkeep
 models/*

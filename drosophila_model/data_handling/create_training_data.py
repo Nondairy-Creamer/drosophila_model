@@ -7,9 +7,9 @@ Reads parameters from ``config.toml`` (``[model]``, ``[stimulus]``, ``[data]``),
 generates the stimulus with the on-the-fly generators in
 ``stimulus_generators.py`` (two eyes when the type supports it, otherwise one
 eye), and saves a single ``.pt`` with a consistent schema to
-``<data_folder>/stimulus/baked/<stimulus_type>.pt``.
+``<data_folder>/stimulus/training/<stimulus_type>.pt``.
 
-The baked file is what ``training_utilities.load_processed_stimulus`` loads, so
+The training file is what ``training_utilities.load_processed_stimulus`` loads, so
 stimuli are no longer generated on the fly during training. Analysis scripts
 still call the generators directly for variable-length, on-the-fly stimuli.
 """
@@ -42,7 +42,7 @@ def load_column_phi_theta(data_folder):
 
 def create_training_data(stimulus_type, config=None, config_path=None,
                          data_config=None, data_config_path=None):
-    """Generate ``stimulus_type`` from config and save it to ``stimulus/baked``.
+    """Generate ``stimulus_type`` from config and save it to ``stimulus/training``.
 
     Model parameters come from the main config (``config`` / ``config_path``);
     stimulus-generation parameters come from the data config (``data_config`` /
@@ -53,7 +53,7 @@ def create_training_data(stimulus_type, config=None, config_path=None,
     if config is None:
         config = load_config(config_path or 'config.toml')
     if data_config is None:
-        data_config = get_data_config(data_config_path or 'data_config.toml')
+        data_config = get_data_config(data_config_path or 'config_data.toml')
 
     data_folder = Path(config['data']['data_folder'])
     column_phi_theta = load_column_phi_theta(data_folder)
@@ -77,9 +77,9 @@ def create_training_data(stimulus_type, config=None, config_path=None,
     stimulus_config = dict(data_config['shared'])
     stimulus_config.update(data_config.get(stimulus_type, {}))
 
-    baked_dir = data_folder / 'stimulus' / 'baked'
-    baked_dir.mkdir(parents=True, exist_ok=True)
-    out_path = baked_dir / f'{stimulus_type}.pt'
+    training_dir = data_folder / 'stimulus' / 'training'
+    training_dir.mkdir(parents=True, exist_ok=True)
+    out_path = training_dir / f'{stimulus_type}.pt'
 
     payload = {
         'stimulus_type': stimulus_type,
@@ -117,7 +117,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--data-config-path', type=str, default=None,
-        help='Path to data config TOML (default: data_config.toml)'
+        help='Path to data config TOML (default: config_data.toml)'
     )
     args = parser.parse_args()
 

@@ -2,7 +2,7 @@
 #
 # Mirrors the config.toml / config_default.toml pattern: this file is the
 # default that ships with the package; the user's gitignored overlay lives at
-# the repo root as `data_config.toml`. Load both (merged) with
+# the repo root as `config_data.toml`. Load both (merged) with
 # `drosophila_model.config.get_data_config()`.
 #
 # Layout:

@@ -32,8 +32,8 @@ def load_processed_stimulus(config, device=None, dtype=None):
     """Load pre-baked stimulus dataset(s) for training.
 
     Reads ``config['stimulus']['stimulus_type']`` (a string or list of
-    strings), loads each baked file from
-    ``<data_folder>/stimulus/baked/<type>.pt`` (produced by
+    strings), loads each training file from
+    ``<data_folder>/stimulus/training/<type>.pt`` (produced by
     ``create_training_data.py``), validates that all share the same eye
     count and camera offset, and concatenates them along the example axis.
     Stimuli are no longer generated on the fly during training.
@@ -47,7 +47,7 @@ def load_processed_stimulus(config, device=None, dtype=None):
     if dtype is None:
         dtype = getattr(torch, config['model']['dtype'])
 
-    baked_dir = Path(config['data']['data_folder']) / 'stimulus' / 'baked'
+    training_dir = Path(config['data']['data_folder']) / 'stimulus' / 'training'
 
     stimulus_type = config['stimulus']['stimulus_type']
     stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)
@@ -55,13 +55,13 @@ def load_processed_stimulus(config, device=None, dtype=None):
     stim_list, flow_list, mask_list, rot_list, trans_list = [], [], [], [], []
     num_eyes_set, eye_offsets = set(), set()
     for stim_type in stimulus_types:
-        baked_path = baked_dir / f'{stim_type}.pt'
-        if not baked_path.exists():
+        training_path = training_dir / f'{stim_type}.pt'
+        if not training_path.exists():
             raise FileNotFoundError(
-                f"Baked stimulus not found: {baked_path}. Generate it first with: "
+                f"Training stimulus not found: {training_path}. Generate it first with: "
                 f"python drosophila_model/data_handling/create_training_data.py {stim_type}"
             )
-        data = torch.load(baked_path, map_location='cpu', weights_only=False)
+        data = torch.load(training_path, map_location='cpu', weights_only=False)
         num_eyes_set.add(data['num_eyes'])
         eye_offsets.add(tuple(data['eye_offset']) if data['eye_offset'] is not None else None)
         stim_list.append(data['stimulus'].to(device=device, dtype=dtype))
@@ -73,12 +73,12 @@ def load_processed_stimulus(config, device=None, dtype=None):
 
     if len(num_eyes_set) > 1:
         raise ValueError(
-            f"Mixed eye counts across baked stimulus types {stimulus_types}: "
+            f"Mixed eye counts across training stimulus types {stimulus_types}: "
             f"{sorted(num_eyes_set)}. Train one eye geometry at a time."
         )
     if len(eye_offsets) > 1:
         raise ValueError(
-            f"Mixed camera offsets across baked stimulus types {stimulus_types}: "
+            f"Mixed camera offsets across training stimulus types {stimulus_types}: "
             f"{sorted(o for o in eye_offsets if o is not None)}. "
             "Train one rig geometry at a time."
         )

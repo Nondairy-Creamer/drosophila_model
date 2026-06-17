@@ -1,9 +1,9 @@
-"""Bake the large raw inputs into cached ``.pt`` files under ``stimulus/raw``.
+"""Bake the large raw inputs into cached ``.pt`` files under ``stimulus/baked``.
 
 This is the first stage of the data pipeline. The truly raw inputs (drone
 videos, panorama ``.mat`` files) are large and slow to decode, so this script
-reads them exactly once and writes a compact ``.pt`` cache next to them in
-``<data_folder>/stimulus/raw``:
+reads them once from ``<data_folder>/stimulus/raw`` and writes a compact ``.pt``
+cache to ``<data_folder>/stimulus/baked``:
 
 * ``small_drone`` -> ``small_drone.pt``  (ommatidium-sampled stereo clips)
 * ``rpi_drone``   -> ``rpi_drone.pt``    (ommatidium-sampled stereo clips)
@@ -19,10 +19,11 @@ is applied at generation time in ``stimulus_generators._filter_pano``.
 The second stage,
 ``drosophila_model/data_handling/create_training_data.py``, reads these caches
 (via the on-the-fly generators) and writes the fixed, training-ready datasets
-to ``stimulus/baked/<stimulus_type>.pt``.
+to ``stimulus/training/<stimulus_type>.pt``.
 
 Usage::
 
+    python drosophila_model/data_handling/process_raw_data.py            # all
     python drosophila_model/data_handling/process_raw_data.py small_drone
     python drosophila_model/data_handling/process_raw_data.py rpi_drone
     python drosophila_model/data_handling/process_raw_data.py random_pano
@@ -75,6 +76,7 @@ def process_drone(dataset, data_folder):
     """
     data_folder = Path(data_folder)
     raw_dir = data_folder / 'stimulus' / 'raw'
+    baked_dir = data_folder / 'stimulus' / 'baked'
     sample_phi, sample_theta = load_column_phi_theta(data_folder)
 
     if dataset == 'small_drone':
@@ -91,7 +93,8 @@ def process_drone(dataset, data_folder):
     if not clips:
         raise RuntimeError(f"No clips produced for '{dataset}' from {raw_dir}.")
 
-    out_path = raw_dir / f'{dataset}.pt'
+    baked_dir.mkdir(parents=True, exist_ok=True)
+    out_path = baked_dir / f'{dataset}.pt'
     torch.save({
         'dataset': dataset,
         'clips': clips,
@@ -104,21 +107,25 @@ def process_drone(dataset, data_folder):
 
 
 def _find_pano_mat_files(raw_dir):
-    """Locate the ``panorama_*.mat`` files, raising a clear error if missing."""
+    """Locate the panorama ``.mat`` files, raising a clear error if missing.
+
+    Looks in the dedicated ``panoramic/`` subfolder first (where the archive is
+    meant to be extracted), then falls back to ``raw_dir`` itself.
+    """
     search_dirs = [raw_dir / 'panoramic', raw_dir]
     for d in search_dirs:
-        mats = sorted(d.glob('panorama_*.mat'))
+        mats = sorted(d.glob('*.mat'))
         if mats:
             return mats
 
     rar_files = sorted(raw_dir.glob('panorama_*.rar'))
     if rar_files:
         raise FileNotFoundError(
-            f"Found {rar_files[0].name} but no extracted panorama_*.mat files. "
+            f"Found {rar_files[0].name} but no extracted .mat files. "
             f"Extract the archive into {raw_dir / 'panoramic'} and re-run."
         )
     raise FileNotFoundError(
-        f"No panorama_*.mat files found in {raw_dir / 'panoramic'} or {raw_dir}."
+        f"No panorama .mat files found in {raw_dir / 'panoramic'} or {raw_dir}."
     )
 
 
@@ -145,6 +152,7 @@ def process_random_pano(data_folder):
     """
     data_folder = Path(data_folder)
     raw_dir = data_folder / 'stimulus' / 'raw'
+    baked_dir = data_folder / 'stimulus' / 'baked'
     mat_files = _find_pano_mat_files(raw_dir)
     print(f"[random_pano] Found {len(mat_files)} panorama .mat files.")
 
@@ -154,7 +162,8 @@ def process_random_pano(data_folder):
         panos.append(_extract_pano_image(mat_path))
 
     panos = np.stack(panos).astype(np.float32)
-    out_path = raw_dir / 'all_panoramic.pt'
+    baked_dir.mkdir(parents=True, exist_ok=True)
+    out_path = baked_dir / 'all_panoramic.pt'
     torch.save(torch.from_numpy(panos), out_path)
 
     print(f"Cached 'random_pano' {tuple(panos.shape)} -> {out_path}")
@@ -162,7 +171,7 @@ def process_random_pano(data_folder):
 
 
 def process_raw_data(raw_type, config=None, config_path=None):
-    """Bake ``raw_type`` from its raw inputs into a ``stimulus/raw`` cache."""
+    """Bake ``raw_type`` from its raw inputs into a ``stimulus/baked`` cache."""
     if config is None:
         config = load_config(config_path or 'config.toml')
     data_folder = config['data']['data_folder']
@@ -177,15 +186,19 @@ def process_raw_data(raw_type, config=None, config_path=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Bake raw inputs into cached .pt files under stimulus/raw.'
+        description='Bake raw inputs into cached .pt files under stimulus/baked.'
     )
     parser.add_argument(
-        'raw_type', type=str, choices=RAW_TYPES,
-        help='Raw dataset to process (small_drone, rpi_drone, random_pano).'
+        'raw_type', type=str, nargs='?', default=None, choices=RAW_TYPES,
+        help='Raw dataset to process (small_drone, rpi_drone, random_pano). '
+             'Omit to process all of them.'
     )
     parser.add_argument(
         '--config-path', type=str, default=None,
         help='Path to config TOML (default: config.toml)'
     )
     args = parser.parse_args()
-    process_raw_data(args.raw_type, config_path=args.config_path)
+
+    raw_types = [args.raw_type] if args.raw_type is not None else list(RAW_TYPES)
+    for raw_type in raw_types:
+        process_raw_data(raw_type, config_path=args.config_path)

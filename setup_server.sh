@@ -18,11 +18,14 @@ pip install -r requirements.txt
 pip install -e . --no-deps
 
 mkdir -p ../drosophila_model_data/stimulus/baked
+mkdir -p ../drosophila_model_data/stimulus/training
 
 # Minimal dataset: only what's needed to train the default optic_lobe model.
 # Stimuli are no longer generated on the fly -- training loads pre-baked
-# datasets from stimulus/baked (see data_handling/create_training_data.py),
-# so we download that folder instead of the raw stimulus source files.
+# datasets from stimulus/training (see data_handling/create_training_data.py).
+# We also pull stimulus/baked (the process_raw_data.py caches: small_drone.pt,
+# rpi_drone.pt, all_panoramic.pt) so the on-the-fly generators / create_training_data
+# can be re-run without re-downloading the large raw source files.
 #
 # gdown can fail on individual files when Google Drive hits its per-file daily
 # download cap. Don't let that abort the whole setup -- just warn and continue
@@ -31,10 +34,12 @@ mkdir -p ../drosophila_model_data/stimulus/baked
 # Drive IDs (from the source folder listing):
 #   connectome_data/baked/  folder  1lkj3q3awKuCOqNnGticnufXqDHMV5f67
 #   stimulus/baked/         folder  1VnciFS4X9BXU0NAgxj-obnpQyPxixkwc
+#   stimulus/training/      folder  12W17H3OQojSquBDgdfnUv-09TTbZYj0w
 #   config.toml                     17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k
 set +e
 gdown --folder "https://drive.google.com/drive/folders/1lkj3q3awKuCOqNnGticnufXqDHMV5f67" -O ../drosophila_model_data/connectome_data/baked
 gdown --folder "https://drive.google.com/drive/folders/1VnciFS4X9BXU0NAgxj-obnpQyPxixkwc" -O ../drosophila_model_data/stimulus/baked
+gdown --folder "https://drive.google.com/drive/folders/12W17H3OQojSquBDgdfnUv-09TTbZYj0w" -O ../drosophila_model_data/stimulus/training
 gdown "17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k" -O ../drosophila_model_data/config.toml
 set -e
 
