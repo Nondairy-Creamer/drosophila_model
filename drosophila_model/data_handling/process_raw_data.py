@@ -8,8 +8,8 @@ cache to ``<data_folder>/stimulus/baked``:
 * ``small_drone`` -> ``small_drone.pt``  (ommatidium-sampled stereo clips)
 * ``rpi_drone``   -> ``rpi_drone.pt``    (ommatidium-sampled stereo clips)
 * ``random_pano`` -> ``all_panoramic.pt`` ((N, H, W) raw panorama images)
-* ``flyview``     -> ``flyview.pt``     (flipped flow + depth-based odometry,
-  baked from ``fib_fly_view_dataset.pkl``)
+* ``flyview``     -> ``flyview.pt``     (flow + depth-based odometry,
+  baked from ``fib_forest_fly_view_dataset_fwd.pkl``)
 
 The drone caches store clips spatially sampled at the connectome ommatidium
 columns but still at the native video frame rate; temporal interpolation to the
@@ -186,7 +186,7 @@ def process_raw_data(raw_type, config=None, config_path=None):
         from drosophila_model.data_handling import stimulus_generators as sg
         stim_dir = Path(data_folder) / 'stimulus'
         return sg.bake_fly_view_dataset(
-            data_path=stim_dir / 'raw' / 'fib_fly_view_dataset.pkl',
+            data_path=stim_dir / 'raw' / 'fib_forest_fly_view_dataset_fwd.pkl',
             out_path=stim_dir / 'baked' / 'flyview.pt',
         )
     raise ValueError(

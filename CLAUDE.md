@@ -36,14 +36,15 @@ Current value (this machine, for reference only — re-read config each time):
  inputs — the drone rigs `drone_videos/` + `drone_poses/` (small_drone) and
  `rpi_drone/` (rpi_drone, with `rpi_drone/dome_calib/`), and the raw
  `panoramic/*.mat` panoramas — are read once by `process_raw_data.py`. Also
- here: `fib_fly_view_dataset.pkl` (raw rendered fly-view source).
+ here: `fib_forest_fly_view_dataset_fwd.pkl` (raw rendered fly-view source).
 - `<data_folder>/stimulus/baked/` — caches produced by
  `drosophila_model/data_handling/process_raw_data.py <raw_type>`
  (`small_drone`, `rpi_drone`, `random_pano`, `flyview`) and consumed by the
  on-the-fly generators in `stimulus_generators.py`: `small_drone.pt`,
  `rpi_drone.pt` (ommatidium-sampled clips at native fps), `all_panoramic.pt`
- (consolidated raw panorama images), and `flyview.pt` (flipped flow +
- depth-based odometry baked from `fib_fly_view_dataset.pkl`, float32, no depth).
+ (consolidated raw panorama images), and `flyview.pt` (flow +
+ depth-based odometry baked from `fib_forest_fly_view_dataset_fwd.pkl`, float32,
+ no depth).
 - `<data_folder>/stimulus/training/` — fixed, training-ready datasets produced by
  `drosophila_model/data_handling/create_training_data.py <stimulus_type>`,
  one `<stimulus_type>.pt` per type (e.g. `small_drone.pt`, `rpi_drone.pt`).

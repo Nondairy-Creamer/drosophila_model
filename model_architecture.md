@@ -137,15 +137,15 @@ under `config['data']['data_folder']`:
     │   ├── panoramic/                # raw panorama_*.mat source images
     │   ├── small_drone.pt            # sampled-clip cache (process_raw_data.py small_drone)
     │   ├── rpi_drone.pt              # sampled-clip cache (process_raw_data.py rpi_drone)
-    │   ├── fib_fly_view_dataset.pkl  # raw rendered fly-view source (responses/flow/depth)
+    │   ├── fib_forest_fly_view_dataset_fwd.pkl  # raw rendered fly-view source (responses/flow/depth)
     │   ├── drone_videos/             # small_drone equirectangular rig (left_N/right_N.mp4)
     │   ├── drone_poses/              # small_drone batch-opt pose .npz
     │   └── rpi_drone/                # rpi_drone dome rig recordings + dome_calib/
     └── baked/                        # fixed training datasets from create_training_data.py
         ├── small_drone.pt            # one <stimulus_type>.pt per baked type
         ├── rpi_drone.pt
-        └── flyview.pt                # cache from fib_fly_view_dataset.pkl (process_raw_data.py
-                                      # flyview): flipped flow + depth-based odometry, float32, no depth
+        └── flyview.pt                # cache from fib_forest_fly_view_dataset_fwd.pkl (process_raw_data.py
+                                      # flyview): flow + depth-based odometry, float32, no depth
 ```
 
 Universal fields land on `ConnectomeData`; per-region union-membership masks

@@ -36,16 +36,15 @@ def bake_fly_view_dataset(
 ):
     """Bake the raw fly-view pickle into a compact ``flyview.pt`` cache.
 
-    Reads ``fib_fly_view_dataset.pkl`` once and applies the two expensive,
+    Reads the raw fly-view pickle once and applies the two expensive,
     timing-independent transforms so the on-the-fly loader never has to touch
     the (multi-GB, ``float64``, depth-carrying) pickle again:
 
-    * **Flipped axis**: both optic-flow components are sign-flipped and
-      converted from rad/frame to deg/s.
+    * **Unit conversion**: both optic-flow components are converted from
+      rad/frame to deg/s.
     * **Recalculated odometry**: per-clip rotation (deg/s) and translation
-      (depth-units/s) are solved from the flipped flow plus the rendered
-      per-column ``depths`` via
-      :func:`ego_motion.estimate_ego_motion_known_depth`.
+      (depth-units/s) are solved from the flow plus the rendered per-column
+      ``depths`` via :func:`ego_motion.estimate_ego_motion_known_depth`.
 
     ``depths`` are consumed here and **not** stored. Invalid columns (NaN flow
     or |flow| > 1 rad/frame) are excluded from the odometry solve and then
@@ -58,7 +57,7 @@ def bake_fly_view_dataset(
 
     Args:
         data_path: Path to the raw pickle. When ``None``, resolves to
-            ``<data_folder>/stimulus/raw/fib_fly_view_dataset.pkl``.
+            ``<data_folder>/stimulus/raw/fib_forest_fly_view_dataset_fwd.pkl``.
         out_path: Destination ``.pt``. When ``None``, resolves to
             ``<data_folder>/stimulus/baked/flyview.pt``.
 
@@ -74,7 +73,7 @@ def bake_fly_view_dataset(
         from drosophila_model.config import load_config
         stim_dir = Path(load_config()['data']['data_folder']) / 'stimulus'
         if data_path is None:
-            data_path = stim_dir / 'raw' / 'fib_fly_view_dataset.pkl'
+            data_path = stim_dir / 'raw' / 'fib_forest_fly_view_dataset_fwd.pkl'
         if out_path is None:
             out_path = stim_dir / 'baked' / 'flyview.pt'
     in_path, out_path = Path(data_path), Path(out_path)
@@ -106,8 +105,6 @@ def bake_fly_view_dataset(
             f"Viewing directions ({column_phi.shape[0]}) != flyview columns "
             f"({n_cols}); cannot solve flow-based odometry.")
 
-    print("assuming x and y flow vectors are flipped in flyview. inverting")
-
     stim_clips, flow_clips, rot_clips, trans_clips = [], [], [], []
     for i in range(len(d['responses'])):
         resp = np.asarray(d['responses'][i], dtype=np.float64)
@@ -121,11 +118,10 @@ def bake_fly_view_dataset(
 
         bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
         resp = np.nan_to_num(resp, nan=0.0)
-        # Invert both flow components (x and y) to match the model basis.
-        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s * -1.0
+        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s
 
-        # Ground-truth ego motion is derived from the (sign-flipped) flow itself
-        # plus the rendered per-column depth, so the odometry targets are exactly
+        # Ground-truth ego motion is derived from the flow itself plus the
+        # rendered per-column depth, so the odometry targets are exactly
         # consistent with the flow the model sees. Solve in rad/s, then store
         # rotation in deg/s (matching the other odometry targets) and translation
         # in depth-units/s.
@@ -176,7 +172,7 @@ def load_fly_view_dataset(
     """
     Load the baked fly-view dataset (``<data_folder>/stimulus/baked/flyview.pt``).
 
-    The flipped flow (deg/s) and the depth-based odometry are precomputed by
+    The flow (deg/s) and the depth-based odometry are precomputed by
     :func:`bake_fly_view_dataset`; this loader only handles the timing-dependent
     steps (drop first frame, segment to ``stim_time``, resample to ``model_dt``).
 
@@ -214,7 +210,7 @@ def load_fly_view_dataset(
         raise FileNotFoundError(
             f"Baked fly-view dataset not found: {path.resolve()}. "
             "Run `python drosophila_model/data_handling/process_raw_data.py flyview` "
-            "to create it from fib_fly_view_dataset.pkl.")
+            "to create it from fib_forest_fly_view_dataset_fwd.pkl.")
 
     d = torch.load(path, weights_only=False)
     fps = float(d['fps'])

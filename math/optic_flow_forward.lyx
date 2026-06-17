@@ -1,0 +1,461 @@
+#LyX 2.3 created this file. For more info see http://www.lyx.org/
+\lyxformat 544
+\begin_document
+\begin_header
+\save_transient_properties true
+\origin unavailable
+\textclass article
+\use_default_options true
+\maintain_unincluded_children false
+\language english
+\language_package default
+\inputencoding auto
+\fontencoding global
+\font_roman "default" "default"
+\font_sans "default" "default"
+\font_typewriter "default" "default"
+\font_math "auto" "auto"
+\font_default_family default
+\use_non_tex_fonts false
+\font_sc false
+\font_osf false
+\font_sf_scale 100 100
+\font_tt_scale 100 100
+\use_microtype false
+\use_dash_ligatures true
+\graphics default
+\default_output_format default
+\output_sync 0
+\bibtex_command default
+\index_command default
+\paperfontsize default
+\use_hyperref false
+\papersize default
+\use_geometry false
+\use_package amsmath 1
+\use_package amssymb 1
+\use_package cancel 1
+\use_package esint 1
+\use_package mathdots 1
+\use_package mathtools 1
+\use_package mhchem 1
+\use_package stackrel 1
+\use_package stmaryrd 1
+\use_package undertilde 1
+\cite_engine basic
+\cite_engine_type default
+\biblio_style plain
+\use_bibtopic false
+\use_indices false
+\paperorientation portrait
+\suppress_date false
+\justification true
+\use_refstyle 1
+\use_minted 0
+\index Index
+\shortcut idx
+\color #008000
+\end_index
+\secnumdepth 3
+\tocdepth 3
+\paragraph_separation indent
+\paragraph_indentation default
+\is_math_indent 0
+\math_numbering_side default
+\quotes_style english
+\dynamic_quotes 0
+\papercolumns 1
+\papersides 1
+\paperpagestyle default
+\tracking_changes false
+\output_changes false
+\html_math_output 0
+\html_css_as_file 0
+\html_be_strict false
+\end_header
+
+\begin_body
+
+\begin_layout Title
+Optic Flow: Forward Model
+\end_layout
+
+\begin_layout Standard
+The explicit map from body-frame ego-motion 
+\begin_inset Formula $(\boldsymbol{\Omega},\mathbf{T})$
+\end_inset
+
+ and per-column depth 
+\begin_inset Formula $Z_{i}$
+\end_inset
+
+ to the two scalar retinal flow measurements 
+\begin_inset Formula $(u_{\text{right},i},u_{\text{up},i})$
+\end_inset
+
+ at each viewing direction.
+ This is the generator inverted by the ego-motion estimators; see optic_flow.lyx
+ for the inverse problem.
+\end_layout
+
+\begin_layout Section*
+Conventions
+\end_layout
+
+\begin_layout Standard
+Right-handed body frame: 
+\begin_inset Formula $+x$
+\end_inset
+
+ forward, 
+\begin_inset Formula $+y$
+\end_inset
+
+ left, 
+\begin_inset Formula $+z$
+\end_inset
+
+ up.
+ Angular velocity 
+\begin_inset Formula $\boldsymbol{\Omega}=(\Omega_{x},\Omega_{y},\Omega_{z})$
+\end_inset
+
+ by the right-hand rule: 
+\begin_inset Formula $\Omega_{x}$
+\end_inset
+
+ = roll, 
+\begin_inset Formula $\Omega_{y}$
+\end_inset
+
+ = pitch down, 
+\begin_inset Formula $\Omega_{z}$
+\end_inset
+
+ = yaw left.
+ Translational velocity 
+\begin_inset Formula $\mathbf{T}=(T_{x},T_{y},T_{z})$
+\end_inset
+
+ in the same frame.
+ Retinal scalars: 
+\begin_inset Formula $u_{\text{right}}>0$
+\end_inset
+
+ is rightward image motion, 
+\begin_inset Formula $u_{\text{up}}>0$
+\end_inset
+
+ upward (arc length per time).
+\end_layout
+
+\begin_layout Section*
+Geometry
+\end_layout
+
+\begin_layout Standard
+A column views direction 
+\begin_inset Formula $\mathbf{d}(\phi,\theta)$
+\end_inset
+
+ with 
+\begin_inset Formula $\theta$
+\end_inset
+
+ the polar angle from 
+\begin_inset Formula $+z$
+\end_inset
+
+ and 
+\begin_inset Formula $\phi$
+\end_inset
+
+ the azimuth from 
+\begin_inset Formula $+x$
+\end_inset
+
+ toward 
+\begin_inset Formula $+y$
+\end_inset
+
+:
+\begin_inset Formula 
+\[
+\mathbf{d}=\begin{pmatrix}\sin\theta\cos\phi\\
+\sin\theta\sin\phi\\
+\cos\theta
+\end{pmatrix}.
+\]
+
+\end_inset
+
+The orthonormal tangent basis at 
+\begin_inset Formula $\mathbf{d}$
+\end_inset
+
+ is
+\begin_inset Formula 
+\[
+\mathbf{e}_{\theta}=\partial_{\theta}\mathbf{d}=\begin{pmatrix}\cos\theta\cos\phi\\
+\cos\theta\sin\phi\\
+-\sin\theta
+\end{pmatrix},\qquad\mathbf{e}_{\phi}=\frac{1}{\sin\theta}\partial_{\phi}\mathbf{d}=\begin{pmatrix}-\sin\phi\\
+\cos\phi\\
+0
+\end{pmatrix}.
+\]
+
+\end_inset
+
+with 
+\begin_inset Formula $\mathbf{e}_{\theta}$
+\end_inset
+
+ pointing down the retina and 
+\begin_inset Formula $\mathbf{e}_{\phi}$
+\end_inset
+
+ pointing left.
+ The triad 
+\begin_inset Formula $(\mathbf{d},\mathbf{e}_{\theta},\mathbf{e}_{\phi})$
+\end_inset
+
+ is right-handed:
+\begin_inset Formula 
+\[
+\mathbf{d}\times\mathbf{e}_{\theta}=\mathbf{e}_{\phi},\qquad\mathbf{d}\times\mathbf{e}_{\phi}=-\mathbf{e}_{\theta},\qquad\mathbf{e}_{\theta}\times\mathbf{e}_{\phi}=\mathbf{d}.
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Section*
+3D flow vector
+\end_layout
+
+\begin_layout Standard
+The static world counter-moves under self-motion, so the flow of viewing
+ direction 
+\begin_inset Formula $\mathbf{d}_{i}$
+\end_inset
+
+ (a 3D tangent vector, 
+\begin_inset Formula $\mathbf{u}_{i}\cdot\mathbf{d}_{i}=0$
+\end_inset
+
+) is
+\begin_inset Formula 
+\[
+\mathbf{u}_{i}=-\boldsymbol{\Omega}\times\mathbf{d}_{i}-\frac{1}{Z_{i}}\Pi_{i}\mathbf{T},\qquad\Pi_{i}=I-\mathbf{d}_{i}\mathbf{d}_{i}^{\intercal}.
+\]
+
+\end_inset
+
+The rotation term 
+\begin_inset Formula $-\boldsymbol{\Omega}\times\mathbf{d}_{i}$
+\end_inset
+
+ is depth-independent; the translation term projects 
+\begin_inset Formula $-\mathbf{T}$
+\end_inset
+
+ onto the tangent plane and scales by inverse depth.
+\end_layout
+
+\begin_layout Section*
+Projection to retinal scalars
+\end_layout
+
+\begin_layout Standard
+The 3D vector is assembled from the two retinal scalars as 
+\begin_inset Formula $\mathbf{u}_{i}=-u_{\text{right},i}\mathbf{e}_{\phi,i}-u_{\text{up},i}\mathbf{e}_{\theta,i}$
+\end_inset
+
+, so by orthonormality
+\begin_inset Formula 
+\[
+u_{\text{right},i}=-\mathbf{u}_{i}\cdot\mathbf{e}_{\phi,i},\qquad u_{\text{up},i}=-\mathbf{u}_{i}\cdot\mathbf{e}_{\theta,i}.
+\]
+
+\end_inset
+
+Substituting the forward model and using 
+\begin_inset Formula $\Pi_{i}\mathbf{e}_{\phi}=\mathbf{e}_{\phi}$
+\end_inset
+
+, 
+\begin_inset Formula $\Pi_{i}\mathbf{e}_{\theta}=\mathbf{e}_{\theta}$
+\end_inset
+
+ together with 
+\begin_inset Formula $(\boldsymbol{\Omega}\times\mathbf{d})\cdot\mathbf{c}=\boldsymbol{\Omega}\cdot(\mathbf{d}\times\mathbf{c})$
+\end_inset
+
+ and the triad identities gives the compact forward model:
+\begin_inset Formula 
+\[
+\boxed{\;u_{\text{right},i}=-\,\boldsymbol{\Omega}\cdot\mathbf{e}_{\theta,i}+\frac{1}{Z_{i}}\,\mathbf{T}\cdot\mathbf{e}_{\phi,i},\qquad u_{\text{up},i}=\boldsymbol{\Omega}\cdot\mathbf{e}_{\phi,i}+\frac{1}{Z_{i}}\,\mathbf{T}\cdot\mathbf{e}_{\theta,i}\;}
+\]
+
+\end_inset
+
+
+\end_layout
+
+\begin_layout Section*
+Expanded in components
+\end_layout
+
+\begin_layout Standard
+With the basis components written out,
+\begin_inset Formula 
+\[
+u_{\text{right},i}=-\big(\Omega_{x}\cos\theta\cos\phi+\Omega_{y}\cos\theta\sin\phi-\Omega_{z}\sin\theta\big)+\frac{1}{Z_{i}}\big(-T_{x}\sin\phi+T_{y}\cos\phi\big),
+\]
+
+\end_inset
+
+
+\begin_inset Formula 
+\[
+u_{\text{up},i}=\big(-\Omega_{x}\sin\phi+\Omega_{y}\cos\phi\big)+\frac{1}{Z_{i}}\big(T_{x}\cos\theta\cos\phi+T_{y}\cos\theta\sin\phi-T_{z}\sin\theta\big),
+\]
+
+\end_inset
+
+where 
+\begin_inset Formula $(\phi,\theta)=(\phi_{i},\theta_{i})$
+\end_inset
+
+ are the column's azimuth and polar angle.
+\end_layout
+
+\begin_layout Section*
+Linear form
+\end_layout
+
+\begin_layout Standard
+Both scalars are linear in the 6-vector 
+\begin_inset Formula $[\boldsymbol{\Omega};\mathbf{T}]$
+\end_inset
+
+, which is what the closed-form known-depth estimator exploits.
+ Stacking the two rows per column,
+\begin_inset Formula 
+\[
+\begin{pmatrix}u_{\text{right},i}\\
+u_{\text{up},i}
+\end{pmatrix}=\begin{pmatrix}-\mathbf{e}_{\theta,i}^{\intercal} & \frac{1}{Z_{i}}\mathbf{e}_{\phi,i}^{\intercal}\\
+\mathbf{e}_{\phi,i}^{\intercal} & \frac{1}{Z_{i}}\mathbf{e}_{\theta,i}^{\intercal}
+\end{pmatrix}\begin{pmatrix}\boldsymbol{\Omega}\\
+\mathbf{T}
+\end{pmatrix}.
+\]
+
+\end_inset
+
+Columns with non-finite depth keep only their rotation block (
+\begin_inset Formula $1/Z_{i}\to0$
+\end_inset
+
+), the correct limit for infinitely distant points.
+\end_layout
+
+\begin_layout Section*
+Two offset eyes
+\end_layout
+
+\begin_layout Standard
+An eye at body-frame offset 
+\begin_inset Formula $\mathbf{r}_{e}$
+\end_inset
+
+ from the center of mass moves at 
+\begin_inset Formula $\mathbf{T}_{e}=\mathbf{T}+\boldsymbol{\Omega}\times\mathbf{r}_{e}$
+\end_inset
+
+, so its columns use 
+\begin_inset Formula $\mathbf{T}_{e}$
+\end_inset
+
+ in place of 
+\begin_inset Formula $\mathbf{T}$
+\end_inset
+
+ above; 
+\begin_inset Formula $\boldsymbol{\Omega}$
+\end_inset
+
+ is shared.
+\end_layout
+
+\begin_layout Section*
+Sanity checks
+\end_layout
+
+\begin_layout Standard
+
+\series bold
+Pure yaw at the equator.
+\series default
+ With 
+\begin_inset Formula $\theta=\pi/2$
+\end_inset
+
+ and 
+\begin_inset Formula $\boldsymbol{\Omega}=(0,0,\Omega_{z})$
+\end_inset
+
+, 
+\begin_inset Formula $\mathbf{T}=0$
+\end_inset
+
+: 
+\begin_inset Formula $u_{\text{right}}=\Omega_{z}$
+\end_inset
+
+, 
+\begin_inset Formula $u_{\text{up}}=0$
+\end_inset
+
+.
+ Yaw-left drives uniform rightward flow, depth-independent.
+\end_layout
+
+\begin_layout Standard
+
+\series bold
+Pure forward translation.
+\series default
+ With 
+\begin_inset Formula $\mathbf{T}=(T_{x},0,0)$
+\end_inset
+
+, 
+\begin_inset Formula $\boldsymbol{\Omega}=0$
+\end_inset
+
+: 
+\begin_inset Formula $u_{\text{right}}=-\frac{T_{x}}{Z}\sin\phi$
+\end_inset
+
+, 
+\begin_inset Formula $u_{\text{up}}=\frac{T_{x}}{Z}\cos\theta\cos\phi$
+\end_inset
+
+.
+ Flow vanishes at the focus of expansion 
+\begin_inset Formula $(\phi=0,\theta=\pi/2)$
+\end_inset
+
+ and grows with 
+\begin_inset Formula $1/Z$
+\end_inset
+
+.
+\end_layout
+
+\end_body
+\end_document
