@@ -27,12 +27,12 @@ seed = 0
 
 [random_pano]
 velocity_amp = 100.0
-velocity_time_scale = 0.5
+velocity_time_scale = 0.3
 num_repeats = 1
 
 [random_sine]
 velocity_amp = 100.0
-velocity_time_scale = 0.5
+velocity_time_scale = 0.3
 num_repeats = 1
 
 [static_sine]
