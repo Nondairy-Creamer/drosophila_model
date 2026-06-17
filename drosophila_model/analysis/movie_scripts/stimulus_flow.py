@@ -1,7 +1,7 @@
 """
 Create a movie of stimulus intensity with true optic flow. No model required.
 
-Supports both one-eye and two-eye stimuli via the --two-eyes flag.
+Defaults to two-eye stimuli; pass ``--no-two-eyes`` for a single eye.
 
 One-eye layout (1x2):
   Left: Stimulus intensity (scatter)
@@ -50,8 +50,9 @@ def main() -> None:
         description="Make a movie showing stimulus and true optic flow (no model needed)."
     )
     parser.add_argument("--config", type=str, default="config.toml", help="Path to config file")
-    parser.add_argument("--two-eyes", action="store_true",
-                        help="Use two-eye stimulus")
+    parser.add_argument("--two-eyes", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use two-eye stimulus (default: two eyes; "
+                             "pass --no-two-eyes for a single eye)")
     parser.add_argument("--stim-index", type=int, nargs="+", default=None,
                         help="Stimulus indices to visualize (default: [5] for 1-eye, [3] for 2-eye)")
     parser.add_argument("--fps", type=int, default=None,

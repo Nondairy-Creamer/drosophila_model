@@ -264,6 +264,79 @@ def estimate_from_flow(eyes, terms=('rotation', 'trans')):
     return omega_star, T_star, rho_star
 
 
+def estimate_ego_motion_known_depth(phi, theta, d_right, d_up, Z, valid=None):
+    """Closed-form 6-DOF ego-motion from optic flow when per-column depth is known.
+
+    Companion to :func:`estimate_from_flow` for the case (e.g. rendered
+    ground-truth flow) where the depth ``Z`` of every viewing column is known.
+    The forward model ``u_i = x_i x Omega - (1/Z_i) Pi_i T`` (see
+    :func:`generate_optic_flow`) is linear in the stacked 6-vector
+    ``[Omega; T]``, so a single least-squares solve over all columns recovers
+    both with no parallax/scale ambiguity (unlike the depth-free estimator).
+
+    Angular units follow the flow: pass flow in rad/s to get ``Omega`` in rad/s
+    and ``T`` in (depth-unit)/s. Columns with non-finite ``Z`` keep only their
+    rotation constraint (their translation weight ``1/Z`` is zero), the correct
+    limit for infinitely distant points.
+
+    Args:
+        phi, theta: ``(N,)`` viewing directions (shared body frame).
+        d_right, d_up: ``(N,)`` or ``(T, N)`` retinal flow (right/up components).
+        Z: ``(N,)`` or ``(T, N)`` per-column depth (length units of ``T``).
+        valid: optional bool mask, ``(N,)`` or ``(T, N)``; ``False`` columns are
+            dropped from the solve (e.g. capped/NaN flow).
+
+    Returns:
+        ``(omega, T)``, each ``(3,)`` (unbatched) or ``(T, 3)`` (batched).
+    """
+    unbatched = d_right.dim() == 1
+    if unbatched:
+        d_right = d_right.unsqueeze(0)
+        d_up = d_up.unsqueeze(0)
+    T_len, N = d_right.shape
+    device, dtype = d_right.device, d_right.dtype
+
+    phi = phi.to(device=device, dtype=dtype)
+    theta = theta.to(device=device, dtype=dtype)
+    Z = torch.as_tensor(Z, device=device, dtype=dtype)
+    if Z.dim() == 1:
+        Z = Z.unsqueeze(0).expand(T_len, N)
+
+    x, e_phi, e_theta = _spherical_basis(phi, theta)
+    A = _cross_matrix(x)                                   # (N, 3, 3)
+    I = torch.eye(3, device=device, dtype=dtype).expand(N, 3, 3)
+    Pi = I - x.unsqueeze(2) @ x.unsqueeze(1)               # (N, 3, 3)
+
+    # d_right = -(u . e_phi), d_up = -(u . e_theta) with u = A Omega - (1/Z) Pi T.
+    # Rotation coefficients are time-independent; translation scales with 1/Z.
+    c_right_omega = -torch.einsum('ni,nij->nj', e_phi, A)  # (N, 3)
+    c_up_omega = -torch.einsum('ni,nij->nj', e_theta, A)
+    ePi_right = torch.einsum('ni,nij->nj', e_phi, Pi)      # (N, 3)
+    ePi_up = torch.einsum('ni,nij->nj', e_theta, Pi)
+
+    inv_Z = torch.where(torch.isfinite(Z), 1.0 / Z, torch.zeros_like(Z))
+    c_right_T = ePi_right.unsqueeze(0) * inv_Z.unsqueeze(-1)  # (T, N, 3)
+    c_up_T = ePi_up.unsqueeze(0) * inv_Z.unsqueeze(-1)
+
+    M_right = torch.cat([c_right_omega.unsqueeze(0).expand(T_len, N, 3), c_right_T], dim=-1)
+    M_up = torch.cat([c_up_omega.unsqueeze(0).expand(T_len, N, 3), c_up_T], dim=-1)
+    M = torch.cat([M_right, M_up], dim=1)                  # (T, 2N, 6)
+    b = torch.cat([d_right, d_up], dim=1)                  # (T, 2N)
+
+    if valid is not None:
+        if valid.dim() == 1:
+            valid = valid.unsqueeze(0).expand(T_len, N)
+        keep = torch.cat([valid, valid], dim=1).to(dtype)
+        M = M * keep.unsqueeze(-1)
+        b = b * keep
+
+    sol = torch.linalg.lstsq(M, b.unsqueeze(-1)).solution[..., 0]  # (T, 6)
+    omega, T = sol[..., :3], sol[..., 3:]
+    if unbatched:
+        omega, T = omega.squeeze(0), T.squeeze(0)
+    return omega, T
+
+
 def _flow_constraint(phi, theta, d_right_t, d_up_t):
     """Per-column colinearity blocks for the joint translation solve.
 

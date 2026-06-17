@@ -53,8 +53,8 @@ def load_fly_view_dataset(
         stim_time: Duration of each segment (seconds). Use a value >= the native
             clip duration to keep each clip as a single segment.
         two_eyes: If True, return binocular columns ``[right | left]`` plus ego-motion
-            rates derived from ``roll_pitch_yaw`` and ``positions``. If False, return
-            right-eye columns only.
+            rates solved from the (sign-flipped) optic flow and the rendered
+            per-column ``depths``. If False, return right-eye columns only.
         data_path: Path to the pickle. When ``None``, resolves to
             ``<config['data']['data_folder']>/stimulus/raw/fib_fly_view_dataset.pkl``.
         drop_first_frame: If True, drop the first time index.
@@ -66,9 +66,11 @@ def load_fly_view_dataset(
         If ``two_eyes`` is True:
             ``(stimulus, optic_flow, rotation_rate, translation_rate)`` with
             stimulus/flow ``(batch, T, 2*n_eye)`` / ``(batch, T, 2*n_eye, 2)``,
-            ``rotation_rate`` ``(batch, T, 3)`` in deg/s,
-            ``translation_rate`` ``(batch, T, 3)`` in position-units per second
-            (``np.gradient`` of ``positions`` at native ``fps``).
+            ``rotation_rate`` ``(batch, T, 3)`` in deg/s and
+            ``translation_rate`` ``(batch, T, 3)`` in depth-units per second,
+            both obtained by least-squares solving the optic-flow forward model
+            (:func:`ego_motion.estimate_ego_motion_known_depth`) against the
+            flipped flow and the per-column ``depths``.
     """
     if data_path is None:
         from drosophila_model.config import load_config
@@ -104,14 +106,27 @@ def load_fly_view_dataset(
 
     print("assuming x and y flow vectors are flipped in flyview. inverting")
 
+    # Ground-truth odometry (two-eye case) is solved from the flipped flow plus
+    # per-column depth, so we need the columns' viewing directions ([right|left]
+    # block order, matching the dataset's column layout).
+    if two_eyes:
+        from drosophila_model.model_definition.ego_motion import (
+            load_viewing_directions,
+            estimate_ego_motion_known_depth,
+        )
+        column_phi, column_theta = load_viewing_directions()
+        if column_phi.shape[0] != n_cols:
+            raise ValueError(
+                f"Viewing directions ({column_phi.shape[0]}) != flyview columns "
+                f"({n_cols}); cannot solve flow-based odometry.")
+
     stim_list, flow_list = [], []
     rot_list, trans_list = [], []
 
     for i in range(len(d['responses'])):
         resp = np.asarray(d['responses'][i], dtype=np.float64)
         flow = np.asarray(d['forward_flows'][i], dtype=np.float64)
-        rpy = np.asarray(d['roll_pitch_yaw'][i], dtype=np.float64)
-        pos = np.asarray(d['positions'][i], dtype=np.float64)
+        depth = np.asarray(d['depths'][i], dtype=np.float64)
 
         if resp.shape[0] != flow.shape[0]:
             raise ValueError(f"Clip {i}: response time {resp.shape[0]} != flow time {flow.shape[0]}")
@@ -119,8 +134,7 @@ def load_fly_view_dataset(
         if drop_first_frame:
             resp = resp[1:]
             flow = flow[1:]
-            rpy = rpy[1:]
-            pos = pos[1:]
+            depth = depth[1:]
 
         clip_len = resp.shape[0]
         if clip_len == 0:
@@ -135,8 +149,22 @@ def load_fly_view_dataset(
         flow_r, flow_l = flow_deg_s[:, :n_eye], flow_deg_s[:, n_eye:]
         bad_r, bad_l = bad[:, :n_eye], bad[:, n_eye:]
 
-        omega = _euler_angles_to_angular_velocity(rpy, stimulus_dt)
-        trans_rate = np.gradient(pos, stimulus_dt, axis=0)
+        # Ground-truth ego motion is derived from the (sign-flipped) flow itself
+        # plus the rendered per-column depth, so the odometry targets are exactly
+        # consistent with the flow the model sees. Solve in rad/s, then report
+        # rotation in deg/s (matching the other odometry targets) and translation
+        # in depth-units/s.
+        if two_eyes:
+            flow_rad_s = flow_deg_s * (np.pi / 180.0)
+            omega_rad, trans_units = estimate_ego_motion_known_depth(
+                column_phi, column_theta,
+                torch.from_numpy(flow_rad_s[..., 0]),
+                torch.from_numpy(flow_rad_s[..., 1]),
+                torch.from_numpy(depth),
+                valid=torch.from_numpy(~bad),
+            )
+            omega = omega_rad.numpy() * (180.0 / np.pi)
+            trans_rate = trans_units.numpy()
 
         n_seg = min(clip_len, n_frames_requested)
         if n_seg == 0:
@@ -1071,70 +1099,6 @@ def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1
     stimulus = sine_wave[None, :, :]
     optic_flow = optic_flow[None, :, :, :]
     return stimulus, optic_flow, rotation[None], translation[None]
-
-
-def _euler_to_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
-    """Convert extrinsic XYZ Euler angles (degrees) to a 3x3 rotation matrix."""
-    r = np.radians(roll_deg)
-    p = np.radians(pitch_deg)
-    y = np.radians(yaw_deg)
-    cr, sr = np.cos(r), np.sin(r)
-    cp, sp = np.cos(p), np.sin(p)
-    cy, sy = np.cos(y), np.sin(y)
-
-    # R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
-    R = np.array([
-        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
-        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
-        [  -sp,           cp*sr,           cp*cr],
-    ])
-    return R
-
-
-def _euler_angles_to_angular_velocity(euler_angles, dt):
-    """Convert a time series of Euler angles (degrees) to angular velocity (deg/s).
-
-    Computes body-frame angular velocity via the relative rotation matrix
-    between consecutive frames, avoiding gimbal-lock singularities that
-    corrupt naive ``np.diff(euler) / dt`` when pitch is near ±90°.
-
-    Uses ``R_rel = R_prev^T @ R_curr`` so the extracted axis-angle is in
-    the body frame, consistent with ``get_random_velocity_pano`` which
-    returns ``omega_body = R^T @ omega_world``.
-
-    Args:
-        euler_angles: (T, 3) array of [roll, pitch, yaw] in degrees.
-        dt: time step in seconds.
-
-    Returns:
-        omega: (T, 3) angular velocity in deg/s (body frame).
-               First frame is set to zero.
-    """
-    T = euler_angles.shape[0]
-    omega = np.zeros_like(euler_angles)
-
-    R_prev = _euler_to_rotation_matrix(*euler_angles[0])
-    for t in range(1, T):
-        R_curr = _euler_to_rotation_matrix(*euler_angles[t])
-        # Body-frame relative rotation: R_prev^T @ R_curr
-        R_rel = R_prev.T @ R_curr
-        # Extract axis-angle via matrix logarithm (Rodrigues)
-        cos_angle = (np.trace(R_rel) - 1.0) / 2.0
-        cos_angle = np.clip(cos_angle, -1.0, 1.0)
-        angle = np.arccos(cos_angle)
-        if angle < 1e-10:
-            omega[t] = 0.0
-        else:
-            # Axis from skew-symmetric part of R_rel (body frame)
-            axis = np.array([
-                R_rel[2, 1] - R_rel[1, 2],
-                R_rel[0, 2] - R_rel[2, 0],
-                R_rel[1, 0] - R_rel[0, 1],
-            ]) / (2.0 * np.sin(angle))
-            omega[t] = axis * angle * (180.0 / np.pi) / dt
-        R_prev = R_curr
-
-    return omega
 
 
 def _random_rotation_matrix(rng):

@@ -1,7 +1,9 @@
 """
 Run a trained model on a freshly generated stimulus and visualize flow.
 
-Supports both one-eye and two-eye stimuli via the --two-eyes flag.
+Defaults to two-eye stimuli; pass ``--no-two-eyes`` for a single eye. The
+two-eye path also saves a static PNG of the stimulus' rotational and
+translational velocity over time alongside the movie.
 
 One-eye layout (3 rows):
   Row 0: Stimulus intensity (scatter)
@@ -70,10 +72,11 @@ def main() -> None:
     parser.add_argument("model_folder", type=str, help="Path to model folder or model.pt")
     parser.add_argument("--config", type=str, default=None,
                         help="Path to config.toml (default: uses workspace config.toml)")
-    parser.add_argument("--two-eyes", action="store_true",
-                        help="Use two-eye stimulus and predict_two_eyes")
+    parser.add_argument("--two-eyes", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use two-eye stimulus and predict_two_eyes (default: two eyes; "
+                             "pass --no-two-eyes for a single eye)")
     parser.add_argument("--stim-type", type=str, default=None,
-                        help="Stimulus type (default: random_sine for 1-eye, random_pano for 2-eye)")
+                        help="Stimulus type (default: random_pano for 2-eye, random_sine for 1-eye)")
     parser.add_argument("--sine-direction", type=str, nargs="+", default=None,
                         choices=["right", "left", "up", "down"],
                         help="Direction(s) for directional_sine (default: all four)")
@@ -290,6 +293,7 @@ def _run_two_eyes(args, model, config, data_config, output_dir,
     stimulus_np = stimulus.cpu().numpy()
     optic_flow_np = optic_flow.cpu().numpy()
     observer_rotation_np = observer_rotation.cpu().numpy()
+    observer_translation_np = observer_translation.cpu().numpy()
     train_mask_np = train_mask.cpu().numpy()
     n_examples = stimulus_np.shape[0]
     print(f"  Generated {n_examples} stimulus examples, shape {stimulus_np.shape}")
@@ -313,7 +317,6 @@ def _run_two_eyes(args, model, config, data_config, output_dir,
         if np.all(np.isnan(flow_right[pre_stim_steps:])):
             print(f"  Stim {stim_index}: ground-truth flow unavailable — "
                   "synthesizing from odometry (Z=1)")
-            observer_translation_np = observer_translation.cpu().numpy()
             flow_right, flow_left = synthesize_two_eye_flow_from_odometry(
                 observer_rotation_np[stim_index], observer_translation_np[stim_index],
                 phi, theta)
@@ -351,6 +354,26 @@ def _run_two_eyes(args, model, config, data_config, output_dir,
             output_path=out_path, frame_rate=frame_rate,
             mask_left=mask_left, mask_right=mask_right,
             stim_type=args.stim_type, flow_label=flow_label,
+        )
+
+        # Overlay the model's estimated ego-motion (dotted) on the stimulus'
+        # ground-truth rotational/translational velocity.
+        with torch.no_grad():
+            pred_rot, pred_trans, _, _ = \
+                model.regions['optic_lobe'].estimate_ego_motion_from_image(
+                    right_input, left_input)
+        pred_rot_np = pred_rot[0].cpu().numpy()[:num_frames]
+        pred_trans_np = pred_trans[0].cpu().numpy()[:num_frames]
+        true_rot = observer_rotation_np[stim_index, :num_frames]
+        true_trans = observer_translation_np[stim_index, :num_frames]
+        # Translation is recovered only up to scale; match GT magnitude for the
+        # overlay when the stimulus actually translates (else show raw prediction).
+        if np.std(true_trans) > 1e-9:
+            pred_trans_np = pred_trans_np * (np.std(true_trans) / (np.std(pred_trans_np) + 1e-12))
+        _save_rate_figure(
+            true_rot, pred_rot_np, true_trans, pred_trans_np,
+            model_dt, stim_index,
+            output_dir / f"{args.stim_type}_velocity_stim_{stim_index}.png",
         )
 
 
@@ -965,7 +988,7 @@ def _save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,
     for i in range(3):
         ax = axes[i, 0]
         ax.plot(times, true_rot[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_rot[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.plot(times, pred_rot[:, i], linewidth=1.2, linestyle=":", label="Model")
         ax.set_ylabel(f"{rot_labels[i]} (deg/s)")
         ax.grid(True, alpha=0.3)
         if i == 0:
@@ -973,7 +996,7 @@ def _save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,
             ax.set_title("Rotational Velocity")
         ax = axes[i, 1]
         ax.plot(times, true_trans[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_trans[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.plot(times, pred_trans[:, i], linewidth=1.2, linestyle=":", label="Model")
         ax.set_ylabel(f"{trans_labels[i]} (m/s)")
         ax.grid(True, alpha=0.3)
         if i == 0:
