@@ -36,18 +36,26 @@ mkdir -p ../drosophila_model_data/stimulus/training
 #   stimulus/baked/         folder  1VnciFS4X9BXU0NAgxj-obnpQyPxixkwc
 #   stimulus/training/      folder  12W17H3OQojSquBDgdfnUv-09TTbZYj0w
 #   config.toml                     17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k
+#   config_data.toml                1y_zl_ZNtHIQeIW-3gvHdaEiNYBRYRi9k
 set +e
 gdown --folder "https://drive.google.com/drive/folders/1lkj3q3awKuCOqNnGticnufXqDHMV5f67" -O ../drosophila_model_data/connectome_data/baked
 gdown --folder "https://drive.google.com/drive/folders/1VnciFS4X9BXU0NAgxj-obnpQyPxixkwc" -O ../drosophila_model_data/stimulus/baked
 gdown --folder "https://drive.google.com/drive/folders/12W17H3OQojSquBDgdfnUv-09TTbZYj0w" -O ../drosophila_model_data/stimulus/training
 gdown "17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k" -O ../drosophila_model_data/config.toml
+gdown "1y_zl_ZNtHIQeIW-3gvHdaEiNYBRYRi9k" -O ../drosophila_model_data/config_data.toml
 set -e
 
-# Place the downloaded user config at the repo root where load_config() looks
-# for it (CWD-relative). config_default.toml is shipped inside the package;
-# this is the per-machine overlay (gitignored).
+# Place the downloaded user configs at the repo root where load_config() /
+# get_data_config() look for them (CWD-relative). config_default.toml and
+# config_default_data.toml are shipped inside the package; these are the
+# per-machine overlays (gitignored).
 if [ -f ../drosophila_model_data/config.toml ]; then
     cp ../drosophila_model_data/config.toml ./config.toml
 else
     echo "warning: ../drosophila_model_data/config.toml not found; skipping copy" >&2
+fi
+if [ -f ../drosophila_model_data/config_data.toml ]; then
+    cp ../drosophila_model_data/config_data.toml ./config_data.toml
+else
+    echo "warning: ../drosophila_model_data/config_data.toml not found; skipping copy" >&2
 fi
