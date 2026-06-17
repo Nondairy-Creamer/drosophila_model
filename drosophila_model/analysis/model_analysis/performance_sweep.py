@@ -101,9 +101,10 @@ def run_performance_sweep(model_path: str | Path,
     flow_cos: dict[str, float] = {}
     for name, stim_type in FLOW_STIMULI:
         print(f"\n--- Flow cosine: {name} ({stim_type}) ---")
-        stimulus, optic_flow, _ = su.get_stimulus_one_eye(
-            stim_type, config, column_phi_theta, data_config=data_config,
+        data = su.get_stimulus(
+            stim_type, config, column_phi_theta, num_eyes=1, data_config=data_config,
         )
+        stimulus, optic_flow = data.stimulus, data.optic_flow
         stimulus = stimulus[:max_examples]
         optic_flow = optic_flow[:max_examples]
         print(f"  {stimulus.shape[0]} examples, {stimulus.shape[1]} frames")
@@ -115,9 +116,10 @@ def run_performance_sweep(model_path: str | Path,
     ego_cos: dict[str, dict] = {}
     for name, stim_type, has_trans in EGO_STIMULI:
         print(f"\n--- Ego-motion cosine: {name} ({stim_type}) ---")
-        stimulus, _, true_rot, true_trans, _ = su.get_stimulus_two_eyes(
-            stim_type, config, column_phi_theta, data_config=data_config,
+        data = su.get_stimulus(
+            stim_type, config, column_phi_theta, num_eyes=2, data_config=data_config,
         )
+        stimulus, true_rot, true_trans = data.stimulus, data.rotation, data.translation
         stimulus = stimulus[:max_examples]
         true_rot = true_rot[:max_examples]
         true_trans = true_trans[:max_examples]

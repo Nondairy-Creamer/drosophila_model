@@ -1,6 +1,7 @@
 import warnings
 import numpy as np
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 import torch
 
@@ -196,11 +197,143 @@ def load_fly_view_dataset(
     return stimulus, optic_flow
 
 
+def _stim_time_vector(dt, stim_time, pre_stim_time=0.0, post_stim_time=0.0):
+    """Build a stimulus time vector (seconds) with the pre- and post-stimulus
+    intervals clamped to hold the first/last stimulus sample.
+
+    Returns ``(t, pre_idx, post_idx)`` where ``t`` is ``(num_time,)`` and the
+    stimulus interval is ``t[pre_idx:post_idx]``.
+    """
+    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
+    t = np.arange(num_time) * dt
+    pre_idx = int(round(pre_stim_time / dt))
+    post_idx = int(round((pre_stim_time + stim_time) / dt))
+    t[:pre_idx] = t[pre_idx]
+    t[post_idx:] = t[post_idx - 1]
+    return t, pre_idx, post_idx
+
+
+def _contrast_scaling(sample_theta, wavelength_rad, filter_std_base=2.5 * np.pi / 180):
+    """Per-column contrast attenuation from the ommatidia Gaussian filter.
+
+    The acceptance-angle std (2.5 deg) widens toward the poles as
+    ``1 / cos(theta - pi/2)``, damping the sine-wave amplitude there.
+    """
+    filter_std = filter_std_base / np.cos(sample_theta - np.pi / 2)
+    return np.exp(-2 * np.pi**2 * filter_std**2 / wavelength_rad**2)
+
+
+def _drift_flow(sample_phi, sample_theta, velocity_rad_s, axis):
+    """Optic flow (deg/s) of a drifting grating moving at ``velocity_rad_s``.
+
+    ``velocity_rad_s`` may be a scalar or a ``(T,)`` array. The flow is derived
+    from the rigid ego-motion that would produce the same retinal slip on a
+    virtual cylinder:
+
+    * ``'lr'``: yaw rotation about z (``omega_z = velocity``), depth ``Z = 1``.
+    * ``'ud'``: vertical translation (``T_z = -velocity``) at the cylinder wall
+      ``Z = 1/sin(theta)`` (unit radius at the equator).
+
+    Returns a ``(T, N, 2)`` array (``T = 1`` for scalar velocity) of
+    ``(right, up)`` angular flow in degrees per second.
+    """
+    from drosophila_model.model_definition.ego_motion import generate_optic_flow
+
+    v = np.atleast_1d(np.asarray(velocity_rad_s, dtype=np.float32))
+    n_time = v.shape[0]
+    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
+    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
+    omega = torch.zeros(n_time, 3, dtype=torch.float32)
+    T_vec = torch.zeros(n_time, 3, dtype=torch.float32)
+    v_t = torch.tensor(v, dtype=torch.float32)
+    if axis == 'lr':
+        omega[:, 2] = v_t
+        Z = 1.0
+    elif axis == 'ud':
+        T_vec[:, 2] = -v_t
+        Z = 1.0 / torch.sin(theta_t)
+    else:
+        raise ValueError(f"axis must be 'lr' or 'ud', got {axis!r}")
+
+    u_right, u_up = generate_optic_flow(phi_t, theta_t, omega, T_vec, Z)
+    flow = np.stack([u_right.numpy() * (180.0 / np.pi),
+                     u_up.numpy() * (180.0 / np.pi)], axis=-1)
+    return flow.reshape(n_time, len(sample_phi), 2)
+
+
+def _drift_ego(velocity_rad_s, axis, n_time):
+    """Observer ego-motion that produces the same retinal slip as a drifting
+    grating moving at ``velocity_rad_s`` (scalar or ``(T,)`` array).
+
+    This is the ego-motion side of :func:`_drift_flow`, so the returned targets
+    are exactly the ``(omega, T)`` used to synthesise the optic flow:
+
+    * ``'lr'``: yaw rotation about z. ``rotation[:, 2] = velocity`` (deg/s),
+      zero translation.
+    * ``'ud'``: vertical translation. ``translation[:, 2] = -velocity`` (length
+      per second on the unit-radius cylinder), zero rotation.
+
+    Returns ``(rotation, translation)``, each ``(n_time, 3)``. Rotation is in
+    deg/s (matching the other odometry targets); translation is linear velocity.
+    """
+    v = np.atleast_1d(np.asarray(velocity_rad_s, dtype=np.float64))
+    if v.shape[0] == 1:
+        v = np.full(n_time, v[0])
+    elif v.shape[0] != n_time:
+        raise ValueError(f"velocity length {v.shape[0]} != n_time {n_time}")
+
+    rotation = np.zeros((n_time, 3))
+    translation = np.zeros((n_time, 3))
+    if axis == 'lr':
+        rotation[:, 2] = v * (180.0 / np.pi)  # rad/s -> deg/s
+    elif axis == 'ud':
+        translation[:, 2] = -v
+    else:
+        raise ValueError(f"axis must be 'lr' or 'ud', got {axis!r}")
+    return rotation, translation
+
+
+def _make_drifting_sine(sample_phi, sample_theta, axis, contrast=1, wavelength=30,
+                        temporal_frequency=4, phase_init=0, dt=0.01, stim_time=1.0,
+                        pre_stim_time=0.0, post_stim_time=0.0):
+    """Core drifting sine-wave generator shared by the LR and UD variants.
+
+    ``axis='lr'`` drifts along azimuth (``phi``); ``axis='ud'`` drifts along the
+    cartesian-vertical coordinate ``tan(theta - pi/2)`` so it moves at constant
+    apparent speed on the virtual cylinder. See :func:`make_lr_sine_wave` /
+    :func:`make_ud_sine_wave` for the public-facing argument descriptions.
+    """
+    wavelength_rad = wavelength * np.pi / 180
+    t, pre_idx, post_idx = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
+    contrast_scaling_factor = _contrast_scaling(sample_theta, wavelength_rad)
+
+    if axis == 'lr':
+        spatial_coord = sample_phi / wavelength_rad
+    elif axis == 'ud':
+        # Vertical wavelength in cartesian space (cylinder is flat vertically).
+        vert_wavelength = 2 * np.tan(wavelength_rad / 2)
+        spatial_coord = np.tan(sample_theta - np.pi / 2) / vert_wavelength
+    else:
+        raise ValueError(f"axis must be 'lr' or 'ud', got {axis!r}")
+
+    t_mesh, coord_mesh = np.meshgrid(t, spatial_coord, indexing='ij')
+    sine_wave = contrast * np.sin(2 * np.pi * (coord_mesh + temporal_frequency * t_mesh) + phase_init)
+    sine_wave *= contrast_scaling_factor[None, :]
+
+    velocity_rad_s = temporal_frequency * wavelength_rad
+    flow_cols = _drift_flow(sample_phi, sample_theta, velocity_rad_s, axis)[0]  # (N, 2)
+    optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
+    optic_flow[pre_idx:post_idx] = flow_cols[None, :, :]
+
+    sine_wave = (sine_wave + 1.0) / 2.0
+    return sine_wave, optic_flow
+
+
 def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=4,
                       phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
-    Generate a basic left-right sine wave stimulus.
-    
+    Generate a basic left-right (azimuthal) drifting sine wave stimulus.
+
     Args:
         sample_phi: azimuthal angles (radians)
         sample_theta: polar angles (radians)
@@ -212,57 +345,22 @@ def make_lr_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
         stim_time: stimulus duration
         pre_stim_time: pre-stimulus time
         post_stim_time: post-stimulus time
-    
+
     Returns:
         sine_wave: [time, points in space] array
         optic_flow: [time, points in space, 2] array (LR/UD flow)
     """
-    wavelength = wavelength * np.pi / 180  # convert degrees to radians
-    filter_std_base = 2.5 * np.pi / 180  # radians
-    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
-    t = np.arange(num_time) * dt
-    pre_stim_index = int(round(pre_stim_time / dt))
-    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
-    t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index - 1]
-    t_mesh, phi_mesh = np.meshgrid(t, sample_phi, indexing='ij')
-    
-    # smooth the sine wave according to its location in theta
-    def contrast_scaling_func(theta):
-        filter_std = filter_std_base * 1 / np.cos(theta - np.pi / 2)
-        return np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
-    
-    contrast_scaling_factor = contrast_scaling_func(sample_theta)
-    
-    # Generate sine wave
-    sine_wave = contrast * np.sin(2 * np.pi * (phi_mesh / wavelength + temporal_frequency * t_mesh) + phase_init)
-    sine_wave *= contrast_scaling_factor[None, :]
-    
-    # Generate optic flow assuming fly rotates in a virtual cylinder.
-    # For LR sine waves, the fly rotates counter-clockwise about z at omega_z = velocity.
-    from drosophila_model.model_definition.ego_motion import generate_optic_flow
-    velocity_rad_s = temporal_frequency * wavelength  # rad/s (wavelength already in radians)
-    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
-    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
-    omega = torch.tensor([0.0, 0.0, float(velocity_rad_s)], dtype=torch.float32)
-    T_vec = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
-    u_right, u_up = generate_optic_flow(phi_t, theta_t, omega, T_vec, 1.0)
-    u_right_deg = u_right.numpy() * (180.0 / np.pi)
-    u_up_deg = u_up.numpy() * (180.0 / np.pi)
+    return _make_drifting_sine(
+        sample_phi, sample_theta, 'lr', contrast=contrast, wavelength=wavelength,
+        temporal_frequency=temporal_frequency, phase_init=phase_init, dt=dt,
+        stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
 
-    optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
-    optic_flow[pre_stim_index:post_stim_index, :, 0] = u_right_deg[None, :]
-    optic_flow[pre_stim_index:post_stim_index, :, 1] = u_up_deg[None, :]
-    
-    sine_wave = (sine_wave + 1.0) / 2.0
-
-    return sine_wave, optic_flow
 
 def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=4,
                       phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
-    Generate a basic up-down sine wave stimulus.
-    
+    Generate a basic up-down (vertical) drifting sine wave stimulus.
+
     Args:
         sample_phi: azimuthal angles (radians)
         sample_theta: polar angles (radians)
@@ -274,57 +372,15 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
         stim_time: stimulus duration
         pre_stim_time: pre-stimulus time
         post_stim_time: post-stimulus time
-    
+
     Returns:
         sine_wave: [time, points in space] array
         optic_flow: [time, points in space, 2] array (LR/UD flow)
     """
-    wavelength = wavelength * np.pi / 180  # convert degrees to radians
-    filter_std_base = 2.5 * np.pi / 180  # radians
-    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
-    t = np.arange(num_time) * dt
-    pre_stim_index = int(round(pre_stim_time / dt))
-    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
-    t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index - 1]
-    t_mesh, theta_mesh = np.meshgrid(t, sample_theta, indexing='ij')
-    
-    # smooth the sine wave according to its location in theta
-    def contrast_scaling_func(theta):
-        filter_std = filter_std_base * 1 / np.cos(theta - np.pi / 2)
-        return np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
-    
-    contrast_scaling_factor = contrast_scaling_func(sample_theta)
-    
-    # length scales for vertical sine waves (since the cylinder is flat vertically)
-    vert_wavelength = 2 * np.tan(wavelength / 2)  # length of sine wave in cartesian space
-    theta_to_length = np.tan(theta_mesh - np.pi / 2)
-    
-    # Generate sine wave
-    sine_wave = contrast * np.sin(2 * np.pi * (theta_to_length / vert_wavelength + temporal_frequency * t_mesh) + phase_init)
-    sine_wave *= contrast_scaling_factor[None, :]
-    
-    # Generate optic flow assuming fly translates vertically in a virtual cylinder.
-    # The cylinder wall is at distance Z = 1/sin(theta) (unit radius at theta=pi/2).
-    # T_z is chosen so the flow at theta=pi/2 equals the requested velocity.
-    from drosophila_model.model_definition.ego_motion import generate_optic_flow
-    velocity_rad_s = temporal_frequency * wavelength  # rad/s at theta=pi/2
-    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
-    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
-    omega = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
-    T_vec = torch.tensor([0.0, 0.0, float(-velocity_rad_s)], dtype=torch.float32)
-    Z = 1.0 / torch.sin(theta_t)
-    u_right, u_up = generate_optic_flow(phi_t, theta_t, omega, T_vec, Z)
-    u_right_deg = u_right.numpy() * (180.0 / np.pi)
-    u_up_deg = u_up.numpy() * (180.0 / np.pi)
-
-    optic_flow = np.zeros((sine_wave.shape[0], sine_wave.shape[1], 2))
-    optic_flow[pre_stim_index:post_stim_index, :, 0] = u_right_deg[None, :]
-    optic_flow[pre_stim_index:post_stim_index, :, 1] = u_up_deg[None, :]
-    
-    sine_wave = (sine_wave + 1.0) / 2.0
-
-    return sine_wave, optic_flow
+    return _make_drifting_sine(
+        sample_phi, sample_theta, 'ud', contrast=contrast, wavelength=wavelength,
+        temporal_frequency=temporal_frequency, phase_init=phase_init, dt=dt,
+        stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
 
 
 def make_lr_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
@@ -484,18 +540,11 @@ def make_counterphase_sine(sample_phi, sample_theta, contrast=1,
     """
     wavelength_phi_rad = wavelength_phi * np.pi / 180
     wavelength_theta_rad = wavelength_theta * np.pi / 180
-    filter_std_base = 2.5 * np.pi / 180
 
-    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
-    t = np.arange(num_time) * dt
-    pre_stim_index = int(round(pre_stim_time / dt))
-    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
-    t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index - 1]
+    t, _, _ = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
 
     # Contrast attenuation from ommatidia Gaussian filtering (same as LR sine)
-    filter_std = filter_std_base / np.cos(sample_theta - np.pi / 2)
-    contrast_scaling = np.exp(-2 * np.pi**2 * filter_std**2 / wavelength_phi_rad**2)
+    contrast_scaling = _contrast_scaling(sample_theta, wavelength_phi_rad)
 
     spatial_phi = np.sin(2 * np.pi * sample_phi / wavelength_phi_rad + phase_phi)
     spatial_theta = np.sin(2 * np.pi * sample_theta / wavelength_theta_rad + phase_theta)
@@ -603,12 +652,7 @@ def make_lr_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     velocity_rad = velocity * np.pi / 180
     filter_std_base = 2.5 * np.pi / 180
 
-    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
-    t = np.arange(num_time) * dt
-    pre_stim_index = int(round(pre_stim_time / dt))
-    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
-    t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index - 1]
+    t, pre_stim_index, _ = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
 
     filter_std = filter_std_base / np.cos(sample_theta - np.pi / 2)  # (N,)
 
@@ -666,12 +710,7 @@ def make_ud_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     velocity_rad = velocity * np.pi / 180
     filter_std_base = 2.5 * np.pi / 180
 
-    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
-    t = np.arange(num_time) * dt
-    pre_stim_index = int(round(pre_stim_time / dt))
-    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
-    t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index - 1]
+    t, pre_stim_index, _ = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
 
     # Column positions in Cartesian (x = forward, y = left, z = up)
     col_y = np.sin(sample_theta) * np.sin(sample_phi)  # (N,)
@@ -737,21 +776,14 @@ def make_full_field_flicker(num_points, temporal_frequency, dt, stim_time,
         stimulus: (time, num_points) array with values in [0, 1].
         optic_flow: (time, num_points, 2) array of zeros.
     """
-    total_time = pre_stim_time + stim_time + post_stim_time
-    num_time = int(round(total_time / dt))
-    t = np.arange(num_time) * dt
-    pre_idx = int(round(pre_stim_time / dt))
-    post_idx = int(round((pre_stim_time + stim_time) / dt))
-
-    t_eff = t.copy()
-    t_eff[:pre_idx] = t_eff[pre_idx]
-    t_eff[post_idx:] = t_eff[post_idx - 1]
-    t_eff -= t_eff[pre_idx]
+    t_eff, pre_idx, _ = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
+    t_eff = t_eff - t_eff[pre_idx]
+    num_time = len(t_eff)
 
     luminance = 0.5 + 0.5 * np.sin(2 * np.pi * temporal_frequency * t_eff)
 
-    stimulus = np.broadcast_to(luminance[:, None], (len(t), num_points)).copy()
-    optic_flow = np.zeros((len(t), num_points, 2))
+    stimulus = np.broadcast_to(luminance[:, None], (num_time, num_points)).copy()
+    optic_flow = np.zeros((num_time, num_points, 2))
 
     return stimulus, optic_flow
 
@@ -840,105 +872,52 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=3
     Returns:
         stimulus: [examples, time, points in space]
         optic_flow: [examples, time, points in space, LR/UD optic flow]
+        rotation: [examples, time, 3] observer angular velocity (deg/s); nonzero
+            z-component for left/right examples, zero for up/down.
+        translation: [examples, time, 3] observer linear velocity; nonzero
+            z-component for up/down examples, zero for left/right.
     """
     if type(temporal_frequency) is not list:
         temporal_frequency = [temporal_frequency]
 
     temporal_frequency = [np.abs(tf) for tf in temporal_frequency]
+    wavelength_rad = wavelength * np.pi / 180
 
-    blocks = ['right', 'left', 'up', 'down']
-    sine_wave_dict = {i: [] for i in blocks}
-    optic_flow_dict = {i: [] for i in blocks}
-    
-    # Generate sine waves at a specific temporal frequency for up down left right
-    # at phase 0, π/2, π, 3π/2 (or equivalently 0, π/2, -0, -π/2)
+    # (block name, drift axis, temporal-frequency sign)
+    directions = [('right', 'lr', 1), ('left', 'lr', -1),
+                  ('up', 'ud', 1), ('down', 'ud', -1)]
+    sine_wave_dict = {b: [] for b, _, _ in directions}
+    optic_flow_dict = {b: [] for b, _, _ in directions}
+    rotation_dict = {b: [] for b, _, _ in directions}
+    translation_dict = {b: [] for b, _, _ in directions}
+
+    # For each temporal frequency and direction, emit four examples: phase 0,
+    # phase pi/2, and their contrast inversions (1 - wave). The inverted-contrast
+    # copies reuse the same optic flow and ego-motion (inversion does not change
+    # the motion). LR drift is observer yaw rotation; UD drift is observer
+    # vertical translation (see _drift_ego / _drift_flow).
     for tf in temporal_frequency:
-        # -- rightward sine wave --
-        sine_wave_right, optic_flow_right = make_lr_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=0,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_right_shifted, optic_flow_right_shifted = make_lr_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=np.pi/2,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_dict['right'].append(sine_wave_right[None, :, :])
-        sine_wave_dict['right'].append(sine_wave_right_shifted[None, :, :])
-        sine_wave_dict['right'].append((1.0 - sine_wave_right)[None, :, :])
-        sine_wave_dict['right'].append((1.0 - sine_wave_right_shifted)[None, :, :])
-        optic_flow_dict['right'].append(optic_flow_right[None, :, :, :])
-        optic_flow_dict['right'].append(optic_flow_right_shifted[None, :, :, :])
-        optic_flow_dict['right'].append(optic_flow_right[None, :, :, :])
-        optic_flow_dict['right'].append(optic_flow_right_shifted[None, :, :, :])
-
-        # -- leftward sine wave --
-        sine_wave_left, optic_flow_left = make_lr_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, -tf, phase_init=0,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_left_shifted, optic_flow_left_shifted = make_lr_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, -tf, phase_init=np.pi/2,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_dict['left'].append(sine_wave_left[None, :, :])
-        sine_wave_dict['left'].append(sine_wave_left_shifted[None, :, :])
-        sine_wave_dict['left'].append((1.0 - sine_wave_left)[None, :, :])
-        sine_wave_dict['left'].append((1.0 - sine_wave_left_shifted)[None, :, :])
-        optic_flow_dict['left'].append(optic_flow_left[None, :, :, :])
-        optic_flow_dict['left'].append(optic_flow_left_shifted[None, :, :, :])
-        optic_flow_dict['left'].append(optic_flow_left[None, :, :, :])
-        optic_flow_dict['left'].append(optic_flow_left_shifted[None, :, :, :])
-
-        # -- upward sine wave --
-        sine_wave_up, optic_flow_up = make_ud_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=0,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_up_shifted, optic_flow_up_shifted = make_ud_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=np.pi/2,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_dict['up'].append(sine_wave_up[None, :, :])
-        sine_wave_dict['up'].append(sine_wave_up_shifted[None, :, :])
-        sine_wave_dict['up'].append((1.0 - sine_wave_up)[None, :, :])
-        sine_wave_dict['up'].append((1.0 - sine_wave_up_shifted)[None, :, :])
-        optic_flow_dict['up'].append(optic_flow_up[None, :, :, :])
-        optic_flow_dict['up'].append(optic_flow_up_shifted[None, :, :, :])
-        optic_flow_dict['up'].append(optic_flow_up[None, :, :, :])
-        optic_flow_dict['up'].append(optic_flow_up_shifted[None, :, :, :])
-
-        # -- downward sine wave --
-        sine_wave_down, optic_flow_down = make_ud_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, -tf, phase_init=0,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_down_shifted, optic_flow_down_shifted = make_ud_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, -tf, phase_init=np.pi/2,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
-        sine_wave_dict['down'].append(sine_wave_down[None, :, :])
-        sine_wave_dict['down'].append(sine_wave_down_shifted[None, :, :])
-        sine_wave_dict['down'].append((1.0 - sine_wave_down)[None, :, :])
-        sine_wave_dict['down'].append((1.0 - sine_wave_down_shifted)[None, :, :])
-        optic_flow_dict['down'].append(optic_flow_down[None, :, :, :])
-        optic_flow_dict['down'].append(optic_flow_down_shifted[None, :, :, :])
-        optic_flow_dict['down'].append(optic_flow_down[None, :, :, :])
-        optic_flow_dict['down'].append(optic_flow_down_shifted[None, :, :, :])
+        for block, axis, sign in directions:
+            wave_0, flow_0 = _make_drifting_sine(
+                sample_phi, sample_theta, axis, contrast=contrast, wavelength=wavelength,
+                temporal_frequency=sign * tf, phase_init=0,
+                dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
+            wave_90, flow_90 = _make_drifting_sine(
+                sample_phi, sample_theta, axis, contrast=contrast, wavelength=wavelength,
+                temporal_frequency=sign * tf, phase_init=np.pi / 2,
+                dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
+            rot, trans = _drift_ego(sign * tf * wavelength_rad, axis, wave_0.shape[0])
+            sine_wave_dict[block] += [wave_0[None], wave_90[None],
+                                      (1.0 - wave_0)[None], (1.0 - wave_90)[None]]
+            optic_flow_dict[block] += [flow_0[None], flow_90[None],
+                                       flow_0[None], flow_90[None]]
+            rotation_dict[block] += [rot[None]] * 4
+            translation_dict[block] += [trans[None]] * 4
 
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
+    rotation, translation = _consolidate_ego(rotation_dict, translation_dict)
 
-    return stimulus, optic_flow
-
-def create_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, temporal_frequency=[4],
-                     dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
-    """
-    Legacy function name for backward compatibility.
-    Calls create_balanced_sine_wave to generate balanced sine wave stimuli.
-    """
-    return create_balanced_sine_wave(
-        sample_phi, sample_theta, contrast, wavelength, temporal_frequency,
-        dt, stim_time, pre_stim_time, post_stim_time
-    )
+    return stimulus, optic_flow, rotation, translation
 
 def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, velocity_amp=150.0, velocity_time_scale=0.15, seed=None,
                                dt=0.01, stim_time=1.0, num_repeats=5):
@@ -959,7 +938,6 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
         rng = np.random.default_rng()
     
     # --- generate the space time coordinates ---
-    filter_std_base = 2.5 * np.pi / 180  # radians
     # double the number of stim because we want to symmetrize the temporal frequnecies
     num_repeats = num_repeats * 2
     num_time = int(round(stim_time * num_repeats / dt))
@@ -980,14 +958,10 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     expected_std = 1 / np.sqrt(2 * np.sqrt(np.pi)) * np.sqrt(dt / velocity_time_scale)
     tf *= tf_amp / expected_std
 
-    # smooth the sign wave according to its location in theta. For simplicity, just assume that the ommatidia applies
-    # gaussian filtering with std 2.5 degrees. As theta increases, this linearly scales the std of the filter
-    # as a result, the amplitude of the sine wave at the top / bottom of the cylinder gets its amplitude damped
-    def contrast_scaling_func(theta):
-        filter_std = filter_std_base * 1 / np.cos(theta - np.pi / 2)
-        return np.exp(-2 * np.pi**2 * filter_std**2 / wavelength**2)
-
-    contrast_scaling_factor = contrast_scaling_func(sample_theta)
+    # smooth the sine wave according to its location in theta (ommatidia Gaussian
+    # filtering with std 2.5 deg, widening toward the poles): the amplitude at the
+    # top / bottom of the cylinder gets damped.
+    contrast_scaling_factor = _contrast_scaling(sample_theta, wavelength)
 
     # length scales for vertical sine waves (since the cylinder is flat vertically)
     vert_wavelength = 2 * np.tan(wavelength / 2) # length of sine wave in cartesian space
@@ -996,6 +970,8 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     blocks = ['right_left', 'up_down']
     sine_wave_dict = {i: [] for i in blocks}
     optic_flow_dict = {i: [] for i in blocks}
+    rotation_dict = {i: [] for i in blocks}
+    translation_dict = {i: [] for i in blocks}
 
     def make_lr_sine_wave(phase_init=0):
         phase = phase_init
@@ -1027,20 +1003,17 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['right_left'].append((-sine_wave_right_left).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['right_left'].append((-sine_wave_right_left_shifted).reshape(num_repeats, time_per_stim, num_cell))
 
-    # Compute optic flow for LR using generate_optic_flow (rotation about z-axis in cylinder)
-    from drosophila_model.model_definition.ego_motion import generate_optic_flow
+    # Optic flow for LR: rotation about the z-axis in the cylinder.
     velocity_rad_s = tf * wavelength  # (num_time,) in rad/s
-    phi_t = torch.tensor(sample_phi, dtype=torch.float32)
-    theta_t = torch.tensor(sample_theta, dtype=torch.float32)
-    omega_batch = torch.zeros(num_time, 3, dtype=torch.float32)
-    omega_batch[:, 2] = torch.tensor(velocity_rad_s.copy(), dtype=torch.float32)
-    T_batch = torch.zeros(num_time, 3, dtype=torch.float32)
-    u_right_lr, u_up_lr = generate_optic_flow(phi_t, theta_t, omega_batch, T_batch, 1.0)
-    lr_flow = np.stack([u_right_lr.numpy() * (180.0 / np.pi),
-                        u_up_lr.numpy() * (180.0 / np.pi)], axis=-1)
+    lr_flow = _drift_flow(sample_phi, sample_theta, velocity_rad_s, 'lr')
     optic_flow_mat = lr_flow.reshape(num_repeats, time_per_stim, num_cell, 2)
 
     optic_flow_dict['right_left'] += [optic_flow_mat] * 4
+
+    # Ego-motion for LR: time-varying observer yaw rotation.
+    lr_rot, lr_trans = _drift_ego(velocity_rad_s, 'lr', num_time)
+    rotation_dict['right_left'] += [lr_rot.reshape(num_repeats, time_per_stim, 3)] * 4
+    translation_dict['right_left'] += [lr_trans.reshape(num_repeats, time_per_stim, 3)] * 4
 
     # -- updown sine wave -- 
     sine_wave_up_down = make_ud_sine_wave(phase_init=0)
@@ -1052,48 +1025,52 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     sine_wave_dict['up_down'].append((-sine_wave_up_down).reshape(num_repeats, time_per_stim, num_cell))
     sine_wave_dict['up_down'].append((-sine_wave_up_down_shifted).reshape(num_repeats, time_per_stim, num_cell))
 
-    # Compute optic flow for UD using generate_optic_flow (vertical translation in cylinder)
-    # Cylinder distance: Z = 1/sin(theta). T_z chosen so flow at theta=pi/2 = requested velocity.
-    T_batch_ud = torch.zeros(num_time, 3, dtype=torch.float32)
-    T_batch_ud[:, 2] = -torch.tensor(velocity_rad_s.copy(), dtype=torch.float32)
-    omega_batch_ud = torch.zeros(num_time, 3, dtype=torch.float32)
-    Z = 1.0 / torch.sin(theta_t)
-    u_right_ud, u_up_ud = generate_optic_flow(phi_t, theta_t, omega_batch_ud, T_batch_ud, Z)
-    ud_flow = np.stack([u_right_ud.numpy() * (180.0 / np.pi),
-                        u_up_ud.numpy() * (180.0 / np.pi)], axis=-1)
+    # Optic flow for UD: vertical translation on the cylinder wall (Z = 1/sin(theta)).
+    ud_flow = _drift_flow(sample_phi, sample_theta, velocity_rad_s, 'ud')
     optic_flow_mat = ud_flow.reshape(num_repeats, time_per_stim, num_cell, 2)
     optic_flow_dict['up_down'] += [optic_flow_mat] * 4
 
+    # Ego-motion for UD: time-varying observer vertical translation.
+    ud_rot, ud_trans = _drift_ego(velocity_rad_s, 'ud', num_time)
+    rotation_dict['up_down'] += [ud_rot.reshape(num_repeats, time_per_stim, 3)] * 4
+    translation_dict['up_down'] += [ud_trans.reshape(num_repeats, time_per_stim, 3)] * 4
+
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
     stimulus = (stimulus + 1.0) / 2.0
+    rotation, translation = _consolidate_ego(rotation_dict, translation_dict)
 
-    return stimulus, optic_flow
+    return stimulus, optic_flow, rotation, translation
 
 
 def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1, wavelength=30, temporal_frequency=4,
                                  phase_init=0, dt=0.01, stim_time=1.0, pre_stim_time=0.0, post_stim_time=0.0):
     """
     Generate a single-direction sine wave stimulus.
+
+    Returns ``(stimulus, optic_flow, rotation, translation)`` with leading
+    example axis of size 1. ``rotation`` (deg/s) is nonzero for left/right
+    (observer yaw); ``translation`` is nonzero for up/down (observer vertical
+    translation). See :func:`_drift_ego`.
     """
     direction = direction.lower()
     if direction in ["right", "left"]:
+        axis = 'lr'
         tf = temporal_frequency if direction == "right" else -temporal_frequency
-        sine_wave, optic_flow = make_lr_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=phase_init,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
     elif direction in ["up", "down"]:
+        axis = 'ud'
         tf = temporal_frequency if direction == "up" else -temporal_frequency
-        sine_wave, optic_flow = make_ud_sine_wave(
-            sample_phi, sample_theta, contrast, wavelength, tf, phase_init=phase_init,
-            dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time
-        )
     else:
         raise ValueError(f"Unsupported direction for sine wave: {direction}")
 
+    sine_wave, optic_flow = _make_drifting_sine(
+        sample_phi, sample_theta, axis, contrast=contrast, wavelength=wavelength,
+        temporal_frequency=tf, phase_init=phase_init,
+        dt=dt, stim_time=stim_time, pre_stim_time=pre_stim_time, post_stim_time=post_stim_time)
+    rotation, translation = _drift_ego(tf * wavelength * np.pi / 180, axis, sine_wave.shape[0])
+
     stimulus = sine_wave[None, :, :]
     optic_flow = optic_flow[None, :, :, :]
-    return stimulus, optic_flow
+    return stimulus, optic_flow, rotation[None], translation[None]
 
 
 def _euler_to_rotation_matrix(roll_deg, pitch_deg, yaw_deg):
@@ -1822,231 +1799,395 @@ def consolidate_stim(stim_dict, optic_flow_dict):
 
     return stimulus, optic_flow
 
-def get_stimulus_one_eye(
+
+def _consolidate_ego(rotation_dict, translation_dict):
+    """Stack per-block ego-motion lists into ``(examples, time, 3)`` arrays.
+
+    Mirrors :func:`consolidate_stim`'s block ordering so the ego-motion examples
+    line up one-to-one with the consolidated stimulus/optic-flow examples.
+    """
+    rotation = np.concatenate(
+        [np.concatenate(rotation_dict[b]) for b in rotation_dict], axis=0)
+    translation = np.concatenate(
+        [np.concatenate(translation_dict[b]) for b in translation_dict], axis=0)
+    return rotation, translation
+
+@dataclass
+class StimulusData:
+    """Unified return type for :func:`get_stimulus`.
+
+    ``stimulus`` is ``(examples, time, num_eyes * N)``; for two eyes the columns
+    are the right eye (sampled at ``(phi, theta)``) followed by the left eye
+    (``(-phi, theta)``). ``optic_flow`` is the same with a trailing ``(2,)``.
+    ``rotation`` / ``translation`` are ``(examples, time, 3)`` observer ego-motion
+    (deg/s and velocity), or ``None`` for one-eye stimuli, which carry no
+    ego-motion target. ``eye_offset`` is the right-eye camera offset of the rig
+    that produced the flow (``None`` for one eye).
+    """
+    stimulus: torch.Tensor
+    optic_flow: torch.Tensor
+    train_mask: torch.Tensor
+    rotation: torch.Tensor | None
+    translation: torch.Tensor | None
+    num_eyes: int
+    eye_offset: tuple[float, float, float] | None
+
+
+@dataclass
+class _GenContext:
+    """Everything a per-stimulus generator needs, plus eye-layout helpers."""
+    config: dict
+    data_config: dict
+    column_phi_theta: object
+    num_eyes: int
+    model_dt: float
+    stim_time: float
+    seed: object
+    device: torch.device
+    dtype: torch.dtype
+    sine_direction: str | None = None
+    sine_temporal_frequency: float | None = None
+    random_sine_duration_s: float | None = None
+
+    @property
+    def phi(self):
+        """Azimuthal sample angles for the requested eyes (right, then -right)."""
+        phi = self.column_phi_theta[:, 0]
+        return np.concatenate([phi, -phi]) if self.num_eyes == 2 else phi
+
+    @property
+    def theta(self):
+        """Polar sample angles for the requested eyes (shared across eyes)."""
+        theta = self.column_phi_theta[:, 1]
+        return np.concatenate([theta, theta]) if self.num_eyes == 2 else theta
+
+    @property
+    def n_cols(self):
+        return self.num_eyes * self.column_phi_theta.shape[0]
+
+    def require_columns(self, name):
+        if self.column_phi_theta is None:
+            raise ValueError(f"{name} requires column_phi_theta input")
+
+    def tensor(self, arr):
+        return torch.as_tensor(arr, device=self.device, dtype=self.dtype)
+
+
+def _ones_mask(stim):
+    return torch.ones(stim.shape[:3], dtype=torch.bool, device=stim.device)
+
+
+def _zero_ego(stim):
+    """Zero rotation/translation (examples, time, 3) matching ``stim``."""
+    z = torch.zeros((stim.shape[0], stim.shape[1], 3),
+                    device=stim.device, dtype=stim.dtype)
+    return z, z.clone()
+
+
+# --- Per-stimulus generators -------------------------------------------------
+# Each takes a _GenContext and returns
+# ``(stimulus, optic_flow, rotation, translation, train_mask)`` tensors for the
+# requested eye count. Generators with no ego-motion return zeros for
+# rotation/translation (nulled to ``None`` for one-eye output by get_stimulus).
+
+def _gen_static_sine(ctx):
+    ctx.require_columns('static_sine')
+    stim, flow, rot, trans = create_balanced_sine_wave(
+        ctx.phi, ctx.theta,
+        temporal_frequency=ctx.data_config['static_sine']['temporal_frequencies'],
+        dt=ctx.model_dt, stim_time=ctx.stim_time, pre_stim_time=0.0, post_stim_time=0.0,
+    )
+    stim, flow = ctx.tensor(stim), ctx.tensor(flow)
+    rot, trans = ctx.tensor(rot), ctx.tensor(trans)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_directional_sine(ctx):
+    ctx.require_columns('directional_sine')
+    if ctx.sine_direction is None:
+        raise ValueError('directional_sine requires sine_direction input')
+    tf = float(ctx.sine_temporal_frequency) if ctx.sine_temporal_frequency is not None else 4.0
+    stim, flow, rot, trans = create_directional_sine_wave(
+        ctx.phi, ctx.theta, direction=ctx.sine_direction, temporal_frequency=tf,
+        dt=ctx.model_dt, stim_time=ctx.stim_time, pre_stim_time=0.0, post_stim_time=0.0,
+    )
+    stim, flow = ctx.tensor(stim), ctx.tensor(flow)
+    rot, trans = ctx.tensor(rot), ctx.tensor(trans)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_random_sine(ctx):
+    ctx.require_columns('random_sine')
+    p = ctx.data_config['random_sine']
+    stim_time = ctx.stim_time
+    num_repeats = p['num_repeats']
+    if ctx.random_sine_duration_s is not None:
+        if ctx.random_sine_duration_s <= 0:
+            raise ValueError("random_sine_duration_s must be positive")
+        stim_time = float(ctx.random_sine_duration_s) / 2.0
+        num_repeats = 1
+    stim, flow, rot, trans = create_random_tf_sine_wave(
+        ctx.phi, ctx.theta, velocity_amp=p['velocity_amp'],
+        velocity_time_scale=p['velocity_time_scale'], num_repeats=num_repeats,
+        dt=ctx.model_dt, stim_time=stim_time, seed=ctx.seed,
+    )
+    stim, flow = ctx.tensor(stim), ctx.tensor(flow)
+    rot, trans = ctx.tensor(rot), ctx.tensor(trans)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_edge(ctx):
+    ctx.require_columns('edge')
+    stim, flow = create_edge_stimulus(
+        ctx.phi, ctx.theta, velocities=ctx.data_config['edge']['edge_velocities'],
+        dt=ctx.model_dt, stim_time=ctx.stim_time, pre_stim_time=0.0, post_stim_time=0.0,
+    )
+    stim, flow = ctx.tensor(stim), ctx.tensor(flow)
+    rot, trans = _zero_ego(stim)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_random_pano(ctx):
+    ctx.require_columns('random_pano')
+    p = ctx.data_config['random_pano']
+    stim, flow, rotation_vectors, _ = get_random_velocity_pano(
+        ctx.phi, ctx.theta, velocity_amp=p['velocity_amp'],
+        velocity_time_scale=p['velocity_time_scale'], num_repeats=p['num_repeats'],
+        dt=ctx.model_dt, stim_time=ctx.stim_time, seed=ctx.seed,
+    )
+    stim, flow = ctx.tensor(stim), ctx.tensor(flow)
+    rot = ctx.tensor(rotation_vectors * 180.0 / np.pi)  # rad/s -> deg/s
+    trans = torch.zeros_like(rot)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_counterphase_sine(ctx):
+    ctx.require_columns('counterphase_sine')
+    stim, flow = create_counterphase_sine(
+        ctx.phi, ctx.theta,
+        temporal_frequencies=ctx.data_config['counterphase_sine']['temporal_frequencies'],
+        seed=ctx.seed, dt=ctx.model_dt, stim_time=ctx.stim_time,
+        pre_stim_time=0.0, post_stim_time=0.0,
+    )
+    stim, flow = ctx.tensor(stim), ctx.tensor(flow)
+    rot, trans = _zero_ego(stim)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_full_field_step(ctx):
+    ctx.require_columns('full_field_step')
+    n_time = int(round(ctx.stim_time / ctx.model_dt))
+    n_cols = ctx.n_cols
+    stim = torch.zeros((3, n_time, n_cols), device=ctx.device, dtype=ctx.dtype)
+    stim[0] = 0.0
+    stim[1] = 0.5
+    stim[2] = 1.0
+    flow = torch.zeros((3, n_time, n_cols, 2), device=ctx.device, dtype=ctx.dtype)
+    rot, trans = _zero_ego(stim)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_full_field_flicker(ctx):
+    ctx.require_columns('full_field_flicker')
+    n_cols = ctx.n_cols
+    flicker_tfs = ctx.data_config['full_field_flicker']['flicker_temporal_frequencies']
+    if not isinstance(flicker_tfs, list):
+        flicker_tfs = [flicker_tfs]
+    stim_arrays, flow_arrays = [], []
+    for tf in flicker_tfs:
+        s, f = make_full_field_flicker(n_cols, tf, ctx.model_dt, ctx.stim_time)
+        stim_arrays.append(s[None])
+        flow_arrays.append(f[None])
+    stim = ctx.tensor(np.concatenate(stim_arrays))
+    flow = ctx.tensor(np.concatenate(flow_arrays))
+    rot, trans = _zero_ego(stim)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_flyview(ctx):
+    ctx.require_columns('flyview')
+    two = ctx.num_eyes == 2
+    if two:
+        stim_np, flow_np, rot_np, trans_np = load_fly_view_dataset(
+            ctx.model_dt, ctx.stim_time, two_eyes=True)
+    else:
+        stim_np, flow_np = load_fly_view_dataset(
+            ctx.model_dt, ctx.stim_time, two_eyes=False)
+    if stim_np.shape[2] != ctx.n_cols:
+        raise ValueError(
+            f"flyview columns ({stim_np.shape[2]}) != num_eyes*N ({ctx.n_cols})")
+    stim, flow = ctx.tensor(stim_np), ctx.tensor(flow_np)
+    if two:
+        rot, trans = ctx.tensor(rot_np), ctx.tensor(trans_np)
+    else:
+        rot, trans = _zero_ego(stim)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_expanding_dot(ctx):
+    ctx.require_columns('expanding_dot')
+    p = ctx.data_config['expanding_dot']
+    stim_np, flow_np = create_expanding_dot_stimulus(
+        ctx.phi, ctx.theta, dt=ctx.model_dt, stim_time=ctx.stim_time,
+        pre_stim_time=0.0, post_stim_time=0.0, seed=ctx.seed,
+        num_light=int(p['num_light']), num_dark=int(p['num_dark']),
+        filter_std=float(p['filter_std']),
+    )
+    stim, flow = ctx.tensor(stim_np), ctx.tensor(flow_np)
+    rot, trans = _zero_ego(stim)
+    return stim, flow, rot, trans, _ones_mask(stim)
+
+
+def _gen_small_drone(ctx):
+    ctx.require_columns('small_drone')
+    return small_drone(ctx.config, ctx.column_phi_theta, ctx.model_dt,
+                       ctx.device, ctx.dtype, ctx.stim_time)
+
+
+def _gen_rpi_drone(ctx):
+    ctx.require_columns('rpi_drone')
+    return rpi_drone(ctx.config, ctx.column_phi_theta, ctx.model_dt,
+                     ctx.device, ctx.dtype, ctx.stim_time)
+
+
+# Registry: stimulus_type -> (generator, supported eye counts). The first
+# supported eye count is the type's natural default (see ``default_num_eyes``).
+_STIMULUS_REGISTRY: dict[str, tuple] = {
+    'static_sine': (_gen_static_sine, (2, 1)),
+    'directional_sine': (_gen_directional_sine, (2, 1)),
+    'random_sine': (_gen_random_sine, (2, 1)),
+    'edge': (_gen_edge, (2, 1)),
+    'random_pano': (_gen_random_pano, (2, 1)),
+    'counterphase_sine': (_gen_counterphase_sine, (2, 1)),
+    'full_field_step': (_gen_full_field_step, (2, 1)),
+    'full_field_flicker': (_gen_full_field_flicker, (2, 1)),
+    'flyview': (_gen_flyview, (2, 1)),
+    'expanding_dot': (_gen_expanding_dot, (2, 1)),
+    'small_drone': (_gen_small_drone, (2,)),
+    'rpi_drone': (_gen_rpi_drone, (2,)),
+}
+
+
+def default_num_eyes(stimulus_type: str) -> int:
+    """Natural eye count for ``stimulus_type`` (first the generator supports)."""
+    if stimulus_type not in _STIMULUS_REGISTRY:
+        raise ValueError(
+            f"Unknown stimulus_type '{stimulus_type}'. "
+            f"Expected one of: {', '.join(sorted(_STIMULUS_REGISTRY))}.")
+    return _STIMULUS_REGISTRY[stimulus_type][1][0]
+
+
+def get_stimulus(
     stimulus_type: str | list[str],
     config,
     column_phi_theta=None,
     *,
+    num_eyes: int | None = None,
     data_config=None,
-    max_duration_s: float | None = None,
-    use_full_length: bool = False,
     sine_direction: str | None = None,
     sine_temporal_frequency: float | None = None,
     random_sine_duration_s: float | None = None,
     pre_stim_time_override: float | None = None,
-):
+) -> StimulusData:
+    """Generate a stimulus (or a list of types, concatenated) in a unified format.
+
+    Single entry point replacing the old ``get_stimulus_one_eye`` /
+    ``get_stimulus_two_eyes`` split. It dispatches to the per-type generator in
+    ``_STIMULUS_REGISTRY`` for the requested ``num_eyes``:
+
+    * ``num_eyes=1`` -> right eye only, ``N`` columns sampled at ``(phi, theta)``.
+    * ``num_eyes=2`` -> right then left, ``2*N`` columns (left at ``(-phi, theta)``),
+      with observer ego-motion targets.
+
+    When ``num_eyes`` is None it defaults to each type's natural eye count
+    (:func:`default_num_eyes`). Stimulus-generation parameters come from
+    ``data_config`` (see :func:`drosophila_model.config.get_data_config`); model
+    ``dt`` / ``device`` / ``dtype`` come from ``config``.
+
+    Returns a :class:`StimulusData`. For one-eye output ``rotation`` /
+    ``translation`` / ``eye_offset`` are ``None``.
+    """
     if data_config is None:
         from drosophila_model.config import get_data_config
         data_config = get_data_config()
     shared = data_config['shared']
 
+    stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)
+    if not stimulus_types:
+        raise ValueError("stimulus_type must be a non-empty type or list of types.")
+    for st in stimulus_types:
+        if st not in _STIMULUS_REGISTRY:
+            raise ValueError(
+                f"Unknown stimulus_type '{st}'. "
+                f"Expected one of: {', '.join(sorted(_STIMULUS_REGISTRY))}.")
+
+    if num_eyes is None:
+        num_eyes = default_num_eyes(stimulus_types[0])
+    for st in stimulus_types:
+        supported = _STIMULUS_REGISTRY[st][1]
+        if num_eyes not in supported:
+            raise ValueError(
+                f"Stimulus '{st}' does not support num_eyes={num_eyes} "
+                f"(supports {supported}).")
+
     device = torch.device(config['model']['device'])
     dtype = getattr(torch, config['model']['dtype'])
-    middle_gray = 0.5
-
     model_dt = config['model']['dt']
-    stim_time = shared['stim_time']
     pre_stim_time = shared['pre_stim_time']
-    post_stim_time = shared['post_stim_time']
-    stimulus_seed = shared['seed']
     if pre_stim_time_override is not None:
         pre_stim_time = float(pre_stim_time_override)
-    sine_pre_stim_time = pre_stim_time
-    sine_post_stim_time = post_stim_time
 
-    stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type
-    stim_list, flow_list, mask_list = [], [], []
+    ctx = _GenContext(
+        config=config, data_config=data_config, column_phi_theta=column_phi_theta,
+        num_eyes=num_eyes, model_dt=model_dt, stim_time=shared['stim_time'],
+        seed=shared['seed'], device=device, dtype=dtype,
+        sine_direction=sine_direction,
+        sine_temporal_frequency=sine_temporal_frequency,
+        random_sine_duration_s=random_sine_duration_s,
+    )
 
-    for stim_type in stimulus_types:
-        if stim_type == 'static_sine':
-            if column_phi_theta is None:
-                raise Exception('sine waves require column_phi_theta input')
-            stimulus, optic_flow = create_balanced_sine_wave(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
-                temporal_frequency=data_config['static_sine']['temporal_frequencies'],
-                dt=model_dt, stim_time=stim_time, pre_stim_time=0.0, post_stim_time=0.0
-            )
-            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'directional_sine':
-            if column_phi_theta is None:
-                raise Exception('sine waves require column_phi_theta input')
-            if sine_direction is None:
-                raise ValueError('directional_sine requires sine_direction input')
-            tf = float(sine_temporal_frequency) if sine_temporal_frequency is not None else 4.0
-            sine_pre_stim_time = 0.0
-            sine_post_stim_time = 0.0
-            stimulus, optic_flow = create_directional_sine_wave(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
-                direction=sine_direction,
-                temporal_frequency=tf,
-                dt=model_dt,
-                stim_time=stim_time,
-                pre_stim_time=sine_pre_stim_time,
-                post_stim_time=sine_post_stim_time,
-            )
-            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'edge':
-            if column_phi_theta is None:
-                raise Exception('edge stimulus requires column_phi_theta input')
-            edge_velocities = data_config['edge']['edge_velocities']
-            stimulus, optic_flow = create_edge_stimulus(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
-                velocities=edge_velocities, dt=model_dt, stim_time=stim_time,
-                pre_stim_time=pre_stim_time, post_stim_time=post_stim_time,
-            )
-            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'random_pano':
-            if column_phi_theta is None:
-                raise Exception('panoramic require column_phi_theta input')
-            pano_params = data_config['random_pano']
-            stimulus, optic_flow, _, _ = get_random_velocity_pano(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
-                velocity_amp=pano_params['velocity_amp'], velocity_time_scale=pano_params['velocity_time_scale'],
-                num_repeats=pano_params['num_repeats'], dt=model_dt, stim_time=stim_time, seed=stimulus_seed
-            )
-            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-        elif stim_type == 'random_sine':
-            if column_phi_theta is None:
-                raise Exception('sine waves require column_phi_theta input')
-            sine_params = data_config['random_sine']
-            random_sine_stim_time = stim_time
-            random_sine_num_repeats = sine_params['num_repeats']
-            if random_sine_duration_s is not None:
-                if random_sine_duration_s <= 0:
-                    raise ValueError("random_sine_duration_s must be positive")
-                random_sine_stim_time = float(random_sine_duration_s) / 2.0
-                random_sine_num_repeats = 1
-            stimulus, optic_flow = create_random_tf_sine_wave(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
-                velocity_amp=sine_params['velocity_amp'], velocity_time_scale=sine_params['velocity_time_scale'],
-                num_repeats=random_sine_num_repeats, dt=model_dt, stim_time=random_sine_stim_time, seed=stimulus_seed
-            )
-            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'flyview':
-            if column_phi_theta is None:
-                raise Exception('flyview requires column_phi_theta input')
-            stimulus_np, optic_flow_np = load_fly_view_dataset(
-                model_dt, stim_time, two_eyes=False,
-            )
-            n_cols_expect = column_phi_theta.shape[0]
-            if stimulus_np.shape[2] != n_cols_expect:
-                raise ValueError(
-                    f"flyview right-eye columns ({stimulus_np.shape[2]}) != "
-                    f"column_phi_theta rows ({n_cols_expect})"
-                )
-            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'counterphase_sine':
-            if column_phi_theta is None:
-                raise Exception('counterphase_sine requires column_phi_theta input')
-            stimulus, optic_flow = create_counterphase_sine(
-                column_phi_theta[:, 0], column_phi_theta[:, 1],
-                temporal_frequencies=data_config['counterphase_sine']['temporal_frequencies'],
-                seed=stimulus_seed, dt=model_dt, stim_time=stim_time,
-                pre_stim_time=0.0, post_stim_time=0.0,
-            )
-            stimulus = torch.tensor(stimulus, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'full_field_step':
-            if column_phi_theta is None:
-                raise Exception('full_field_step requires column_phi_theta input')
-            num_time_steps = int(round(stim_time / model_dt))
-            n_cols = column_phi_theta.shape[0]
-            stimulus = torch.zeros((3, num_time_steps, n_cols), device=device, dtype=dtype)
-            stimulus[0] = 0.0
-            stimulus[1] = 0.5
-            stimulus[2] = 1.0
-            optic_flow = torch.zeros((3, num_time_steps, n_cols, 2), device=device, dtype=dtype)
-            train_mask = torch.ones((3, num_time_steps, n_cols), dtype=torch.bool, device=device)
-
-        elif stim_type == 'full_field_flicker':
-            if column_phi_theta is None:
-                raise Exception('full_field_flicker requires column_phi_theta input')
-            n_cols = column_phi_theta.shape[0]
-            flicker_tfs = data_config['full_field_flicker']['flicker_temporal_frequencies']
-            if not isinstance(flicker_tfs, list):
-                flicker_tfs = [flicker_tfs]
-            stim_arrays, flow_arrays = [], []
-            for tf in flicker_tfs:
-                s, f = make_full_field_flicker(n_cols, tf, model_dt, stim_time)
-                stim_arrays.append(s[None])
-                flow_arrays.append(f[None])
-            stimulus = torch.tensor(np.concatenate(stim_arrays), device=device, dtype=dtype)
-            optic_flow = torch.tensor(np.concatenate(flow_arrays), device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'expanding_dot':
-            if column_phi_theta is None:
-                raise Exception('expanding_dot requires column_phi_theta input')
-            dot_params = data_config['expanding_dot']
-            n_light = int(dot_params['num_light'])
-            n_dark = int(dot_params['num_dark'])
-            filt = float(dot_params['filter_std'])
-            stimulus_np, optic_flow_np = create_expanding_dot_stimulus(
-                column_phi_theta[:, 0],
-                column_phi_theta[:, 1],
-                dt=model_dt,
-                stim_time=stim_time,
-                pre_stim_time=0.0,
-                post_stim_time=0.0,
-                seed=stimulus_seed,
-                num_light=n_light,
-                num_dark=n_dark,
-                filter_std=filt,
-            )
-            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        else:
-            raise ValueError(
-                f"Unknown stimulus_type '{stim_type}'. "
-                "Expected one of: static_sine, directional_sine, edge, random_pano, "
-                "random_sine, flyview, full_field_step, "
-                "full_field_flicker, counterphase_sine, expanding_dot."
-            )
-
-        stim_list.append(stimulus)
-        flow_list.append(optic_flow)
-        mask_list.append(train_mask)
+    stim_list, flow_list, rot_list, trans_list, mask_list = [], [], [], [], []
+    for st in stimulus_types:
+        generator = _STIMULUS_REGISTRY[st][0]
+        stim, flow, rot, trans, mask = generator(ctx)
+        stim_list.append(stim)
+        flow_list.append(flow)
+        rot_list.append(rot)
+        trans_list.append(trans)
+        mask_list.append(mask)
 
     stimulus = torch.cat(stim_list, dim=0)
     optic_flow = torch.cat(flow_list, dim=0)
+    rotation = torch.cat(rot_list, dim=0)
+    translation = torch.cat(trans_list, dim=0)
     train_mask = torch.cat(mask_list, dim=0)
 
-    num_time = stimulus.shape[1]
-    num_cols = stimulus.shape[2]
-
-    # Add pre-stimulus interval (mean-gray stimulus with zero optic flow)
+    # Prepend the stationary pre-stimulus interval (mean-gray, zero flow/ego).
     pre_stim_points = int(round(pre_stim_time / model_dt))
     if pre_stim_points > 0:
-        n_examples = stimulus.shape[0]
-        pre_stim = torch.full((n_examples, pre_stim_points, num_cols), middle_gray, device=device, dtype=dtype)
-        pre_flow = torch.zeros((n_examples, pre_stim_points, optic_flow.shape[2], optic_flow.shape[3]), device=device, dtype=dtype)
-        pre_mask = torch.zeros((n_examples, pre_stim_points, num_cols), dtype=torch.bool, device=device)
+        n = stimulus.shape[0]
+        num_cols = stimulus.shape[2]
+        pre_stim = torch.full((n, pre_stim_points, num_cols), 0.5, device=device, dtype=dtype)
+        pre_flow = torch.zeros((n, pre_stim_points, optic_flow.shape[2], optic_flow.shape[3]),
+                               device=device, dtype=dtype)
+        pre_rot = torch.zeros((n, pre_stim_points, 3), device=device, dtype=dtype)
+        pre_mask = torch.zeros((n, pre_stim_points, num_cols), dtype=torch.bool, device=device)
         stimulus = torch.cat([pre_stim, stimulus], dim=1)
         optic_flow = torch.cat([pre_flow, optic_flow], dim=1)
+        rotation = torch.cat([pre_rot, rotation], dim=1)
+        translation = torch.cat([pre_rot.clone(), translation], dim=1)
         train_mask = torch.cat([pre_mask, train_mask], dim=1)
 
-    return stimulus, optic_flow, train_mask
+    if num_eyes == 1:
+        return StimulusData(
+            stimulus=stimulus, optic_flow=optic_flow, train_mask=train_mask,
+            rotation=None, translation=None, num_eyes=1, eye_offset=None,
+        )
+    return StimulusData(
+        stimulus=stimulus, optic_flow=optic_flow, train_mask=train_mask,
+        rotation=rotation, translation=translation, num_eyes=2,
+        eye_offset=camera_offset_for_stimulus(stimulus_types),
+    )
 
 
 # Right-eye camera offset (body frame +x forward / +y left / +z up, in the
@@ -2127,270 +2268,6 @@ def rpi_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
         sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
     )
     return du.drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
-
-
-# Stimulus types that ``get_stimulus_two_eyes`` can generate. The baker
-# (``create_training_data.py``) uses this to decide whether to produce a
-# binocular dataset (preferred) or fall back to a one-eye dataset.
-TWO_EYE_STIMULUS_TYPES = frozenset({
-    'random_pano', 'small_drone', 'edge', 'counterphase_sine',
-    'full_field_step', 'full_field_flicker', 'flyview', 'expanding_dot',
-    'rpi_drone',
-})
-
-
-def get_stimulus_two_eyes(
-    stimulus_type: str | list[str],
-    config,
-    column_phi_theta=None,
-    *,
-    data_config=None,
-    pre_stim_time_override: float | None = None,
-):
-    """
-    Load a two-eye stimulus and return sampled images, optic flow,
-    and observer ego-motion.
-
-    Args:
-        stimulus_type: type of stimulus, or list of types to concatenate.
-        config: configuration dict.
-        column_phi_theta: (N, 2) right-eye (phi, theta) in radians.
-            Left eye is sampled at (-phi, theta).
-        pre_stim_time_override: override pre-stim time from config.
-    Returns:
-        stimulus: (examples, time, 2*N) right then left eye stimulus.
-        optic_flow: (examples, time, 2*N, 2) right then left optic flow (NaN if unavailable).
-        observer_rotation: (examples, time, 3) rotation rate (deg/s).
-        observer_translation: (examples, time, 3) translation rate.
-        train_mask: (examples, time, 2*N) bool — True where decoder output
-            should be used for training/odometry (False for pre-stim,
-            out-of-bounds columns, etc.).
-    """
-    if data_config is None:
-        from drosophila_model.config import get_data_config
-        data_config = get_data_config()
-    shared = data_config['shared']
-
-    device = torch.device(config['model']['device'])
-    dtype = getattr(torch, config['model']['dtype'])
-    middle_gray = 0.5
-
-    model_dt = config['model']['dt']
-    stim_time = shared['stim_time']
-    stimulus_seed = shared['seed']
-    pre_stim_time = shared['pre_stim_time']
-    if pre_stim_time_override is not None:
-        pre_stim_time = float(pre_stim_time_override)
-
-    stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type
-    stim_list, flow_list, rot_list, trans_list, mask_list = [], [], [], [], []
-
-    for stim_type in stimulus_types:
-        if stim_type == 'random_pano':
-            if column_phi_theta is None:
-                raise Exception('random_pano requires column_phi_theta input')
-
-            N = column_phi_theta.shape[0]
-            pano_params = data_config['random_pano']
-
-            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
-            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
-
-            stimulus_both, optic_flow_both, rotation_vectors, _ = get_random_velocity_pano(
-                both_phi, both_theta,
-                velocity_amp=pano_params['velocity_amp'],
-                velocity_time_scale=pano_params['velocity_time_scale'],
-                num_repeats=pano_params['num_repeats'],
-                dt=model_dt, stim_time=stim_time, seed=stimulus_seed,
-            )
-
-            stimulus = torch.tensor(stimulus_both, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_both, device=device, dtype=dtype)
-            # NOTE: no u_right sign flip needed for the left eye.
-            # generate_optic_flow returns u_right = -(u · e_phi), which already
-            # gives the same sign for symmetric (phi, -phi) columns because both
-            # the 3D flow and the e_phi basis vector mirror together.  The model's
-            # lr_flip in estimate_ego_motion_from_image handles the decoder's
-            # mirror convention separately.
-            observer_rotation = torch.tensor(
-                rotation_vectors * 180 / np.pi,  # rad/s → deg/s
-                device=device, dtype=dtype,
-            )
-            observer_translation = torch.zeros_like(observer_rotation)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'small_drone':
-            if column_phi_theta is None:
-                raise Exception('small_drone requires column_phi_theta input')
-            stimulus, optic_flow, observer_rotation, observer_translation, train_mask = \
-                small_drone(config, column_phi_theta, model_dt, device, dtype, stim_time)
-
-        elif stim_type == 'edge':
-            if column_phi_theta is None:
-                raise Exception('edge stimulus requires column_phi_theta input')
-
-            edge_velocities = data_config['edge']['edge_velocities']
-
-            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
-            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
-
-            stimulus_np, optic_flow_np = create_edge_stimulus(
-                both_phi, both_theta,
-                velocities=edge_velocities, dt=model_dt, stim_time=stim_time,
-                pre_stim_time=0.0, post_stim_time=0.0,
-            )
-            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
-            observer_rotation = torch.zeros(
-                (stimulus.shape[0], stimulus.shape[1], 3), device=device, dtype=dtype)
-            observer_translation = torch.zeros_like(observer_rotation)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'counterphase_sine':
-            if column_phi_theta is None:
-                raise Exception('counterphase_sine requires column_phi_theta input')
-            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
-            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
-
-            stimulus_np, optic_flow_np = create_counterphase_sine(
-                both_phi, both_theta,
-                temporal_frequencies=data_config['counterphase_sine']['temporal_frequencies'],
-                seed=stimulus_seed, dt=model_dt, stim_time=stim_time,
-                pre_stim_time=0.0, post_stim_time=0.0,
-            )
-            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
-            n_cp = stimulus.shape[0]
-            observer_rotation = torch.zeros((n_cp, stimulus.shape[1], 3), device=device, dtype=dtype)
-            observer_translation = torch.zeros((n_cp, stimulus.shape[1], 3), device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'full_field_step':
-            if column_phi_theta is None:
-                raise Exception('full_field_step requires column_phi_theta input')
-            num_time_steps = int(round(stim_time / model_dt))
-            num_cols_both = 2 * column_phi_theta.shape[0]
-            stimulus = torch.zeros((3, num_time_steps, num_cols_both), device=device, dtype=dtype)
-            stimulus[0] = 0.0
-            stimulus[1] = 0.5
-            stimulus[2] = 1.0
-            optic_flow = torch.zeros((3, num_time_steps, num_cols_both, 2), device=device, dtype=dtype)
-            observer_rotation = torch.zeros((3, num_time_steps, 3), device=device, dtype=dtype)
-            observer_translation = torch.zeros((3, num_time_steps, 3), device=device, dtype=dtype)
-            train_mask = torch.ones((3, num_time_steps, num_cols_both), dtype=torch.bool, device=device)
-
-        elif stim_type == 'full_field_flicker':
-            if column_phi_theta is None:
-                raise Exception('full_field_flicker requires column_phi_theta input')
-            num_cols_both = 2 * column_phi_theta.shape[0]
-            flicker_tfs = data_config['full_field_flicker']['flicker_temporal_frequencies']
-            if not isinstance(flicker_tfs, list):
-                flicker_tfs = [flicker_tfs]
-            stim_arrays, flow_arrays = [], []
-            for tf in flicker_tfs:
-                s, f = make_full_field_flicker(num_cols_both, tf, model_dt, stim_time)
-                stim_arrays.append(s[None])
-                flow_arrays.append(f[None])
-            n_flicker = len(flicker_tfs)
-            stimulus = torch.tensor(np.concatenate(stim_arrays), device=device, dtype=dtype)
-            optic_flow = torch.tensor(np.concatenate(flow_arrays), device=device, dtype=dtype)
-            observer_rotation = torch.zeros((n_flicker, stimulus.shape[1], 3), device=device, dtype=dtype)
-            observer_translation = torch.zeros((n_flicker, stimulus.shape[1], 3), device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'flyview':
-            if column_phi_theta is None:
-                raise Exception('flyview requires column_phi_theta input')
-            stimulus_np, optic_flow_np, rot_np, trans_np = load_fly_view_dataset(
-                model_dt, stim_time, two_eyes=True,
-            )
-            n_expect = 2 * column_phi_theta.shape[0]
-            if stimulus_np.shape[2] != n_expect:
-                raise ValueError(
-                    f"flyview binocular columns ({stimulus_np.shape[2]}) != "
-                    f"2 * column_phi_theta rows ({n_expect})"
-                )
-            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
-            observer_rotation = torch.tensor(rot_np, device=device, dtype=dtype)
-            observer_translation = torch.tensor(trans_np, device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'expanding_dot':
-            if column_phi_theta is None:
-                raise Exception('expanding_dot requires column_phi_theta input')
-            dot_params = data_config['expanding_dot']
-            n_light = int(dot_params['num_light'])
-            n_dark = int(dot_params['num_dark'])
-            filt = float(dot_params['filter_std'])
-            both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
-            both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
-            stimulus_np, optic_flow_np = create_expanding_dot_stimulus(
-                both_phi,
-                both_theta,
-                dt=model_dt,
-                stim_time=stim_time,
-                pre_stim_time=0.0,
-                post_stim_time=0.0,
-                seed=stimulus_seed,
-                num_light=n_light,
-                num_dark=n_dark,
-                filter_std=filt,
-            )
-            stimulus = torch.tensor(stimulus_np, device=device, dtype=dtype)
-            optic_flow = torch.tensor(optic_flow_np, device=device, dtype=dtype)
-            n_ex = stimulus.shape[0]
-            Tlen = stimulus.shape[1]
-            observer_rotation = torch.zeros((n_ex, Tlen, 3), device=device, dtype=dtype)
-            observer_translation = torch.zeros((n_ex, Tlen, 3), device=device, dtype=dtype)
-            train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-        elif stim_type == 'rpi_drone':
-            if column_phi_theta is None:
-                raise Exception('rpi_drone requires column_phi_theta input')
-            stimulus, optic_flow, observer_rotation, observer_translation, train_mask = \
-                rpi_drone(config, column_phi_theta, model_dt, device, dtype, stim_time)
-
-        else:
-            raise ValueError(
-                f"Unknown stimulus_type '{stim_type}' for two-eye stimulus. "
-                "Expected one of: random_pano, small_drone, edge, flyview, full_field_step, "
-                "full_field_flicker, counterphase_sine, expanding_dot, rpi_drone."
-            )
-
-        stim_list.append(stimulus)
-        flow_list.append(optic_flow)
-        rot_list.append(observer_rotation)
-        trans_list.append(observer_translation)
-        mask_list.append(train_mask)
-
-    stimulus = torch.cat(stim_list, dim=0)
-    optic_flow = torch.cat(flow_list, dim=0)
-    observer_rotation = torch.cat(rot_list, dim=0)
-    observer_translation = torch.cat(trans_list, dim=0)
-    train_mask = torch.cat(mask_list, dim=0)
-
-    num_time = stimulus.shape[1]
-    num_cols = stimulus.shape[2]   # 2*N
-    num_flow_cols = optic_flow.shape[2]
-
-    # Add pre-stimulus interval (stationary observer, middle-gray stimulus)
-    pre_stim_points = int(round(pre_stim_time / model_dt))
-    if pre_stim_points > 0:
-        n_examples = stimulus.shape[0]
-        pre_stim = torch.full((n_examples, pre_stim_points, num_cols), middle_gray, device=device, dtype=dtype)
-        pre_flow = torch.zeros((n_examples, pre_stim_points, num_flow_cols, 2), device=device, dtype=dtype)
-        pre_rot = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
-        pre_trans = torch.zeros((n_examples, pre_stim_points, 3), device=device, dtype=dtype)
-        pre_mask = torch.zeros((n_examples, pre_stim_points, num_cols), dtype=torch.bool, device=device)
-
-        stimulus = torch.cat([pre_stim, stimulus], dim=1)
-        optic_flow = torch.cat([pre_flow, optic_flow], dim=1)
-        observer_rotation = torch.cat([pre_rot, observer_rotation], dim=1)
-        observer_translation = torch.cat([pre_trans, observer_translation], dim=1)
-        train_mask = torch.cat([pre_mask, train_mask], dim=1)
-
-    return stimulus, optic_flow, observer_rotation, observer_translation, train_mask
 
 
 def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_noise_mult=5):

@@ -106,8 +106,9 @@ def main() -> None:
 def _run_one_eye(args, config, data_config, column_phi_theta, output_folder, frame_rate,
                  cell_x, cell_y, cell_z):
     print("Loading stimulus and optic flow...")
-    stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(
-        args.stim_type, config, column_phi_theta, data_config=data_config)
+    data = su.get_stimulus(
+        args.stim_type, config, column_phi_theta, num_eyes=1, data_config=data_config)
+    stimulus, optic_flow, train_mask = data.stimulus, data.optic_flow, data.train_mask
     stimulus = stimulus.cpu().numpy()
     optic_flow = optic_flow.cpu().numpy()
     train_mask = train_mask.cpu().numpy()
@@ -132,9 +133,11 @@ def _run_two_eyes(args, config, data_config, column_phi_theta, output_folder, fr
     pre_stim_steps = int(data_config["shared"]["pre_stim_time"] / model_dt)
 
     print("Loading two-eye stimulus and odometry...")
-    stimulus, optic_flow, observer_rotation, observer_translation, train_mask = (
-        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta, data_config=data_config)
-    )
+    data = su.get_stimulus(args.stim_type, config, column_phi_theta, num_eyes=2,
+                           data_config=data_config)
+    stimulus, optic_flow = data.stimulus, data.optic_flow
+    observer_rotation, observer_translation, train_mask = (
+        data.rotation, data.translation, data.train_mask)
     stimulus = stimulus.numpy()
     observer_rotation = observer_rotation.numpy()
     observer_translation = observer_translation.numpy()

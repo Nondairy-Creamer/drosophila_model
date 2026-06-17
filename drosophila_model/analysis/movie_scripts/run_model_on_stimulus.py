@@ -29,6 +29,10 @@ Usage:
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --ego-motion --stim-type random_pano
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --ego-motion --stim-type flyview
     python movie_scripts/run_model_on_stimulus.py models/my_model/ --two-eyes --ego-motion --translation
+
+``--duration <seconds>`` overrides the generated stimulus length
+(``[shared].stim_time`` in the data config); ``--max-frames`` is a separate hard
+cap on how many frames get rendered.
 """
 import argparse
 import sys
@@ -77,8 +81,12 @@ def main() -> None:
                         help="Stimulus indices to visualize (space-separated)")
     parser.add_argument("--fps", type=float, default=None,
                         help="Output movie frame rate (default: the model's base rate)")
+    parser.add_argument("--duration", type=float, default=None,
+                        help="Generated stimulus duration in seconds (overrides "
+                             "[shared].stim_time from the data config). Does not "
+                             "apply to fixed-length drone clips.")
     parser.add_argument("--max-frames", type=int, default=None,
-                        help="Maximum number of frames to render")
+                        help="Hard cap on the number of frames to render")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory (default: <model_folder>/figures/run_model_on_stimulus)")
     # Ego-motion features (from run_model_on_pano)
@@ -103,6 +111,12 @@ def main() -> None:
 
     config = load_config(args.config) if args.config else load_config()
     data_config = get_data_config()
+    if args.duration is not None:
+        if args.duration <= 0:
+            parser.error("--duration must be positive")
+        print(f"Overriding stimulus duration {data_config['shared']['stim_time']}s "
+              f"-> {args.duration}s")
+        data_config['shared']['stim_time'] = args.duration
     model = nm.BaseRnn.load(model_path)
 
     device = model.device
@@ -167,8 +181,10 @@ def _run_one_eye(args, model, config, data_config, output_dir,
         stim_parts, flow_parts, mask_parts = [], [], []
         for d in directions:
             print(f"Generating stimulus (type={args.stim_type}, direction={d})...")
-            s, f, m = su.get_stimulus_one_eye(
-                args.stim_type, config, column_phi_theta, data_config=data_config, sine_direction=d)
+            data = su.get_stimulus(
+                args.stim_type, config, column_phi_theta, num_eyes=1,
+                data_config=data_config, sine_direction=d)
+            s, f, m = data.stimulus, data.optic_flow, data.train_mask
             stim_parts.append(s)
             flow_parts.append(f)
             mask_parts.append(m)
@@ -214,9 +230,10 @@ def _run_one_eye(args, model, config, data_config, output_dir,
         return
 
     print(f"Generating stimulus (type={args.stim_type})...")
-    stimulus, optic_flow, train_mask = su.get_stimulus_one_eye(
-        args.stim_type, config, column_phi_theta, data_config=data_config,
+    data = su.get_stimulus(
+        args.stim_type, config, column_phi_theta, num_eyes=1, data_config=data_config,
     )
+    stimulus, optic_flow, train_mask = data.stimulus, data.optic_flow, data.train_mask
     stimulus_np = stimulus.cpu().numpy()
     optic_flow_np = optic_flow.cpu().numpy()
     train_mask_np = train_mask.cpu().numpy()
@@ -265,9 +282,11 @@ def _run_two_eyes(args, model, config, data_config, output_dir,
                   device, dtype, model_dt, column_phi_theta, N,
                   cell_x, cell_y, cell_z, frame_rate, flow_key):
     print(f"Generating two-eye stimulus (type={args.stim_type})...")
-    stimulus, optic_flow, observer_rotation, observer_translation, train_mask = (
-        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta, data_config=data_config)
-    )
+    data = su.get_stimulus(args.stim_type, config, column_phi_theta, num_eyes=2,
+                           data_config=data_config)
+    stimulus, optic_flow = data.stimulus, data.optic_flow
+    observer_rotation, observer_translation, train_mask = (
+        data.rotation, data.translation, data.train_mask)
     stimulus_np = stimulus.cpu().numpy()
     optic_flow_np = optic_flow.cpu().numpy()
     observer_rotation_np = observer_rotation.cpu().numpy()
@@ -483,13 +502,15 @@ def _run_ego_motion_two_eyes(args, model, config, data_config, output_dir,
 
     This is the path that used to live in ``run_model_on_cell_inputs.py`` under
     ``--flyview``: it generates the stimulus on the fly via
-    :func:`get_stimulus_two_eyes`, runs ``estimate_ego_motion_from_image``, and
+    :func:`get_stimulus` (num_eyes=2), runs ``estimate_ego_motion_from_image``, and
     renders a stimulus + predicted-flow + rotation/translation-rate movie.
     """
     print(f"Generating two-eye stimulus (type={args.stim_type})...")
-    stimulus, optic_flow, observer_rotation, observer_translation, train_mask = (
-        su.get_stimulus_two_eyes(args.stim_type, config, column_phi_theta, data_config=data_config)
-    )
+    data = su.get_stimulus(args.stim_type, config, column_phi_theta, num_eyes=2,
+                           data_config=data_config)
+    stimulus, optic_flow = data.stimulus, data.optic_flow
+    observer_rotation, observer_translation, train_mask = (
+        data.rotation, data.translation, data.train_mask)
     stimulus_np = stimulus.cpu().numpy()
     observer_rotation_np = observer_rotation.cpu().numpy()
     observer_translation_np = observer_translation.cpu().numpy()

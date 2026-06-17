@@ -426,13 +426,15 @@ def run_model_on_stimuli(
         if column_info == "column_phi_theta":
             column_info = column_phi_theta
         stimulus_kwargs = spec.get("stimulus_kwargs", {})
-        stimulus, optic_flow, _ = su.get_stimulus_one_eye(
+        stim_data = su.get_stimulus(
             spec["stimulus_type"],
             stim_config,
             column_info,
+            num_eyes=1,
             data_config=stim_data_config,
             **stimulus_kwargs,
         )
+        stimulus, optic_flow = stim_data.stimulus, stim_data.optic_flow
         if stimulus.shape[0] > 1:
             stimulus, optic_flow = stimulus[1:], optic_flow[1:]
 

@@ -58,21 +58,17 @@ def create_training_data(stimulus_type, config=None, config_path=None,
     data_folder = Path(config['data']['data_folder'])
     column_phi_theta = load_column_phi_theta(data_folder)
 
-    two_eyes = stimulus_type in sg.TWO_EYE_STIMULUS_TYPES
-    if two_eyes:
-        stimulus, optic_flow, rotation, translation, train_mask = \
-            sg.get_stimulus_two_eyes(stimulus_type, config, column_phi_theta,
-                                     data_config=data_config)
-        eye_offset = sg.camera_offset_for_stimulus(stimulus_type)
-        num_eyes = 2
-    else:
-        stimulus, optic_flow, train_mask = \
-            sg.get_stimulus_one_eye(stimulus_type, config, column_phi_theta,
-                                    data_config=data_config)
-        rotation = None
-        translation = None
-        eye_offset = None
-        num_eyes = 1
+    data = sg.get_stimulus(
+        stimulus_type, config, column_phi_theta,
+        num_eyes=sg.default_num_eyes(stimulus_type), data_config=data_config,
+    )
+    stimulus = data.stimulus
+    optic_flow = data.optic_flow
+    train_mask = data.train_mask
+    rotation = data.rotation
+    translation = data.translation
+    eye_offset = data.eye_offset
+    num_eyes = data.num_eyes
 
     stimulus_config = dict(data_config['shared'])
     stimulus_config.update(data_config.get(stimulus_type, {}))

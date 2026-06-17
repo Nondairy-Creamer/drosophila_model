@@ -55,7 +55,7 @@ def main() -> None:
     parser.add_argument("--cell-types", type=str, nargs=4, default=['T4a', 'T4b', 'T4c', 'T4d'],
                         help="Four cell types to plot in diamond (right, left, up, down)")
     parser.add_argument("--stim-type", type=str, default="random_sine",
-                        help="Stimulus type passed to get_stimulus_one_eye")
+                        help="Stimulus type passed to get_stimulus (num_eyes=1)")
     parser.add_argument("--sine-direction", type=str, nargs="+", default=None,
                         choices=["right", "left", "up", "down"],
                         help="Direction(s) for directional_sine stimulus type (default: all four)")
@@ -107,16 +107,17 @@ def main() -> None:
         stim_parts, mask_parts = [], []
         for d in directions:
             print(f"Generating stimulus (type={args.stim_type}, direction={d})...")
-            s, _, m = su.get_stimulus_one_eye(
-                args.stim_type, config, column_phi_theta, sine_direction=d)
+            data = su.get_stimulus(
+                args.stim_type, config, column_phi_theta, num_eyes=1, sine_direction=d)
+            s, m = data.stimulus, data.train_mask
             stim_parts.append(_select_stim(s, args.stim_index, args.num_stim))
             mask_parts.append(_select_stim(m, args.stim_index, args.num_stim))
         stimulus = torch.cat(stim_parts, dim=0).to(device=device, dtype=dtype)
         train_mask = torch.cat(mask_parts, dim=0)
     else:
         print(f"Generating stimulus (type={args.stim_type})...")
-        stimulus, _, train_mask = su.get_stimulus_one_eye(
-            args.stim_type, config, column_phi_theta)
+        data = su.get_stimulus(args.stim_type, config, column_phi_theta, num_eyes=1)
+        stimulus, train_mask = data.stimulus, data.train_mask
         stimulus = _select_stim(stimulus, args.stim_index, args.num_stim).to(
             device=device, dtype=dtype)
         train_mask = _select_stim(train_mask, args.stim_index, args.num_stim)

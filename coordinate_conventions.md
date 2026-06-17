@@ -61,7 +61,7 @@ angular flow component is consistent across eyes without any correction.
 
 ### Two-Eye Flow Pipeline
 
-1. `get_stimulus_two_eyes` computes flow for both eyes by concatenating
+1. `get_stimulus` (with `num_eyes=2`) computes flow for both eyes by concatenating
    right-eye columns (phi) with left-eye columns (-phi) and calling
    `generate_optic_flow` on all columns at once.  No sign correction is
    needed on the resulting `u_right`.
