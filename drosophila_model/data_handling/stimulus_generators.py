@@ -30,6 +30,141 @@ EXPANDING_DOT_D0_RANGE_CM = (30.0, 90.0)
 EXPANDING_DOT_SPEED_RANGE_CM_S = (15.0, 45.0)
 
 
+def bake_fly_view_dataset(
+    data_path: str | Path | None = None,
+    out_path: str | Path | None = None,
+):
+    """Bake the raw fly-view pickle into a compact ``flyview.pt`` cache.
+
+    Reads ``fib_fly_view_dataset.pkl`` once and applies the two expensive,
+    timing-independent transforms so the on-the-fly loader never has to touch
+    the (multi-GB, ``float64``, depth-carrying) pickle again:
+
+    * **Flipped axis**: both optic-flow components are sign-flipped and
+      converted from rad/frame to deg/s.
+    * **Recalculated odometry**: per-clip rotation (deg/s) and translation
+      (depth-units/s) are solved from the flipped flow plus the rendered
+      per-column ``depths`` via
+      :func:`ego_motion.estimate_ego_motion_known_depth`.
+
+    ``depths`` are consumed here and **not** stored. Invalid columns (NaN flow
+    or |flow| > 1 rad/frame) are excluded from the odometry solve and then
+    zeroed in the stored stimulus/flow. Everything is saved as ``float32``.
+
+    Columns stay **block-packed**: ``[..., :n_eye]`` = right eye,
+    ``[..., n_eye:]`` = left eye. Clips keep their native length and frame rate;
+    ``drop_first_frame``, segmentation, and resampling happen later in
+    :func:`load_fly_view_dataset`.
+
+    Args:
+        data_path: Path to the raw pickle. When ``None``, resolves to
+            ``<data_folder>/stimulus/raw/fib_fly_view_dataset.pkl``.
+        out_path: Destination ``.pt``. When ``None``, resolves to
+            ``<data_folder>/stimulus/baked/flyview.pt``.
+
+    Returns:
+        The path of the written ``flyview.pt``.
+    """
+    from drosophila_model.model_definition.ego_motion import (
+        load_viewing_directions,
+        estimate_ego_motion_known_depth,
+    )
+
+    if data_path is None or out_path is None:
+        from drosophila_model.config import load_config
+        stim_dir = Path(load_config()['data']['data_folder']) / 'stimulus'
+        if data_path is None:
+            data_path = stim_dir / 'raw' / 'fib_fly_view_dataset.pkl'
+        if out_path is None:
+            out_path = stim_dir / 'baked' / 'flyview.pt'
+    in_path, out_path = Path(data_path), Path(out_path)
+    if not in_path.exists():
+        raise FileNotFoundError(f"Fly-view pickle not found: {in_path.resolve()}")
+
+    with open(in_path, 'rb') as f:
+        d = pickle.load(f)
+
+    fps = float(d['fps'])
+    flow_units = d.get('flow_units', 'radians/frame')
+    if flow_units != 'radians/frame':
+        raise ValueError(
+            f"Expected forward_flows in radians/frame; got flow_units={flow_units!r}"
+        )
+    # rad/frame -> deg/s (constant scale; temporal resampling happens at load).
+    flow_to_deg_s = fps * (180.0 / np.pi)
+
+    n_cols = int(np.asarray(d['responses'][0]).shape[1])
+    if n_cols % 2 != 0:
+        raise ValueError(f"Expected an even column count (R|L); got {n_cols}")
+    n_eye = n_cols // 2
+
+    # Viewing directions ([right|left] block order, matching the column layout)
+    # are needed to solve flow-based odometry.
+    column_phi, column_theta = load_viewing_directions()
+    if column_phi.shape[0] != n_cols:
+        raise ValueError(
+            f"Viewing directions ({column_phi.shape[0]}) != flyview columns "
+            f"({n_cols}); cannot solve flow-based odometry.")
+
+    print("assuming x and y flow vectors are flipped in flyview. inverting")
+
+    stim_clips, flow_clips, rot_clips, trans_clips = [], [], [], []
+    for i in range(len(d['responses'])):
+        resp = np.asarray(d['responses'][i], dtype=np.float64)
+        flow = np.asarray(d['forward_flows'][i], dtype=np.float64)
+        depth = np.asarray(d['depths'][i], dtype=np.float64)
+        if resp.shape[0] != flow.shape[0]:
+            raise ValueError(
+                f"Clip {i}: response time {resp.shape[0]} != flow time {flow.shape[0]}")
+        if resp.shape[0] == 0:
+            continue
+
+        bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
+        resp = np.nan_to_num(resp, nan=0.0)
+        # Invert both flow components (x and y) to match the model basis.
+        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s * -1.0
+
+        # Ground-truth ego motion is derived from the (sign-flipped) flow itself
+        # plus the rendered per-column depth, so the odometry targets are exactly
+        # consistent with the flow the model sees. Solve in rad/s, then store
+        # rotation in deg/s (matching the other odometry targets) and translation
+        # in depth-units/s.
+        flow_rad_s = flow_deg_s * (np.pi / 180.0)
+        omega_rad, trans_units = estimate_ego_motion_known_depth(
+            column_phi, column_theta,
+            torch.from_numpy(flow_rad_s[..., 0]),
+            torch.from_numpy(flow_rad_s[..., 1]),
+            torch.from_numpy(depth),
+            valid=torch.from_numpy(~bad),
+        )
+        omega = omega_rad.numpy() * (180.0 / np.pi)
+        trans_rate = trans_units.numpy()
+
+        # Zero invalid columns now (odometry already excluded them via ``valid``).
+        resp[bad] = 0.0
+        flow_deg_s = np.where(bad[..., np.newaxis], 0.0, flow_deg_s)
+
+        stim_clips.append(torch.from_numpy(resp.astype(np.float32)))
+        flow_clips.append(torch.from_numpy(flow_deg_s.astype(np.float32)))
+        rot_clips.append(torch.from_numpy(omega.astype(np.float32)))
+        trans_clips.append(torch.from_numpy(trans_rate.astype(np.float32)))
+
+    if not stim_clips:
+        raise RuntimeError("No fly-view clips produced (empty dataset?).")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        'fps': fps,
+        'n_eye': n_eye,
+        'stimulus': stim_clips,
+        'optic_flow': flow_clips,
+        'rotation_rate': rot_clips,
+        'translation_rate': trans_clips,
+    }, out_path)
+    print(f"Baked 'flyview' ({len(stim_clips)} clips, n_eye={n_eye}) -> {out_path}")
+    return out_path
+
+
 def load_fly_view_dataset(
     model_dt: float,
     stim_time: float,
@@ -39,24 +174,23 @@ def load_fly_view_dataset(
     drop_first_frame: bool = True,
 ):
     """
-    Load the fly-view dataset (``<data_folder>/stimulus/raw/fib_fly_view_dataset.pkl``).
+    Load the baked fly-view dataset (``<data_folder>/stimulus/baked/flyview.pt``).
+
+    The flipped flow (deg/s) and the depth-based odometry are precomputed by
+    :func:`bake_fly_view_dataset`; this loader only handles the timing-dependent
+    steps (drop first frame, segment to ``stim_time``, resample to ``model_dt``).
 
     Columns are **block-packed**: ``[..., :n_eye]`` = all right-eye samples,
     ``[..., n_eye:]`` = all left-eye samples (``n_eye = N // 2``).
-
-    ``forward_flows`` are in radians per video frame (see key ``flow_units`` in the
-    file); they are converted to deg/s before temporal interpolation to ``model_dt``.
-    Both flow components (x and y) are sign-flipped to match the model basis.
 
     Args:
         model_dt: Model time step (seconds).
         stim_time: Duration of each segment (seconds). Use a value >= the native
             clip duration to keep each clip as a single segment.
-        two_eyes: If True, return binocular columns ``[right | left]`` plus ego-motion
-            rates solved from the (sign-flipped) optic flow and the rendered
-            per-column ``depths``. If False, return right-eye columns only.
-        data_path: Path to the pickle. When ``None``, resolves to
-            ``<config['data']['data_folder']>/stimulus/raw/fib_fly_view_dataset.pkl``.
+        two_eyes: If True, return binocular columns ``[right | left]`` plus the
+            baked ego-motion rates. If False, return right-eye columns only.
+        data_path: Path to the baked ``flyview.pt``. When ``None``, resolves to
+            ``<config['data']['data_folder']>/stimulus/baked/flyview.pt``.
         drop_first_frame: If True, drop the first time index.
 
     Returns:
@@ -67,132 +201,67 @@ def load_fly_view_dataset(
             ``(stimulus, optic_flow, rotation_rate, translation_rate)`` with
             stimulus/flow ``(batch, T, 2*n_eye)`` / ``(batch, T, 2*n_eye, 2)``,
             ``rotation_rate`` ``(batch, T, 3)`` in deg/s and
-            ``translation_rate`` ``(batch, T, 3)`` in depth-units per second,
-            both obtained by least-squares solving the optic-flow forward model
-            (:func:`ego_motion.estimate_ego_motion_known_depth`) against the
-            flipped flow and the per-column ``depths``.
+            ``translation_rate`` ``(batch, T, 3)`` in depth-units per second.
     """
     if data_path is None:
         from drosophila_model.config import load_config
         data_path = (
             Path(load_config()['data']['data_folder'])
-            / 'stimulus' / 'raw' / 'fib_fly_view_dataset.pkl'
+            / 'stimulus' / 'baked' / 'flyview.pt'
         )
     path = Path(data_path)
     if not path.exists():
-        raise FileNotFoundError(f"Fly-view dataset not found: {path.resolve()}")
+        raise FileNotFoundError(
+            f"Baked fly-view dataset not found: {path.resolve()}. "
+            "Run `python drosophila_model/data_handling/process_raw_data.py flyview` "
+            "to create it from fib_fly_view_dataset.pkl.")
 
-    with open(path, 'rb') as f:
-        d = pickle.load(f)
-
+    d = torch.load(path, weights_only=False)
     fps = float(d['fps'])
     stimulus_dt = 1.0 / fps
-    flow_units = d.get('flow_units', 'radians/frame')
-    if flow_units != 'radians/frame':
-        raise ValueError(
-            f"Expected forward_flows in radians/frame; got flow_units={flow_units!r}"
-        )
+    n_eye = int(d['n_eye'])
 
-    # rad/frame -> deg/s (constant scale before temporal resampling)
-    flow_to_deg_s = fps * (180.0 / np.pi)
-
-    n_cols = int(np.asarray(d['responses'][0]).shape[1])
-    if n_cols % 2 != 0:
-        raise ValueError(f"Expected an even column count (R|L); got {n_cols}")
-    n_eye = n_cols // 2
+    stim_clips = d['stimulus']
+    flow_clips = d['optic_flow']
+    rot_clips = d['rotation_rate']
+    trans_clips = d['translation_rate']
 
     # Ideal native frame count for stim_time; clips may be shorter — we upsample later.
     n_frames_requested = max(1, int(round(stim_time / stimulus_dt)))
 
-    print("assuming x and y flow vectors are flipped in flyview. inverting")
-
-    # Ground-truth odometry (two-eye case) is solved from the flipped flow plus
-    # per-column depth, so we need the columns' viewing directions ([right|left]
-    # block order, matching the dataset's column layout).
-    if two_eyes:
-        from drosophila_model.model_definition.ego_motion import (
-            load_viewing_directions,
-            estimate_ego_motion_known_depth,
-        )
-        column_phi, column_theta = load_viewing_directions()
-        if column_phi.shape[0] != n_cols:
-            raise ValueError(
-                f"Viewing directions ({column_phi.shape[0]}) != flyview columns "
-                f"({n_cols}); cannot solve flow-based odometry.")
-
     stim_list, flow_list = [], []
     rot_list, trans_list = [], []
 
-    for i in range(len(d['responses'])):
-        resp = np.asarray(d['responses'][i], dtype=np.float64)
-        flow = np.asarray(d['forward_flows'][i], dtype=np.float64)
-        depth = np.asarray(d['depths'][i], dtype=np.float64)
-
-        if resp.shape[0] != flow.shape[0]:
-            raise ValueError(f"Clip {i}: response time {resp.shape[0]} != flow time {flow.shape[0]}")
+    for i in range(len(stim_clips)):
+        s = np.asarray(stim_clips[i])
+        f = np.asarray(flow_clips[i])
+        if two_eyes:
+            rot = np.asarray(rot_clips[i])
+            trans = np.asarray(trans_clips[i])
 
         if drop_first_frame:
-            resp = resp[1:]
-            flow = flow[1:]
-            depth = depth[1:]
+            s, f = s[1:], f[1:]
+            if two_eyes:
+                rot, trans = rot[1:], trans[1:]
 
-        clip_len = resp.shape[0]
+        clip_len = s.shape[0]
         if clip_len == 0:
             continue
 
-        bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
-        resp = np.nan_to_num(resp, nan=0.0)
-        # Invert both flow components (x and y) to match the model basis.
-        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s * -1.0
-
-        resp_r, resp_l = resp[:, :n_eye], resp[:, n_eye:]
-        flow_r, flow_l = flow_deg_s[:, :n_eye], flow_deg_s[:, n_eye:]
-        bad_r, bad_l = bad[:, :n_eye], bad[:, n_eye:]
-
-        # Ground-truth ego motion is derived from the (sign-flipped) flow itself
-        # plus the rendered per-column depth, so the odometry targets are exactly
-        # consistent with the flow the model sees. Solve in rad/s, then report
-        # rotation in deg/s (matching the other odometry targets) and translation
-        # in depth-units/s.
-        if two_eyes:
-            flow_rad_s = flow_deg_s * (np.pi / 180.0)
-            omega_rad, trans_units = estimate_ego_motion_known_depth(
-                column_phi, column_theta,
-                torch.from_numpy(flow_rad_s[..., 0]),
-                torch.from_numpy(flow_rad_s[..., 1]),
-                torch.from_numpy(depth),
-                valid=torch.from_numpy(~bad),
-            )
-            omega = omega_rad.numpy() * (180.0 / np.pi)
-            trans_rate = trans_units.numpy()
+        if not two_eyes:
+            s = s[:, :n_eye]
+            f = f[:, :n_eye]
 
         n_seg = min(clip_len, n_frames_requested)
-        if n_seg == 0:
-            continue
         num_segments = clip_len // n_seg
 
         for seg_idx in range(num_segments):
             sl = slice(seg_idx * n_seg, (seg_idx + 1) * n_seg)
-
+            stim_list.append(s[sl][None, ...])
+            flow_list.append(f[sl][None, ...])
             if two_eyes:
-                s = np.concatenate([resp_r[sl], resp_l[sl]], axis=-1)
-                f = np.concatenate([flow_r[sl], flow_l[sl]], axis=1)
-                b = np.concatenate([bad_r[sl], bad_l[sl]], axis=-1)
-            else:
-                s = resp_r[sl]
-                f = flow_r[sl]
-                b = bad_r[sl]
-
-            s = s.copy()
-            s[b] = 0.0
-            f = np.where(b[..., np.newaxis], 0.0, f)
-
-            stim_list.append(s[None, ...])
-            flow_list.append(f[None, ...])
-
-            if two_eyes:
-                rot_list.append(omega[sl][None, ...])
-                trans_list.append(trans_rate[sl][None, ...])
+                rot_list.append(rot[sl][None, ...])
+                trans_list.append(trans[sl][None, ...])
 
     if not stim_list:
         raise RuntimeError(

@@ -8,6 +8,8 @@ cache to ``<data_folder>/stimulus/baked``:
 * ``small_drone`` -> ``small_drone.pt``  (ommatidium-sampled stereo clips)
 * ``rpi_drone``   -> ``rpi_drone.pt``    (ommatidium-sampled stereo clips)
 * ``random_pano`` -> ``all_panoramic.pt`` ((N, H, W) raw panorama images)
+* ``flyview``     -> ``flyview.pt``     (flipped flow + depth-based odometry,
+  baked from ``fib_fly_view_dataset.pkl``)
 
 The drone caches store clips spatially sampled at the connectome ommatidium
 columns but still at the native video frame rate; temporal interpolation to the
@@ -38,7 +40,7 @@ import torch
 from drosophila_model.config import load_config
 from drosophila_model.data_handling import drone_utilities as du
 
-RAW_TYPES = ('small_drone', 'rpi_drone', 'random_pano')
+RAW_TYPES = ('small_drone', 'rpi_drone', 'random_pano', 'flyview')
 
 
 def loadmat_v73(path):
@@ -180,6 +182,13 @@ def process_raw_data(raw_type, config=None, config_path=None):
         return process_drone(raw_type, data_folder)
     if raw_type == 'random_pano':
         return process_random_pano(data_folder)
+    if raw_type == 'flyview':
+        from drosophila_model.data_handling import stimulus_generators as sg
+        stim_dir = Path(data_folder) / 'stimulus'
+        return sg.bake_fly_view_dataset(
+            data_path=stim_dir / 'raw' / 'fib_fly_view_dataset.pkl',
+            out_path=stim_dir / 'baked' / 'flyview.pt',
+        )
     raise ValueError(
         f"Unknown raw_type '{raw_type}'; expected one of {RAW_TYPES}.")
 
