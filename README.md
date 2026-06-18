@@ -31,7 +31,7 @@ Both scripts read parameters from `config.toml` at the repo root, which overlays
 | `neural_models.py` | Model definitions (`BaseRnn`, `CurrentModel`, etc.) — connectome-constrained RNNs with decoders (see [model_architecture.md](model_architecture.md)) |
 | `training_utilities.py` | Training loop, gradient updates, checkpointing, baked-stimulus loading (in `training/`) |
 | `loss_functions.py` | Loss functions (MSE, correlation, cosine, combined) |
-| `config.py` | Config loading/saving (`load_config`, `get_data_config`, `save_config`) |
+| `config.py` | Config loading/saving (`load_config`, `save_config`); data config is merged under `config['data']` |
 | `connectome_loading.py` | `ConnectomeData` + `load_connectome` / `get_connectome_subset` (in `model_definition/`) |
 | `plotting_utilities.py` | Plotting helpers used during training (in `training/`) |
 | `download_models.py` | Rsync model artifacts to/from a remote server (in `training/`) |

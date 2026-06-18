@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from drosophila_model.config import load_config, get_data_config
+from drosophila_model.config import load_config
 from drosophila_model.data_handling import stimulus_generators as su
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
@@ -71,7 +71,7 @@ def main() -> None:
         args.stim_index = [3] if args.two_eyes else [5]
 
     config = load_config(args.config)
-    data_config = get_data_config()
+    data_config = config['data']
     data_folder = Path(config['data']['data_folder'])
 
     if args.stim_time is not None:

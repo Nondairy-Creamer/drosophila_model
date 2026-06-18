@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from drosophila_model.config import load_config, get_data_config
+from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.data_handling import stimulus_generators as su
 from drosophila_model.training.loss_functions import cos_loss
@@ -70,7 +70,7 @@ def _eval_config(model_folder: Path, model: nm.BaseRnn) -> tuple[dict, dict]:
     config = load_config(model_folder / "config.toml")
     config["model"]["device"] = str(model.device)
     config["model"]["dt"] = model.dt
-    data_config = get_data_config()
+    data_config = config['data']
     data_config["shared"]["pre_stim_time"] = 0.0
     return config, data_config
 

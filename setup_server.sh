@@ -45,8 +45,8 @@ gdown "17JhWo8jaq7zA41peCR7CHXRDkOXFYS6k" -O ../drosophila_model_data/config.tom
 gdown "1y_zl_ZNtHIQeIW-3gvHdaEiNYBRYRi9k" -O ../drosophila_model_data/config_data.toml
 set -e
 
-# Place the downloaded user configs at the repo root where load_config() /
-# get_data_config() look for them (CWD-relative). config_default.toml and
+# Place the downloaded user configs at the repo root where load_config()
+# looks for them (CWD-relative). config_default.toml and
 # config_default_data.toml are shipped inside the package; these are the
 # per-machine overlays (gitignored).
 if [ -f ../drosophila_model_data/config.toml ]; then

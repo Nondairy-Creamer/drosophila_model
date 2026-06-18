@@ -28,7 +28,7 @@ def get_git_commit_hash():
     return None
 
 
-def load_processed_stimulus(config, device=None, dtype=None):
+def load_processed_stimulus(config, device=None, dtype=None, train_fraction=None):
     """Load pre-baked stimulus dataset(s) for training.
 
     Reads ``config['stimulus']['stimulus_type']`` (a string or list of
@@ -38,6 +38,11 @@ def load_processed_stimulus(config, device=None, dtype=None):
     count and camera offset, and concatenates them along the example axis.
     Stimuli are no longer generated on the fly during training.
 
+    Only the first ``train_fraction`` of each dataset's examples is kept; the
+    last ``(1 - train_fraction)`` is cropped off and reserved for testing.
+    When ``train_fraction`` is ``None`` it is read from the data config's
+    ``[shared].train_fraction`` (see ``config_default_data.toml``).
+
     Returns a dict with keys ``stimulus``, ``optic_flow``, ``train_mask``,
     ``rotation``, ``translation``, ``num_eyes``, ``eye_offset``.
     ``rotation``/``translation`` are ``None`` for one-eye datasets.
@@ -46,6 +51,12 @@ def load_processed_stimulus(config, device=None, dtype=None):
         device = torch.device(config['model']['device'])
     if dtype is None:
         dtype = getattr(torch, config['model']['dtype'])
+    if train_fraction is None:
+        train_fraction = config['data']['shared']['train_fraction']
+    if not 0 < train_fraction <= 1:
+        raise ValueError(
+            f"train_fraction must be in (0, 1], got {train_fraction}."
+        )
 
     training_dir = Path(config['data']['data_folder']) / 'stimulus' / 'training'
 
@@ -62,14 +73,18 @@ def load_processed_stimulus(config, device=None, dtype=None):
                 f"python drosophila_model/data_handling/create_training_data.py {stim_type}"
             )
         data = torch.load(training_path, map_location='cpu', weights_only=False)
+        # Keep the first train_fraction of examples (dim 0); the remainder is
+        # held out for testing. Always keep at least one example.
+        num_examples = data['stimulus'].shape[0]
+        num_train = max(1, int(np.round(num_examples * train_fraction)))
         num_eyes_set.add(data['num_eyes'])
         eye_offsets.add(tuple(data['eye_offset']) if data['eye_offset'] is not None else None)
-        stim_list.append(data['stimulus'].to(device=device, dtype=dtype))
-        flow_list.append(data['optic_flow'].to(device=device, dtype=dtype))
-        mask_list.append(data['train_mask'].to(device=device))
+        stim_list.append(data['stimulus'][:num_train].to(device=device, dtype=dtype))
+        flow_list.append(data['optic_flow'][:num_train].to(device=device, dtype=dtype))
+        mask_list.append(data['train_mask'][:num_train].to(device=device))
         if data['rotation'] is not None:
-            rot_list.append(data['rotation'].to(device=device, dtype=dtype))
-            trans_list.append(data['translation'].to(device=device, dtype=dtype))
+            rot_list.append(data['rotation'][:num_train].to(device=device, dtype=dtype))
+            trans_list.append(data['translation'][:num_train].to(device=device, dtype=dtype))
 
     if len(num_eyes_set) > 1:
         raise ValueError(

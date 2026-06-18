@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from drosophila_model.config import load_config, get_data_config
+from drosophila_model.config import load_config
 
 
 def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
@@ -43,9 +43,12 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
     assert config["data"]["data_folder"] == "../drosophila_model_data"
 
 
-def test_get_data_config_merges_and_validates(tmp_path):
-    user_config = tmp_path / "data_config_override.toml"
-    user_config.write_text(
+def test_load_config_merges_data_config_under_data(tmp_path):
+    main_config = tmp_path / "config_main.toml"
+    main_config.write_text("")
+
+    data_config = tmp_path / "data_config_override.toml"
+    data_config.write_text(
         "\n".join(
             [
                 "[shared]",
@@ -59,21 +62,26 @@ def test_get_data_config_merges_and_validates(tmp_path):
         )
     )
 
-    data_config = get_data_config(str(user_config))
+    config = load_config(str(main_config), str(data_config))
 
-    # Overlay applied.
-    assert data_config["shared"]["stim_time"] == 7.5
-    assert data_config["shared"]["seed"] is None
-    assert data_config["random_pano"]["velocity_amp"] == 250.0
-    # Untouched defaults preserved.
-    assert data_config["shared"]["pre_stim_time"] == 0.0
-    assert data_config["random_pano"]["num_repeats"] == 1
-    assert data_config["edge"]["edge_velocities"] == [30, 60, 120, 240]
+    # Data config nested under config['data'], overlay applied.
+    assert config["data"]["shared"]["stim_time"] == 7.5
+    assert config["data"]["shared"]["seed"] is None
+    assert config["data"]["random_pano"]["velocity_amp"] == 250.0
+    # Untouched data defaults preserved.
+    assert config["data"]["shared"]["pre_stim_time"] == 0.5
+    assert config["data"]["random_pano"]["num_repeats"] == 1
+    assert config["data"]["edge"]["edge_velocities"] == [30, 60, 120, 240]
+    # data_folder still lives alongside the merged data tables.
+    assert config["data"]["data_folder"] == "../drosophila_model_data"
 
 
-def test_get_data_config_rejects_unknown_keys(tmp_path):
-    user_config = tmp_path / "data_config_bad.toml"
-    user_config.write_text("[shared]\nnot_a_real_key = 1\n")
+def test_load_config_rejects_unknown_data_keys(tmp_path):
+    main_config = tmp_path / "config_main.toml"
+    main_config.write_text("")
+
+    bad_data_config = tmp_path / "data_config_bad.toml"
+    bad_data_config.write_text("[shared]\nnot_a_real_key = 1\n")
 
     with pytest.raises(ValueError):
-        get_data_config(str(user_config))
+        load_config(str(main_config), str(bad_data_config))

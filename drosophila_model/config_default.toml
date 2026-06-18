@@ -75,8 +75,8 @@ batch_size = 32
 [stimulus]
 # Which baked dataset(s) to train on (string or list). Stimulus *generation*
 # parameters (stim_time, velocities, temporal_frequencies, ...) live in the
-# data config: config_default_data.toml + config_data.toml, loaded via
-# drosophila_model.config.get_data_config().
+# data config: config_default_data.toml + config_data.toml, merged under
+# config['data'] by drosophila_model.config.load_config().
 stimulus_type = 'random_sine'
 
 [data]

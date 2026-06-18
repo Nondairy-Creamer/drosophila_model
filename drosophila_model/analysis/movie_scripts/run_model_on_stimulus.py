@@ -44,7 +44,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from drosophila_model.config import load_config, get_data_config
+from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import ego_motion as em
 from drosophila_model.data_handling import stimulus_generators as su
@@ -113,7 +113,7 @@ def main() -> None:
     model_folder = model_path.parent if model_path.is_file() else model_path
 
     config = load_config(args.config) if args.config else load_config()
-    data_config = get_data_config()
+    data_config = config['data']
     if args.duration is not None:
         if args.duration <= 0:
             parser.error("--duration must be positive")

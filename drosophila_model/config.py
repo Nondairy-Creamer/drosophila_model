@@ -2,7 +2,7 @@
 
 Top-level so it's obvious where to import from:
 
-    from drosophila_model.config import load_config, get_data_config, save_config
+    from drosophila_model.config import load_config, save_config
 """
 
 from __future__ import annotations
@@ -40,13 +40,21 @@ except ImportError:  # pragma: no cover - tomli_w present per requirements for <
 #   ('run_info',) -- added programmatically by ``run_model.py`` to record
 #       per-run provenance (seed, device, run_id) and persisted into saved
 #       configs. Not part of the user-editable schema; allow any contents.
+#   ('data',) -- the stimulus/dataset generation parameters loaded from the
+#       data config (config_default_data.toml + config_data.toml) are merged
+#       into config['data'] by load_config. A saved run config.toml therefore
+#       embeds those tables (shared, random_pano, ...), which are not in
+#       config_default.toml's [data]. Stop validating at this depth here; the
+#       data overlay is still strictly validated inside _load_data_config.
 _EXTENSIBLE_PATHS: frozenset[tuple[str, ...]] = frozenset({
     ('model', 'regions'),
     ('run_info',),
+    ('data',),
 })
 
 
-def load_config(config_path: str = 'config.toml') -> dict:
+def load_config(config_path: str = 'config.toml',
+                data_config_path: str = 'config_data.toml') -> dict:
     '''
     Load configuration by merging default config with user config.
 
@@ -63,6 +71,12 @@ def load_config(config_path: str = 'config.toml') -> dict:
     The GPU/CPU device for the model is ``config['model']['device']``. A
     ``[run_info]`` table (if present) is only provenance from saved runs and is
     not used to set the model device.
+
+    The stimulus/dataset generation parameters (default
+    ``config_default_data.toml`` + optional ``data_config_path`` overlay) are
+    loaded and merged into ``config['data']`` alongside ``data_folder``, so
+    callers read ``config['data']['shared'][...]`` /
+    ``config['data'][<stimulus_type>][...]`` rather than a separate loader.
 
     Returns:
         Dictionary containing the merged configuration
@@ -85,11 +99,17 @@ def load_config(config_path: str = 'config.toml') -> dict:
             stacklevel=2,
         )
 
+    # Fold the stimulus/dataset generation config into config['data'] next to
+    # data_folder, so there is a single config dict to pass around.
+    data_config = _load_data_config(data_config_path)
+    config.setdefault('data', {})
+    config['data'] = _merge_configs(config['data'], data_config)
+
     config = _convert_none_strings(config)
     return config
 
 
-def get_data_config(config_path: str = 'config_data.toml') -> dict:
+def _load_data_config(config_path: str = 'config_data.toml') -> dict:
     '''
     Load the stimulus/dataset generation config (default + user overlay).
 
@@ -103,6 +123,9 @@ def get_data_config(config_path: str = 'config_data.toml') -> dict:
     plus one ``[<stimulus_type>]`` table per generator for its specific
     parameters (see ``config_default_data.toml``). Every key in the overlay
     must already exist in the default, or ``ValueError`` is raised.
+
+    Internal helper for :func:`load_config`; the result is merged into
+    ``config['data']`` rather than returned to callers directly.
 
     Returns:
         Merged data-config dict (``"none"`` strings converted to ``None``).

@@ -2,8 +2,8 @@
 #
 # Mirrors the config.toml / config_default.toml pattern: this file is the
 # default that ships with the package; the user's gitignored overlay lives at
-# the repo root as `config_data.toml`. Load both (merged) with
-# `drosophila_model.config.get_data_config()`.
+# the repo root as `config_data.toml`. Both are loaded, merged, and nested
+# under `config['data']` by `drosophila_model.config.load_config()`.
 #
 # Layout:
 #   [shared]            -- parameters common to every dataset (stim_time,
@@ -24,6 +24,10 @@ stim_time = 1.0
 pre_stim_time = 0.5
 post_stim_time = 0.0
 seed = 0
+# Fraction (0, 1] of each baked dataset to use for training. Training loads the
+# data and keeps the first `train_fraction` of examples per stimulus type,
+# cropping off the last (1 - train_fraction) which is reserved for testing.
+train_fraction = 0.75
 
 [random_pano]
 velocity_amp = 100.0

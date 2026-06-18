@@ -2130,15 +2130,14 @@ def get_stimulus(
 
     When ``num_eyes`` is None it defaults to each type's natural eye count
     (:func:`default_num_eyes`). Stimulus-generation parameters come from
-    ``data_config`` (see :func:`drosophila_model.config.get_data_config`); model
-    ``dt`` / ``device`` / ``dtype`` come from ``config``.
+    ``data_config`` (defaults to ``config['data']``); model ``dt`` / ``device``
+    / ``dtype`` come from ``config``.
 
     Returns a :class:`StimulusData`. For one-eye output ``rotation`` /
     ``translation`` / ``eye_offset`` are ``None``.
     """
     if data_config is None:
-        from drosophila_model.config import get_data_config
-        data_config = get_data_config()
+        data_config = config['data']
     shared = data_config['shared']
 
     stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)

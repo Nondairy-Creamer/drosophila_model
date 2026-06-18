@@ -19,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-from drosophila_model.config import load_config, get_data_config
+from drosophila_model.config import load_config
 from drosophila_model.data_handling import stimulus_generators as sg
 
 
@@ -41,26 +41,26 @@ def load_column_phi_theta(data_folder):
 
 
 def create_training_data(stimulus_type, config=None, config_path=None,
-                         data_config=None, data_config_path=None):
+                         data_config_path=None):
     """Generate ``stimulus_type`` from config and save it to ``stimulus/training``.
 
-    Model parameters come from the main config (``config`` / ``config_path``);
-    stimulus-generation parameters come from the data config (``data_config`` /
-    ``data_config_path``, see :func:`drosophila_model.config.get_data_config`).
+    Model parameters and the stimulus-generation parameters both come from the
+    config (``config`` / ``config_path``); the stimulus-generation parameters
+    live under ``config['data']`` (default + ``data_config_path`` overlay,
+    merged by :func:`drosophila_model.config.load_config`).
 
     Returns the path of the written ``.pt`` file.
     """
     if config is None:
-        config = load_config(config_path or 'config.toml')
-    if data_config is None:
-        data_config = get_data_config(data_config_path or 'config_data.toml')
+        config = load_config(config_path or 'config.toml',
+                             data_config_path or 'config_data.toml')
 
     data_folder = Path(config['data']['data_folder'])
     column_phi_theta = load_column_phi_theta(data_folder)
 
     data = sg.get_stimulus(
         stimulus_type, config, column_phi_theta,
-        num_eyes=sg.default_num_eyes(stimulus_type), data_config=data_config,
+        num_eyes=sg.default_num_eyes(stimulus_type),
     )
     stimulus = data.stimulus
     optic_flow = data.optic_flow
@@ -70,8 +70,8 @@ def create_training_data(stimulus_type, config=None, config_path=None,
     eye_offset = data.eye_offset
     num_eyes = data.num_eyes
 
-    stimulus_config = dict(data_config['shared'])
-    stimulus_config.update(data_config.get(stimulus_type, {}))
+    stimulus_config = dict(config['data']['shared'])
+    stimulus_config.update(config['data'].get(stimulus_type, {}))
 
     training_dir = data_folder / 'stimulus' / 'training'
     training_dir.mkdir(parents=True, exist_ok=True)
