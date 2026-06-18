@@ -107,6 +107,31 @@ def _rsync_base(port: str, identity_file: str) -> list[str]:
     ]
 
 
+def _ensure_remote_rsync(ssh_base: list[str]) -> None:
+    '''
+    Make sure rsync exists on the remote. RunPod containers often ship without
+    it, which makes rsync-over-ssh fail with "rsync: command not found"
+    (exit 127). If missing, try to install it via apt-get.
+    '''
+    check = subprocess.run(
+        ssh_base + ['command -v rsync'],
+        capture_output=True, text=True,
+    )
+    if check.returncode == 0:
+        return
+
+    print('rsync not found on remote; attempting to install it...')
+    install_cmd = (
+        'apt-get update && apt-get install -y rsync'
+    )
+    result = subprocess.run(ssh_base + [install_cmd])
+    if result.returncode != 0:
+        raise RuntimeError(
+            'Failed to install rsync on the remote. Install it manually '
+            '(e.g. `apt-get update && apt-get install -y rsync`) and retry.'
+        )
+
+
 def scp_transfer(
     server: str,
     transfer_type: str = 'pull',
@@ -139,6 +164,8 @@ def scp_transfer(
 
     ssh_base = ['ssh', '-p', port, '-i', identity_file, f'{user}@{hostname}']
     rsync_base = _rsync_base(port, identity_file)
+
+    _ensure_remote_rsync(ssh_base)
 
     if transfer_type == 'pull':
         if folder:
