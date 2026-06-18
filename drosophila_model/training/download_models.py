@@ -222,11 +222,9 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        '--type',
-        dest='transfer_type',
-        choices=['pull', 'push'],
-        default='pull',
-        help="Transfer direction: 'pull' (download, default) or 'push' (upload).",
+        '--push',
+        action='store_true',
+        help='Upload to the remote. If omitted, pulls (downloads) instead.',
     )
     parser.add_argument(
         '--model-folder',
@@ -237,7 +235,7 @@ def main() -> None:
     args = parser.parse_args()
     scp_transfer(
         server=args.server,
-        transfer_type=args.transfer_type,
+        transfer_type='push' if args.push else 'pull',
         folder=args.model_folder,
     )
 
