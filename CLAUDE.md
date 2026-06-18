@@ -45,8 +45,10 @@ Current value (this machine, for reference only — re-read config each time):
  (consolidated raw panorama images), and `flyview.pt` (flow +
  depth-based odometry baked from `fib_forest_fly_view_dataset_fwd.pkl`, float32,
  no depth).
-- `<data_folder>/stimulus/training/` — fixed, training-ready datasets produced by
+- `<data_folder>/stimulus/training/` — fixed datasets produced by
  `drosophila_model/data_handling/create_training_data.py <stimulus_type>`,
- one `<stimulus_type>.pt` per type (e.g. `small_drone.pt`, `rpi_drone.pt`).
- Training loads these via `training_utilities.load_processed_stimulus` (no
- on-the-fly generation).
+ split by `[data].shared.train_fraction` into a `<stimulus_type>_train.pt` and
+ `<stimulus_type>_test.pt` pair per type (e.g. `small_drone_train.pt` +
+ `small_drone_test.pt`). Training loads the `_train.pt` via
+ `training_utilities.load_processed_stimulus` (no on-the-fly generation); the
+ `_test.pt` is held out for analysis only.

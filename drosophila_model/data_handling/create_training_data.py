@@ -6,16 +6,25 @@ Usage:
 Reads parameters from ``config.toml`` (``[model]``, ``[stimulus]``, ``[data]``),
 generates the stimulus with the on-the-fly generators in
 ``stimulus_generators.py`` (two eyes when the type supports it, otherwise one
-eye), and saves a single ``.pt`` with a consistent schema to
-``<data_folder>/stimulus/training/<stimulus_type>.pt``.
+eye), and splits it into a train/test pair saved with a consistent schema to
+``<data_folder>/stimulus/training/<stimulus_type>_train.pt`` and
+``..._test.pt``. The split is by whole source group (``StimulusData.group_id``,
+e.g. the raw fly-view clip a segment was cut from), never within a group, so
+correlated examples can't leak across train/test. The first
+``[data].shared.train_fraction`` of groups go to ``_train.pt``, the rest to
+``_test.pt``. Generators whose examples are independent give each example its
+own group, so this reduces to a per-example split for them.
 
-The training file is what ``training_utilities.load_processed_stimulus`` loads, so
-stimuli are no longer generated on the fly during training. Analysis scripts
-still call the generators directly for variable-length, on-the-fly stimuli.
+The ``_train.pt`` file is what ``training_utilities.load_processed_stimulus``
+loads, so stimuli are no longer generated on the fly during training. The
+``_test.pt`` file is held out for later analysis and is never read during
+training. Analysis scripts still call the generators directly for
+variable-length, on-the-fly stimuli.
 """
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -55,6 +64,12 @@ def create_training_data(stimulus_type, config=None, config_path=None,
         config = load_config(config_path or 'config.toml',
                              data_config_path or 'config_data.toml')
 
+    train_fraction = config['data']['shared']['train_fraction']
+    if not 0 < train_fraction <= 1:
+        raise ValueError(
+            f"train_fraction must be in (0, 1], got {train_fraction}."
+        )
+
     data_folder = Path(config['data']['data_folder'])
     column_phi_theta = load_column_phi_theta(data_folder)
 
@@ -62,41 +77,65 @@ def create_training_data(stimulus_type, config=None, config_path=None,
         stimulus_type, config, column_phi_theta,
         num_eyes=sg.default_num_eyes(stimulus_type),
     )
-    stimulus = data.stimulus
-    optic_flow = data.optic_flow
-    train_mask = data.train_mask
-    rotation = data.rotation
-    translation = data.translation
+    stimulus = data.stimulus.detach().cpu()
+    optic_flow = data.optic_flow.detach().cpu()
+    train_mask = data.train_mask.detach().cpu()
+    rotation = data.rotation.detach().cpu() if data.rotation is not None else None
+    translation = data.translation.detach().cpu() if data.translation is not None else None
+    group_id = data.group_id.detach().cpu()
     eye_offset = data.eye_offset
     num_eyes = data.num_eyes
 
     stimulus_config = dict(config['data']['shared'])
     stimulus_config.update(config['data'].get(stimulus_type, {}))
 
+    # Split by whole source group (e.g. raw fly-view clip), never within one, so
+    # correlated examples can't leak across train/test. The first
+    # `train_fraction` of groups (in first-appearance order) go to train, the
+    # rest to test. Generators that produce independent examples give each
+    # example its own group, so this reduces to a per-example split for them.
+    groups_in_order = pd.unique(group_id.numpy())
+    num_groups = len(groups_in_order)
+    num_train_groups = max(1, int(np.round(num_groups * train_fraction)))
+    train_groups = set(groups_in_order[:num_train_groups].tolist())
+    is_train = torch.tensor([g in train_groups for g in group_id.tolist()],
+                            dtype=torch.bool)
+
+    def build_payload(sel):
+        return {
+            'stimulus_type': stimulus_type,
+            'num_eyes': num_eyes,
+            'eye_offset': eye_offset,
+            'model_dt': config['model']['dt'],
+            'train_fraction': train_fraction,
+            'stimulus': stimulus[sel],
+            'optic_flow': optic_flow[sel],
+            'train_mask': train_mask[sel],
+            'rotation': rotation[sel] if rotation is not None else None,
+            'translation': translation[sel] if translation is not None else None,
+            'group_id': group_id[sel],
+            'stimulus_config': stimulus_config,
+        }
+
     training_dir = data_folder / 'stimulus' / 'training'
     training_dir.mkdir(parents=True, exist_ok=True)
-    out_path = training_dir / f'{stimulus_type}.pt'
 
-    payload = {
-        'stimulus_type': stimulus_type,
-        'num_eyes': num_eyes,
-        'eye_offset': eye_offset,
-        'model_dt': config['model']['dt'],
-        'stimulus': stimulus.detach().cpu(),
-        'optic_flow': optic_flow.detach().cpu(),
-        'train_mask': train_mask.detach().cpu(),
-        'rotation': rotation.detach().cpu() if rotation is not None else None,
-        'translation': translation.detach().cpu() if translation is not None else None,
-        'stimulus_config': stimulus_config,
-    }
-    torch.save(payload, out_path)
+    train_path = training_dir / f'{stimulus_type}_train.pt'
+    test_path = training_dir / f'{stimulus_type}_test.pt'
+    torch.save(build_payload(is_train), train_path)
+    torch.save(build_payload(~is_train), test_path)
 
+    num_train = int(is_train.sum())
     print(
-        f"Baked '{stimulus_type}' ({num_eyes} eye(s)) -> {out_path}\n"
+        f"Baked '{stimulus_type}' ({num_eyes} eye(s)) from {stimulus.shape[0]} "
+        f"examples across {num_groups} source group(s)\n"
+        f"  train ({num_train_groups} group(s), {num_train} examples) -> {train_path}\n"
+        f"  test  ({num_groups - num_train_groups} group(s), "
+        f"{stimulus.shape[0] - num_train} examples) -> {test_path}\n"
         f"  stimulus {tuple(stimulus.shape)}, optic_flow {tuple(optic_flow.shape)}, "
         f"train_mask {tuple(train_mask.shape)}"
     )
-    return out_path
+    return train_path, test_path
 
 
 if __name__ == '__main__':

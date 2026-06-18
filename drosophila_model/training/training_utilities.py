@@ -28,20 +28,20 @@ def get_git_commit_hash():
     return None
 
 
-def load_processed_stimulus(config, device=None, dtype=None, train_fraction=None):
-    """Load pre-baked stimulus dataset(s) for training.
+def load_processed_stimulus(config, device=None, dtype=None):
+    """Load pre-baked training stimulus dataset(s).
 
     Reads ``config['stimulus']['stimulus_type']`` (a string or list of
     strings), loads each training file from
-    ``<data_folder>/stimulus/training/<type>.pt`` (produced by
+    ``<data_folder>/stimulus/training/<type>_train.pt`` (produced by
     ``create_training_data.py``), validates that all share the same eye
     count and camera offset, and concatenates them along the example axis.
     Stimuli are no longer generated on the fly during training.
 
-    Only the first ``train_fraction`` of each dataset's examples is kept; the
-    last ``(1 - train_fraction)`` is cropped off and reserved for testing.
-    When ``train_fraction`` is ``None`` it is read from the data config's
-    ``[shared].train_fraction`` (see ``config_default_data.toml``).
+    The train/test split is baked into separate ``_train.pt`` / ``_test.pt``
+    files by ``create_training_data.py`` (via ``[data].shared.train_fraction``);
+    only the ``_train.pt`` file is loaded here. The ``_test.pt`` file is held
+    out for later analysis and is never read during training.
 
     Returns a dict with keys ``stimulus``, ``optic_flow``, ``train_mask``,
     ``rotation``, ``translation``, ``num_eyes``, ``eye_offset``.
@@ -51,12 +51,6 @@ def load_processed_stimulus(config, device=None, dtype=None, train_fraction=None
         device = torch.device(config['model']['device'])
     if dtype is None:
         dtype = getattr(torch, config['model']['dtype'])
-    if train_fraction is None:
-        train_fraction = config['data']['shared']['train_fraction']
-    if not 0 < train_fraction <= 1:
-        raise ValueError(
-            f"train_fraction must be in (0, 1], got {train_fraction}."
-        )
 
     training_dir = Path(config['data']['data_folder']) / 'stimulus' / 'training'
 
@@ -66,25 +60,21 @@ def load_processed_stimulus(config, device=None, dtype=None, train_fraction=None
     stim_list, flow_list, mask_list, rot_list, trans_list = [], [], [], [], []
     num_eyes_set, eye_offsets = set(), set()
     for stim_type in stimulus_types:
-        training_path = training_dir / f'{stim_type}.pt'
+        training_path = training_dir / f'{stim_type}_train.pt'
         if not training_path.exists():
             raise FileNotFoundError(
                 f"Training stimulus not found: {training_path}. Generate it first with: "
                 f"python drosophila_model/data_handling/create_training_data.py {stim_type}"
             )
         data = torch.load(training_path, map_location='cpu', weights_only=False)
-        # Keep the first train_fraction of examples (dim 0); the remainder is
-        # held out for testing. Always keep at least one example.
-        num_examples = data['stimulus'].shape[0]
-        num_train = max(1, int(np.round(num_examples * train_fraction)))
         num_eyes_set.add(data['num_eyes'])
         eye_offsets.add(tuple(data['eye_offset']) if data['eye_offset'] is not None else None)
-        stim_list.append(data['stimulus'][:num_train].to(device=device, dtype=dtype))
-        flow_list.append(data['optic_flow'][:num_train].to(device=device, dtype=dtype))
-        mask_list.append(data['train_mask'][:num_train].to(device=device))
+        stim_list.append(data['stimulus'].to(device=device, dtype=dtype))
+        flow_list.append(data['optic_flow'].to(device=device, dtype=dtype))
+        mask_list.append(data['train_mask'].to(device=device))
         if data['rotation'] is not None:
-            rot_list.append(data['rotation'][:num_train].to(device=device, dtype=dtype))
-            trans_list.append(data['translation'][:num_train].to(device=device, dtype=dtype))
+            rot_list.append(data['rotation'].to(device=device, dtype=dtype))
+            trans_list.append(data['translation'].to(device=device, dtype=dtype))
 
     if len(num_eyes_set) > 1:
         raise ValueError(

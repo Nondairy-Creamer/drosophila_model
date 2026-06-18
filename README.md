@@ -44,7 +44,7 @@ Stimulus and connectome data prep lives in `data_handling/`.
 |---|---|
 | `stimulus_generators.py` | On-the-fly stimulus generators — random panoramas, sine gratings, edges, drone footage, optic flow |
 | `process_raw_data.py` | Bake the large raw inputs (drone videos, panorama `.mat`) from `stimulus/raw` into cached `.pt` files under `stimulus/baked` (`small_drone.pt`, `rpi_drone.pt`, `all_panoramic.pt`) |
-| `create_training_data.py` | Bake a fixed, training-ready dataset (`stimulus/training/<stimulus_type>.pt`) that training loads |
+| `create_training_data.py` | Bake a fixed dataset split into a train/test pair (`stimulus/training/<stimulus_type>_train.pt` + `..._test.pt`); training loads the `_train.pt`, the `_test.pt` is held out for analysis |
 | `drone_utilities.py` | Raw drone-rig processing — video loading, pose loading, dome calibration, ego-motion solving, per-dataset processors |
 | `estimate_pose.py` | `small_drone` AprilTag pose-estimation engine (dual-camera bundle adjustment) |
 | `drone_pose.py` | `small_drone` batch driver (CLI) — writes `pose_<id>.npz` via `estimate_pose` |

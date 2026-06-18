@@ -191,13 +191,16 @@ def load_fly_view_dataset(
 
     Returns:
         If ``two_eyes`` is False:
-            ``(stimulus, optic_flow)`` numpy arrays, shapes
-            ``(batch, T, n_eye)`` and ``(batch, T, n_eye, 2)``.
+            ``(stimulus, optic_flow, clip_ids)`` with stimulus/flow numpy
+            arrays of shapes ``(batch, T, n_eye)`` and ``(batch, T, n_eye, 2)``.
         If ``two_eyes`` is True:
-            ``(stimulus, optic_flow, rotation_rate, translation_rate)`` with
-            stimulus/flow ``(batch, T, 2*n_eye)`` / ``(batch, T, 2*n_eye, 2)``,
+            ``(stimulus, optic_flow, rotation_rate, translation_rate, clip_ids)``
+            with stimulus/flow ``(batch, T, 2*n_eye)`` / ``(batch, T, 2*n_eye, 2)``,
             ``rotation_rate`` ``(batch, T, 3)`` in deg/s and
             ``translation_rate`` ``(batch, T, 3)`` in depth-units per second.
+        ``clip_ids`` is a ``(batch,)`` int array giving the source-clip index
+        each segment was cut from, so callers can keep all segments of a clip
+        on the same side of a train/test split.
     """
     if data_path is None:
         from drosophila_model.config import load_config
@@ -227,6 +230,7 @@ def load_fly_view_dataset(
 
     stim_list, flow_list = [], []
     rot_list, trans_list = [], []
+    clip_id_list = []
 
     for i in range(len(stim_clips)):
         s = np.asarray(stim_clips[i])
@@ -255,6 +259,7 @@ def load_fly_view_dataset(
             sl = slice(seg_idx * n_seg, (seg_idx + 1) * n_seg)
             stim_list.append(s[sl][None, ...])
             flow_list.append(f[sl][None, ...])
+            clip_id_list.append(i)
             if two_eyes:
                 rot_list.append(rot[sl][None, ...])
                 trans_list.append(trans[sl][None, ...])
@@ -266,6 +271,7 @@ def load_fly_view_dataset(
 
     stimulus = np.concatenate(stim_list, axis=0)
     optic_flow = np.concatenate(flow_list, axis=0)
+    clip_ids = np.asarray(clip_id_list, dtype=np.int64)
 
     # Map native timing → model_dt, then stretch/compress time to exactly stim_time.
     n_target = max(1, int(round(stim_time / model_dt)) + 1)
@@ -281,13 +287,13 @@ def load_fly_view_dataset(
         optic_flow = resample_time_to_length(optic_flow, n_target)
         rotation_rate = resample_time_to_length(rotation_rate, n_target)
         translation_rate = resample_time_to_length(translation_rate, n_target)
-        return stimulus, optic_flow, rotation_rate, translation_rate
+        return stimulus, optic_flow, rotation_rate, translation_rate, clip_ids
 
     stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
     optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
     stimulus = resample_time_to_length(stimulus, n_target)
     optic_flow = resample_time_to_length(optic_flow, n_target)
-    return stimulus, optic_flow
+    return stimulus, optic_flow, clip_ids
 
 
 def _stim_time_vector(dt, stim_time, pre_stim_time=0.0, post_stim_time=0.0):
@@ -1852,6 +1858,13 @@ class StimulusData:
     (deg/s and velocity), or ``None`` for one-eye stimuli, which carry no
     ego-motion target. ``eye_offset`` is the right-eye camera offset of the rig
     that produced the flow (``None`` for one eye).
+
+    ``group_id`` is a ``(examples,)`` integer tensor identifying the source each
+    example was derived from (e.g. the raw fly-view clip a segment was cut
+    from). Examples that share a ``group_id`` are correlated (same scene /
+    continuous trajectory) and must stay together when splitting train/test, so
+    the split happens at whole-group granularity. Generators that produce
+    independent examples give each example its own ``group_id``.
     """
     stimulus: torch.Tensor
     optic_flow: torch.Tensor
@@ -1860,6 +1873,7 @@ class StimulusData:
     translation: torch.Tensor | None
     num_eyes: int
     eye_offset: tuple[float, float, float] | None
+    group_id: torch.Tensor
 
 
 @dataclass
@@ -2037,10 +2051,10 @@ def _gen_flyview(ctx):
     ctx.require_columns('flyview')
     two = ctx.num_eyes == 2
     if two:
-        stim_np, flow_np, rot_np, trans_np = load_fly_view_dataset(
+        stim_np, flow_np, rot_np, trans_np, clip_ids = load_fly_view_dataset(
             ctx.model_dt, ctx.stim_time, two_eyes=True)
     else:
-        stim_np, flow_np = load_fly_view_dataset(
+        stim_np, flow_np, clip_ids = load_fly_view_dataset(
             ctx.model_dt, ctx.stim_time, two_eyes=False)
     if stim_np.shape[2] != ctx.n_cols:
         raise ValueError(
@@ -2050,7 +2064,10 @@ def _gen_flyview(ctx):
         rot, trans = ctx.tensor(rot_np), ctx.tensor(trans_np)
     else:
         rot, trans = _zero_ego(stim)
-    return stim, flow, rot, trans, _ones_mask(stim)
+    # Segments cut from the same raw clip share a group id so they cannot be
+    # split across train/test (avoids leaking correlated frames).
+    group_id = torch.as_tensor(clip_ids, device=stim.device, dtype=torch.long)
+    return stim, flow, rot, trans, _ones_mask(stim), group_id
 
 
 def _gen_expanding_dot(ctx):
@@ -2175,9 +2192,23 @@ def get_stimulus(
     )
 
     stim_list, flow_list, rot_list, trans_list, mask_list = [], [], [], [], []
+    group_list = []
+    group_offset = 0
     for st in stimulus_types:
         generator = _STIMULUS_REGISTRY[st][0]
-        stim, flow, rot, trans, mask = generator(ctx)
+        result = generator(ctx)
+        # Generators may optionally return a per-example group id (6th element);
+        # those that don't get each example as its own group.
+        if len(result) == 6:
+            stim, flow, rot, trans, mask, group_id = result
+            group_id = group_id.to(device=stim.device, dtype=torch.long)
+        else:
+            stim, flow, rot, trans, mask = result
+            group_id = torch.arange(stim.shape[0], device=stim.device, dtype=torch.long)
+        # Offset so group ids stay unique across concatenated stimulus types.
+        group_list.append(group_id + group_offset)
+        if group_id.numel():
+            group_offset += int(group_id.max()) + 1
         stim_list.append(stim)
         flow_list.append(flow)
         rot_list.append(rot)
@@ -2189,6 +2220,7 @@ def get_stimulus(
     rotation = torch.cat(rot_list, dim=0)
     translation = torch.cat(trans_list, dim=0)
     train_mask = torch.cat(mask_list, dim=0)
+    group_id = torch.cat(group_list, dim=0)
 
     # Prepend the stationary pre-stimulus interval (mean-gray, zero flow/ego).
     pre_stim_points = int(round(pre_stim_time / model_dt))
@@ -2210,11 +2242,13 @@ def get_stimulus(
         return StimulusData(
             stimulus=stimulus, optic_flow=optic_flow, train_mask=train_mask,
             rotation=None, translation=None, num_eyes=1, eye_offset=None,
+            group_id=group_id,
         )
     return StimulusData(
         stimulus=stimulus, optic_flow=optic_flow, train_mask=train_mask,
         rotation=rotation, translation=translation, num_eyes=2,
         eye_offset=camera_offset_for_stimulus(stimulus_types),
+        group_id=group_id,
     )
 
 

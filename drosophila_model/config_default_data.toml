@@ -24,9 +24,11 @@ stim_time = 1.0
 pre_stim_time = 0.5
 post_stim_time = 0.0
 seed = 0
-# Fraction (0, 1] of each baked dataset to use for training. Training loads the
-# data and keeps the first `train_fraction` of examples per stimulus type,
-# cropping off the last (1 - train_fraction) which is reserved for testing.
+# Fraction (0, 1] of each baked dataset to use for training. At bake time
+# create_training_data.py splits each dataset along the example axis into a
+# `<type>_train.pt` (first `train_fraction`) and `<type>_test.pt` (the
+# remaining 1 - train_fraction). Training loads only the `_train.pt`; the
+# `_test.pt` is reserved for later analysis.
 train_fraction = 0.75
 
 [random_pano]
