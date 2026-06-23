@@ -85,12 +85,16 @@ def main() -> None:
     mem_after_stimulus = _peak_rss_bytes()
 
     # --- Warmup (CUDA kernel compilation, cuDNN autotuning, etc.) ---
+    # Also build the cached column mappings here so the per-frame loop below is
+    # steady-state (the first call constructs mappings, a one-time cost we don't
+    # want polluting the per-step timing).
     print("\nWarmup run...")
     with torch.no_grad():
-        model.regions['optic_lobe'].estimate_ego_motion_from_image(
+        _, _, warmup_r_res, _ = model.regions['optic_lobe'].estimate_ego_motion_from_image(
             right_stim[:, :1, :], left_stim[:, :1, :],
         )
         _sync(device)
+    warmup_cached_mappings = warmup_r_res["mappings"]
 
     # --- Time full forward pass ---
     print(f"\nRunning full forward pass on device={device}...")
@@ -110,7 +114,7 @@ def main() -> None:
         state_left = None
         filter_state_right = None
         filter_state_left = None
-        cached_mappings = None
+        cached_mappings = warmup_cached_mappings
         for t in range(n_time):
             right_frame = right_stim[:, t : t + 1, :]
             left_frame = left_stim[:, t : t + 1, :]
@@ -128,8 +132,6 @@ def main() -> None:
             _sync(device)
             frame_times.append(time.perf_counter() - t0)
 
-            if cached_mappings is None:
-                cached_mappings = r_res["mappings"]
             state_right = r_res["model_state"]["v"]
             state_left = l_res["model_state"]["v"]
             filter_state_right = r_res["model_state"]["filter_state"]

@@ -68,13 +68,18 @@ def _log_vee(R):
     return angle / (2.0 * np.sin(angle)) * w
 
 
-def reconstruct_odometry(flow, depth, phi, theta, fps, flow_flip, swap_flow=False):
+def reconstruct_odometry(flow, depth, phi, theta, fps, flow_flip, swap_flow=False,
+                         noise_std=0.0, rng=None):
     """Solve (rotation deg/s, translation units/s) from flow + depth.
 
     Mirrors ``bake_fly_view_dataset``: flow is rad/frame, optionally sign-flipped
     (the bake default), scaled to rad/s, and fed with per-column depth into the
     closed-form known-depth solver. ``swap_flow`` exchanges the d_right / d_up
     components before solving (diagnostic for a basis swap).
+
+    ``noise_std`` (rad/s) adds i.i.d. Gaussian noise to each retinal flow
+    component (after sign/scale, before the solve), simulating measurement error
+    on the ground-truth flow. ``rng`` is an optional ``np.random.Generator``.
     """
     bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
     sign = -1.0 if flow_flip else 1.0
@@ -83,6 +88,10 @@ def reconstruct_odometry(flow, depth, phi, theta, fps, flow_flip, swap_flow=Fals
     d_up = flow_rad_s[..., 1]
     if swap_flow:
         d_right, d_up = d_up, d_right
+    if noise_std > 0:
+        rng = rng or np.random.default_rng()
+        d_right = d_right + rng.normal(0.0, noise_std, size=d_right.shape)
+        d_up = d_up + rng.normal(0.0, noise_std, size=d_up.shape)
     omega, trans = estimate_ego_motion_known_depth(
         phi, theta,
         torch.from_numpy(d_right),
@@ -176,6 +185,104 @@ def plot_clip(clip_idx, recon_rot, recon_trans, true_rot, true_trans, dt, out_di
     print(f"  Saved {out_path}")
 
 
+def _rms(a):
+    return float(np.sqrt(np.mean(a ** 2)))
+
+
+def run_noise_sweep(d, clips, phi, theta, fps, flow_flip, noise_fracs, n_trials,
+                    out_dir, seed=0):
+    """Add Gaussian noise to the ground-truth flow, reconstruct, and measure how
+    much each DOF gets perturbed vs the noise-free (perfect) reconstruction.
+
+    The noise level is a fraction of each clip's own RMS retinal flow speed
+    (rad/s), so ``noise_frac=0.05`` is 5% flow noise. For each DOF we report the
+    RMS reconstruction error normalized by that DOF's ground-truth RMS, averaged
+    over the requested clips and trials. This isolates the conditioning question:
+    if translation flow is small relative to rotation flow, the translation
+    estimate should blow up far faster with noise than rotation does.
+    """
+    rng = np.random.default_rng(seed)
+    rot_axes = AXIS_LABELS
+    trans_axes = AXIS_LABELS
+    # err[kind][noise_idx] -> list over (clip, trial, axis) of normalized RMS error
+    rot_err = np.zeros((len(noise_fracs), 3))
+    trans_err = np.zeros((len(noise_fracs), 3))
+    rot_count = np.zeros((len(noise_fracs), 3))
+    trans_count = np.zeros((len(noise_fracs), 3))
+
+    sl = slice(1, -1)
+    for idx in clips:
+        flow = np.asarray(d["forward_flows"][idx], dtype=np.float64)
+        depth = np.asarray(d["depths"][idx], dtype=np.float64)
+        if flow.shape[0] < 3:
+            continue
+        true_rot, true_trans, _ = file_odometry(d, idx, fps)
+
+        # Per-clip flow scale: RMS speed over valid columns (rad/s).
+        valid = ~(np.isnan(flow).any(axis=-1) |
+                  (np.hypot(flow[..., 0], flow[..., 1]) > 1.0))
+        speed = np.hypot(flow[..., 0], flow[..., 1]) * fps
+        flow_rms = _rms(speed[valid]) if valid.any() else 0.0
+
+        for ni, frac in enumerate(noise_fracs):
+            noise_std = frac * flow_rms
+            for _ in range(n_trials if frac > 0 else 1):
+                rec_rot, rec_trans = reconstruct_odometry(
+                    flow, depth, phi, theta, fps, flow_flip,
+                    noise_std=noise_std, rng=rng)
+                for i in range(3):
+                    denom_r = true_rot[sl, i].std() + 1e-12
+                    denom_t = true_trans[sl, i].std() + 1e-12
+                    rot_err[ni, i] += _rms(rec_rot[sl, i] - true_rot[sl, i]) / denom_r
+                    trans_err[ni, i] += _rms(rec_trans[sl, i] - true_trans[sl, i]) / denom_t
+                    rot_count[ni, i] += 1
+                    trans_count[ni, i] += 1
+
+    rot_err /= np.maximum(rot_count, 1)
+    trans_err /= np.maximum(trans_count, 1)
+
+    print("\nNoise sweep (normalized RMS error = RMS(recon - truth) / std(truth)):")
+    header = "  noise%   " + "".join(f"rot[{a.split()[0]}] " for a in rot_axes) \
+             + "  " + "".join(f"trn[{a.split()[0]}] " for a in trans_axes)
+    print(header)
+    for ni, frac in enumerate(noise_fracs):
+        row = f"  {frac*100:5.1f}%  "
+        row += "".join(f"{rot_err[ni, i]:8.3f} " for i in range(3))
+        row += "  "
+        row += "".join(f"{trans_err[ni, i]:8.3f} " for i in range(3))
+        print(row)
+
+    # Summary: mean over axes, rotation vs translation.
+    print("\n  noise%    rot(mean)   trans(mean)   ratio(trans/rot)")
+    for ni, frac in enumerate(noise_fracs):
+        rm = rot_err[ni].mean()
+        tm = trans_err[ni].mean()
+        ratio = tm / (rm + 1e-12)
+        print(f"  {frac*100:5.1f}%   {rm:9.3f}   {tm:9.3f}     {ratio:8.1f}x")
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fracs_pct = np.array(noise_fracs) * 100
+    ax.plot(fracs_pct, rot_err.mean(axis=1), "o-", color="#377eb8",
+            label="rotation (mean over axes)", linewidth=2)
+    ax.plot(fracs_pct, trans_err.mean(axis=1), "s-", color="#e41a1c",
+            label="translation (mean over axes)", linewidth=2)
+    for i, a in enumerate(rot_axes):
+        ax.plot(fracs_pct, rot_err[:, i], ":", color="#377eb8", alpha=0.4)
+    for i, a in enumerate(trans_axes):
+        ax.plot(fracs_pct, trans_err[:, i], ":", color="#e41a1c", alpha=0.4)
+    ax.set_xlabel("Flow noise (% of clip RMS flow speed)")
+    ax.set_ylabel("Normalized RMS error  [RMS(recon - truth) / std(truth)]")
+    ax.set_title(f"Ego-motion sensitivity to flow noise\n"
+                 f"{len(clips)} clips, {n_trials} trials/level (dotted = per-axis)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    out_path = out_dir / "flyview_odometry_noise_sweep.png"
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"\n  Saved {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Validate fly-view odometry reconstruction.")
     parser.add_argument("--clips", type=int, nargs="+", default=None,
@@ -185,6 +292,14 @@ def main():
                              "the bake no longer inverts).")
     parser.add_argument("--swap-flow", action="store_true",
                         help="Swap the d_right / d_up flow components before solving.")
+    parser.add_argument("--noise-sweep", action="store_true",
+                        help="Add Gaussian noise to the ground-truth flow and measure "
+                             "how much each DOF's reconstruction is perturbed.")
+    parser.add_argument("--noise-fracs", type=float, nargs="+",
+                        default=[0.0, 0.01, 0.02, 0.05, 0.1, 0.2],
+                        help="Noise levels as fraction of each clip's RMS flow speed.")
+    parser.add_argument("--noise-trials", type=int, default=10,
+                        help="Random noise realizations averaged per noise level.")
     parser.add_argument("--config-path", type=str, default=None)
     args = parser.parse_args()
     flow_flip = args.negate_flow
@@ -205,6 +320,12 @@ def main():
     out_dir = Path(__file__).resolve().parents[3] / "figures" / "verify_flyview_odometry"
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"fps={fps:.4f}, flow_flip={flow_flip}, {n_clips} clips total -> {out_dir}")
+
+    if args.noise_sweep:
+        run_noise_sweep(d, clips, phi, theta, fps, flow_flip,
+                        args.noise_fracs, args.noise_trials, out_dir)
+        print("Done.")
+        return
 
     # Aggregate per-axis gain (recon ~ gain * truth) across the plotted clips.
     rot_recon_all, rot_true_all, tr_recon_all, tr_true_all = [], [], [], []

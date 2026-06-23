@@ -357,11 +357,13 @@ def _run_two_eyes(args, model, config, data_config, output_dir,
         )
 
         # Overlay the model's estimated ego-motion (dotted) on the stimulus'
-        # ground-truth rotational/translational velocity.
+        # ground-truth rotational/translational velocity. Pass the dataset's
+        # registered camera offset (0 for single-viewpoint renders like flyview)
+        # so the solver matches training instead of the region's default rig gap.
         with torch.no_grad():
             pred_rot, pred_trans, _, _ = \
                 model.regions['optic_lobe'].estimate_ego_motion_from_image(
-                    right_input, left_input)
+                    right_input, left_input, camera_offset=data.eye_offset)
         pred_rot_np = pred_rot[0].cpu().numpy()[:num_frames]
         pred_trans_np = pred_trans[0].cpu().numpy()[:num_frames]
         true_rot = observer_rotation_np[stim_index, :num_frames]
@@ -564,10 +566,13 @@ def _run_ego_motion_two_eyes(args, model, config, data_config, output_dir,
 
         print(f"\nEstimating ego-motion for stimulus {stim_index} "
               f"({num_frames} frames, N={N})...")
+        # Pass the dataset's registered camera offset (0 for single-viewpoint
+        # renders like flyview) so the solver matches training rather than the
+        # region's default rig gap.
         with torch.no_grad():
             pred_rot, pred_trans, right_res, left_res = \
                 model.regions['optic_lobe'].estimate_ego_motion_from_image(
-                    right_input, left_input)
+                    right_input, left_input, camera_offset=data.eye_offset)
         pred_flow_right = right_res["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()[:num_frames]
         pred_flow_left = left_res["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()[:num_frames]
         pred_rot_np = pred_rot[0].cpu().numpy()[:num_frames]
