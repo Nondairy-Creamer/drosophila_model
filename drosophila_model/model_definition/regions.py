@@ -313,8 +313,8 @@ class OpticLobeRegion(RegionView):
     left eye is modelled as a mirrored right eye (:meth:`predict_two_eyes`).
 
     Geometry loaded from ``optic_lobe_columns.parquet`` in the baked bundle
-    (not written by ``format_connectome_data``; it ships with the connectome
-    data and must be copied into ``connectome_data/baked/``):
+    (written by ``data_handling.build_column_geometry`` from the Reiser lab
+    eye map):
 
     - ``column_indices``: ``(C,)`` int64 — every hex column, ``0..C-1``. A
       column's id is also its position on the stimulus, recording and readout

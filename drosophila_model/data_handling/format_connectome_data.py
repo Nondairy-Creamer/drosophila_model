@@ -48,11 +48,10 @@ Writes the baked bundle to ``<data_folder>/connectome_data/baked``:
     assignment (loaded by :class:`regions.OpticLobeRegion`).
     columns: ``root_id, column_index`` (0-indexed).
 
-The empirical per-column geometry file ``optic_lobe_columns.parquet`` (the
-right-eye viewing direction of each column, from the Reiser lab eye map of
-Zhao et al. 2025, keyed by the Codex column ``p, q``) is NOT written here —
-it ships with the data bundle and must already exist in the baked directory
-before models can load.
+The per-column geometry file ``optic_lobe_columns.parquet`` (the right-eye
+viewing direction of each column, from the Reiser lab eye map of Zhao et al.
+2025) is written by :mod:`drosophila_model.data_handling.build_column_geometry`,
+which runs here first when the file is missing.
 
 To add support for another area, just declare a new ``RegionView``
 subclass with ``neuropils = [...]`` in :mod:`regions` and register it in
@@ -66,7 +65,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from drosophila_model.config import get_data_folder, load_config
-from drosophila_model.data_handling import split_ct1
+from drosophila_model.data_handling import build_column_geometry, split_ct1
 
 
 _ROOT_ID_DTYPE = np.int64
@@ -144,6 +143,9 @@ def main() -> None:
         split_ct1.split_ct1(folder)
     ct1_pieces = pd.read_parquet(baked_dir / 'ct1_pieces.parquet')
     ct1_connections = pd.read_parquet(baked_dir / 'ct1_connections.parquet')
+    if not (baked_dir / 'optic_lobe_columns.parquet').exists():
+        print("Column geometry not found; running build_column_geometry ...")
+        build_column_geometry.build_column_geometry(folder)
 
     print(f"Reading raw CSVs from {raw_dir} ...")
     cell_types_df = pd.read_csv(

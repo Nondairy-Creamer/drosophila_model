@@ -25,3 +25,4 @@ scipy
 pytest
 h5py
 scikit-learn
+rdata

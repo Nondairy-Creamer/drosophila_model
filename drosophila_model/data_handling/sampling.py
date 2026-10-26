@@ -24,7 +24,7 @@ def load_column_phi_theta(data_folder):
     """Load the right-eye column directions without building the model.
 
     Reads ``<data_folder>/connectome_data/baked/optic_lobe_columns.parquet``,
-    which ships with the connectome data (no script in this repo writes it).
+    written by :mod:`drosophila_model.data_handling.build_column_geometry`.
     Rows are ordered by ``column_index``, which must run ``0..N-1``: the model
     addresses stimulus channels by global column index, so row ``k`` of every
     stimulus must be column ``k``.
@@ -35,9 +35,8 @@ def load_column_phi_theta(data_folder):
     col_path = Path(data_folder) / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
     if not col_path.exists():
         raise FileNotFoundError(
-            f"Optic-lobe column file not found: {col_path}. It ships with the "
-            "connectome data (no script in this repo produces it); place it in "
-            "connectome_data/baked/."
+            f"Optic-lobe column file not found: {col_path}. Build it with "
+            "`python -m drosophila_model.data_handling.build_column_geometry`."
         )
     column_info_df = pd.read_parquet(col_path).sort_values('column_index')
     if not np.array_equal(column_info_df['column_index'].to_numpy(),

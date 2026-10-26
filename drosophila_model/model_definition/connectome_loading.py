@@ -13,8 +13,7 @@ The bundle is produced once by :mod:`format_connectome_data` and stored under
   ``pre_root_id, post_root_id, synapse_counts, nt_type, neuropil``.
 - ``<region>_*.parquet`` — per-region geometry / lookups, owned and loaded
   by the corresponding :class:`regions.RegionView` subclass (e.g.
-  ``optic_lobe_columns.parquet``, which ships with the connectome data
-  rather than being written by ``format_connectome_data``, and
+  ``optic_lobe_columns.parquet``, written by ``build_column_geometry``, and
   ``optic_lobe_column_index.parquet``).
 
 :func:`load_connectome` takes a ``{region_name: {'neuropils': [...],
