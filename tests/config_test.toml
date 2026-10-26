@@ -8,7 +8,7 @@ nonlinearity = "Softplus"
 dt = 0.01
 synapse_count_threshold = 2
 use_connectome_subset = [
-    'L2', 'L4', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'CT1', 'T5a', 'T5b', 'T5c', 'T5d',
+    'L2', 'L4', 'Tm1', 'Tm2', 'Tm4', 'Tm9', 'T5a', 'T5b', 'T5c', 'T5d',
     'L1', 'L3', 'L5', 'Mi1', 'Tm3', 'Mi4', 'Mi9', 'C2', 'C3', 'T4a', 'T4b', 'T4c' ,'T4d'
 ]
 
@@ -25,25 +25,12 @@ num_steps = 100
 save_every = 10
 input_noise_std = 0.16
 contrast_std = 0.2
-random_flip_input = true
 loss_components = ['flow_loss']
 alpha = 0.01
 clip_norm = 'none'
-use_synthetic_data = true
 
 [stimulus]
 stimulus_type = 'random_sine'
-stim_time = 1.0
-pre_stim_time = 0.0
-post_stim_time = 0.0
-velocity_amp = 150.0
-velocity_time_scale = 0.2
-num_repeats = 1
-temporal_frequencies = [
-    2,
-    4,
-    8,
-]
 
-[data]
-data_folder = "../drosophila_model_data"
+# No [data] table: tests/model_factory.py takes [data].data_folder from the
+# repo-root config.toml (or the default).

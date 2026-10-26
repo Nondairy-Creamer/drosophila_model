@@ -3,28 +3,32 @@
 Top-level so it's obvious where to import from:
 
     from drosophila_model.config import load_config, save_config
+
+Three loaders cover every use:
+
+* :func:`load_config` -- the live config for this machine: the packaged
+  defaults (``config_default.toml`` + ``config_default_data.toml``) overlaid
+  with the user's gitignored ``config.toml`` / ``config_data.toml``. Strictly
+  validated so typos fail loudly.
+* :func:`load_run_config` -- the config a trained model was saved with
+  (``models/<run>/config.toml``). Its saved data tables are kept as-is; only
+  ``[data].data_folder`` is taken from this machine's ``config.toml``.
+* :func:`get_data_folder` -- the one way to resolve ``[data].data_folder``
+  (default ``../drosophila_model_data``, next to the repo; override it in
+  ``config.toml``).
 """
 
 from __future__ import annotations
 
 import os
 import tempfile
+import tomllib
 import warnings
 from importlib import resources
 from pathlib import Path
 from typing import Any, Dict
 
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
-
-try:
-    # Python <3.11 needs a writer; on 3.11+ tomllib reads but doesn't write,
-    # so tomli_w is the writer either way.
-    import tomli_w as toml_writer
-except ImportError:  # pragma: no cover - tomli_w present per requirements for <3.11
-    toml_writer = None
+import tomli_w
 
 
 # Paths under which a user config may introduce keys that aren't in
@@ -32,24 +36,21 @@ except ImportError:  # pragma: no cover - tomli_w present per requirements for <
 #
 #   ('model', 'regions') -- region names are user-defined (the default only
 #       ships ``optic_lobe``; configs that introduce another area such as
-#       ``antenna_lobe`` add their own sub-table). The keys *inside* each
-#       region sub-table are validated at runtime by the corresponding
-#       ``RegionView._load_extras`` (see model_definition/regions.py), which
-#       raises on unknown region opts. So we stop validating at this depth.
+#       ``antenna_lobe`` add their own sub-table). Region names are checked
+#       against ``regions.REGION_REGISTRY`` and the keys *inside* each region
+#       sub-table by the corresponding ``RegionView._load_extras`` (see
+#       model_definition/regions.py), so we stop validating at this depth.
 #
 #   ('run_info',) -- added programmatically by ``run_model.py`` to record
-#       per-run provenance (seed, device, run_id) and persisted into saved
-#       configs. Not part of the user-editable schema; allow any contents.
-#   ('data',) -- the stimulus/dataset generation parameters loaded from the
-#       data config (config_default_data.toml + config_data.toml) are merged
-#       into config['data'] by load_config. A saved run config.toml therefore
-#       embeds those tables (shared, random_pano, ...), which are not in
-#       config_default.toml's [data]. Stop validating at this depth here; the
-#       data overlay is still strictly validated inside _load_data_config.
+#       per-run provenance (seed, device, run_id, eye geometry) and persisted
+#       into saved configs. Not part of the user-editable schema.
+#
+# ``[data]`` is validated too: ``data_folder`` against config_default.toml
+# and the stimulus/dataset tables (``[data.shared]``, ``[data.<type>]``)
+# against config_default_data.toml.
 _EXTENSIBLE_PATHS: frozenset[tuple[str, ...]] = frozenset({
     ('model', 'regions'),
     ('run_info',),
-    ('data',),
 })
 
 
@@ -68,28 +69,41 @@ def load_config(config_path: str = 'config.toml',
     for the extensible paths declared in :data:`_EXTENSIBLE_PATHS`. Unknown
     keys raise ``ValueError`` to catch silent typos / dead config.
 
-    The GPU/CPU device for the model is ``config['model']['device']``. A
-    ``[run_info]`` table (if present) is only provenance from saved runs and is
-    not used to set the model device.
+    ``[model].device`` is resolved with :func:`resolve_device`, so a CUDA
+    device falls back to CPU (with a warning) on machines without CUDA.
 
     The stimulus/dataset generation parameters (default
     ``config_default_data.toml`` + optional ``data_config_path`` overlay) are
     loaded and merged into ``config['data']`` alongside ``data_folder``, so
     callers read ``config['data']['shared'][...]`` /
     ``config['data'][<stimulus_type>][...]`` rather than a separate loader.
+    ``[data.<table>]`` tables in ``config_path`` are applied too, under the
+    ``data_config_path`` overlay (which wins where both set a key).
+
+    Read ``[data].data_folder`` with :func:`get_data_folder`, which raises a
+    clear error when the folder does not exist.
 
     Returns:
         Dictionary containing the merged configuration
     '''
-    default_resource = resources.files('drosophila_model').joinpath('config_default.toml')
-    with default_resource.open('rb') as f:
-        config = tomllib.load(f)
+    config = _load_default('config_default.toml')
+    data_defaults = _load_default('config_default_data.toml')
 
     user_path = Path(config_path)
+    user_data_tables = {}
     if user_path.exists():
-        with open(user_path, 'rb') as f:
-            user_config = tomllib.load(f)
-        _validate_user_keys(user_config, config, source=str(user_path))
+        user_config = _read_toml(user_path)
+        # [data] holds data_folder (schema: config_default.toml) plus
+        # optional stimulus/dataset tables (schema: config_default_data.toml).
+        user_data = user_config.get('data', {})
+        user_data_tables = {k: v for k, v in user_data.items() if isinstance(v, dict)}
+        _validate_user_keys(user_data_tables, data_defaults, source=str(user_path),
+                            default_name='config_default_data.toml', path=('data',))
+        if 'data' in user_config:
+            user_config['data'] = {k: v for k, v in user_data.items()
+                                   if k not in user_data_tables}
+        _validate_user_keys(user_config, config, source=str(user_path),
+                            default_name='config_default.toml')
         config = _merge_configs(config, user_config)
     elif config_path != 'config.toml':
         warnings.warn(
@@ -101,55 +115,127 @@ def load_config(config_path: str = 'config.toml',
 
     # Fold the stimulus/dataset generation config into config['data'] next to
     # data_folder, so there is a single config dict to pass around.
-    data_config = _load_data_config(data_config_path)
-    config.setdefault('data', {})
+    data_config = _merge_configs(data_defaults, user_data_tables)
+    data_config = _merge_configs(data_config,
+                                 _load_data_overlay(data_config_path, data_defaults))
     config['data'] = _merge_configs(config['data'], data_config)
 
     config = _convert_none_strings(config)
+    config['model']['device'] = resolve_device(config['model']['device'])
     return config
 
 
-def _load_data_config(config_path: str = 'config_data.toml') -> dict:
+def load_run_config(path: os.PathLike | str,
+                    local_config_path: str = 'config.toml') -> dict:
     '''
-    Load the stimulus/dataset generation config (default + user overlay).
+    Load the config a trained model was saved with.
+
+    ``path`` is a model folder (``models/<run>``) or its ``config.toml``. The
+    saved file is merged over the packaged defaults. The saved ``[data]``
+    generation tables are kept as they were at training time (they are *not*
+    replaced by this machine's ``config_data.toml``).
+
+    ``[data].data_folder`` is a property of the machine, not the run, so it is
+    taken from the local ``config.toml`` when that file sets it.
+    ``[model].device`` is resolved with :func:`resolve_device`.
+    '''
+    path = Path(path)
+    if path.is_dir():
+        path = path / 'config.toml'
+    config = _load_default('config_default.toml')
+    config['data'] = _merge_configs(config.get('data', {}),
+                                    _load_default('config_default_data.toml'))
+    config = _merge_configs(config, _read_toml(path))
+
+    local_path = Path(local_config_path)
+    if local_path.exists():
+        local_folder = _read_toml(local_path).get('data', {}).get('data_folder')
+        if local_folder:
+            config['data']['data_folder'] = local_folder
+
+    config = _convert_none_strings(config)
+    config['model']['device'] = resolve_device(config['model']['device'])
+    return config
+
+
+def get_data_folder(config: dict) -> Path:
+    '''
+    Return ``[data].data_folder`` as a Path, or raise a clear error.
+
+    The default (``../drosophila_model_data``) is relative to the working
+    directory, so run scripts from the repo root or set an absolute
+    ``data_folder`` in the ``[data]`` table of your (gitignored)
+    ``config.toml``.
+    '''
+    folder = (config.get('data') or {}).get('data_folder')
+    if not folder:
+        raise ValueError(
+            "[data].data_folder is empty. Set it in the [data] table of your "
+            "config.toml."
+        )
+    path = Path(folder).expanduser()
+    if not path.is_dir():
+        raise FileNotFoundError(
+            f"[data].data_folder does not exist: {path.resolve()!s}. Put the "
+            "data bundle there or set [data].data_folder in config.toml "
+            f"(read from the current directory, {Path.cwd()}; run scripts "
+            "from the repo root)."
+        )
+    return path
+
+
+def resolve_device(device: str) -> str:
+    '''
+    Return ``device``, falling back to ``'cpu'`` when CUDA is unavailable.
+
+    Lets the same config.toml (e.g. ``device = "cuda:0"``) be used on a GPU
+    server and on a laptop.
+    '''
+    device = str(device)
+    if device.startswith('cuda'):
+        import torch
+        if not torch.cuda.is_available():
+            warnings.warn(
+                f"Config device '{device}' requested but CUDA is not available; "
+                "using 'cpu'.",
+                stacklevel=3,
+            )
+            return 'cpu'
+    return device
+
+
+def _load_data_overlay(config_path: str, data_defaults: dict) -> dict:
+    '''
+    Read and validate the user's stimulus/dataset generation overlay.
 
     Same two-file pattern as :func:`load_config`: the default ships inside the
-    package as ``drosophila_model/config_default_data.toml`` (located via
-    ``importlib.resources``), and the optional user overlay (``config_path``,
-    default ``config_data.toml`` at the repo root) is gitignored and resolved
-    relative to CWD.
+    package as ``drosophila_model/config_default_data.toml`` (``data_defaults``),
+    and the optional user overlay (``config_path``, default
+    ``config_data.toml`` at the repo root) is gitignored and resolved relative
+    to CWD.
 
     The schema is a ``[shared]`` table of parameters common to every dataset
     plus one ``[<stimulus_type>]`` table per generator for its specific
     parameters (see ``config_default_data.toml``). Every key in the overlay
     must already exist in the default, or ``ValueError`` is raised.
 
-    Internal helper for :func:`load_config`; the result is merged into
-    ``config['data']`` rather than returned to callers directly.
-
-    Returns:
-        Merged data-config dict (``"none"`` strings converted to ``None``).
+    Internal helper for :func:`load_config`, which merges the result into
+    ``config['data']``. Returns ``{}`` when the overlay file does not exist.
     '''
-    default_resource = resources.files('drosophila_model').joinpath('config_default_data.toml')
-    with default_resource.open('rb') as f:
-        config = tomllib.load(f)
-
     user_path = Path(config_path)
-    if user_path.exists():
-        with open(user_path, 'rb') as f:
-            user_config = tomllib.load(f)
-        _validate_user_keys(user_config, config, source=str(user_path))
-        config = _merge_configs(config, user_config)
-    elif config_path != 'config_data.toml':
-        warnings.warn(
-            f'Data config file not found: {user_path.resolve()!s}. '
-            'Using only config_default_data.toml (no overlay). '
-            'Did you mean config_data.toml?',
-            stacklevel=2,
-        )
-
-    config = _convert_none_strings(config)
-    return config
+    if not user_path.exists():
+        if config_path != 'config_data.toml':
+            warnings.warn(
+                f'Data config file not found: {user_path.resolve()!s}. '
+                'Using only config_default_data.toml (no overlay). '
+                'Did you mean config_data.toml?',
+                stacklevel=3,
+            )
+        return {}
+    user_config = _read_toml(user_path)
+    _validate_user_keys(user_config, data_defaults, source=str(user_path),
+                        default_name='config_default_data.toml')
+    return user_config
 
 
 def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
@@ -158,35 +244,43 @@ def save_config(config: Dict[str, Any], path: os.PathLike | str) -> None:
 
     Args:
         config: Configuration dictionary to be written
-        path: Output TOML path (default: 'config.toml')
+        path: Output TOML path
 
-    The write is performed atomically by writing to a temporary file
-    in the destination directory and then replacing the target.
+    The write is atomic: the TOML is written to a temporary file in the
+    destination directory and then moved over the target.
     '''
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if toml_writer is None:
-        raise RuntimeError(
-            "TOML writer not available. Please install 'tomli-w' for writing TOML files."
-        )
+    text = tomli_w.dumps(_convert_none_to_strings(config))
 
-    config_serializable = _convert_none_to_strings(config)
-
-    dir_fd = os.open(str(output_path.parent), os.O_RDONLY)
-    try:
-        with tempfile.NamedTemporaryFile('w', delete=False, dir=str(output_path.parent), suffix='.tmp') as tmp:
-            tmp_path = Path(tmp.name)
-            tmp.write(toml_writer.dumps(config_serializable))
+    with tempfile.NamedTemporaryFile('w', delete=False, dir=str(output_path.parent),
+                                     suffix='.tmp', encoding='utf-8') as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            tmp.write(text)
             tmp.flush()
             os.fsync(tmp.fileno())
+        except BaseException:
+            tmp.close()
+            tmp_path.unlink(missing_ok=True)
+            raise
+    try:
         os.replace(tmp_path, output_path)
-        os.fsync(dir_fd)
-    finally:
-        try:
-            os.close(dir_fd)
-        except Exception:
-            pass
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _load_default(name: str) -> dict:
+    '''Read one of the TOML defaults shipped inside the package.'''
+    with resources.files('drosophila_model').joinpath(name).open('rb') as f:
+        return tomllib.load(f)
+
+
+def _read_toml(path: Path) -> dict:
+    with open(path, 'rb') as f:
+        return tomllib.load(f)
 
 
 def _merge_configs(default: dict, user: dict) -> dict:
@@ -201,6 +295,7 @@ def _merge_configs(default: dict, user: dict) -> dict:
 
 
 def _validate_user_keys(user: dict, default: dict, *, source: str,
+                        default_name: str,
                         path: tuple[str, ...] = ()) -> None:
     '''Strict-validate user config keys against the default schema.
 
@@ -219,8 +314,8 @@ def _validate_user_keys(user: dict, default: dict, *, source: str,
         joined = ', '.join(unknown)
         raise ValueError(
             f"Unknown config key(s) in {source} not present in "
-            f"config_default.toml: {joined}. Add them to "
-            f"drosophila_model/config_default.toml first if intentional."
+            f"{default_name}: {joined}. Add them to "
+            f"drosophila_model/{default_name} first if intentional."
         )
 
 
