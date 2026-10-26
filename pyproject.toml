@@ -15,7 +15,6 @@ dependencies = [
     "imageio>=2.37.3",
     "imageio-ffmpeg>=0.6.0",  # bundled ffmpeg: imageio mp4 writer, and matplotlib's ffmpeg fallback in fly_eye/hexagonal_animation.py
     "matplotlib>=3.10.8",
-    "natsort>=8.4.0",
     "numpy>=2.4.3",
     "opencv-python>=4.13.0.92",
     "pandas>=3.0.1",

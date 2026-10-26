@@ -2,50 +2,59 @@
 Shared utilities for movie scripts.
 
 Provides:
-  - Movie rendering helpers (masked_rgba, setup_eye_axes, write_movie,
-    ylim_from_data). Per-eye flow rendering helpers are re-exported from
-    analysis_utilities (prepare_eye_quiver, init_eye_quiver, update_eye_quiver,
-    add_eye_colorwheel, ...).
-  - Scatter/quiver factory functions for the factory-based movie pipeline
-  - Re-exports from analysis_utilities (fig_to_rgb, angular_flow_to_cartesian_xz,
-    get_flow_key, make_flow_comparison_movie, make_stimulus_flow_movie)
+  - Movie rendering helpers: masked_rgba, write_movie, ylim_from_data, get_fov,
+    compute_filtered.
+  - Flow helpers: synthesize_two_eye_flow_from_odometry, subtract_rotation_flow.
+  - The diamond-layout cell-response movie: make_scatter_diamond_sequence_factory
+    + make_movie.
+  - Re-exports from analysis_utilities (fig_to_rgb, get_flow_key,
+    make_flow_comparison_movie, make_stimulus_flow_movie and the per-eye flow
+    rendering helpers prepare_eye_quiver, setup_eye_axis, init_eye_quiver,
+    update_eye_quiver, add_eye_colorwheel).
 """
 from pathlib import Path
 
-# Path to the `drosophila_model/` package root, used by `_load_flyeye_utils`
-# to find `fly_eye/utils.py` via direct file load (see comment there).
-# This file is at drosophila_model/analysis/movie_scripts/movie_utilities.py
-# → three parents up = drosophila_model/.
-_pkg_root = Path(__file__).resolve().parent.parent.parent
-
-
 import numpy as np
-import matplotlib
 import matplotlib.colors as mcolors
 from matplotlib import pyplot as plt
 import imageio as iio_v2
 
 from drosophila_model.analysis.model_analysis.analysis_utilities import (
     fig_to_rgb,
-    angular_flow_to_cartesian_xz,
     get_flow_key,
     make_flow_comparison_movie,
     make_stimulus_flow_movie,
-    flow_direction_colors,
-    update_direction_quiver,
-    add_direction_colorwheel,
     # Eye-view single-source-of-truth helpers
-    eye_cell_y,
-    eye_color_flip,
-    project_eye_flow,
     prepare_eye_quiver,
     setup_eye_axis,
-    setup_eye_axes as _setup_eye_axes_canonical,
-    eye_quiver_colors,
     init_eye_quiver,
     update_eye_quiver,
     add_eye_colorwheel,
 )
+from drosophila_model.fly_eye.utils import column_hex_centers, hex_vertices
+
+__all__ = [
+    # defined here
+    "masked_rgba",
+    "synthesize_two_eye_flow_from_odometry",
+    "write_movie",
+    "ylim_from_data",
+    "get_fov",
+    "compute_filtered",
+    "subtract_rotation_flow",
+    "make_scatter_diamond_sequence_factory",
+    "make_movie",
+    # re-exported from analysis_utilities
+    "fig_to_rgb",
+    "get_flow_key",
+    "make_flow_comparison_movie",
+    "make_stimulus_flow_movie",
+    "prepare_eye_quiver",
+    "setup_eye_axis",
+    "init_eye_quiver",
+    "update_eye_quiver",
+    "add_eye_colorwheel",
+]
 
 _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
 
@@ -75,24 +84,32 @@ def masked_rgba(values, mask, cmap=None, norm=None):
     return rgba
 
 
-def synthesize_two_eye_flow_from_odometry(rotation_deg_s, translation, phi, theta):
+def synthesize_two_eye_flow_from_odometry(rotation_deg_s, translation, phi, theta,
+                                          eye_offset=None):
     """Predicted two-eye optic flow (degrees) from per-frame odometry at depth Z=1.
 
     Used by the no-/with-model two-eye movie scripts as a fallback when a
     stimulus carries ground-truth ego-motion but no ground-truth optic flow
     (e.g. the drone rigs, whose stored ``optic_flow`` is all-NaN). The left eye
-    is the sagittal mirror of the right (``phi -> -phi``).
+    is the sagittal mirror of the right (``phi -> -phi``; the eye offset's
+    ``y`` flips, see ``OpticLobeRegion.mirror_camera_offset``).
 
     Args:
         rotation_deg_s: (T, 3) observer rotation rate in deg/s.
         translation: (T, 3) observer translation rate.
         phi, theta: (N,) right-eye column angles (radians).
+        eye_offset: optional length-3 right-eye camera offset
+            (``StimulusData.eye_offset``, same length unit as ``translation``).
+            Each eye then translates at ``translation + omega x offset``, the
+            rig geometry the two-eye ego-motion solver assumes. ``None`` puts
+            both eyes at the body centre.
 
     Returns:
         ``(flow_right, flow_left)``, each (T, N, 2) in degrees.
     """
     import torch
     from drosophila_model.model_definition.ego_motion import generate_optic_flow
+    from drosophila_model.model_definition.regions import OpticLobeRegion
 
     phi_right_t = torch.tensor(phi, dtype=torch.float32)
     theta_right_t = torch.tensor(theta, dtype=torch.float32)
@@ -100,22 +117,19 @@ def synthesize_two_eye_flow_from_odometry(rotation_deg_s, translation, phi, thet
     omega_t = torch.tensor(np.asarray(rotation_deg_s) * np.pi / 180.0, dtype=torch.float32)
     trans_t = torch.tensor(np.asarray(translation), dtype=torch.float32)
 
-    ur_r, uu_r = generate_optic_flow(phi_right_t, theta_right_t, omega_t, trans_t, 1.0)
-    ur_l, uu_l = generate_optic_flow(phi_left_t, theta_right_t, omega_t, trans_t, 1.0)
+    offset_right = offset_left = None
+    if eye_offset is not None:
+        offsets = OpticLobeRegion.mirror_camera_offset(eye_offset)
+        offset_right = torch.tensor(offsets['right'], dtype=torch.float32)
+        offset_left = torch.tensor(offsets['left'], dtype=torch.float32)
+
+    ur_r, uu_r = generate_optic_flow(phi_right_t, theta_right_t, omega_t, trans_t, 1.0,
+                                     offset=offset_right)
+    ur_l, uu_l = generate_optic_flow(phi_left_t, theta_right_t, omega_t, trans_t, 1.0,
+                                     offset=offset_left)
     flow_right = np.stack([ur_r.numpy(), uu_r.numpy()], axis=-1) * (180.0 / np.pi)
     flow_left = np.stack([ur_l.numpy(), uu_l.numpy()], axis=-1) * (180.0 / np.pi)
     return flow_right, flow_left
-
-
-def setup_eye_axes(ax_left, ax_right, cell_x, cell_z, x_margin=None, z_margin=None):
-    """Configure a pair of left/right eye axes (canonical convention).
-
-    Thin wrapper around the canonical
-    :func:`analysis_utilities.setup_eye_axes` (re-exported here under
-    ``_setup_eye_axes_canonical``) so existing call sites keep working.
-    """
-    _setup_eye_axes_canonical(ax_left, ax_right, cell_x, cell_z,
-                              x_margin=x_margin, z_margin=z_margin)
 
 
 def write_movie(fig, update_fn, num_frames, output_path, frame_rate, log_every=50):
@@ -153,50 +167,6 @@ def ylim_from_data(data, margin_frac=0.1, min_margin=0.01):
     return lo - margin, hi + margin
 
 
-def init_rate_comparison_axis(ax, true_rate, pred_rate, labels, model_dt,
-                              colors=None, ylabel="", title=""):
-    """Plot full true (solid) vs predicted (dashed) (T, C) time series.
-
-    Adds a vertical time cursor at t=0 and returns it; advance it per frame via
-    ``cursor.set_xdata([t, t])`` (see :func:`update_time_cursor`). Used to overlay
-    odometry (rotation/translation rate) ground truth against model predictions.
-
-    Parameters
-    ----------
-    ax : matplotlib Axes
-    true_rate, pred_rate : (T, C) arrays
-    labels : list of C channel labels
-    model_dt : seconds per time step
-    colors : optional list of per-channel colors
-    ylabel, title : axis labels
-    """
-    true_rate = np.asarray(true_rate)
-    pred_rate = np.asarray(pred_rate)
-    T = true_rate.shape[0]
-    times = np.arange(T) * model_dt
-    if colors is None:
-        colors = ["#e41a1c", "#377eb8", "#4daf4a"]
-    for i, label in enumerate(labels):
-        c = colors[i % len(colors)]
-        ax.plot(times, true_rate[:, i], color=c, linewidth=1.5, label=f"true {label}")
-        ax.plot(times, pred_rate[:, i], color=c, linewidth=1.2, linestyle="--",
-                label=f"pred {label}")
-    ax.set_xlim(times[0], times[-1] if T > 1 else times[0] + model_dt)
-    ax.set_ylim(*ylim_from_data(np.concatenate([true_rate, pred_rate], axis=0)))
-    ax.set_xlabel("time (s)")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.legend(loc="upper left", fontsize=7, ncol=2)
-    ax.grid(True, alpha=0.3)
-    return ax.axvline(times[0], color="k", linewidth=1.0, alpha=0.6)
-
-
-def update_time_cursor(cursor, t, model_dt):
-    """Move a vertical time-cursor line (from :func:`init_rate_comparison_axis`)."""
-    x = t * model_dt
-    cursor.set_xdata([x, x])
-
-
 def get_fov(in_fov, t):
     """Index a field-of-view mask that may be static (N,) or time-varying (T, N)."""
     if in_fov.ndim == 2:
@@ -216,100 +186,46 @@ def compute_filtered(model, input_batch):
 
 
 def subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
-    """Subtract rotation-induced flow, returning translation-only angular flow."""
-    phi_r = column_phi_theta[:, 0]
-    theta = column_phi_theta[:, 1]
-    phi_l = -phi_r
+    """Subtract rotation-induced flow, returning translation-only angular flow.
 
-    def _rotation_angular_flow(phi, theta, omega):
-        x = np.stack([np.sin(theta) * np.cos(phi),
-                      np.sin(theta) * np.sin(phi),
-                      np.cos(theta)], axis=-1)
-        e_phi = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=-1)
-        e_theta = np.stack([np.cos(theta) * np.cos(phi),
-                            np.cos(theta) * np.sin(phi),
-                            -np.sin(theta)], axis=-1)
-        u_rot = np.cross(x[None, :, :], omega[:, None, :])
-        d_right_rot = -np.einsum('tnj,nj->tn', u_rot, e_phi)
-        d_up_rot = -np.einsum('tnj,nj->tn', u_rot, e_theta)
-        return d_right_rot, d_up_rot
+    The rotational flow is :func:`ego_motion.generate_optic_flow` with zero
+    translation (depth-independent), at the right-eye columns and at their
+    sagittal mirror (``phi -> -phi``) for the left eye. It is linear in
+    ``omega``, so ``omega`` must be in the angular unit of the predicted flow.
 
-    dr_r, du_r = _rotation_angular_flow(phi_r, theta, omega)
-    dr_l, du_l = _rotation_angular_flow(phi_l, theta, omega)
-
-    out_right = pred_flow_right.copy()
-    out_right[:, :, 0] -= dr_r
-    out_right[:, :, 1] -= du_r
-
-    out_left = pred_flow_left.copy()
-    out_left[:, :, 0] -= dr_l
-    out_left[:, :, 1] -= du_l
-
-    return out_right, out_left
-
-
-# ---------------------------------------------------------------------------
-# Factory-based movie pipeline (formerly root movie_utilities.py)
-# ---------------------------------------------------------------------------
-
-
-def make_scatter_plot_factory(pred_plot, cell_x, cell_z):
+    Args:
+        pred_flow_right, pred_flow_left: (T, N, 2) predicted angular flow.
+        omega: (T, 3) rotation rate.
+        column_phi_theta: (N, 2) right-eye column (phi, theta) in radians.
     """
-    Returns a factory callable that, given a direction index, initializes a scatter plot and
-    provides an update function for per-frame rendering.
-    """
-    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+    import torch
+    from drosophila_model.model_definition.ego_motion import generate_optic_flow
 
-    def init_plot_for_direction(d, di):
-        fig, ax = plt.subplots(figsize=(6,4), dpi=120)
-        chosen_activity = pred_plot[di, :, :]
+    # torch.tensor copies: column_phi_theta may be a read-only (parquet) array.
+    phi_theta = torch.tensor(np.array(column_phi_theta), dtype=torch.float64)
+    omega_t = torch.tensor(np.array(omega), dtype=torch.float64)
+    no_translation = torch.zeros_like(omega_t)
 
-        ax.set_xlim(-1, 1); ax.set_ylim(-1, 1)
-        sc = ax.scatter(cell_x, cell_z, c=chosen_activity[0, :], cmap="viridis", norm=norm)
-        cbar = fig.colorbar(sc, ax=ax)
-        ax.set_xlabel('location in x, posterior <-> anterior')
-        ax.set_ylabel('location in z, ventral <-> dorsal')
-        ax.set_title(d)
-        num_frames = chosen_activity.shape[0]
-
-        def update(frame_t):
-            sc.set_array(chosen_activity[frame_t, :])
-            cbar.update_normal(sc)
-
-        return fig, update, num_frames
-
-    init_plot_for_direction.num_stimuli = int(pred_plot.shape[0])
-    init_plot_for_direction.uses_stimuli_index = True
-    return init_plot_for_direction
-
-
-def _load_flyeye_utils():
-    """Load fly_eye/utils.py directly, bypassing fly_eye/__init__.py so we don't
-    pull in optional deps (natsort, cv2) required by other fly_eye submodules."""
-    import importlib.util
-    utils_path = _pkg_root / "fly_eye" / "utils.py"
-    spec = importlib.util.spec_from_file_location("flyeye_utils_local", utils_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    outputs = []
+    for pred_flow, phi in ((pred_flow_right, phi_theta[:, 0]),
+                           (pred_flow_left, -phi_theta[:, 0])):
+        d_right, d_up = generate_optic_flow(phi, phi_theta[:, 1], omega_t,
+                                            no_translation, 1.0)
+        out = pred_flow.copy()
+        out -= torch.stack([d_right, d_up], dim=-1).numpy()
+        outputs.append(out)
+    return outputs[0], outputs[1]
 
 
 def _hex_polys_centered_to_extent(column_p_q, target_x, target_z):
     """
-    Build hexagon polygons for ``column_p_q`` (using FlyEye's flat-hex layout),
-    centered at the origin and scaled to match the extent spanned by
-    ``target_x``/``target_z``. Returns ``(verts, scale)`` where ``verts`` is
-    an ``(N, 6, 2)`` array suitable for ``matplotlib.collections.PolyCollection``.
+    Build hexagon polygons for ``column_p_q`` (the fly_eye hex-mosaic layout,
+    see :func:`fly_eye.utils.column_hex_centers`), centered at the origin and
+    scaled to match the extent spanned by ``target_x``/``target_z``. Returns
+    ``(verts, scale)`` where ``verts`` is an ``(N, 6, 2)`` array suitable for
+    ``matplotlib.collections.PolyCollection``.
     """
-    flyeye_utils = _load_flyeye_utils()
-    pixel_from_flat_hex = flyeye_utils.pixel_from_flat_hex
-    rotate_coords = flyeye_utils.rotate_coords
-    hex_vertices = flyeye_utils.hex_vertices
-
-    p = np.asarray(column_p_q[:, 0])
-    q = -np.asarray(column_p_q[:, 1])  # FlyEye convention (see visualize_stimulus.py)
-    x, y = pixel_from_flat_hex(p, q)
-    x, y = rotate_coords(x, y, -60.0)  # ROTATE_CORRECTION
+    x, y = column_hex_centers(column_p_q)
     x = x - x.mean()
     y = y - y.mean()
 
@@ -323,21 +239,22 @@ def _hex_polys_centered_to_extent(column_p_q, target_x, target_z):
 
 def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0, stim_cmap='viridis', stim_scale_frac=0.5, stim_size_frac=0.2, stim_p_q=None):
     """
-    New simple interface:
+    Diamond layout of four cell-type responses around the stimulus.
       - responses_dict: dict with 5 keys (in insertion order):
           ['<right>', '<left>', '<up>', '<down>', 'stimulus']
         Each value is a numpy array shaped [num_stimuli, num_time, num_columns].
       - The four non-'stimulus' keys are plotted simultaneously in a diamond:
           order (in insertion): Right at (+offset, 0), Left at (-offset, 0),
           Up at (0, +offset), Down at (0, -offset).
-        'stimulus' is plotted at the center with half spatial scale and smaller markers.
+        'stimulus' is plotted at the center, scaled by ``stim_scale_frac`` with
+        markers scaled by ``stim_size_frac``.
       - For each stimulus index, we render its full time series, followed by 25 blank frames.
       - If ``stim_p_q`` (an ``(N, 2)`` hex-grid coord array) is provided, the
-        center stimulus is rendered as a hexagonal mosaic via FlyEye's hex
+        center stimulus is rendered as a hexagonal mosaic via the fly_eye hex
         layout instead of a scatter (cell panels remain scatters).
     The returned init callable conforms to make_movie: init(d, di) -> (fig, update(frame_t), num_frames).
     This factory concatenates ALL stimuli back-to-back into a single movie (with gaps),
-    so the stimulus index parameter is ignored.
+    so the direction index ``di`` is ignored.
     """
     norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
     keys_in_order = list(responses_dict.keys())
@@ -364,8 +281,8 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
             dx, dz = position_by_index[idx]
             coords.append((scale * cell_x + dx, scale * cell_z + dz))
         coords.append((stim_coord_scale * cell_x, stim_coord_scale * cell_z))
-        x_all = np.concatenate([xy[0] for xy in coords]) if coords else (scale * cell_x)
-        y_all = np.concatenate([xy[1] for xy in coords]) if coords else (scale * cell_z)
+        x_all = np.concatenate([xy[0] for xy in coords])
+        y_all = np.concatenate([xy[1] for xy in coords])
         x_min, x_max = np.min(x_all), np.max(x_all)
         y_min, y_max = np.min(y_all), np.max(y_all)
         x_span = max(1e-6, x_max - x_min)
@@ -476,591 +393,17 @@ def make_scatter_diamond_sequence_factory(responses_dict, cell_x, cell_z, offset
 
         return fig, update, total_frames
 
-    init_plot_for_direction.num_stimuli = 1
-    init_plot_for_direction.uses_stimuli_index = False
-    return init_plot_for_direction
-
-
-def make_scatter_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, size_scale=1.0):
-    """
-    Side-by-side sequence view for a single cell type vs stimulus.
-      - responses_dict: dict containing exactly one non-'stimulus' key (treated as the cell)
-        and an optional 'stimulus' key.
-        Values are numpy arrays shaped [num_stimuli, num_time, num_columns].
-      - Plots the cell on the RIGHT at (+offset, 0) and the stimulus on the LEFT at (-offset, 0).
-      - Concatenates all stimuli back-to-back with a blank gap between them (like diamond sequence).
-    Returns an init callable suitable for make_movie that ignores the stimuli index parameter.
-    """
-    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-
-    keys_in_order = list(responses_dict.keys())
-    cell_keys = [k for k in keys_in_order if k != 'stimulus']
-    cell_key = cell_keys[0] if len(cell_keys) > 0 else None
-    stim_all = responses_dict.get('stimulus', None)
-
-    def init_plot_for_direction(d, di):
-        fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
-        try:
-            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-            ax.set_position([0, 0, 1, 1])
-        except Exception:
-            pass
-
-        left_x = -offset
-        right_x = +offset
-        coords = [
-            (scale * cell_x + left_x, scale * cell_z + 0.0),
-            (scale * cell_x + right_x, scale * cell_z + 0.0),
-        ]
-        x_all = np.concatenate([xy[0] for xy in coords])
-        y_all = np.concatenate([xy[1] for xy in coords])
-        x_min, x_max = np.min(x_all), np.max(x_all)
-        y_min, y_max = np.min(y_all), np.max(y_all)
-        x_span = max(1e-6, x_max - x_min)
-        y_span = max(1e-6, y_max - y_min)
-        span = max(x_span, y_span)
-        margin_frac = 0.02
-        half = 0.5 * span * (1.0 + margin_frac)
-        x_center = 0.5 * (x_min + x_max)
-        y_center = 0.5 * (y_min + y_max)
-        ax.set_xlim(x_center - half, x_center + half)
-        ax.set_ylim(y_center - half, y_center + half)
-        ax.set_aspect('equal', 'box')
-        ax.set_xticks([]); ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.set_axis_off()
-
-        base_ms = plt.rcParams.get("lines.markersize", 6.0)
-        base_s = float(base_ms) ** 2
-        s_cell = max(1.0, base_s * size_scale)
-        s_stim = max(1.0, s_cell * 0.8)
-
-        if stim_all is not None:
-            num_stimuli, L, num_cols = stim_all.shape
-        else:
-            cell_all = responses_dict.get(cell_key, None)
-            if cell_all is not None:
-                num_stimuli, L, num_cols = cell_all.shape
-            else:
-                num_stimuli, L, num_cols = 1, 0, cell_x.shape[0]
-
-        zero_vec = np.zeros(num_cols, dtype=float)
-
-        stim_initial = np.zeros(num_cols, dtype=float)
-        if stim_all is not None and num_stimuli > 0 and L > 0:
-            stim_initial = stim_all[0, 0, :]
-        stim_scatter = ax.scatter(
-            scale * cell_x + left_x, scale * cell_z + 0.0,
-            c=stim_initial, cmap="viridis", norm=norm, s=s_stim,
-            edgecolors='none', linewidths=0.0, antialiased=False,
-        )
-
-        cell_initial = np.zeros(num_cols, dtype=float)
-        cell_all = responses_dict.get(cell_key, None)
-        if cell_all is not None and num_stimuli > 0 and L > 0:
-            cell_initial = cell_all[0, 0, :]
-        cell_scatter = ax.scatter(
-            scale * cell_x + right_x, scale * cell_z + 0.0,
-            c=cell_initial, cmap="viridis", norm=norm, s=s_cell,
-            edgecolors='none', linewidths=0.0, antialiased=False,
-        )
-
-        blanks = 25
-        total_frames = num_stimuli * (L + blanks)
-
-        def update(frame_t):
-            if total_frames == 0 or L == 0:
-                stim_scatter.set_array(zero_vec)
-                cell_scatter.set_array(zero_vec)
-                return
-            block = L + blanks
-            stim_idx, within = divmod(frame_t, block)
-            if stim_idx >= num_stimuli:
-                stim_idx = num_stimuli - 1
-            if within < L:
-                t = within
-                if stim_all is not None and stim_idx < stim_all.shape[0]:
-                    stim_scatter.set_array(stim_all[stim_idx, t, :])
-                else:
-                    stim_scatter.set_array(zero_vec)
-                if cell_all is not None and stim_idx < cell_all.shape[0]:
-                    cell_scatter.set_array(cell_all[stim_idx, t, :])
-                else:
-                    cell_scatter.set_array(zero_vec)
-            else:
-                stim_scatter.set_array(zero_vec)
-                cell_scatter.set_array(zero_vec)
-
-        return fig, update, total_frames
-
-    init_plot_for_direction.num_stimuli = 1
-    init_plot_for_direction.uses_stimuli_index = False
-    return init_plot_for_direction
-
-
-def make_quiver_plot_factory(x_flow, z_flow, cell_x, cell_z):
-    """
-    Returns a factory callable that, given a direction index, initializes a quiver plot (+X from pred_plot_0, +Y from pred_plot_1)
-    and provides an update function for per-frame rendering. Arrow color encodes direction (hue) and amplitude (saturation).
-    """
-    _, max_mag = flow_direction_colors(x_flow, z_flow)
-
-    def init_plot_for_direction(d, di):
-        fig, ax = plt.subplots(figsize=(6,4), dpi=120)
-        chosen_u = -x_flow[di, :, :]
-        chosen_v = z_flow[di, :, :]
-
-        ax.set_xlim(-1, 1); ax.set_ylim(-1, 1)
-        colors_0, _ = flow_direction_colors(chosen_u[0, :], chosen_v[0, :], max_mag)
-        q = ax.quiver(
-            cell_x, cell_z,
-            chosen_u[0, :], chosen_v[0, :],
-            angles='xy', scale_units='xy', scale=1.0,
-        )
-        q.set_facecolor(colors_0)
-        q.set_edgecolor(colors_0)
-        add_direction_colorwheel(fig)
-        ax.set_xlabel('location in x, posterior <-> anterior')
-        ax.set_ylabel('location in z, ventral <-> dorsal')
-        ax.set_title(d)
-        num_frames = chosen_u.shape[0]
-
-        def update(frame_t):
-            update_direction_quiver(q, chosen_u[frame_t, :], chosen_v[frame_t, :], max_mag)
-
-        return fig, update, num_frames
-
-    init_plot_for_direction.num_stimuli = int(x_flow.shape[0])
-    init_plot_for_direction.uses_stimuli_index = True
     return init_plot_for_direction
 
 
 def make_movie(init_plot_for_direction, directions, fig_folder, frame_rate, save_name=''):
     """
-    Generic movie maker that supports multiple stimuli per direction.
-    - Determines the number of stimuli from the initializer's `num_stimuli` attribute.
-    - Splits the stimuli into consecutive blocks across len(directions) directions.
-    - If the initializer does not use a stimuli index (uses_stimuli_index=False), falls back to one movie per direction.
-    - Output filenames: {save_name}_{direction}_{stimulus_index}.mp4 when per-stimulus; else {save_name}_{direction}.mp4
+    Write one movie per direction label to ``{fig_folder}/{save_name}_{direction}.mp4``.
+
+    ``init_plot_for_direction(d, di) -> (fig, update(frame_t), num_frames)``,
+    e.g. from :func:`make_scatter_diamond_sequence_factory`.
     """
-    num_directions = len(directions)
-    total_stimuli = getattr(init_plot_for_direction, 'num_stimuli', num_directions)
-    uses_index = getattr(init_plot_for_direction, 'uses_stimuli_index', True)
-
-    if not uses_index:
-        for di, d in enumerate(directions):
-            fig, update, num_frames = init_plot_for_direction(d, di)
-            out_path = fig_folder / f"{save_name}_{d}.mp4"
-            with iio_v2.get_writer(out_path, codec="libx264", fps=frame_rate) as writer:
-                for t in range(num_frames):
-                    update(t)
-                    writer.append_data(fig_to_rgb(fig))
-            plt.close(fig)
-        return
-
-    base = total_stimuli // num_directions
-    remainder = total_stimuli % num_directions
-    start_index = 0
-    for dir_index, d in enumerate(directions):
-        block_size = base + (1 if dir_index < remainder else 0)
-        for stim_index in range(block_size):
-            di = start_index + stim_index
-            fig, update, num_frames = init_plot_for_direction(d, di)
-            out_path = fig_folder / f"{save_name}_{d}_{stim_index}.mp4"
-            with iio_v2.get_writer(out_path, codec="libx264", fps=frame_rate) as writer:
-                for t in range(num_frames):
-                    update(t)
-                    writer.append_data(fig_to_rgb(fig))
-            plt.close(fig)
-        start_index += block_size
-
-
-def make_scatter_grid_factory(pair_resp, cell_x, cell_z):
-    """
-    Returns a factory callable that, given a direction index, initializes a 2x2 grid
-    of scatter plots for the four pair responses present in `pair_resp`.
-    """
-    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    preferred_order = ['right_cells', 'left_cells', 'up_cells', 'down_cells']
-    keys = [k for k in preferred_order if k in pair_resp]
-    keys += [k for k in pair_resp.keys() if k not in keys]
-
-    def init_plot_for_direction(d, di):
-        fig, axes = plt.subplots(2, 2, figsize=(10, 8), dpi=120)
-        axes = axes.ravel()
-
-        scatters = []
-        colorbars = []
-        activities = []
-        num_frames = None
-
-        for ax, key in zip(axes, keys):
-            chosen_activity = pair_resp[key][di, :, :]
-            if num_frames is None:
-                num_frames = chosen_activity.shape[0]
-
-            ax.set_xlim(-1, 1); ax.set_ylim(-1, 1)
-            sc = ax.scatter(cell_x, cell_z, c=chosen_activity[0, :], cmap="viridis", norm=norm)
-            cbar = fig.colorbar(sc, ax=ax)
-            ax.set_xlabel('location in x, posterior <-> anterior')
-            ax.set_ylabel('location in z, ventral <-> dorsal')
-            ax.set_title(key)
-
-            scatters.append(sc)
-            colorbars.append(cbar)
-            activities.append(chosen_activity)
-
-        for ax in axes[len(keys):]:
-            ax.axis('off')
-
-        def update(frame_t):
-            for sc, cbar, chosen_activity in zip(scatters, colorbars, activities):
-                sc.set_array(chosen_activity[frame_t, :])
-                cbar.update_normal(sc)
-
-        return fig, update, num_frames
-
-    if len(keys) > 0:
-        init_plot_for_direction.num_stimuli = int(pair_resp[keys[0]].shape[0])
-    else:
-        init_plot_for_direction.num_stimuli = 1
-    init_plot_for_direction.uses_stimuli_index = True
-    return init_plot_for_direction
-
-
-def make_scatter_grid_3x3_factory(pair_resp, cell_x, cell_z):
-    """
-    Returns a factory callable that, given a direction index, initializes a 3x3 grid
-    of scatter plots where only four positions are populated:
-      - 'up_cells' at (0, 1)
-      - 'right_cells' at (1, 2)
-      - 'left_cells' at (1, 0)
-      - 'down_cells' at (2, 1)
-    """
-    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    position_by_key = {
-        'up_cells': (0, 1),
-        'right_cells': (1, 2),
-        'left_cells': (1, 0),
-        'down_cells': (2, 1),
-    }
-    preferred_order = ['up_cells', 'right_cells', 'left_cells', 'down_cells']
-    keys = [k for k in preferred_order if k in pair_resp]
-
-    def init_plot_for_direction(d, di):
-        fig = plt.figure(figsize=(6, 6), dpi=120)
-
-        scatters = []
-        activities = []
-        num_frames = None
-
-        cell_centers = {0: 1.0/6.0, 1: 3.0/6.0, 2: 5.0/6.0}
-        base_size = 1.0 / 3.0
-        side = min(0.45, base_size * 1.3)
-
-        for key in keys:
-            r, c = position_by_key[key]
-            cx = cell_centers[c]
-            cy = 1.0 - cell_centers[r]
-            left = max(0.0, cx - side / 2.0)
-            bottom = max(0.0, cy - side / 2.0)
-            if left + side > 1.0:
-                left = 1.0 - side
-            if bottom + side > 1.0:
-                bottom = 1.0 - side
-            ax = fig.add_axes([left, bottom, side, side])
-
-            chosen_activity = pair_resp[key][di, :, :]
-            if num_frames is None:
-                num_frames = chosen_activity.shape[0]
-
-            ax.set_xlim(-1, 1); ax.set_ylim(-1, 1)
-            sc = ax.scatter(cell_x, cell_z, c=chosen_activity[0, :], cmap="viridis", norm=norm)
-            ax.set_xticks([]); ax.set_yticks([])
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            ax.set_aspect('equal', 'box')
-            ax.set_title(key)
-
-            scatters.append(sc)
-            activities.append(chosen_activity)
-
-        num_frames = num_frames if num_frames is not None else 0
-
-        def update(frame_t):
-            for sc, chosen_activity in zip(scatters, activities):
-                sc.set_array(chosen_activity[frame_t, :])
-
-        return fig, update, num_frames
-
-    if len(keys) > 0:
-        init_plot_for_direction.num_stimuli = int(pair_resp[keys[0]].shape[0])
-    else:
-        init_plot_for_direction.num_stimuli = 1
-    init_plot_for_direction.uses_stimuli_index = True
-    return init_plot_for_direction
-
-
-def make_scatter_diamond_factory(pair_resp, cell_x, cell_z, offset=2.6, label=False, scale=1.0, size_scale=1.0):
-    """
-    Returns a factory callable that, given a direction index, initializes a single-axes
-    scatter where the four datasets are arranged in a diamond configuration.
-    """
-    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    positions = {
-        'up': (0.0, +offset),
-        'right': (+offset, 0.0),
-        'left': (-offset, 0.0),
-        'down': (0.0, -offset),
-    }
-
-    def init_plot_for_direction(d, di):
-        fig, ax = plt.subplots(figsize=(6, 6), dpi=120)
-        try:
-            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-            ax.set_position([0, 0, 1, 1])
-        except Exception:
-            pass
-        scatters = []
-        activities = []
-        num_frames = None
-        coords = []
-        for dx, dz in positions.values():
-            coords.append((scale * cell_x + dx, scale * cell_z + dz))
-        coords.append(((0.5 * scale) * cell_x, (0.5 * scale) * cell_z))
-
-        if coords:
-            x_all = np.concatenate([xy[0] for xy in coords])
-            y_all = np.concatenate([xy[1] for xy in coords])
-            x_min, x_max = np.min(x_all), np.max(x_all)
-            y_min, y_max = np.min(y_all), np.max(y_all)
-            x_span = max(1e-6, x_max - x_min)
-            y_span = max(1e-6, y_max - y_min)
-            span = max(x_span, y_span)
-            margin_frac = 0.02
-            half = 0.5 * span * (1.0 + margin_frac)
-            x_center = 0.5 * (x_min + x_max)
-            y_center = 0.5 * (y_min + y_max)
-            ax.set_xlim(x_center - half, x_center + half)
-            ax.set_ylim(y_center - half, y_center + half)
-        else:
-            xy_margin = 0.2
-            max_extent = offset + (scale * 1.0) + xy_margin
-            ax.set_xlim(-max_extent, +max_extent)
-            ax.set_ylim(-max_extent, +max_extent)
-        ax.set_aspect('equal', 'box')
-        ax.set_xticks([]); ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.set_axis_off()
-
-        base_ms = plt.rcParams.get("lines.markersize", 6.0)
-        base_s = float(base_ms) ** 2
-        s_val = max(1.0, base_s * size_scale)
-
-        block = pair_resp.get(d, {})
-        resp_arrays = []
-        if 'responses' in block and isinstance(block['responses'], dict):
-            values_in_order = list(block['responses'].values())
-            mapping_dirs = ['right', 'left', 'up', 'down']
-            for idx in range(4):
-                arr = values_in_order[idx] if idx < len(values_in_order) else None
-                resp_arrays.append((mapping_dirs[idx], arr))
-        else:
-            resp_arrays = [('right', None), ('left', None), ('up', None), ('down', None)]
-
-        lengths = []
-        for _, arr in resp_arrays:
-            if arr is not None:
-                lengths.append(arr.shape[0])
-        if 'stimulus' in block:
-            lengths.append(block['stimulus'].shape[0])
-        num_frames = min(lengths) if lengths else 0
-
-        zero_vec = np.zeros_like(cell_x)
-
-        for dir_name, arr in resp_arrays:
-            dx, dz = positions[dir_name]
-            initial = arr[0, :] if (arr is not None and num_frames > 0) else zero_vec
-            sc = ax.scatter(
-                scale * cell_x + dx, scale * cell_z + dz,
-                c=initial, cmap="viridis", norm=norm, s=s_val,
-                edgecolors='none', linewidths=0.0, antialiased=False,
-            )
-            if label:
-                ax.text(dx, dz + 0.9 * scale, dir_name, ha='center', va='bottom', fontsize=10, color='black')
-            scatters.append(sc)
-            activities.append(arr if arr is not None else np.zeros((max(1, num_frames), cell_x.shape[0])))
-
-        stim_arr = block.get('stimulus', None)
-        stim_initial = stim_arr[0, :] if (stim_arr is not None and num_frames > 0) else zero_vec
-        sc = ax.scatter(
-            (0.5 * scale) * cell_x, (0.5 * scale) * cell_z,
-            c=stim_initial, cmap="viridis", norm=norm, s=max(1.0, s_val * 0.2),
-            edgecolors='none', linewidths=0.0, antialiased=False,
-        )
-        if label:
-            ax.text(0.0, 0.9 * 0.5 * scale, 'stimulus', ha='center', va='bottom', fontsize=10, color='black')
-        scatters.append(sc)
-        activities.append(stim_arr if stim_arr is not None else np.zeros((max(1, num_frames), cell_x.shape[0])))
-
-        num_frames = num_frames if num_frames is not None else 0
-
-        def update(frame_t):
-            for sc, chosen_activity in zip(scatters, activities):
-                if chosen_activity.shape[0] == 0:
-                    sc.set_array(zero_vec)
-                else:
-                    t = min(frame_t, chosen_activity.shape[0] - 1)
-                    sc.set_array(chosen_activity[t, :])
-
-        return fig, update, num_frames
-
-    init_plot_for_direction.num_stimuli = 1
-    init_plot_for_direction.uses_stimuli_index = False
-    return init_plot_for_direction
-
-
-def make_quiver_pair_sequence_factory(responses_dict, cell_x, cell_z, offset=2.6, scale=1.0, arrow_scale=1.0):
-    """
-    Side-by-side sequence view: stimulus (left) and quiver vector field (right).
-    """
-    stim_norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-
-    keys_in_order = list(responses_dict.keys())
-    cell_keys = [k for k in keys_in_order if k != 'stimulus'][:4]
-    while len(cell_keys) < 4:
-        cell_keys.append(None)
-    stim_all = responses_dict.get('stimulus', None)
-
-    arr1 = responses_dict.get(cell_keys[0], None) if cell_keys[0] is not None else None
-    arr2 = responses_dict.get(cell_keys[1], None) if cell_keys[1] is not None else None
-    arr3 = responses_dict.get(cell_keys[2], None) if cell_keys[2] is not None else None
-    arr4 = responses_dict.get(cell_keys[3], None) if cell_keys[3] is not None else None
-
-    def first_shape(*candidates):
-        for a in candidates:
-            if a is not None:
-                return a.shape
-        return None
-
-    shape = stim_all.shape if stim_all is not None else first_shape(arr1, arr2, arr3, arr4)
-    if shape is None:
-        num_stimuli, L, num_cols = 1, 0, cell_x.shape[0]
-    else:
-        num_stimuli, L, num_cols = shape
-
-    def safe_diff(a, b):
-        if a is None and b is None:
-            return None
-        if a is None:
-            return -b
-        if b is None:
-            return a
-        return a - b
-
-    d1 = safe_diff(arr1, arr2)
-    d2 = safe_diff(arr3, arr4)
-    if d1 is not None and d2 is not None and d1.size > 0 and d2.size > 0:
-        _, max_mag = flow_direction_colors(d1, d2)
-    else:
-        max_mag = 1.0
-
-    def init_plot_for_direction(d, di):
-        fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
-        try:
-            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-            ax.set_position([0, 0, 1, 1])
-        except Exception:
-            pass
-
-        left_x = -offset
-        right_x = +offset
-        coords = [
-            (scale * cell_x + left_x, scale * cell_z + 0.0),
-            (scale * cell_x + right_x, scale * cell_z + 0.0),
-        ]
-        x_all = np.concatenate([xy[0] for xy in coords])
-        y_all = np.concatenate([xy[1] for xy in coords])
-        x_min, x_max = np.min(x_all), np.max(x_all)
-        y_min, y_max = np.min(y_all), np.max(y_all)
-        x_span = max(1e-6, x_max - x_min)
-        y_span = max(1e-6, y_max - y_min)
-        span = max(x_span, y_span)
-        margin_frac = 0.02
-        half = 0.5 * span * (1.0 + margin_frac)
-        x_center = 0.5 * (x_min + x_max)
-        y_center = 0.5 * (y_min + y_max)
-        ax.set_xlim(x_center - half, x_center + half)
-        ax.set_ylim(y_center - half, y_center + half)
-        ax.set_aspect('equal', 'box')
-        ax.set_xticks([]); ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.set_axis_off()
-
-        base_ms = plt.rcParams.get("lines.markersize", 6.0)
-        base_s = float(base_ms) ** 2
-        s_stim = max(1.0, base_s * 0.8)
-
-        zero_vec = np.zeros(num_cols, dtype=float)
-
-        stim_initial = np.zeros(num_cols, dtype=float)
-        if stim_all is not None and num_stimuli > 0 and L > 0:
-            stim_initial = stim_all[0, 0, :]
-        stim_scatter = ax.scatter(
-            scale * cell_x + left_x, scale * cell_z + 0.0,
-            c=stim_initial, cmap="viridis", norm=stim_norm, s=s_stim,
-            edgecolors='none', linewidths=0.0, antialiased=False,
-        )
-
-        if L > 0 and num_stimuli > 0:
-            u0 = (arr1[0, 0, :] if arr1 is not None else 0.0) - (arr2[0, 0, :] if arr2 is not None else 0.0)
-            v0 = (arr3[0, 0, :] if arr3 is not None else 0.0) - (arr4[0, 0, :] if arr4 is not None else 0.0)
-        else:
-            u0 = np.zeros(num_cols, dtype=float)
-            v0 = np.zeros(num_cols, dtype=float)
-        colors_0, _ = flow_direction_colors(u0, v0, max_mag)
-        q = ax.quiver(
-            scale * cell_x + right_x, scale * cell_z + 0.0,
-            u0, v0,
-            angles='xy', scale_units='xy',
-            scale=max(1e-9, 1.0 / float(arrow_scale)),
-        )
-        q.set_facecolor(colors_0)
-        q.set_edgecolor(colors_0)
-        add_direction_colorwheel(fig)
-
-        blanks = 25
-        total_frames = num_stimuli * (L + blanks)
-
-        def update(frame_t):
-            if total_frames == 0 or L == 0:
-                stim_scatter.set_array(zero_vec)
-                update_direction_quiver(q, zero_vec, zero_vec, max_mag)
-                return
-            block = L + blanks
-            stim_idx, within = divmod(frame_t, block)
-            if stim_idx >= num_stimuli:
-                stim_idx = num_stimuli - 1
-            if within < L:
-                t = within
-                if stim_all is not None and stim_idx < stim_all.shape[0]:
-                    stim_scatter.set_array(stim_all[stim_idx, t, :])
-                else:
-                    stim_scatter.set_array(zero_vec)
-                u = ((arr1[stim_idx, t, :] if arr1 is not None and stim_idx < arr1.shape[0] else 0.0) -
-                     (arr2[stim_idx, t, :] if arr2 is not None and stim_idx < arr2.shape[0] else 0.0))
-                v = ((arr3[stim_idx, t, :] if arr3 is not None and stim_idx < arr3.shape[0] else 0.0) -
-                     (arr4[stim_idx, t, :] if arr4 is not None and stim_idx < arr4.shape[0] else 0.0))
-                update_direction_quiver(q, u, v, max_mag)
-            else:
-                stim_scatter.set_array(zero_vec)
-                update_direction_quiver(q, zero_vec, zero_vec, max_mag)
-
-        return fig, update, total_frames
-
-    init_plot_for_direction.num_stimuli = 1
-    init_plot_for_direction.uses_stimuli_index = False
-    return init_plot_for_direction
+    for di, d in enumerate(directions):
+        fig, update, num_frames = init_plot_for_direction(d, di)
+        write_movie(fig, update, num_frames, Path(fig_folder) / f"{save_name}_{d}.mp4",
+                    frame_rate)
