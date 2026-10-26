@@ -19,7 +19,7 @@ Two-eye layout (2x2):
 Columns outside the field of view are drawn yellow.
 
 To run a model on a freshly generated stimulus (random pano/sine, edges,
-flyview, drone, ...) — including the fly-view ego-motion comparison — use
+flyview, ...) — including the fly-view ego-motion comparison — use
 ``run_model_on_stimulus`` instead.
 
 Usage (from the repo root):

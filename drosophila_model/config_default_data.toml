@@ -12,9 +12,8 @@
 #                          parameters that generator actually uses (e.g.
 #                          temporal_frequencies for the sine/flicker stimuli,
 #                          velocity_* for the panoramas). Datasets with no
-#                          extra parameters (flyview, small_drone, rpi_drone,
-#                          ...) need no table; the generators fall back to
-#                          [shared] alone.
+#                          extra parameters (e.g. flyview) need no table; the
+#                          generators fall back to [shared] alone.
 #
 # Every key in the user overlay must already exist here (strict validation),
 # so add new generator parameters to this file first.

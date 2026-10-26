@@ -7,10 +7,7 @@ Runs these analyses on a trained model, in this order (each can be skipped):
                               default 1)
   3. white_noise_silencing  — STA filter recovery + silencing comparison
   4. sine_wave_silencing    — tuning curves + silencing comparison
-  5. drone_sweep            — drone video ego-motion estimation (--num-clips,
-                              default 1); skipped when the baked
-                              small_drone.pt cache is missing
-  6. performance_sweep      — flow + ego-motion cosine on the held-out baked
+  5. performance_sweep      — flow + ego-motion cosine on the held-out baked
                               test split (``<type>_test.pt``) of random_sine,
                               random_pano and flyview; families with no baked
                               test file are skipped
@@ -20,7 +17,7 @@ under <model_folder>/analysis_data/white_noise_silencing/).
 
 Usage (from the repo root):
     python -m drosophila_model.analysis.model_analysis.benchmark_model models/my_model/
-    python -m drosophila_model.analysis.model_analysis.benchmark_model models/my_model/ --skip-drone
+    python -m drosophila_model.analysis.model_analysis.benchmark_model models/my_model/ --skip-edge
 """
 import argparse
 import subprocess
@@ -28,8 +25,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
-from drosophila_model.config import get_data_folder, load_config
 
 _ANALYSIS_PACKAGE = "drosophila_model.analysis.model_analysis"
 
@@ -60,8 +55,6 @@ def main() -> None:
                         help="Skip edge sweep")
     parser.add_argument("--skip-pano", action="store_true",
                         help="Skip panoramic sweep")
-    parser.add_argument("--skip-drone", action="store_true",
-                        help="Skip drone sweep")
     parser.add_argument("--skip-white-noise-silencing", action="store_true",
                         help="Skip white noise silencing analysis")
     parser.add_argument("--skip-sine-silencing", action="store_true",
@@ -70,8 +63,6 @@ def main() -> None:
                         help="Skip performance sweep (flow + ego cosine)")
     parser.add_argument("--num-panos", type=int, default=1,
                         help="Number of pano stimuli (default: 1)")
-    parser.add_argument("--num-clips", type=int, default=1,
-                        help="Number of drone clips (default: 1)")
     parser.add_argument("--pano-stim-time", type=float, default=5.0,
                         help="Pano stimulus duration in seconds (default: 5.0)")
     args = parser.parse_args()
@@ -100,23 +91,6 @@ def main() -> None:
     # --- Sine wave silencing (subprocess) ---
     if not args.skip_sine_silencing:
         _run_subprocess("Sine Wave Silencing", "sine_wave_silencing", model_folder)
-
-    # --- Drone sweep (import directly to capture metrics) ---
-    drone_results = None
-    if not args.skip_drone:
-        _banner("Drone Sweep")
-        from drosophila_model.analysis.model_analysis.drone_sweep import run_drone_sweep
-        # Check for the baked cache up front (rather than catching
-        # FileNotFoundError) so other missing files still fail loudly.
-        drone_cache = get_data_folder(load_config()) / 'stimulus' / 'baked' / 'small_drone.pt'
-        if drone_cache.exists():
-            drone_results = run_drone_sweep(
-                model_folder,
-                num_clips=args.num_clips,
-            )
-        else:
-            print(f"Skipping drone sweep: {drone_cache} not found. Build it with:\n"
-                  "  python -m drosophila_model.data_handling.process_raw_data small_drone")
 
     # --- Performance sweep (import directly to capture metrics) ---
     performance_results = None
@@ -147,10 +121,6 @@ def main() -> None:
 
     if pano_results is not None:
         print(f"  Pano rotation  median cos sim: {pano_results['median_rot_cos']:.4f}")
-
-    if drone_results is not None:
-        print(f"  Drone rotation  median cos sim: {drone_results['median_rot_cos']:.4f}")
-        print(f"  Drone translation median cos sim: {drone_results['median_trans_cos']:.4f}")
 
     if performance_results is not None:
         flow_cos = performance_results['flow_cos']

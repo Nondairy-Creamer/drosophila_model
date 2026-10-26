@@ -29,7 +29,7 @@ Two complementary metrics are computed where applicable:
                    translation, so only rotation is reported; flyview has
                    both).
 
-No figures are produced — use ``pano_sweep`` / ``drone_sweep`` for those.
+No figures are produced — use ``pano_sweep`` for those.
 
 Usage:
     python -m drosophila_model.analysis.model_analysis.performance_sweep models/<model>/

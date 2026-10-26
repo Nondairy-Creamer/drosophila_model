@@ -108,9 +108,7 @@ def main() -> None:
                         help="Output movie frame rate (default: the model's base rate)")
     parser.add_argument("--duration", type=float, default=None,
                         help="Generated stimulus duration in seconds (overrides "
-                             "[shared].stim_time from the data config). For drone "
-                             "datasets this sets the segment length (capped at the "
-                             "longest clip).")
+                             "[shared].stim_time from the data config).")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Hard cap on the number of frames to render")
     parser.add_argument("--output-dir", type=str, default=None,

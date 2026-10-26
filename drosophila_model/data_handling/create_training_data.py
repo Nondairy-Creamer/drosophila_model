@@ -12,11 +12,11 @@ consistent schema to ``<data_folder>/stimulus/training/<stimulus_type>_train.pt`
 and ``..._test.pt``.
 
 The split is by whole source group (``StimulusData.group_id``: e.g. the raw
-fly-view clip a segment was cut from, a ~10 s block of a drone clip, all
-repeats of one panorama, or the phase/contrast variants of one grating
-condition), never within a group, so correlated examples can't leak across
-train/test. The groups are shuffled with ``[data].shared.seed`` and the first
-``train_fraction`` of them go to ``_train.pt``, the rest to ``_test.pt``.
+fly-view clip a segment was cut from, all repeats of one panorama, or the
+phase/contrast variants of one grating condition), never within a group, so
+correlated examples can't leak across train/test. The groups are shuffled with
+``[data].shared.seed`` and the first ``train_fraction`` of them go to
+``_train.pt``, the rest to ``_test.pt``.
 ``train_fraction`` comes from the type's own ``[data.<stimulus_type>]`` table
 when it sets one (e.g. the tiny ``full_field_step`` probe uses 1.0), otherwise
 from ``[data].shared``; when every group goes to training no ``_test.pt`` is

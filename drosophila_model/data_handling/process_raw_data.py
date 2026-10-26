@@ -1,22 +1,16 @@
 """Bake the large raw inputs into cached ``.pt`` files under ``stimulus/baked``.
 
-This is the first stage of the data pipeline. The truly raw inputs (drone
-videos, panorama ``.mat`` files) are large and slow to decode, so this script
-reads them once from ``<data_folder>/stimulus/raw`` and writes a compact ``.pt``
-cache to ``<data_folder>/stimulus/baked``:
+This is the first stage of the data pipeline. The truly raw inputs (panorama
+``.mat`` files, the rendered fly-view pickle) are large and slow to decode, so
+this script reads them once from ``<data_folder>/stimulus/raw`` and writes a
+compact ``.pt`` cache to ``<data_folder>/stimulus/baked``:
 
-* ``small_drone`` -> ``small_drone.pt``  (ommatidium-sampled stereo clips)
-* ``rpi_drone``   -> ``rpi_drone.pt``    (ommatidium-sampled stereo clips)
 * ``random_pano`` -> ``all_panoramic.pt`` ((N, H, W) raw panorama images)
 * ``flyview``     -> ``flyview.pt``     (flow + depth-based odometry,
   baked from ``fib_forest_fly_view_dataset_fwd.pkl``)
 
-The drone caches store clips spatially sampled at the connectome ommatidium
-columns but still at the native video frame rate; temporal interpolation to the
-model ``dt`` happens later in
-:func:`drosophila_model.data_handling.drone_utilities.get_drone_stimulus`. The
-panorama cache stores the unfiltered images; the Gaussian ommatidial filtering
-is applied at generation time in ``stimulus_generators._filter_pano``.
+The panorama cache stores the unfiltered images; the Gaussian ommatidial
+filtering is applied at generation time in ``stimulus_generators._filter_pano``.
 
 The second stage, ``drosophila_model.data_handling.create_training_data``,
 reads these caches (via the on-the-fly generators) and writes the fixed,
@@ -26,8 +20,6 @@ training-ready datasets to ``stimulus/training/<stimulus_type>_train.pt`` and
 Usage::
 
     python -m drosophila_model.data_handling.process_raw_data            # all
-    python -m drosophila_model.data_handling.process_raw_data small_drone
-    python -m drosophila_model.data_handling.process_raw_data rpi_drone
     python -m drosophila_model.data_handling.process_raw_data random_pano
     python -m drosophila_model.data_handling.process_raw_data flyview
 """
@@ -38,10 +30,8 @@ import numpy as np
 import torch
 
 from drosophila_model.config import get_data_folder, load_config
-from drosophila_model.data_handling import drone_utilities as du
-from drosophila_model.data_handling.sampling import load_column_phi_theta
 
-RAW_TYPES = ('small_drone', 'rpi_drone', 'random_pano', 'flyview')
+RAW_TYPES = ('random_pano', 'flyview')
 
 
 def loadmat_v73(path):
@@ -52,48 +42,6 @@ def loadmat_v73(path):
         for k in f.keys():
             out[k] = np.array(f[k])
     return out
-
-
-def process_drone(dataset, data_folder):
-    """Process a drone rig into ommatidium-sampled clips and cache them.
-
-    The clips are sampled at the right-eye columns (and their left-eye mirror)
-    of ``optic_lobe_columns.parquet``; the columns are stored in the cache and
-    ``get_drone_stimulus`` checks callers' columns against them.
-
-    Returns the path of the written ``.pt`` file.
-    """
-    data_folder = Path(data_folder)
-    raw_dir = data_folder / 'stimulus' / 'raw'
-    baked_dir = data_folder / 'stimulus' / 'baked'
-    column_phi_theta = load_column_phi_theta(data_folder)
-    sample_phi, sample_theta = column_phi_theta[:, 0], column_phi_theta[:, 1]
-
-    if dataset == 'small_drone':
-        clips = du.process_small_drone_dataset(
-            raw_dir / 'drone_videos', raw_dir / 'drone_poses',
-            sample_phi, sample_theta)
-    elif dataset == 'rpi_drone':
-        clips = du.process_rpi_drone_dataset(
-            raw_dir / 'rpi_drone', raw_dir / 'rpi_drone' / 'dome_calib',
-            sample_phi, sample_theta)
-    else:
-        raise ValueError(f"Unknown drone dataset '{dataset}'.")
-
-    if not clips:
-        raise RuntimeError(f"No clips produced for '{dataset}' from {raw_dir}.")
-
-    baked_dir.mkdir(parents=True, exist_ok=True)
-    out_path = baked_dir / f'{dataset}.pt'
-    torch.save({
-        'dataset': dataset,
-        'clips': clips,
-        'sample_phi': np.asarray(sample_phi),
-        'sample_theta': np.asarray(sample_theta),
-    }, out_path)
-
-    print(f"Cached '{dataset}' ({len(clips)} clips) -> {out_path}")
-    return out_path
 
 
 def _find_pano_mat_files(raw_dir):
@@ -166,8 +114,6 @@ def process_raw_data(raw_type, config=None, config_path=None):
         config = load_config(config_path or 'config.toml')
     data_folder = get_data_folder(config)
 
-    if raw_type in ('small_drone', 'rpi_drone'):
-        return process_drone(raw_type, data_folder)
     if raw_type == 'random_pano':
         return process_random_pano(data_folder)
     if raw_type == 'flyview':

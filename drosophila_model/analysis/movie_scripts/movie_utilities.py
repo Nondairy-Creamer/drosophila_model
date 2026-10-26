@@ -90,9 +90,9 @@ def synthesize_two_eye_flow_from_odometry(rotation_deg_s, translation, phi, thet
 
     Used by the no-/with-model two-eye movie scripts as a fallback when a
     stimulus carries ground-truth ego-motion but no ground-truth optic flow
-    (e.g. the drone rigs, whose stored ``optic_flow`` is all-NaN). The left eye
-    is the sagittal mirror of the right (``phi -> -phi``; the eye offset's
-    ``y`` flips, see ``OpticLobeRegion.mirror_camera_offset``).
+    (its stored ``optic_flow`` is all-NaN). The left eye is the sagittal
+    mirror of the right (``phi -> -phi``; the eye offset's ``y`` flips, see
+    ``OpticLobeRegion.mirror_camera_offset``).
 
     Args:
         rotation_deg_s: (T, 3) observer rotation rate in deg/s.

@@ -19,7 +19,7 @@ Columns outside the field of view are drawn yellow. Movies are written to
 ``figures/stimulus_flow/`` (relative to the repo root) unless --output-dir is set.
 
 Usage (from the repo root):
-    python -m drosophila_model.analysis.movie_scripts.stimulus_flow --stim-type small_drone
+    python -m drosophila_model.analysis.movie_scripts.stimulus_flow --stim-type random_pano
     python -m drosophila_model.analysis.movie_scripts.stimulus_flow --no-two-eyes --stim-type flyview
 """
 import argparse
@@ -64,7 +64,7 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=None,
                         help="Output movie frame rate (default: 1/dt from config)")
     parser.add_argument("--stim-type", type=str, default=None,
-                        help="Stimulus type (default: flyview for 1-eye, small_drone for 2-eye)")
+                        help="Stimulus type (default: flyview)")
     parser.add_argument("--stim-time", type=float, default=None,
                         help="Override stim_time from config (seconds)")
     parser.add_argument("--output-dir", type=str, default=None,
@@ -72,7 +72,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.stim_type is None:
-        args.stim_type = "small_drone" if args.two_eyes else "flyview"
+        args.stim_type = "flyview"
     if args.stim_type == "directional_sine":
         parser.error("--stim-type directional_sine needs a sine direction, which this "
                      "script does not take")

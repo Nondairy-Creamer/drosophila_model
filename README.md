@@ -7,7 +7,7 @@ architecture comes from the FlyWire connectome. Each model is a
 types), and only per-cell-type parameters — gains, time constants, reversal
 potentials, input filters and readouts — are learned. The main use is the
 right optic lobe trained to report optic flow and ego-motion (rotation and
-translation) from natural, synthetic and drone-recorded visual input.
+translation) from natural and synthetic visual input.
 
 - Model internals: [model_architecture.md](model_architecture.md)
 - Coordinate and flow sign conventions: [coordinate_conventions.md](coordinate_conventions.md)
@@ -75,8 +75,8 @@ In code, use `config.load_config()` for the live config,
 | Folder | Contents | Produced by |
 |---|---|---|
 | `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet` | `data_handling.format_connectome_data`, from the raw FlyWire CSVs in `connectome_data/raw/` (`optic_lobe_columns.parquet`, the column viewing directions, ships with the data bundle) |
-| `stimulus/raw/` | drone videos and poses, rpi dome recordings, panorama `.mat` files, the rendered fly-view `.pkl` | recorded / rendered elsewhere |
-| `stimulus/baked/` | `small_drone.pt`, `rpi_drone.pt`, `all_panoramic.pt`, `flyview.pt` | `data_handling.process_raw_data [small_drone\|rpi_drone\|random_pano\|flyview]` (omit the type to process all four) |
+| `stimulus/raw/` | panorama `.mat` files, the rendered fly-view `.pkl` | recorded / rendered elsewhere |
+| `stimulus/baked/` | `all_panoramic.pt`, `flyview.pt` | `data_handling.process_raw_data [random_pano\|flyview]` (omit the type to process both) |
 | `stimulus/training/` | `<type>_train.pt` and `<type>_test.pt` | `data_handling.create_training_data <type>` |
 
 Training never generates stimuli on the fly; it loads `<type>_train.pt`. Bake
@@ -87,9 +87,8 @@ python -m drosophila_model.data_handling.create_training_data random_pano
 ```
 
 Bakeable types are `static_sine`, `random_sine`, `counterphase_sine`,
-`random_pano`, `full_field_step`, `full_field_flicker`, `flyview`,
-`small_drone` and `rpi_drone`. All of them bake two-eye data (`[right | left]`
-on the column axis).
+`random_pano`, `full_field_step`, `full_field_flicker` and `flyview`. All of
+them bake two-eye data (`[right | left]` on the column axis).
 
 The split is a seeded shuffle of whole source groups, so correlated examples
 never straddle train/test. Examples share a group when they are segments of
@@ -172,9 +171,9 @@ split. `performance_sweep` evaluates on the held-out `_test.pt` files.
 
 | Script | What it does |
 |---|---|
-| `benchmark_model` | Standard battery on one model: edge sweep, pano and drone odometry, white-noise and sine silencing, performance sweep (each skippable). |
+| `benchmark_model` | Standard battery on one model: edge sweep, pano odometry, white-noise and sine silencing, performance sweep (each skippable). |
 | `performance_sweep` | Flow and ego-motion cosine similarity on baked `random_sine`, `random_pano`, `flyview` (`--split test` by default). |
-| `pano_sweep` / `drone_sweep` | Odometry (rotation and translation) on random-velocity panoramas / recorded drone clips (`--dataset small_drone\|rpi_drone`). |
+| `pano_sweep` | Odometry (rotation and translation) on random-velocity panoramas. |
 | `plot_odometry` | Predicted vs. true odometry on the run's training stimuli. |
 | `edge_sweep` / `sine_wave_sweep` / `natural_pano_velocity_sweep` | Velocity / temporal-frequency tuning of readouts and cells. |
 | `white_noise` | Spike-triggered-average spatiotemporal filters of cell types. |
@@ -190,9 +189,7 @@ split. `performance_sweep` evaluates on the held-out `_test.pt` files.
 | `run_stimulus_battery` | Run all `view_*` scripts and tile their hex movies. |
 | `view_spatial_frequency` | Spatial power spectrum of the natural panoramas. |
 | `verify_flyview_odometry` | Check the fly-view dataset's odometry reconstruction. |
-| `stream_optic_flow` | Live camera → model → UDP ego-motion stream for a drone controller. |
 | `antenna_lobe_decoding` / `olf_decoding_mimic` | Odor-identity decoding from ORN vs. PN responses of antenna-lobe models. |
-| `board_stimulus` | Printable board patterns for the drone recordings. |
 
 ### `drosophila_model.analysis.movie_scripts`
 
@@ -201,18 +198,8 @@ split. `performance_sweep` evaluates on the held-out `_test.pt` files.
 | `run_model_on_stimulus` | Model flow (and `--ego-motion` odometry) on a freshly generated stimulus. |
 | `run_model_on_stimulus_cells` | Diamond-layout movie of four cell types around the stimulus. |
 | `run_model_on_cell_inputs` | Replay the run's training inputs and show predicted vs. true flow. |
-| `run_model_on_drone` | Model flow and odometry on drone clips. |
 | `natural_pano_t4t5_movies` | T4/T5 diamond movies for rotating natural panoramas. |
 | `stimulus_flow` | Stimulus with its true optic flow (no model). |
-| `visualize_drone_data` / `plot_tag_location` / `raw_drone_flow` | Inspect baked drone clips, rpi tag detections, and raw small_drone videos with their legacy pose logs. |
-
-### Drone tooling (`drosophila_model.data_handling`)
-
-- `drone_pose`: small_drone AprilTag pose estimation per clip; the engine is
-  `estimate_pose`.
-- `extract_tags`: rpi dome tag bearings and board poses.
-- `drone_utilities`: converts the recordings into ommatidium-sampled clips for
-  `process_raw_data`.
 
 ## Code layout
 
@@ -226,7 +213,7 @@ drosophila_model/
                             (load_processed_stimulus, model_outputs, compute_loss_components,
                             train_model), loss_functions, model management tools
   data_handling/            raw-data and training-data baking, stimulus_generators, sampling,
-                            drone tooling, format_connectome_data
+                            format_connectome_data
   analysis/model_analysis/  analysis scripts + analysis_utilities
   analysis/movie_scripts/   movie scripts + movie_utilities
   fly_eye/                  hex-mosaic rendering of per-column activity

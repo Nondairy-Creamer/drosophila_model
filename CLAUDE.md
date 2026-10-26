@@ -29,24 +29,20 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
  the per-machine config overlays live here too (`setup_server.sh` installs
  them at the repo root)
 - `<data_folder>/connectome_data/` — connectome (`baked/cell_info.parquet`, `baked/synapses.parquet`)
-- `<data_folder>/stimulus/raw/` — raw stimulus source files. The large raw
- inputs — the drone rigs `drone_videos/` + `drone_poses/` (small_drone) and
- `rpi_drone/` (rpi_drone, with `rpi_drone/dome_calib/`), and the raw
- `panoramic/*.mat` panoramas — are read once by `process_raw_data.py`. Also
- here: `fib_forest_fly_view_dataset_fwd.pkl` (raw rendered fly-view source).
+- `<data_folder>/stimulus/raw/` — raw stimulus source files, read once by
+ `process_raw_data.py`: the raw `panoramic/*.mat` panoramas and
+ `fib_forest_fly_view_dataset_fwd.pkl` (raw rendered fly-view source).
 - `<data_folder>/stimulus/baked/` — caches produced by
  `python -m drosophila_model.data_handling.process_raw_data <raw_type>`
- (`small_drone`, `rpi_drone`, `random_pano`, `flyview`; omit `<raw_type>` to
- bake all four) and consumed by the on-the-fly generators in
- `stimulus_generators.py`: `small_drone.pt`, `rpi_drone.pt`
- (ommatidium-sampled clips at native fps), `all_panoramic.pt` (consolidated
- raw panorama images), and `flyview.pt` (stimulus, flow in deg/s and
- depth-based odometry per clip at native fps, baked from
+ (`random_pano`, `flyview`; omit `<raw_type>` to bake both) and consumed by
+ the on-the-fly generators in `stimulus_generators.py`: `all_panoramic.pt`
+ (consolidated raw panorama images) and `flyview.pt` (stimulus, flow in deg/s
+ and depth-based odometry per clip at native fps, baked from
  `fib_forest_fly_view_dataset_fwd.pkl`, float32, no depth).
 - `<data_folder>/stimulus/training/` — fixed datasets produced by
  `python -m drosophila_model.data_handling.create_training_data <stimulus_type>`,
  split into a `<stimulus_type>_train.pt` and `<stimulus_type>_test.pt` pair
- per type (e.g. `small_drone_train.pt` + `small_drone_test.pt`). The split is
+ per type (e.g. `flyview_train.pt` + `flyview_test.pt`). The split is
  a seeded shuffle (`[data].shared.seed`) of whole source groups (correlated
  variants — segments of one clip, repeats of one panorama, phase/contrast
  variants of one grating — share a group); the first `train_fraction` of the

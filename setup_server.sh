@@ -36,9 +36,9 @@ mkdir -p "$DATA_FOLDER/stimulus/baked"
 mkdir -p "$DATA_FOLDER/stimulus/training"
 
 # Minimal dataset: the baked connectome, the stimulus/baked caches written by
-# process_raw_data.py (small_drone.pt, rpi_drone.pt, all_panoramic.pt,
-# flyview.pt) so create_training_data can bake training sets without the large
-# raw source files, whatever baked training sets were uploaded to
+# process_raw_data.py (all_panoramic.pt, flyview.pt) so create_training_data
+# can bake training sets without the large raw source files, whatever baked
+# training sets were uploaded to
 # stimulus/training, and the per-machine config.toml / config_data.toml.
 # Training sets that are still missing are baked at the end of this script.
 #

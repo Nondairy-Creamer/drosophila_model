@@ -198,14 +198,9 @@ with the stimulus data, under `config['data']['data_folder']` (read it with
 └── stimulus/
     ├── raw/                          # raw sources, read once by process_raw_data.py
     │   ├── panoramic/                # raw panorama .mat source images (random_pano)
-    │   ├── drone_videos/             # small_drone equirectangular rig (left_N/right_N.mp4)
-    │   ├── drone_poses/              # small_drone batch-opt pose .npz
-    │   ├── rpi_drone/                # rpi_drone dome rig recordings + dome_calib/
     │   └── fib_forest_fly_view_dataset_fwd.pkl  # raw rendered fly-view source (responses/flow/depth)
     ├── baked/                        # caches from process_raw_data.py <raw_type>,
     │   │                             # read by the generators in stimulus_generators.py
-    │   ├── small_drone.pt            # ommatidium-sampled clips at native fps
-    │   ├── rpi_drone.pt              # ommatidium-sampled clips at native fps
     │   ├── all_panoramic.pt          # consolidated raw panorama images (random_pano)
     │   └── flyview.pt                # from fib_forest_fly_view_dataset_fwd.pkl: stimulus,
     │                                 # flow (deg/s) + depth-based odometry, float32, no depth
@@ -443,10 +438,9 @@ each eye can sit off the body centre (`ego_motion.EyeFlow.offset`). The offset
 is a property of the rig that recorded the dataset, not of the model:
 
 - a stimulus loader declares its right-eye offset with the
-  `@stimulus_generators.camera_offset(x, y, z)` decorator (today only
-  `rpi_drone`: `(0.050, -0.050, 0.013)` m), and
-  `stimulus_generators.camera_offset_for_stimulus` looks it up (`(0, 0, 0)`
-  when none is declared);
+  `@stimulus_generators.camera_offset(x, y, z)` decorator (no current stimulus
+  declares one), and `stimulus_generators.camera_offset_for_stimulus` looks it
+  up (`(0, 0, 0)` when none is declared);
 - `get_stimulus` returns it as `StimulusData.eye_offset`, `create_training_data`
   bakes it into the `.pt` files, `load_processed_stimulus` returns it, and
   `run_model` records it as `[run_info].eye_offset`

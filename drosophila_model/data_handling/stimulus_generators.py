@@ -16,7 +16,6 @@ from drosophila_model.data_handling.sampling import (
     build_ommatidium_sampling_matrix,
     interpolate_to_model_dt,
 )
-from drosophila_model.data_handling import drone_utilities as du
 
 # Full-sphere equirectangular panorama for expanding-dot: observer in uniform middle gray;
 # every direction is a pixel.  φ ∈ [−π, π] (360° azimuth), θ ∈ [0, π] colatitude from +z
@@ -1271,7 +1270,7 @@ def make_expanding_dot_pano(
     ``approach_speed``).
 
     Column samples use :func:`build_ommatidium_sampling_matrix` and ``W @
-    pano.ravel()`` each frame (same as the drone samplers), not bilinear
+    pano.ravel()`` each frame, not bilinear
     ``map_coordinates`` like :func:`get_random_velocity_pano`.  Here ``W`` is
     shape ``(N, H*W)`` sparse (one row per ommatidium, one column per pano pixel) —
     not the same shape as the ``(H, W)`` image.  That matvec each timestep is why
@@ -2030,18 +2029,6 @@ def _gen_expanding_dot(ctx):
     return stim, flow, rot, trans, _ones_mask(stim)
 
 
-def _gen_small_drone(ctx):
-    ctx.require_columns('small_drone')
-    return small_drone(ctx.config, ctx.column_phi_theta, ctx.model_dt,
-                       ctx.device, ctx.dtype, ctx.stim_time)
-
-
-def _gen_rpi_drone(ctx):
-    ctx.require_columns('rpi_drone')
-    return rpi_drone(ctx.config, ctx.column_phi_theta, ctx.model_dt,
-                     ctx.device, ctx.dtype, ctx.stim_time)
-
-
 # Registry: stimulus_type -> (generator, supported eye counts). The first
 # supported eye count is the type's natural default (see ``default_num_eyes``).
 # Every type defaults to two eyes, so create_training_data always bakes
@@ -2057,8 +2044,6 @@ _STIMULUS_REGISTRY: dict[str, tuple] = {
     'full_field_flicker': (_gen_full_field_flicker, (2, 1)),
     'flyview': (_gen_flyview, (2, 1)),
     'expanding_dot': (_gen_expanding_dot, (2, 1)),
-    'small_drone': (_gen_small_drone, (2,)),
-    'rpi_drone': (_gen_rpi_drone, (2,)),
 }
 
 # Registered types that only analysis scripts may generate; create_training_data
@@ -2210,8 +2195,8 @@ def get_stimulus(
 
 # Right-eye camera offset (body frame +x forward / +y left / +z up) per two-eye
 # stimulus type. Its length unit must match the dataset's translation targets
-# (metres for the drone rigs, whose translation is in m/s; depth units for
-# flyview), because the two-eye solver's absolute translation scales with it.
+# (depth units for flyview), because the two-eye solver's absolute translation
+# scales with it.
 # The offset is a property of the rig that produced the flow: a single-viewpoint
 # render has none, a real two-camera rig carries its physical half-baseline.
 # Populated by the @camera_offset decorator on each stimulus loader (keyed by
@@ -2250,41 +2235,3 @@ def camera_offset_for_stimulus(stimulus_type: str | list[str]):
             "Train one rig geometry at a time."
         )
     return offsets.pop()
-
-
-def small_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
-    """Two-eye loader for the equirectangular ``small_drone`` rig.
-
-    Loads the cached clips from ``<data_folder>/stimulus/baked/small_drone.pt``
-    (built by ``process_raw_data.py``) via
-    :func:`drone_utilities.get_drone_stimulus`.
-
-    Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
-    train_mask, group_id)`` (see :func:`drone_utilities.drone_clips_to_two_eye`).
-    """
-    drone_clips = du.get_drone_stimulus(
-        model_dt, dataset='small_drone',
-        data_folder=get_data_folder(config),
-        sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
-    )
-    return du.drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
-
-
-@camera_offset(0.050, -0.050, 0.013)
-def rpi_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
-    """Two-eye loader for the ``rpi_drone`` dataset.
-
-    A real two-camera rig; the ``@camera_offset`` above declares its right-eye
-    half-baseline in metres, matching the m/s ground-truth translation. Loads
-    the cached clips from ``<data_folder>/stimulus/baked/rpi_drone.pt`` (built
-    by ``process_raw_data.py``) via :func:`drone_utilities.get_drone_stimulus`.
-
-    Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
-    train_mask, group_id)`` (see :func:`drone_utilities.drone_clips_to_two_eye`).
-    """
-    drone_clips = du.get_drone_stimulus(
-        model_dt, dataset='rpi_drone',
-        data_folder=get_data_folder(config),
-        sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
-    )
-    return du.drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
