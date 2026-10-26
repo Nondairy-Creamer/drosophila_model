@@ -425,7 +425,7 @@ def _run_white_noise_inner(model, cell_types, output_dir, data_dir, duration,
         if cached_mappings is not None:
             optic_cache = cached_mappings.get('optic_lobe', {})
             predict_kwargs['input_neurons'] = optic_cache.get('input_mapping')
-            predict_kwargs['output_neurons'] = optic_cache.get('output_mapping')
+            predict_kwargs['output_neurons'] = {'optic_lobe': optic_cache.get('output_mapping')}
         else:
             predict_kwargs['output_neurons'] = valid_cell_types
 
