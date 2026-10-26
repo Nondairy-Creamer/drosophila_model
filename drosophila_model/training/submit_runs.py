@@ -5,10 +5,15 @@ Submission script for running multiple model training jobs across available GPUs
 This script detects available GPUs and distributes multiple training runs across them,
 each with a different random seed. All runs are executed in parallel.
 
-Usage:
-    python submit_runs.py --runs-per-gpu 4
-    python submit_runs.py --runs-per-gpu 10 --base-seed 100
-    python submit_runs.py --runs-per-gpu 4 --tag my_experiment
+Usage (from the repo root):
+    python -m drosophila_model.training.submit_runs --runs-per-gpu 4
+    python -m drosophila_model.training.submit_runs --runs-per-gpu 10 --base-seed 100
+    python -m drosophila_model.training.submit_runs --runs-per-gpu 4 --tag my_experiment
+
+Runs are written to models/<tag>_gpuN_runM/ and their output to
+logs/<tag>_gpuN_runM.log. By default the launcher detaches and logs to
+logs/submit_runs_<tag>.log; stop it (and its runs) with ``kill <pid>`` or
+``python -m drosophila_model.training.kill_submit_runs``.
 """
 
 import torch
@@ -125,6 +130,20 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
     return process, log_file
 
 
+def exit_if_tag_used(tag):
+    """Exit if run folders for ``tag`` already exist.
+
+    Fails fast instead of letting every run_model child die on an existing
+    run folder.
+    """
+    existing = sorted(Path('models').glob(f'{tag}_gpu*_run*'))
+    if existing:
+        print(f"Error: run folders for tag '{tag}' already exist "
+              f"({', '.join(str(p) for p in existing[:3])}{', ...' if len(existing) > 3 else ''}). "
+              "Use a different --tag.")
+        sys.exit(1)
+
+
 def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None, config_path=None):
     """
     Submit multiple training runs across available GPUs.
@@ -148,15 +167,13 @@ def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=Non
 
     timestamp = tag if tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
     print(f"Using tag for all runs: {timestamp}")
-    
+
+    exit_if_tag_used(timestamp)
+
     # Detect available GPUs
     gpus = get_available_gpus()
     print(f"Found {len(gpus)} available device(s): {gpus}")
-    
-    if not gpus:
-        print("Error: No available devices found.")
-        return
-    
+
     # Calculate total number of runs
     total_runs = len(gpus) * runs_per_gpu
     print(f"Submitting {total_runs} runs ({runs_per_gpu} per GPU)")
@@ -228,10 +245,10 @@ def main():
         epilog="""
     Examples:
     # Run 4 jobs per GPU using the base seed from config
-    python submit_runs.py --runs-per-gpu 4
-    
+    python -m drosophila_model.training.submit_runs --runs-per-gpu 4
+
     # Run 10 jobs per GPU with custom base seed
-    python submit_runs.py --runs-per-gpu 10 --base-seed 100
+    python -m drosophila_model.training.submit_runs --runs-per-gpu 10 --base-seed 100
                 """
     )
     
@@ -289,25 +306,9 @@ def main():
     )
     
     args = parser.parse_args()
-    
-    # By default, re-launch ourselves detached with output to log_submit_runs.log
-    # (replicates: nohup python -u submit_runs.py ... > log_submit_runs.log 2>&1 &)
-    if not args.foreground and os.environ.get('_SUBMIT_RUNS_FG') != '1':
-        env = os.environ.copy()
-        env['_SUBMIT_RUNS_FG'] = '1'
-        log_file = open('log_submit_runs.log', 'w')
-        proc = subprocess.Popen(
-            [sys.executable, '-u'] + sys.argv + ['--foreground'],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # detach from terminal (POSIX setsid)
-            env=env,
-        )
-        print(f"Running in background (PID {proc.pid}). Output: log_submit_runs.log")
-        print(f"To follow: tail -f log_submit_runs.log")
-        print(f"To stop:   kill {proc.pid}")
-        sys.exit(0)
-    
+
+    # Validate paths before (possibly) detaching, so a bad path is reported
+    # here rather than only in the background launcher's log.
     # Validate script path if explicitly provided; otherwise we invoke the
     # installed module drosophila_model.training.run_model.
     script_path = None
@@ -317,7 +318,7 @@ def main():
             print(f"Error: Script not found at {script_path}")
             sys.exit(1)
         script_path = str(script_path)
-    
+
     # Validate model path if provided
     model_path = None
     if args.model_folder is not None:
@@ -327,7 +328,7 @@ def main():
             print(f"Error: Model file not found at {model_file}")
             sys.exit(1)
         model_path = str(model_path)
-    
+
     # Validate config path if provided
     config_path = None
     if args.config_path is not None:
@@ -336,7 +337,33 @@ def main():
             print(f"Error: Config file not found at {config_path}")
             sys.exit(1)
         config_path = str(config_path)
-    
+
+    # By default, re-launch ourselves detached with output to
+    # logs/submit_runs_<tag>.log (replicates: nohup python -u -m ... > log 2>&1 &).
+    # The tag is fixed here so the launcher log and the run folders share it.
+    if not args.foreground and os.environ.get('_SUBMIT_RUNS_FG') != '1':
+        tag = args.tag if args.tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
+        exit_if_tag_used(tag)
+        env = os.environ.copy()
+        env['_SUBMIT_RUNS_FG'] = '1'
+        Path('logs').mkdir(exist_ok=True)
+        launcher_log = Path('logs') / f'submit_runs_{tag}.log'
+        log_file = open(launcher_log, 'w')
+        relaunch_args = sys.argv[1:] + ['--foreground']
+        if args.tag is None:
+            relaunch_args += ['--tag', tag]
+        proc = subprocess.Popen(
+            [sys.executable, '-u', '-m', 'drosophila_model.training.submit_runs'] + relaunch_args,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # detach from terminal (POSIX setsid)
+            env=env,
+        )
+        print(f"Running in background (PID {proc.pid}). Output: {launcher_log}")
+        print(f"To follow: tail -f {launcher_log}")
+        print(f"To stop:   kill {proc.pid}")
+        sys.exit(0)
+
     # Submit runs
     submit_runs(
         runs_per_gpu=args.runs_per_gpu,

@@ -1,3 +1,15 @@
+"""Rank trained runs by their best training loss.
+
+Usage (from the repo root):
+
+    python -m drosophila_model.training.find_best_model
+
+Scans ``models/`` (and one level down, for the group folders that
+``download_models`` pulls runs into), groups runs by tag/timestamp, prints the
+best run per group and saves a loss comparison plot per group to
+``figures/find_best_model/``.
+"""
+import argparse
 import torch
 import numpy as np
 import re
@@ -9,8 +21,12 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 
-MODELS_DIR = Path(__file__).resolve().parent.parent.parent / 'models'
+MODELS_DIR = Path('models')  # relative to the working directory (the repo root)
 NEAR_ZERO_THRESHOLD = 1e-6
+
+
+def _visible_subdirs(folder):
+    return sorted(f for f in folder.iterdir() if f.is_dir() and not f.name.startswith('.'))
 
 
 def find_best_models(models_dir=MODELS_DIR):
@@ -18,6 +34,10 @@ def find_best_models(models_dir=MODELS_DIR):
     Scan the models directory, group model folders by their tag/timestamp prefix
     (stripping any _gpuN_runN suffix), and for each group find the folder with
     the lowest valid loss.
+
+    A top-level folder without ``model_opt.pt`` is treated as a group folder
+    (the ``models/<tag>/<tag>_gpuN_runM/`` layout ``download_models`` pulls
+    into) and its subfolders are scanned instead.
 
     Losses that are NaN, inf, or within 1e-6 of zero are ignored.
 
@@ -28,11 +48,15 @@ def find_best_models(models_dir=MODELS_DIR):
     if not models_dir.is_dir():
         raise ValueError(f"Models directory not found: {models_dir}")
 
-    # Collect all subdirectories (skip hidden directories)
-    all_folders = sorted(
-        f for f in models_dir.iterdir()
-        if f.is_dir() and not f.name.startswith('.')
-    )
+    # Collect run folders (skip hidden directories), descending one level
+    # into group folders.
+    all_folders = []
+    for folder in _visible_subdirs(models_dir):
+        if (folder / 'model_opt.pt').exists():
+            all_folders.append(folder)
+        else:
+            sub_runs = [f for f in _visible_subdirs(folder) if (f / 'model_opt.pt').exists()]
+            all_folders.extend(sub_runs if sub_runs else [folder])
 
     if not all_folders:
         raise ValueError(f"No model folders found in {models_dir}")
@@ -87,7 +111,7 @@ def find_best_models(models_dir=MODELS_DIR):
             print(f"  {folder.name}: min loss = {min_loss:.6e}")
 
         if not model_losses:
-            print(f"  ** No valid models in this group **")
+            print("  ** No valid models in this group **")
             continue
 
         # Find the best model in this group
@@ -114,7 +138,7 @@ def find_best_models(models_dir=MODELS_DIR):
         plt.xlim(-0.5, 0.5)
         plt.legend()
 
-        fig_dir = models_dir.parent / 'figures' / 'find_best_model'
+        fig_dir = Path('figures') / 'find_best_model'
         fig_dir.mkdir(parents=True, exist_ok=True)
         fig_path = fig_dir / f'{prefix}_loss_comparison.png'
         plt.savefig(fig_path, dpi=150, bbox_inches='tight')
@@ -124,7 +148,11 @@ def find_best_models(models_dir=MODELS_DIR):
     return results
 
 
-if __name__ == '__main__':
+def main():
+    argparse.ArgumentParser(
+        description='Rank the runs in models/ by best training loss and plot each '
+                    'group to figures/find_best_model/.'
+    ).parse_args()
     results = find_best_models()
 
     if not results:
@@ -136,3 +164,7 @@ if __name__ == '__main__':
     print(f"{'='*60}")
     for prefix, (folder, loss) in sorted(results.items()):
         print(f"  {prefix}  ->  {folder.name}  (loss = {loss:.6e})")
+
+
+if __name__ == '__main__':
+    main()
