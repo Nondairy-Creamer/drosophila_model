@@ -168,15 +168,22 @@ with the stimulus data, under `config['data']['data_folder']` (read it with
 ├── config.toml, config_data.toml     # copies of the per-machine config overlays
 │                                     # (setup_server.sh installs them at the repo root)
 ├── connectome_data/
-│   ├── raw/                          # raw CSVs consumed by format_connectome_data.py
-│   │   ├── consolidated_cell_types.csv    # root_id, primary_type, additional_type(s)
-│   │   ├── connections_no_threshold.csv   # pre_root_id, post_root_id, neuropil, syn_count, nt_type
-│   │   ├── column_assignments_no_threshold.csv   # optic-lobe-only column geometry
-│   │   └── visual_neuron_types_no_threshold.csv  # read only to type the CT1_L / CT1_M
-│   │                                             # per-column split neurons
+│   ├── raw/                          # FlyWire Codex downloads (FAFB v783), as downloaded
+│   │   ├── consolidated_cell_types.csv.gz             # root_id, primary_type, additional_type(s)
+│   │   ├── connections_princeton_no_threshold.csv.gz  # pre_root_id, post_root_id, neuropil, syn_count, nt_type
+│   │   ├── column_assignment.csv.gz                   # optic-lobe per-neuron columns (column_id, p, q)
+│   │   ├── fafb_v783_princeton_synapse_table.csv.gz   # per-synapse positions; read by split_ct1.py
+│   │   │                                              # and build_column_geometry.py
+│   │   ├── cell_stats.csv.gz, classification.csv.gz   # optional extras merged into cell_info
+│   │   └── eyemap_T4/data/eyemap.RData  # Reiser lab eye map (Zhao et al. 2025; github.com/reiserlab/eyemap_T4)
 │   └── baked/
+│       ├── ct1_pieces.parquet, ct1_connections.parquet  # emitted by split_ct1.py:
+│       │     # each CT1 split into per-column CT1_M / CT1_L pieces (synthetic
+│       │     # root IDs); format_connectome_data.py swaps them in for CT1
 │       ├── cell_info.parquet         # emitted by format_connectome_data.py
-│       │     columns: root_id, primary_type, neurotransmitter, neuropils
+│       │     columns: root_id, primary_type, neurotransmitter, neuropils,
+│       │     plus length_nm, area_nm, size_nm, flow, super_class, class,
+│       │     sub_class, side when the extras are present
 │       │     - neuropils: list[str] of every neuropil this neuron has at
 │       │       least one synapse in (union; pre + post). Required by the
 │       │       loader but not read: membership is recomputed from the
@@ -191,19 +198,19 @@ with the stimulus data, under `config['data']['data_folder']` (read it with
 │       ├── optic_lobe_column_index.parquet  # emitted by format_connectome_data.py
 │       │     columns: root_id, column_index (0-indexed)
 │       │     # loaded by OpticLobeRegion._load_extras
-│       └── optic_lobe_columns.parquet  # sourced from a separate empirical dataset
-│             # (not written by format_connectome_data.py; must be copied here)
-│             columns: column_index (0..C-1 in row order), phi, theta, p, q, x, y, z
+│       └── optic_lobe_columns.parquet  # emitted by build_column_geometry.py from the
+│             # eye map: each eye-map column matched to a FlyWire left-medulla Mi1,
+│             # carried to the right-lobe column with the same (p, q); rim columns
+│             # the eye map misses are interpolated over the hex grid
+│             columns: column_index (0..C-1 in row order), phi, theta, p, q, x, y, z,
+│             source ('eye_map' | 'interpolated')
 │             # right-eye geometry, loaded by OpticLobeRegion._load_extras
 └── stimulus/
     ├── raw/                          # raw sources, read once by process_raw_data.py
-    │   ├── panoramic/                # raw panorama .mat source images (random_pano)
-    │   └── fib_forest_fly_view_dataset_fwd.pkl  # raw rendered fly-view source (responses/flow/depth)
-    ├── baked/                        # caches from process_raw_data.py <raw_type>,
+    │   └── panoramic/                # raw panorama .mat source images (random_pano)
+    ├── baked/                        # cache from process_raw_data.py random_pano,
     │   │                             # read by the generators in stimulus_generators.py
-    │   ├── all_panoramic.pt          # consolidated raw panorama images (random_pano)
-    │   └── flyview.pt                # from fib_forest_fly_view_dataset_fwd.pkl: stimulus,
-    │                                 # flow (deg/s) + depth-based odometry, float32, no depth
+    │   └── all_panoramic.pt          # consolidated raw panorama images (random_pano)
     └── training/                     # fixed datasets from create_training_data.py <stimulus_type>
         ├── <stimulus_type>_train.pt  # loaded for training by training_utilities.load_processed_stimulus
         └── <stimulus_type>_test.pt   # held-out split for evaluation (not written for

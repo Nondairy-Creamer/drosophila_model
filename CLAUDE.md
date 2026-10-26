@@ -28,24 +28,36 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
 - `<data_folder>/config.toml`, `<data_folder>/config_data.toml` — copies of
  the per-machine config overlays live here too (`setup_server.sh` installs
  them at the repo root)
-- `<data_folder>/connectome_data/` — connectome (`baked/cell_info.parquet`, `baked/synapses.parquet`)
+- `<data_folder>/connectome_data/raw/` — FlyWire Codex downloads (FAFB v783)
+ kept as downloaded (`.csv.gz`): `consolidated_cell_types`,
+ `connections_princeton_no_threshold`, `column_assignment`,
+ `fafb_v783_princeton_synapse_table` (read only by `split_ct1` and
+ `build_column_geometry`), plus the optional `cell_stats` / `classification`
+ extras. `raw/eyemap_T4/data/eyemap.RData` is the Reiser lab eye map (Zhao et
+ al. 2025), from github.com/reiserlab/eyemap_T4 (GPL-3.0).
+- `<data_folder>/connectome_data/baked/` — produced by
+ `python -m drosophila_model.data_handling.format_connectome_data` (which
+ first runs `split_ct1` and `build_column_geometry` if their outputs are
+ missing): `cell_info.parquet`, `synapses.parquet`,
+ `optic_lobe_column_index.parquet`, the CT1 split (`ct1_pieces.parquet`,
+ `ct1_connections.parquet`: each CT1 replaced by per-column `CT1_M` / `CT1_L`
+ pieces) and `optic_lobe_columns.parquet` (each right-lobe column's viewing
+ direction, from the eye map matched to FlyWire columns; rim columns the eye
+ map misses are interpolated, `source == 'interpolated'`).
 - `<data_folder>/stimulus/raw/` — raw stimulus source files, read once by
- `process_raw_data.py`: the raw `panoramic/*.mat` panoramas and
- `fib_forest_fly_view_dataset_fwd.pkl` (raw rendered fly-view source).
+ `process_raw_data.py`: the raw `panoramic/*.mat` panoramas.
 - `<data_folder>/stimulus/baked/` — caches produced by
- `python -m drosophila_model.data_handling.process_raw_data <raw_type>`
- (`random_pano`, `flyview`; omit `<raw_type>` to bake both) and consumed by
- the on-the-fly generators in `stimulus_generators.py`: `all_panoramic.pt`
- (consolidated raw panorama images) and `flyview.pt` (stimulus, flow in deg/s
- and depth-based odometry per clip at native fps, baked from
- `fib_forest_fly_view_dataset_fwd.pkl`, float32, no depth).
+ `python -m drosophila_model.data_handling.process_raw_data random_pano` and
+ consumed by the on-the-fly generators in `stimulus_generators.py`:
+ `all_panoramic.pt` (consolidated raw panorama images). Every other stimulus
+ is computed on the fly; there are no pre-rendered stimuli.
 - `<data_folder>/stimulus/training/` — fixed datasets produced by
  `python -m drosophila_model.data_handling.create_training_data <stimulus_type>`,
  split into a `<stimulus_type>_train.pt` and `<stimulus_type>_test.pt` pair
- per type (e.g. `flyview_train.pt` + `flyview_test.pt`). The split is
+ per type (e.g. `random_pano_train.pt` + `random_pano_test.pt`). The split is
  a seeded shuffle (`[data].shared.seed`) of whole source groups (correlated
- variants — segments of one clip, repeats of one panorama, phase/contrast
- variants of one grating — share a group); the first `train_fraction` of the
+ variants — repeats of one panorama, phase/contrast variants of one grating —
+ share a group); the first `train_fraction` of the
  groups go to `_train.pt`. `train_fraction` is `[data].shared.train_fraction`
  unless the type's own table in `config_default_data.toml` overrides it:
  `full_field_step` / `full_field_flicker` use 1.0, so they are train-only (no

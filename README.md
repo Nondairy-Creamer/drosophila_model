@@ -74,9 +74,10 @@ In code, use `config.load_config()` for the live config,
 
 | Folder | Contents | Produced by |
 |---|---|---|
-| `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet` | `data_handling.format_connectome_data`, from the raw FlyWire CSVs in `connectome_data/raw/` (`optic_lobe_columns.parquet`, the column viewing directions, ships with the data bundle) |
-| `stimulus/raw/` | panorama `.mat` files, the rendered fly-view `.pkl` | recorded / rendered elsewhere |
-| `stimulus/baked/` | `all_panoramic.pt`, `flyview.pt` | `data_handling.process_raw_data [random_pano\|flyview]` (omit the type to process both) |
+| `connectome_data/raw/` | FlyWire Codex downloads (FAFB v783), as `.csv.gz`: `consolidated_cell_types`, `connections_princeton_no_threshold`, `column_assignment`, `fafb_v783_princeton_synapse_table`, and optionally `cell_stats` / `classification` | downloaded from Codex |
+| `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet`, and the CT1 split (`ct1_pieces.parquet`, `ct1_connections.parquet`) | `data_handling.format_connectome_data`, which first runs `data_handling.split_ct1` (each CT1 split into per-column `CT1_M` / `CT1_L` pieces by synapse position) and `data_handling.build_column_geometry` (column viewing directions from the Reiser lab eye map, Zhao et al. 2025, in `connectome_data/raw/eyemap_T4/`) if their outputs are missing |
+| `stimulus/raw/` | panorama `.mat` files | Meyer et al. 2014 panoramas |
+| `stimulus/baked/` | `all_panoramic.pt` | `data_handling.process_raw_data random_pano` |
 | `stimulus/training/` | `<type>_train.pt` and `<type>_test.pt` | `data_handling.create_training_data <type>` |
 
 Training never generates stimuli on the fly; it loads `<type>_train.pt`. Bake
@@ -87,8 +88,9 @@ python -m drosophila_model.data_handling.create_training_data random_pano
 ```
 
 Bakeable types are `static_sine`, `random_sine`, `counterphase_sine`,
-`random_pano`, `full_field_step`, `full_field_flicker` and `flyview`. All of
-them bake two-eye data (`[right | left]` on the column axis).
+`random_pano`, `full_field_step` and `full_field_flicker`, all computed on the
+fly (`random_pano` from the raw panorama images). All of them bake two-eye
+data (`[right | left]` on the column axis).
 
 The split is a seeded shuffle of whole source groups, so correlated examples
 never straddle train/test. Examples share a group when they are segments of
@@ -172,7 +174,7 @@ split. `performance_sweep` evaluates on the held-out `_test.pt` files.
 | Script | What it does |
 |---|---|
 | `benchmark_model` | Standard battery on one model: edge sweep, pano odometry, white-noise and sine silencing, performance sweep (each skippable). |
-| `performance_sweep` | Flow and ego-motion cosine similarity on baked `random_sine`, `random_pano`, `flyview` (`--split test` by default). |
+| `performance_sweep` | Flow and ego-motion cosine similarity on baked `random_sine`, `random_pano` (`--split test` by default). |
 | `pano_sweep` | Odometry (rotation and translation) on random-velocity panoramas. |
 | `plot_odometry` | Predicted vs. true odometry on the run's training stimuli. |
 | `edge_sweep` / `sine_wave_sweep` / `natural_pano_velocity_sweep` | Velocity / temporal-frequency tuning of readouts and cells. |
@@ -188,7 +190,6 @@ split. `performance_sweep` evaluates on the held-out `_test.pt` files.
 | `view_edge_stimulus`, `view_sine_stimulus`, `view_impulse_stimulus`, `view_natural_scene`, `view_stimulus_preprocessing` | Per-stimulus response plots and hex-mosaic movies of a trained run (`--model`, required: the run folder or its `model.pt`). |
 | `run_stimulus_battery` | Run all `view_*` scripts and tile their hex movies. |
 | `view_spatial_frequency` | Spatial power spectrum of the natural panoramas. |
-| `verify_flyview_odometry` | Check the fly-view dataset's odometry reconstruction. |
 | `antenna_lobe_decoding` / `olf_decoding_mimic` | Odor-identity decoding from ORN vs. PN responses of antenna-lobe models. |
 
 ### `drosophila_model.analysis.movie_scripts`
@@ -213,7 +214,7 @@ drosophila_model/
                             (load_processed_stimulus, model_outputs, compute_loss_components,
                             train_model), loss_functions, model management tools
   data_handling/            raw-data and training-data baking, stimulus_generators, sampling,
-                            format_connectome_data
+                            format_connectome_data, split_ct1, build_column_geometry
   analysis/model_analysis/  analysis scripts + analysis_utilities
   analysis/movie_scripts/   movie scripts + movie_utilities
   fly_eye/                  hex-mosaic rendering of per-column activity
