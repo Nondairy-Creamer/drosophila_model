@@ -9,10 +9,15 @@ __pycache__/
 build/
 dist/
 .venv
+venv/
 .DS_Store
 logs/*
-drone/*
 scratch*
-*/.log
+*.log
+# Non-figure data products written by analysis scripts (cache/<analysis>/...).
+cache/
 
+# Editor / IDE files.
+.idea/
 *.lyx#
+*.lyx~
