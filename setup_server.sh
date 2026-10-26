@@ -19,17 +19,20 @@ echo "Data folder: $DATA_FOLDER"
 # with a torch build matched to the pod's GPU (e.g. Blackwell / sm_120 needs a
 # cu128 nightly newer than what the stable cu128 index serves). Running
 # against the system Python lets us inherit that working torch.
-pip install --upgrade pip
+#
+# pip is always run as `python -m pip`: on Windows (Git Bash) pip.exe refuses
+# to upgrade itself, and this also guarantees pip matches `python` below.
+python -m pip install --upgrade pip
 
 # Third-party deps. torch is listed unpinned in requirements.txt so pip will
 # leave any existing install alone (RunPod) and install the default CPU build
 # on fresh machines without torch.
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 # Register this repo as the `drosophila_model` package in editable mode.
 # --no-deps avoids pip re-resolving torch off pyproject.toml's version pin
 # and accidentally replacing the pod's GPU torch with a CPU build from PyPI.
-pip install -e . --no-deps
+python -m pip install -e . --no-deps
 
 mkdir -p "$DATA_FOLDER/connectome_data/baked"
 mkdir -p "$DATA_FOLDER/stimulus/baked"
