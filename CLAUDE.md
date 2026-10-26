@@ -18,19 +18,16 @@ nest them under the analysis-name subfolder as above.
 
 ## Data folder
 
-There is NO default data path. ALWAYS read `[data].data_folder` from
-`config.toml` every single time you need the data location. Never hardcode or
-assume a path (in particular, do not assume `../drosophila_model_data`).
-
-Current value (this machine, for reference only — re-read config each time):
-
-```
-/Users/mcreamer/Library/CloudStorage/GoogleDrive-matthew.s.creamer@gmail.com/My Drive/memazing/drosophila_model_data
-```
+ALWAYS read `[data].data_folder` from the config (`config.get_data_folder`)
+every single time you need the data location. Never hardcode a path. The
+packaged default is `../drosophila_model_data` (relative to the repo root);
+`config.toml` overrides it.
 
 ### Layout
 
-- `<data_folder>/config.toml` — a copy of run config lives here too
+- `<data_folder>/config.toml`, `<data_folder>/config_data.toml` — copies of
+ the per-machine config overlays live here too (`setup_server.sh` installs
+ them at the repo root)
 - `<data_folder>/connectome_data/` — connectome (`baked/cell_info.parquet`, `baked/synapses.parquet`)
 - `<data_folder>/stimulus/raw/` — raw stimulus source files. The large raw
  inputs — the drone rigs `drone_videos/` + `drone_poses/` (small_drone) and
@@ -38,17 +35,25 @@ Current value (this machine, for reference only — re-read config each time):
  `panoramic/*.mat` panoramas — are read once by `process_raw_data.py`. Also
  here: `fib_forest_fly_view_dataset_fwd.pkl` (raw rendered fly-view source).
 - `<data_folder>/stimulus/baked/` — caches produced by
- `drosophila_model/data_handling/process_raw_data.py <raw_type>`
- (`small_drone`, `rpi_drone`, `random_pano`, `flyview`) and consumed by the
- on-the-fly generators in `stimulus_generators.py`: `small_drone.pt`,
- `rpi_drone.pt` (ommatidium-sampled clips at native fps), `all_panoramic.pt`
- (consolidated raw panorama images), and `flyview.pt` (flow +
- depth-based odometry baked from `fib_forest_fly_view_dataset_fwd.pkl`, float32,
- no depth).
+ `python -m drosophila_model.data_handling.process_raw_data <raw_type>`
+ (`small_drone`, `rpi_drone`, `random_pano`, `flyview`; omit `<raw_type>` to
+ bake all four) and consumed by the on-the-fly generators in
+ `stimulus_generators.py`: `small_drone.pt`, `rpi_drone.pt`
+ (ommatidium-sampled clips at native fps), `all_panoramic.pt` (consolidated
+ raw panorama images), and `flyview.pt` (stimulus, flow in deg/s and
+ depth-based odometry per clip at native fps, baked from
+ `fib_forest_fly_view_dataset_fwd.pkl`, float32, no depth).
 - `<data_folder>/stimulus/training/` — fixed datasets produced by
- `drosophila_model/data_handling/create_training_data.py <stimulus_type>`,
- split by `[data].shared.train_fraction` into a `<stimulus_type>_train.pt` and
- `<stimulus_type>_test.pt` pair per type (e.g. `small_drone_train.pt` +
- `small_drone_test.pt`). Training loads the `_train.pt` via
+ `python -m drosophila_model.data_handling.create_training_data <stimulus_type>`,
+ split into a `<stimulus_type>_train.pt` and `<stimulus_type>_test.pt` pair
+ per type (e.g. `small_drone_train.pt` + `small_drone_test.pt`). The split is
+ a seeded shuffle (`[data].shared.seed`) of whole source groups (correlated
+ variants — segments of one clip, repeats of one panorama, phase/contrast
+ variants of one grating — share a group); the first `train_fraction` of the
+ groups go to `_train.pt`. `train_fraction` is `[data].shared.train_fraction`
+ unless the type's own table in `config_default_data.toml` overrides it:
+ `full_field_step` / `full_field_flicker` use 1.0, so they are train-only (no
+ `_test.pt`). Training loads the `_train.pt` via
  `training_utilities.load_processed_stimulus` (no on-the-fly generation); the
- `_test.pt` is held out for analysis only.
+ `_test.pt` is held out for analysis only (e.g. `performance_sweep` evaluates
+ on it).
