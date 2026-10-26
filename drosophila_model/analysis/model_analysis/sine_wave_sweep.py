@@ -7,13 +7,14 @@ Velocity is scaled with wavelength so that temporal frequency is matched
 across spatial frequencies. Plots mean firing rate as a function of
 temporal frequency for each direction, plus XT plots at 8 Hz (firing rates and,
 under ``xt_plots/``, stimulus after the model's input convolution when enabled).
+The stimulus drives the model's default input cells (L1-L3).
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.sine_wave_sweep models/<run_folder>
+    python -m drosophila_model.analysis.model_analysis.sine_wave_sweep models/<run_folder> --expressive
 """
-import sys
-from pathlib import Path
-
-# Add parent directory to path for imports
-
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -23,25 +24,16 @@ from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.data_handling.stimulus_generators import make_lr_sine_wave, make_ud_sine_wave
-from drosophila_model.analysis.model_analysis.analysis_utilities import input_conv_stimulus_timecourse, prepare_xt
-
-
-NEURON_GROUPS = [
-    ("T4", ["T4a", "T4b", "T4c", "T4d"]),
-    ("T5", ["T5a", "T5b", "T5c", "T5d"]),
-    ("L", ["L2", "L3", "L4", "L5"]),
-    ("C_CT1", ["C2", "C3", "CT1_L", "CT1_M"]),
-    ("Tm_A", ["Tm1", "Tm2", "Tm4", "Tm9"]),
-    ("Mi_Tm", ["Mi1", "Tm3", "Mi4", "Mi9"]),
-    ("T_other", ["T1", "T2", "T3"]),
-]
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    NEURON_GROUPS, get_flow_key, input_conv_stimulus_timecourse, prepare_xt,
+)
 
 
 def generate_stimulus(direction, sample_phi, sample_theta, wavelength, velocity, dt, stim_time, pre_stim_time, zero_center=False):
     """Generate a single sine wave stimulus for a given direction and velocity.
 
-    Returns stimulus tensor of shape (1, time, columns) and the number of
-    warm-up time steps (pre_stim_time frames).
+    Returns a numpy array of shape (1, time, columns); the first
+    ``pre_stim_time / dt`` frames are the static warm-up.
     """
     temporal_frequency = velocity / wavelength
 
@@ -82,29 +74,21 @@ def run_sine_wave_sweep(model, silenced_neurons=None, output_dir=None,
     Args:
         model: A loaded ``BaseRnn`` (already on the desired device and
             in eval mode).
-        silenced_neurons: Optional list of neuron names to silence.
-            ``output_strength_log`` is saved and restored automatically.
+        silenced_neurons: Optional list of neuron names to silence; the
+            model is restored afterwards.
         output_dir: Path for figures.  If *None*, plotting is skipped.
         expressive: If True, analyse all ``NEURON_GROUPS``; otherwise only
             T4 and T5.
+        zero_center: Map the stimulus from [0, 1] to [-1, 1].
 
     Returns:
         dict mapping ``cell_type -> direction -> wavelength -> np.ndarray``
         of mean firing rates across temporal frequencies.
     """
-    original_output_strength = None
-    original_input_strength = None
-    if silenced_neurons:
-        original_output_strength = model.output_strength_log.data.clone()
-        original_input_strength = model.input_strength_log.data.clone()
-        model.silence_neurons(silenced_neurons)
-
-    try:
+    if not silenced_neurons:
         return _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center)
-    finally:
-        if original_output_strength is not None:
-            model.output_strength_log.data.copy_(original_output_strength)
-            model.input_strength_log.data.copy_(original_input_strength)
+    with model.silenced(silenced_neurons):
+        return _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center)
 
 
 def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False):
@@ -120,8 +104,6 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
     temporal_frequencies = [0.5, 1, 2, 4, 8, 16]  # Hz
     pre_stim_time = 0.5  # warm-up (seconds)
     stim_time = 1.0  # stimulus duration (seconds)
-
-    stim_dt = model.dt
 
     pre_stim_steps = int(pre_stim_time / dt)
     num_sweep = len(temporal_frequencies)
@@ -148,7 +130,7 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
                 velocity = tf * wavelength
                 stim_np = generate_stimulus(
                     direction, sample_phi, sample_theta,
-                    wavelength, velocity, stim_dt, stim_time, pre_stim_time,
+                    wavelength, velocity, dt, stim_time, pre_stim_time,
                     zero_center=zero_center,
                 )
                 stim_list.append(stim_np)
@@ -159,28 +141,22 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
     print(f"Running {all_stim_tensor.shape[0]} stimuli through the model...")
 
     with torch.no_grad():
-        pred = model.predict(all_stim_tensor, input_neurons=["L1", "L2", "L3"],
+        pred = model.predict(all_stim_tensor,
                              output_neurons=all_neurons)['outputs']['optic_lobe']
 
     # --- extract mean decoder responses (if model has a decoder) ---
     decoder_results = None
-    decoder_key = next((k for k, m in model._readout_modules.items() if m.predicts_flow), None)
+    decoder_key = get_flow_key(model)
     if decoder_key is not None:
         decoder_out = pred[decoder_key]
         decoder_stim = decoder_out[:, pre_stim_steps:, :, :]
-        mean_responses = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()
-
-        if mean_responses.shape[-1] == 4:
-            mean_responses = np.stack([
-                mean_responses[:, 0] - mean_responses[:, 1],
-                mean_responses[:, 2] - mean_responses[:, 3],
-            ], axis=-1)
+        mean_responses = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()  # (N, 2)
 
         decoder_results = {d: {w: np.zeros((num_sweep, 2)) for w in wavelengths} for d in directions}
         for i, (direction, wavelength, si) in enumerate(index_map):
             decoder_results[direction][wavelength][si, :] = mean_responses[i]
     else:
-        print("Model has no decoder — skipping decoder figure.")
+        print("Model has no decoder - skipping decoder figure.")
 
     # --- extract per-cell-type mean firing rates ---
     cell_results = {}
@@ -234,7 +210,7 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
         for group_name, cell_types in active_groups:
             present = [ct for ct in cell_types if ct in cell_results]
             if not present:
-                print(f"Skipping group {group_name} — no matching neurons in model.")
+                print(f"Skipping group {group_name} - no matching neurons in model.")
                 continue
 
             for wavelength in wavelengths:
@@ -269,7 +245,7 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
 
         tf_8hz = 8
         if tf_8hz not in temporal_frequencies:
-            print("8 Hz not in sweep — skipping XT plots.")
+            print("8 Hz not in sweep - skipping XT plots.")
         else:
             si_8hz = temporal_frequencies.index(tf_8hz)
             batch_lookup = {}
@@ -281,6 +257,13 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
             use_conv = getattr(model.regions['optic_lobe'], "use_input_conv", False)
             stim_label = "Input-conv stimulus" if use_conv else "Raw stimulus (no input conv)"
 
+            # Columns are sorted along the motion axis: phi for left/right
+            # gratings, theta for up/down gratings.
+            def _xt_axis(direction):
+                if direction in ("right", "left"):
+                    return sample_phi, "φ (rad)"
+                return sample_theta, "θ (rad)"
+
             for wavelength in wavelengths:
                 fig, axes = plt.subplots(2, 2, figsize=(12, 10))
                 dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
@@ -288,12 +271,13 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
                 for direction, ax in dir_axes.items():
                     bi = batch_lookup[(direction, wavelength)]
                     stim_np = conv_inputs[bi].detach().cpu().numpy()
-                    sorted_data, extent = prepare_xt(stim_np, sample_phi)
+                    coord, coord_label = _xt_axis(direction)
+                    sorted_data, extent = prepare_xt(stim_np, coord)
                     im = ax.imshow(sorted_data, aspect="auto",
                                    extent=[extent[0], extent[1], extent[3], extent[2]],
                                    cmap="viridis", origin="upper")
                     ax.set_title(direction)
-                    ax.set_xlabel("φ (rad)")
+                    ax.set_xlabel(coord_label)
                     ax.set_ylabel("Time step")
                     fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
                 fig.suptitle(f"{stim_label} — 8 Hz, λ={wavelength}°", fontsize=14)
@@ -303,32 +287,32 @@ def _run_sine_wave_sweep_inner(model, output_dir, expressive, zero_center=False)
                 plt.close(fig)
                 print(f"Saved {save_path}")
 
-            xt_wavelength = wavelengths[0]
+            wavelength = wavelengths[0]
             for ct in all_neurons:
                 fr_all = pred["firing_rate"][ct]  # (N, time, columns)
-                for wavelength in [xt_wavelength]:
-                    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-                    dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
-                                "up": axes[1, 0], "down": axes[1, 1]}
+                fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+                dir_axes = {"right": axes[0, 0], "left": axes[0, 1],
+                            "up": axes[1, 0], "down": axes[1, 1]}
 
-                    for direction, ax in dir_axes.items():
-                        bi = batch_lookup[(direction, wavelength)]
-                        fr_np = fr_all[bi].cpu().numpy()  # (time, columns)
-                        sorted_data, extent = prepare_xt(fr_np, sample_phi)
-                        im = ax.imshow(sorted_data, aspect="auto",
-                                       extent=[extent[0], extent[1], extent[3], extent[2]],
-                                       cmap="viridis", origin="upper")
-                        ax.set_title(direction)
-                        ax.set_xlabel("φ (rad)")
-                        ax.set_ylabel("Time step")
-                        fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
+                for direction, ax in dir_axes.items():
+                    bi = batch_lookup[(direction, wavelength)]
+                    fr_np = fr_all[bi].cpu().numpy()  # (time, columns)
+                    coord, coord_label = _xt_axis(direction)
+                    sorted_data, extent = prepare_xt(fr_np, coord)
+                    im = ax.imshow(sorted_data, aspect="auto",
+                                   extent=[extent[0], extent[1], extent[3], extent[2]],
+                                   cmap="viridis", origin="upper")
+                    ax.set_title(direction)
+                    ax.set_xlabel(coord_label)
+                    ax.set_ylabel("Time step")
+                    fig.colorbar(im, ax=ax, shrink=0.7, pad=0.04)
 
-                    fig.suptitle(f"{ct} — 8 Hz, λ={wavelength}°", fontsize=14)
-                    plt.tight_layout()
-                    save_path = xt_folder / f"{ct}_lambda{wavelength}_8hz.png"
-                    fig.savefig(save_path, dpi=150)
-                    plt.close(fig)
-                    print(f"Saved {save_path}")
+                fig.suptitle(f"{ct} — 8 Hz, λ={wavelength}°", fontsize=14)
+                plt.tight_layout()
+                save_path = xt_folder / f"{ct}_lambda{wavelength}_8hz.png"
+                fig.savefig(save_path, dpi=150)
+                plt.close(fig)
+                print(f"Saved {save_path}")
 
     return cell_results
 
@@ -338,7 +322,7 @@ def main():
     parser.add_argument(
         "model_folder",
         type=str,
-        help="Path to model folder (containing model.pt and config.toml)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--expressive", action="store_true", default=False,
@@ -358,12 +342,16 @@ def main():
     )
     args = parser.parse_args()
 
-    model_folder = Path(args.model_folder)
-    model = nm.BaseRnn.load(model_folder / "model.pt")
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.BaseRnn.load(model_path)
     model.eval()
 
+    # Silenced runs get their own sub-folder so they don't overwrite the baseline.
+    condition = ("silenced_" + "_".join(args.silenced_neurons)
+                 if args.silenced_neurons else "")
     output_dir = (Path(args.output_dir) if args.output_dir
-                  else model_folder / "figures" / "sine_wave_sweep")
+                  else model_folder / "figures" / "sine_wave_sweep" / condition)
 
     cell_results = run_sine_wave_sweep(
         model,

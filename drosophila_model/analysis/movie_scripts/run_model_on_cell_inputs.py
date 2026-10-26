@@ -1,13 +1,14 @@
 """
 Run a trained model on the saved cell_inputs.pt (the exact inputs the model was
-trained on) and visualize predicted optic flow.
+trained on, i.e. its training split, not held-out data) and visualize predicted
+optic flow.
 
 Auto-detects one-eye vs two-eye based on input width relative to the model's
 column count (N columns = one-eye, 2N = two-eye).
 
 One-eye layout (2x2):
   Top left:     Stimulus intensity
-  Top right:    True optic flow
+  Top right:    True optic flow (from the saved target.pt)
   Bottom left:  Filtered stimulus (after input conv, if available)
   Bottom right: Predicted optic flow
 
@@ -15,16 +16,17 @@ Two-eye layout (2x2):
   Row 0: Left stimulus        | Right stimulus
   Row 1: Left predicted flow  | Right predicted flow
 
+Columns outside the field of view are drawn yellow.
+
 To run a model on a freshly generated stimulus (random pano/sine, edges,
 flyview, drone, ...) — including the fly-view ego-motion comparison — use
-``run_model_on_stimulus.py`` instead.
+``run_model_on_stimulus`` instead.
 
-Usage:
-    python movie_scripts/run_model_on_cell_inputs.py models/my_model/
-    python movie_scripts/run_model_on_cell_inputs.py models/my_model/ --stim-index 5
+Usage (from the repo root):
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_cell_inputs models/my_model/
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_cell_inputs models/my_model/ --stim-index 5
 """
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -32,12 +34,12 @@ import torch
 import numpy as np
 
 from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.training.training_utilities import loss_start_step
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
     masked_rgba,
     write_movie,
     compute_filtered,
-    fig_to_rgb,
     get_flow_key,
     make_flow_comparison_movie,
     prepare_eye_quiver,
@@ -48,16 +50,17 @@ from drosophila_model.analysis.movie_scripts.movie_utilities import (
 )
 
 
-def _extract_optic_flow(target_loaded):
-    """Pull the flow tensor from the saved target file (tensor or dict)."""
-    if torch.is_tensor(target_loaded):
-        return target_loaded
-    if isinstance(target_loaded, dict):
-        for key in ('decoder', 'optic_flow', 'flow'):
-            if key in target_loaded and torch.is_tensor(target_loaded[key]):
-                return target_loaded[key]
-        raise ValueError("Target dict missing flow tensor under keys: decoder, optic_flow, flow.")
-    raise TypeError("Unsupported target format.")
+def _display_mask(train_mask):
+    """Field-of-view mask for one example's ``(T, columns)`` train mask.
+
+    The leading pre-stimulus frames are excluded from the loss
+    (``train_mask`` False) but are on screen; show them with the field of view
+    of the first stimulus frame instead of painting every column as masked.
+    """
+    mask = train_mask.cpu().numpy().astype(bool)
+    start = loss_start_step(train_mask.unsqueeze(0))
+    mask[:start] = mask[start]
+    return mask
 
 
 def main() -> None:
@@ -86,23 +89,19 @@ def main() -> None:
 
     flow_key = get_flow_key(model)
     if flow_key is None:
-        print("WARNING: No flow readout found. Using first readout.")
-        flow_key = next(iter(model._readout_modules.keys()))
+        raise SystemExit("Model has no flow readout (predicts_flow=True); "
+                         "cannot render a flow movie.")
 
     stim_index = args.stim_index
 
     print("Loading inputs...")
     cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
-    if isinstance(cell_inputs_data, dict):
-        cell_inputs_all = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
-        train_mask_all = cell_inputs_data.get('train_mask', None)
-    else:
-        cell_inputs_all = cell_inputs_data.to(device=device, dtype=dtype)
-        train_mask_all = None
+    cell_inputs_all = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
+    train_mask_all = cell_inputs_data['train_mask']
 
     input_width = cell_inputs_all.shape[2]
     two_eyes = (input_width == 2 * N)
-    print(f"  cell_inputs shape: {cell_inputs_all.shape} — {'two-eye' if two_eyes else 'one-eye'} detected")
+    print(f"  cell_inputs shape: {cell_inputs_all.shape} - {'two-eye' if two_eyes else 'one-eye'} detected")
     print(f"  Using stimulus index {stim_index}")
 
     output_folder = model_folder / 'figures' / 'run_model_on_cell_inputs'
@@ -110,7 +109,7 @@ def main() -> None:
     if two_eyes:
         _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
                       cell_x, cell_y, cell_z, flow_key, frame_rate,
-                      args.max_frames, output_folder, device, dtype)
+                      args.max_frames, output_folder)
     else:
         _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
                      cell_x, cell_y, cell_z, flow_key, frame_rate,
@@ -124,13 +123,18 @@ def _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
 
     stim_input = cell_inputs_all[stim_index:stim_index + 1]
 
-    # Load true flow if available
+    # run_model saves the training targets next to cell_inputs.pt.
     target_path = model_folder / 'target.pt'
-    true_flow_np = None
-    if target_path.exists():
-        target_loaded = torch.load(target_path, map_location=device)
-        true_flow_all = _extract_optic_flow(target_loaded).to(device=device, dtype=dtype)
-        true_flow_np = true_flow_all[stim_index].detach().cpu().numpy()
+    if not target_path.exists():
+        raise SystemExit(f"{target_path} not found; the one-eye movie compares "
+                         "against the saved training targets.")
+    target = torch.load(target_path, map_location=device)
+    if 'optic_flow' not in target:
+        raise SystemExit(f"{target_path} has no 'optic_flow' target "
+                         f"(keys: {sorted(target)}).")
+    true_flow_np = target['optic_flow'][stim_index].to(dtype=dtype).cpu().numpy()
+
+    mask = _display_mask(train_mask_all[stim_index])
 
     print(f"Running model prediction for stimulus {stim_index}...")
     with torch.no_grad():
@@ -148,34 +152,34 @@ def _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
     if max_frames is not None:
         stimulus = stimulus[:max_frames]
         pred_flow = pred_flow[:max_frames]
-        if true_flow_np is not None:
-            true_flow_np = true_flow_np[:max_frames]
+        true_flow_np = true_flow_np[:max_frames]
         if filtered_stim_np is not None:
             filtered_stim_np = filtered_stim_np[:max_frames]
+        mask = mask[:max_frames]
 
-    if true_flow_np is not None:
-        from drosophila_model.training.loss_functions import cos_loss
-        true_flow_t = torch.tensor(true_flow_np)
-        pred_flow_t = torch.tensor(pred_flow)
-        print("Cosine similarity", 1 - cos_loss(true_flow_t, pred_flow_t))
+    from drosophila_model.training.loss_functions import cos_loss
+    true_flow_t = torch.tensor(true_flow_np)
+    pred_flow_t = torch.tensor(pred_flow)
+    print(f"Cosine similarity: {1 - cos_loss(true_flow_t, pred_flow_t).item():.4f}")
 
     out_path = output_folder / f'optic_flow_comparison_stim_{stim_index}.mp4'
     print(f"Creating movie -> {out_path}")
 
     make_flow_comparison_movie(
         stimulus,
-        true_flow_np if true_flow_np is not None else pred_flow,
-        pred_flow if true_flow_np is not None else None,
+        true_flow_np,
+        pred_flow,
         cell_x, cell_y, cell_z,
         out_path, frame_rate,
         filtered_stimulus=filtered_stim_np,
+        mask=mask,
         eye="right",
     )
 
 
 def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
                   cell_x, cell_y, cell_z, flow_key, frame_rate,
-                  max_frames, output_folder, device, dtype):
+                  max_frames, output_folder):
     """Two-eye path: split the saved input, predict, and render a 2x2 movie
     (left/right stimulus over left/right predicted flow)."""
     import matplotlib
@@ -187,22 +191,17 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
     right_input = stim_input[:, :, :N]
     left_input = stim_input[:, :, N:]
 
-    if train_mask_all is not None:
-        stim_mask = train_mask_all[stim_index].cpu().numpy()
-        mask_right = stim_mask[:, :N]
-        mask_left = stim_mask[:, N:]
-    else:
-        mask_right = None
-        mask_left = None
+    stim_mask = _display_mask(train_mask_all[stim_index])
+    mask_right = stim_mask[:, :N]
+    mask_left = stim_mask[:, N:]
 
     num_frames = stim_input.shape[1]
     if max_frames is not None:
         num_frames = min(num_frames, max_frames)
         right_input = right_input[:, :num_frames]
         left_input = left_input[:, :num_frames]
-        if mask_right is not None:
-            mask_right = mask_right[:num_frames]
-            mask_left = mask_left[:num_frames]
+        mask_right = mask_right[:num_frames]
+        mask_left = mask_left[:num_frames]
 
     print(f"Running model prediction ({num_frames} frames, N={N} columns per eye)...")
     with torch.no_grad():
@@ -232,33 +231,33 @@ def _run_two_eyes(model, cell_inputs_all, train_mask_all, stim_index, N,
     fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.24), dpi=100,
                              gridspec_kw={"height_ratios": [3, 3]})
 
-    mask_l_0 = mask_left[0] if mask_left is not None else None
-    mask_r_0 = mask_right[0] if mask_right is not None else None
-
     ax_stim_l, ax_stim_r = axes[0, 0], axes[0, 1]
     setup_eye_axis(ax_stim_l, cell_x, cell_z, "left")
     setup_eye_axis(ax_stim_r, cell_x, cell_z, "right")
     sc_stim_l = ax_stim_l.scatter(cell_x, cell_z,
-        c=masked_rgba(stimulus_left[0], mask_l_0, gray_cmap, stim_norm), s=90, edgecolors="none")
+        c=masked_rgba(stimulus_left[0], mask_left[0], gray_cmap, stim_norm), s=90, edgecolors="none")
     sc_stim_r = ax_stim_r.scatter(cell_x, cell_z,
-        c=masked_rgba(stimulus_right[0], mask_r_0, gray_cmap, stim_norm), s=90, edgecolors="none")
+        c=masked_rgba(stimulus_right[0], mask_right[0], gray_cmap, stim_norm), s=90, edgecolors="none")
     ax_stim_l.set_title("Left Eye (stimulus)")
     ax_stim_r.set_title("Right Eye (stimulus)")
-    fig.colorbar(sc_stim_l, ax=ax_stim_l, label="intensity")
-    fig.colorbar(sc_stim_r, ax=ax_stim_r, label="intensity")
+    # The scatters carry explicit RGBA colours, so the colorbars need their own
+    # mappable for the gray stimulus scale.
+    stim_sm = plt.cm.ScalarMappable(cmap=gray_cmap, norm=stim_norm)
+    stim_sm.set_array([])
+    fig.colorbar(stim_sm, ax=ax_stim_l, label="intensity")
+    fig.colorbar(stim_sm, ax=ax_stim_r, label="intensity")
 
     pred_flow_row = _init_flow_row(
         axes[1, 0], axes[1, 1], pred_prepared,
         cell_x, cell_z, max_mag, arrow_scale, "predicted flow")
-    add_eye_colorwheel(fig)
 
     plt.tight_layout()
+    # After tight_layout: the fixed-position polar wheel is not a subplot.
+    add_eye_colorwheel(fig)
 
     def update(t):
-        mask_l_t = mask_left[t] if mask_left is not None else None
-        mask_r_t = mask_right[t] if mask_right is not None else None
-        sc_stim_l.set_facecolors(masked_rgba(stimulus_left[t], mask_l_t, gray_cmap, stim_norm))
-        sc_stim_r.set_facecolors(masked_rgba(stimulus_right[t], mask_r_t, gray_cmap, stim_norm))
+        sc_stim_l.set_facecolors(masked_rgba(stimulus_left[t], mask_left[t], gray_cmap, stim_norm))
+        sc_stim_r.set_facecolors(masked_rgba(stimulus_right[t], mask_right[t], gray_cmap, stim_norm))
         _update_flow_row(pred_flow_row, t, max_mag)
         title = f"frame {t + 1}/{num_frames}"
         ax_stim_l.set_title(f"Left Eye (stimulus) {title}")

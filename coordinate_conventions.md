@@ -40,6 +40,11 @@ of visual space (phi < 0). Column positions are stored as `(phi, theta)` in
 
 The **left eye** is the mirror image of the right eye. Its viewing directions
 are at `(-phi, theta)` — the same polar angle but with negated azimuth.
+Two-eye column sets are ordered `[right | left]`
+(`OpticLobeRegion.column_phi_theta_two_eyes`,
+`ego_motion.load_viewing_directions`). Likewise, the left-eye camera offset
+is the sagittal mirror `(x, -y, z)` of the right-eye offset
+(`OpticLobeRegion.mirror_camera_offset`).
 
 ## Optic Flow
 
@@ -52,25 +57,31 @@ Flow is represented in local spherical coordinates at each column:
 - **u_right**: positive = rightward motion on the retina
 - **u_up**: positive = upward motion on the retina
 
-`generate_optic_flow` (in `analysis/analysis_utilities.py`) computes flow
+`generate_optic_flow` (in `model_definition/ego_motion.py`) computes flow
 by projecting the 3D velocity onto the local `e_phi` and `e_theta` basis
 vectors.  The projection `u_right = -(u · e_phi)` already yields the
-**same** `u_right` sign for symmetric left/right-eye columns — both the
-physical 3D flow and the `e_phi` basis vector mirror together, so the
-angular flow component is consistent across eyes without any correction.
+**same** `u_right` convention for left- and right-eye columns (positive =
+toward decreasing phi, i.e. rightward in the world frame), so no per-eye
+sign correction is applied.  Under mirror-symmetric motion the two eyes'
+values therefore differ in sign (forward translation: `u_right > 0` on the
+right eye, `< 0` on the left), while a yaw gives both eyes the same sign.
 
 ### Two-Eye Flow Pipeline
 
-1. `get_stimulus` (with `num_eyes=2`) computes flow for both eyes by concatenating
-   right-eye columns (phi) with left-eye columns (-phi) and calling
+1. `get_stimulus` (in `data_handling/stimulus_generators.py`, with
+   `num_eyes=2`) samples right-eye columns (phi) followed by left-eye
+   columns (-phi); the synthetic generators (sine gratings, panoramas) call
    `generate_optic_flow` on all columns at once.  No sign correction is
    needed on the resulting `u_right`.
 2. The model processes left-eye input by feeding it through the right-eye
-   model (which sees it as mirrored right-eye data).  The decoder outputs
+   model (which sees it as mirrored right-eye data;
+   `OpticLobeRegion.predict_two_eyes`).  The flow readout outputs
    `u_right` in the right-eye convention (horizontally flipped relative to
    physical left-eye flow).
 3. The model's left-eye `u_right` predictions are **flipped** (multiplied
-   by -1) in `estimate_ego_motion_from_image` to undo the mirror and
-   produce correct physical flow.
+   by -1, the readout's `flip_for_left_eye`) in `predict_two_eyes` — and in
+   `estimate_ego_motion_from_image` for a left-eye-only solve — to undo the
+   mirror and produce correct physical flow.
 4. Training loss compares the flipped predictions against the ground truth
-   directly.
+   directly (`training_utilities.model_outputs` concatenates both eyes'
+   readouts in the same `[right | left]` column order as the targets).

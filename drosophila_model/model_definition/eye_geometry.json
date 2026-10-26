@@ -1,4 +1,0 @@
-{
-  "_comment": "Vector from the body center of mass to the RIGHT-eye camera, in the shared body frame (+x forward, +y left, +z up), in millimetres. The left-eye camera is the sagittal mirror of this vector (y negated). Body rotation gives an offset eye an extra linear velocity Omega x offset, which is what lets the two-eye solver recover absolute translational scale. Placeholder geometry: replace with measured fly head values.",
-  "camera_offset_mm": [0.30, -0.25, 0.20]
-}

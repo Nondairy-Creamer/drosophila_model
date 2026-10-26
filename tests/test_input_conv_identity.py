@@ -1,8 +1,7 @@
 import torch
 
-from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import model_layers as ml
-from test_model_factory import build_model_from_test_config
+from tests.model_factory import build_model_from_test_config
 
 
 def _set_identity_filter(model):
@@ -25,27 +24,9 @@ def _set_identity_filter(model):
         model.regions['optic_lobe'].temporal_lru.c_im.zero_()
 
 
-def test_uniform_input_gives_zero_conv_output():
-    """A spatially uniform input has no local contrast, so conv output should be ~0."""
-    model, _, _, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
-    model.eval()
-    _set_identity_filter(model)
-
-    batch = 2
-    u_t = torch.full(
-        (batch, model.regions['optic_lobe'].num_columns), 5.0,
-        dtype=model.dtype, device=model.device,
-    )
-
-    with torch.no_grad():
-        y_t, _ = model.regions['optic_lobe'].apply_input_conv(u_t)
-
-    assert torch.allclose(y_t, torch.zeros_like(y_t), atol=1e-3, rtol=0.0)
-
-
 def test_spatial_identity_gives_zero_output():
     """With a spatial identity filter, centered = input - input = 0, so output is ~0."""
-    model, _, _, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
+    model, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
     model.eval()
     _set_identity_filter(model)
 
@@ -64,7 +45,7 @@ def test_spatial_identity_gives_zero_output():
 
 def test_lru_step_shapes():
     """Verify the LRU step returns correct shapes and state."""
-    model, _, _, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
+    model, _ = build_model_from_test_config(readouts=[], use_input_conv=True)
     model.eval()
 
     batch = 3

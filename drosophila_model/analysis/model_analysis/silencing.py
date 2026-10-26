@@ -1,16 +1,17 @@
 """
 Evaluate model loss with systematic neuron silencing.
 
-Loads a trained model and its saved stimuli, computes the baseline loss,
-then silences every non-empty combination of {L1, L2, L3}, plus grouped
-T4 (T4a-d), T5 (T5a-d), and combined T4+T5 silencing.
+Loads a trained model and its saved training stimuli (``cell_inputs.pt`` /
+``target.pt``, i.e. the training split, not held-out data), computes the
+baseline training loss, then silences every non-empty combination of
+{L1, L2, L3}, plus grouped T4 (T4a-d), T5 (T5a-d), and combined T4+T5
+silencing.
 
 Usage:
-    python analysis/silencing.py <model_folder>
-    python analysis/silencing.py models/best_drone --device cpu
+    python -m drosophila_model.analysis.model_analysis.silencing models/<model>/
+    python -m drosophila_model.analysis.model_analysis.silencing models/<model>/ --device cpu
 """
 import argparse
-import sys
 from itertools import combinations
 from pathlib import Path
 
@@ -18,55 +19,31 @@ from pathlib import Path
 import torch
 import numpy as np
 
-from drosophila_model.config import load_config
+from drosophila_model.config import load_run_config
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.training import loss_functions as lf
+from drosophila_model.training import training_utilities as tu
+from drosophila_model.analysis.model_analysis.analysis_utilities import run_eye_offset
 
 INPUT_NEURONS = ['L1', 'L2', 'L3']
 T4_NEURONS = ['T4a', 'T4b', 'T4c', 'T4d']
 T5_NEURONS = ['T5a', 'T5b', 'T5c', 'T5d']
 
 
-def compute_loss(model, cell_inputs, target, train_mask, config):
-    """Compute the training loss for a model on saved data.
+def compute_loss(model, cell_inputs, target, train_mask, loss_components,
+                 num_eyes, eye_offset):
+    """Training loss of ``model`` on saved training data.
 
-    Uses the ``loss_components`` list from *config* to look up and call each
-    loss function by name from ``loss_functions``, mirroring the training loop.
+    Runs the model exactly as ``train_model`` does (the two-eye ego-motion
+    path, solved with the run's ``eye_offset``, for two-eye data) and sums the
+    ``loss_components``. The model is in eval mode, so training-only
+    regularizers are not included.
     """
-    time_mask = train_mask.any(dim=-1)
-    loss_start_step = 0
-    if not time_mask[:, 0].all():
-        loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
-
-    loss_names = config['training'].get('loss_components', ['flow_loss'])
-
     with torch.no_grad():
-        if 'odometry_loss' in loss_names and isinstance(target, dict) and 'rotation' in target:
-            N = cell_inputs.shape[2] // 2
-            oob = ~train_mask.any(dim=1).any(dim=0)
-            pred_rot, pred_trans, right_res, left_res = \
-                model.regions['optic_lobe'].estimate_ego_motion_from_image(
-                    cell_inputs[:, :, :N], cell_inputs[:, :, N:], oob_columns=oob)
-            outputs = {}
-            right_optic = right_res['outputs']['optic_lobe']
-            left_optic = left_res['outputs']['optic_lobe']
-            for key in right_optic:
-                if key in ('voltage', 'firing_rate', 'synaptic_current'):
-                    continue
-                outputs[key] = torch.cat(
-                    [right_optic[key], left_optic[key]], dim=2)
-            outputs['pred_rotation'] = pred_rot
-            outputs['pred_translation'] = pred_trans
-        else:
-            input_neurons = [n for n in INPUT_NEURONS if n in model.unique_cell_types]
-            result = model.predict(cell_inputs, input_neurons=input_neurons)
-            outputs = result['outputs']['optic_lobe']
-
-        loss = sum(
-            getattr(lf, n)(model, outputs, target, train_mask, loss_start_step)
-            for n in loss_names
-        ) / len(loss_names)
-        return loss.item()
+        outputs, _ = tu.model_outputs(model, cell_inputs, train_mask, num_eyes,
+                                      eye_offset=eye_offset)
+        components = tu.compute_loss_components(
+            model, outputs, target, train_mask, loss_components)
+    return float(sum(components.values()))
 
 
 def main() -> None:
@@ -93,16 +70,7 @@ def main() -> None:
 
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
-
-    local_config = load_config()
-    model_config_path = model_folder / 'config.toml'
-    if model_config_path.exists():
-        model_config = load_config(model_config_path)
-    else:
-        model_config = local_config
-
-    dtype_str = local_config['model'].get('dtype', 'float32')
-    pt_dtype = getattr(torch, dtype_str)
+    run_config = load_run_config(model_folder)
 
     # --- Load inputs and targets ---
     print(f"Loading model from {model_path} ...")
@@ -112,20 +80,16 @@ def main() -> None:
 
     cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt',
                                   map_location=device, weights_only=False)
-    if isinstance(cell_inputs_data, dict):
-        cell_inputs = cell_inputs_data['cell_inputs'].to(device=device, dtype=model.dtype)
-        train_mask = cell_inputs_data['train_mask'].to(device=device)
-    else:
-        cell_inputs = cell_inputs_data.to(device=device, dtype=model.dtype)
-        train_mask = torch.ones(cell_inputs.shape[:3], dtype=torch.bool, device=device)
+    cell_inputs = cell_inputs_data['cell_inputs'].to(device=device, dtype=model.dtype)
+    train_mask = cell_inputs_data['train_mask'].to(device=device)
 
     target = torch.load(model_folder / 'target.pt',
                         map_location=device, weights_only=False)
-    if isinstance(target, dict):
-        target = {k: (v.to(device=device, dtype=model.dtype) if torch.is_tensor(v) else v)
-                  for k, v in target.items()}
-    else:
-        target = target.to(device=device, dtype=model.dtype)
+    target = {k: v.to(device=device, dtype=model.dtype) for k, v in target.items()}
+
+    num_eyes = run_config['run_info']['num_eyes']
+    eye_offset = run_eye_offset(run_config)
+    loss_components = run_config['training']['loss_components']
 
     # --- Subsample stimuli ---
     num_stimuli = cell_inputs.shape[0]
@@ -135,16 +99,17 @@ def main() -> None:
         idx.sort()
         cell_inputs = cell_inputs[idx]
         train_mask = train_mask[idx]
-        if isinstance(target, dict):
-            target = {k: (v[idx] if torch.is_tensor(v) else v) for k, v in target.items()}
-        else:
-            target = target[idx]
+        target = {k: v[idx] for k, v in target.items()}
         print(f"  Sampled {args.num_stimuli}/{num_stimuli} stimuli (seed={args.seed})")
 
     print(f"  cell_inputs shape: {cell_inputs.shape}")
 
+    def loss_of(mdl):
+        return compute_loss(mdl, cell_inputs, target, train_mask, loss_components,
+                            num_eyes, eye_offset)
+
     # --- Baseline loss (no silencing) ---
-    baseline_loss = compute_loss(model, cell_inputs, target, train_mask, model_config)
+    baseline_loss = loss_of(model)
     print(f"\nBaseline loss (no silencing): {baseline_loss:.6f}")
 
     # --- Build silencing experiments ---
@@ -173,31 +138,20 @@ def main() -> None:
         print("No silenceable neurons found in model cell types.")
         return
 
-    original_output_strength = model.output_strength_log.data.clone()
-    original_input_strength = model.input_strength_log.data.clone()
-
     results = [("none", baseline_loss)]
 
     for group in silencing_groups:
         label = "+".join(group)
-
-        model.output_strength_log.data.copy_(original_output_strength)
-        model.input_strength_log.data.copy_(original_input_strength)
-        model.silence_neurons(group)
-
-        loss = compute_loss(model, cell_inputs, target, train_mask, model_config)
+        with model.silenced(group):
+            loss = loss_of(model)
         results.append((label, loss))
         print(f"  Silenced {label:30s} -> loss = {loss:.6f}")
-
-    # Restore original weights
-    model.output_strength_log.data.copy_(original_output_strength)
-    model.input_strength_log.data.copy_(original_input_strength)
 
     # --- Summary table ---
     max_label = max(len(label) for label, _ in results)
     width = max_label + 30
     print("\n" + "=" * width)
-    print(f"{'Silenced':<{max_label}s} {'Loss':>12s} {'Δ Loss':>12s}")
+    print(f"{'Silenced':<{max_label}s} {'Loss':>12s} {'Delta Loss':>12s}")
     print("-" * width)
     for label, loss in results:
         delta = loss - baseline_loss

@@ -8,15 +8,47 @@ one neutral place lets the dependency flow one way
 (generators/utilities -> sampling) without import cycles.
 
 Contents:
+    * ``load_column_phi_theta`` -- the right-eye ommatidium column directions
+      every stimulus is sampled at.
     * ``build_ommatidium_sampling_matrix`` / ``build_calibrated_sampling_matrix``
       -- sparse (image pixel -> ommatidium) samplers.
-    * ``interpolate_to_model_dt`` / ``resample_time_to_length`` -- temporal
-      resampling along the time axis.
+    * ``interpolate_to_model_dt`` -- temporal resampling along the time axis.
 """
 
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import torch
 from scipy.sparse import csr_matrix
+
+
+def load_column_phi_theta(data_folder):
+    """Load the right-eye column directions without building the model.
+
+    Reads ``<data_folder>/connectome_data/baked/optic_lobe_columns.parquet``,
+    which ships with the connectome data (no script in this repo writes it).
+    Rows are ordered by ``column_index``, which must run ``0..N-1``: the model
+    addresses stimulus channels by global column index, so row ``k`` of every
+    stimulus must be column ``k``.
+
+    Returns:
+        ``(N, 2)`` array of ``(phi, theta)`` in radians.
+    """
+    col_path = Path(data_folder) / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
+    if not col_path.exists():
+        raise FileNotFoundError(
+            f"Optic-lobe column file not found: {col_path}. It ships with the "
+            "connectome data (no script in this repo produces it); place it in "
+            "connectome_data/baked/."
+        )
+    column_info_df = pd.read_parquet(col_path).sort_values('column_index')
+    if not np.array_equal(column_info_df['column_index'].to_numpy(),
+                          np.arange(len(column_info_df))):
+        raise ValueError(
+            f"{col_path}: column_index must run 0..N-1 with no gaps or duplicates."
+        )
+    return column_info_df[['phi', 'theta']].to_numpy()
 
 
 def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim,
@@ -186,42 +218,6 @@ def build_calibrated_sampling_matrix(image_shape, calib_u, calib_v,
     return W, in_fov
 
 
-def resample_time_to_length(data, n_out: int):
-    """
-    Linearly resample along time (dimension 1) to exactly ``n_out`` steps.
-
-    Used after ``interpolate_to_model_dt`` when the nominal stimulus duration
-    (``stim_time``) does not match the duration implied by the available native
-    frames (e.g. short clips upsampled to match config).
-    """
-    if n_out < 1:
-        raise ValueError("n_out must be at least 1")
-
-    was_numpy = isinstance(data, np.ndarray)
-    if was_numpy:
-        data = torch.from_numpy(data)
-
-    original_dtype = data.dtype
-    batch_size, t_in = data.shape[0], data.shape[1]
-    remaining_dims = data.shape[2:]
-
-    if t_in == n_out:
-        out = data
-    else:
-        data_flat = data.reshape(batch_size, t_in, -1).permute(0, 2, 1)
-        data_rs = torch.nn.functional.interpolate(
-            data_flat.float(),
-            size=n_out,
-            mode='linear',
-            align_corners=True,
-        ).to(dtype=original_dtype)
-        out = data_rs.permute(0, 2, 1).reshape((batch_size, n_out) + remaining_dims)
-
-    if was_numpy:
-        out = out.numpy()
-    return out
-
-
 def interpolate_to_model_dt(data, stimulus_dt, model_dt):
     """
     Linearly interpolate movie data from stimulus_dt to model_dt.
@@ -235,18 +231,20 @@ def interpolate_to_model_dt(data, stimulus_dt, model_dt):
         Interpolated data with new time dimension matching model_dt
 
     Raises:
-        ValueError: If model_dt is meaningfully larger than stimulus_dt (would
-            fabricate temporal resolution). A small relative tolerance allows
-            datasets recorded at ~the model rate (e.g. 30.303 Hz data vs 30 Hz model).
+        ValueError: If model_dt is meaningfully larger than stimulus_dt: that
+            would down-sample the data by linear interpolation, which aliases
+            without an anti-aliasing filter. Up-sampling to a finer model_dt is
+            allowed. A small relative tolerance accepts datasets recorded at
+            ~the model rate (e.g. 30.303 Hz data vs a 30 Hz model).
     """
-    # Treat rates within rel_tol as the same sampling rate; resample_time_to_length
-    # handles the final exact length. This avoids hard-failing on negligible
-    # rate mismatches while still blocking genuine upsampling.
+    # Treat rates within rel_tol as the same sampling rate, so negligible rate
+    # mismatches do not hard-fail while genuine down-sampling is still blocked.
     rel_tol = 0.05
     if model_dt > stimulus_dt * (1.0 + rel_tol):
         raise ValueError(
-            f"model_dt ({model_dt}) cannot be larger than stimulus_dt ({stimulus_dt}). "
-            f"Cannot upsample temporal resolution."
+            f"model_dt ({model_dt}) cannot be larger than stimulus_dt ({stimulus_dt}): "
+            "down-sampling by linear interpolation would alias. Use a model dt no "
+            "larger than the stimulus frame interval."
         )
 
     # Convert to torch if numpy

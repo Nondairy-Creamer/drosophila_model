@@ -6,11 +6,10 @@ observations, and saves:
     - rotation location (roll, pitch, yaw in degrees) and rate (deg/s)
     - translation location (x, y, z in metres) and rate (m/s)
 
-Uses auto mode by default: fixes one tag as the world origin and jointly
-estimates the other tag's position along with the drone trajectory.
-Only requires the tag side length (default 16 cm).
-
-Use compare_pose.py for comparison plots across estimation methods.
+Fixes one tag as the world origin and jointly estimates the other tag's
+pose along with the drone trajectory (:func:`estimate_pose.run_pipeline_auto`).
+Only requires the tag side length (default 16 cm). Uses the equirectangular
+small_drone rig by default, or a pinhole rig from ``--calibration``.
 
 Usage:
     python -m drosophila_model.data_handling.drone_pose
@@ -24,10 +23,11 @@ from scipy.ndimage import median_filter
 from pathlib import Path
 import argparse
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 
 from drosophila_model.data_handling.estimate_pose import (
-    DualCameraRig, EquirectRig, TagMap, run_pipeline, run_pipeline_auto,
+    DEFAULT_SMOOTHNESS, DEFAULT_TAG_FAMILY, DEFAULT_TAG_SIZE,
+    DualCameraRig, EquirectRig, run_pipeline_auto,
 )
 from drosophila_model.data_handling.drone_utilities import get_image_size
 
@@ -88,15 +88,6 @@ def compute_angular_velocity(rvecs: np.ndarray, dt: float) -> np.ndarray:
     return omega
 
 
-def rvecs_to_euler_deg(rvecs: np.ndarray) -> np.ndarray:
-    """Convert rotation vectors → Euler angles [roll, pitch, yaw] in degrees.
-
-    Uses intrinsic XYZ convention matching coordinate_conventions.md:
-        roll about X (forward), pitch about Y (left), yaw about Z (up).
-    """
-    return Rotation.from_rotvec(rvecs).as_euler('xyz', degrees=True)
-
-
 def compute_all(
     rvecs: np.ndarray,
     tvecs: np.ndarray,
@@ -118,7 +109,7 @@ def compute_all(
         rvecs: (T, 3) rotation vectors (radians), world frame
         tvecs: (T, 3) positions in world units, world frame
         dt: time step in seconds
-        world_to_m: scale factor from tag-map units to metres
+        world_to_m: scale factor from world (tag-size) units to metres
         median_kernel: odd integer for median filter width (0 to disable)
 
     Returns:
@@ -129,6 +120,8 @@ def compute_all(
 
     all_rots = Rotation.from_rotvec(rvecs)
     delta_rots = R_0.inv() * all_rots
+    # Extrinsic x-y-z Euler angles (= intrinsic Z-Y-X yaw-pitch-roll),
+    # returned as [roll, pitch, yaw] in degrees.
     rotation_deg = delta_rots.as_euler('xyz', degrees=True)
 
     omega_rad = compute_angular_velocity(rvecs, dt)
@@ -158,18 +151,16 @@ def compute_all(
 def process_clip(
     clip_id: int,
     data_dir: Path,
-    rig: DualCameraRig,
+    rig: EquirectRig | DualCameraRig,
     tag_size: float,
     tag_family: str,
     smoothness: float,
     world_to_m: float,
-    tag_map: TagMap | None = None,
     median_kernel: int = 5,
 ) -> dict | None:
     """Run pose estimation on one clip and compute locations + rates.
 
-    Uses auto mode (joint tag + trajectory estimation) when tag_map is None,
-    otherwise falls back to fixed-tag-position mode.
+    Uses joint tag + trajectory estimation (``run_pipeline_auto``).
 
     Returns:
         dict with rotation/translation locations and rates, raw poses, etc.
@@ -183,24 +174,14 @@ def process_clip(
     print(f'{"="*60}')
 
     try:
-        if tag_map is None:
-            trajectory = run_pipeline_auto(
-                left_video_path=str(left_path),
-                right_video_path=str(right_path),
-                rig=rig,
-                tag_size=tag_size,
-                tag_family=tag_family,
-                smoothness_weight=smoothness,
-            )
-        else:
-            trajectory = run_pipeline(
-                left_video_path=str(left_path),
-                right_video_path=str(right_path),
-                tag_map=tag_map,
-                rig=rig,
-                tag_family=tag_family,
-                smoothness_weight=smoothness,
-            )
+        trajectory = run_pipeline_auto(
+            left_video_path=str(left_path),
+            right_video_path=str(right_path),
+            rig=rig,
+            tag_size=tag_size,
+            tag_family=tag_family,
+            smoothness_weight=smoothness,
+        )
     except Exception as e:
         print(f'  FAILED: {e}')
         return None
@@ -242,7 +223,7 @@ def save_clip_result(result: dict, output_dir: Path):
         tvecs=result['tvecs'],
         fps=result['fps'],
     )
-    print(f'  Saved → {path}')
+    print(f'  Saved -> {path}')
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -256,21 +237,19 @@ def main():
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory for pose .npz files '
                              '(default: <data_folder>/stimulus/raw/drone_poses)')
-    parser.add_argument('--tag-size', type=float, default=0.16,
-                        help='AprilTag side length in metres (default: 0.16)')
-    parser.add_argument('--tag-map', type=str, default=None,
-                        help='Tag world positions JSON. If provided, uses '
-                             'fixed-position mode instead of auto mode.')
+    parser.add_argument('--tag-size', type=float, default=DEFAULT_TAG_SIZE,
+                        help=f'AprilTag side length in metres (default: {DEFAULT_TAG_SIZE})')
     parser.add_argument('--calibration', type=str, default=None,
-                        help='Camera rig calibration JSON. If omitted, uses '
-                             'create_from_fov with default 120×90 deg FOV.')
-    parser.add_argument('--tag-family', default='tag36h11',
-                        help='AprilTag family (default: tag36h11)')
-    parser.add_argument('--smoothness', type=float, default=0.1,
-                        help='Temporal smoothness weight (default: 0.1)')
+                        help='Pinhole camera rig calibration JSON (see '
+                             'estimate_pose.DualCameraRig.load). If omitted, '
+                             'uses the equirectangular small_drone rig.')
+    parser.add_argument('--tag-family', default=DEFAULT_TAG_FAMILY,
+                        help=f'AprilTag family (default: {DEFAULT_TAG_FAMILY})')
+    parser.add_argument('--smoothness', type=float, default=DEFAULT_SMOOTHNESS,
+                        help=f'Temporal smoothness weight (default: {DEFAULT_SMOOTHNESS})')
     parser.add_argument('--world-to-m', type=float, default=1.0,
-                        help='Scale from tag-map units to metres '
-                             '(default: 1.0, i.e. tag map already in metres)')
+                        help='Scale from --tag-size units to metres '
+                             '(default: 1.0, i.e. --tag-size is in metres)')
     parser.add_argument('--median-kernel', type=int, default=5,
                         help='Median filter width for velocity smoothing '
                              '(odd int, 0 to disable; default: 5)')
@@ -278,45 +257,41 @@ def main():
                         help='Process only these clip IDs (default: all)')
     args = parser.parse_args()
 
-    data_folder = Path(load_config()['data']['data_folder'])
-    data_dir = Path(args.data_dir) if args.data_dir else data_folder / 'stimulus' / 'raw' / 'drone_videos'
-    output_dir = Path(args.output_dir) if args.output_dir else data_folder / 'stimulus' / 'raw' / 'drone_poses'
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # The data folder is only needed for the default input/output locations.
+    raw_dir = (None if args.data_dir and args.output_dir
+               else get_data_folder(load_config()) / 'stimulus' / 'raw')
+    data_dir = Path(args.data_dir) if args.data_dir else raw_dir / 'drone_videos'
+    output_dir = Path(args.output_dir) if args.output_dir else raw_dir / 'drone_poses'
 
     # Discover clips
     all_ids = find_clip_ids(data_dir)
     if not all_ids:
         print(f'No left_N.mp4 / right_N.mp4 pairs found in {data_dir}')
         return
-    clip_ids = args.clips if args.clips else all_ids
-    clip_ids = [c for c in clip_ids if c in all_ids]
-    print(f'Found {len(all_ids)} clip pairs, processing {len(clip_ids)}: {clip_ids}')
-
-    # Tag map (only if explicitly provided)
-    tag_map = None
-    if args.tag_map:
-        tag_map = TagMap.load(args.tag_map)
-        print(f'Loaded tag map from {args.tag_map} '
-              f'({len(tag_map.tags)} tags: {sorted(tag_map.tags.keys())})')
-        print(f'Using fixed-position mode')
+    if args.clips:
+        missing = sorted(set(args.clips) - set(all_ids))
+        if missing:
+            print(f'  Warning: requested clips not found: {missing}')
+        clip_ids = [c for c in args.clips if c in all_ids]
     else:
-        print(f'Using auto mode (tag size={args.tag_size:.3f} m, '
-              f'joint tag + trajectory optimisation)')
+        clip_ids = all_ids
+    if not clip_ids:
+        print(f'None of the requested clips {args.clips} exist in {data_dir}')
+        return
+    print(f'Found {len(all_ids)} clip pairs, processing {len(clip_ids)}: {clip_ids}')
+    print(f'Tag size={args.tag_size:.3f} m, joint tag + trajectory optimisation')
 
     # Camera rig
     if args.calibration:
         rig = DualCameraRig.load(args.calibration)
-        print(f'Loaded calibration from {args.calibration}')
+        print(f'Loaded pinhole calibration from {args.calibration}')
     else:
         image_size = get_image_size(data_dir, clip_ids[0])
-        if tag_map is None:
-            rig = EquirectRig.create_default(image_size)
-            print(f'Using equirectangular rig '
-                  f'(image {image_size[1]}x{image_size[0]})')
-        else:
-            rig = DualCameraRig.create_from_fov(image_size)
-            print(f'Using pinhole calibration (120x90 deg FOV, '
-                  f'image {image_size[1]}x{image_size[0]})')
+        rig = EquirectRig.create_default(image_size)
+        print(f'Using equirectangular rig '
+              f'(image {image_size[1]}x{image_size[0]})')
+
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Process clips
     results = []
@@ -327,7 +302,6 @@ def main():
             tag_family=args.tag_family,
             smoothness=args.smoothness,
             world_to_m=args.world_to_m,
-            tag_map=tag_map,
             median_kernel=args.median_kernel,
         )
         if result is None:
@@ -341,7 +315,7 @@ def main():
         print(f'\n{"="*60}')
         print(f'Processed {len(results)}/{len(clip_ids)} clips')
         print(f'{"Clip":>6} {"Frames":>8} {"Duration":>10} '
-              f'{"Reproj (px)":>12} {"ω RMS (°/s)":>12} {"v RMS (m/s)":>12}')
+              f'{"Reproj (px)":>12} {"w RMS (deg/s)":>12} {"v RMS (m/s)":>12}')
         for r in results:
             dur = r['n_frames'] / r['fps']
             omega_rms = np.sqrt((r['rotation_deg_s'] ** 2).mean())

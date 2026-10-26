@@ -5,12 +5,17 @@ then for each silencing configuration.  For every silenced condition a bar chart
 shows the relative RMS amplitude of each recovered filter compared to the
 unsilenced baseline.
 
-Usage:
-    python analysis/white_noise_silencing.py models/best_cells_30hz/
-    python analysis/white_noise_silencing.py models/best_cells_30hz/ --duration 30
+Cell types the model lacks are dropped from the silencing configurations.
+
+Figures go to ``<model_folder>/figures/white_noise_silencing/``; each
+condition's ``sta_data.npz`` goes to
+``<model_folder>/analysis_data/white_noise_silencing/<condition>/``.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.white_noise_silencing models/<run_folder>
+    python -m drosophila_model.analysis.model_analysis.white_noise_silencing models/<run_folder> --duration 30
 """
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -20,7 +25,10 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
-from white_noise import run_white_noise, DEFAULT_CELL_TYPES
+from drosophila_model.analysis.model_analysis.white_noise import run_white_noise
+from drosophila_model.analysis.model_analysis.sine_wave_silencing import (
+    config_label, present_silencing_configs,
+)
 
 # ── Silencing configurations ─────────────────────────────────────────
 SILENCING_CONFIGS = [
@@ -33,13 +41,6 @@ SILENCING_CONFIGS = [
 ]
 
 
-def _config_label(silenced):
-    """Human-readable label for a silencing configuration."""
-    if not silenced:
-        return 'baseline'
-    return 'silence_' + '+'.join(silenced)
-
-
 def _sta_rms(sta):
     """Root-mean-square amplitude of a STA filter."""
     return np.sqrt(np.mean(sta ** 2))
@@ -50,7 +51,7 @@ def plot_relative_amplitudes(baseline_stas, silenced_stas, silenced_neurons,
     """Bar chart of per-cell-type RMS relative to the unsilenced baseline."""
     common_types = sorted(set(baseline_stas) & set(silenced_stas))
     if not common_types:
-        print('  No overlapping cell types to compare — skipping plot.')
+        print('  No overlapping cell types to compare - skipping plot.')
         return
 
     ratios = []
@@ -84,8 +85,10 @@ def main():
     parser.add_argument('--cell-types', type=str, nargs='+', default=None,
                         help='Cell types to analyse')
     parser.add_argument('--output-dir', type=str, default=None,
-                        help='Root output directory '
-                             '(default: <model_folder>/figures/white_noise_silencing)')
+                        help='Root figure directory '
+                             '(default: <model_folder>/figures/white_noise_silencing); '
+                             'sta_data.npz always goes to '
+                             '<model_folder>/analysis_data/white_noise_silencing/<condition>')
     parser.add_argument('--duration', type=float, default=None,
                         help='Stimulus duration in seconds')
     parser.add_argument('--sta-duration-ms', type=float, default=None,
@@ -103,6 +106,7 @@ def main():
 
     output_root = (Path(args.output_dir) if args.output_dir
                    else model_folder / 'figures' / 'white_noise_silencing')
+    data_root = model_folder / 'analysis_data' / 'white_noise_silencing'
 
     wn_kwargs = {}
     if args.duration is not None:
@@ -113,12 +117,12 @@ def main():
         wn_kwargs['filter_size'] = args.filter_size
 
     cell_types = args.cell_types
+    configs = present_silencing_configs(SILENCING_CONFIGS, model.unique_cell_types)
 
     # ── Run each silencing configuration ─────────────────────────────
     all_results = {}
-    for config in SILENCING_CONFIGS:
-        label = _config_label(config)
-        sub_dir = output_root / label
+    for config in configs:
+        label = config_label(config)
         print(f'\n{"=" * 60}')
         print(f'Running: {label}')
         print(f'{"=" * 60}')
@@ -127,7 +131,8 @@ def main():
             model,
             cell_types=cell_types,
             silenced_neurons=config if config else None,
-            output_dir=sub_dir,
+            output_dir=output_root / label,
+            data_dir=data_root / label,
             **wn_kwargs,
         )
         all_results[label] = sta_dict
@@ -135,13 +140,13 @@ def main():
     # ── Relative-amplitude comparison plots ──────────────────────────
     baseline_stas = all_results.get('baseline', {})
     if not baseline_stas:
-        print('Baseline run produced no filters — cannot compute ratios.')
+        print('Baseline run produced no filters - cannot compute ratios.')
         return
 
-    for config in SILENCING_CONFIGS:
+    for config in configs:
         if not config:
             continue
-        label = _config_label(config)
+        label = config_label(config)
         silenced_stas = all_results.get(label, {})
         out_path = output_root / f'relative_amplitude_{label}.png'
         plot_relative_amplitudes(baseline_stas, silenced_stas, config,

@@ -6,22 +6,23 @@ up, down) across a gray background over a range of speeds.  Plots mean
 decoder response (LR and UD components) and cell firing rates as a function
 of velocity for each direction and edge polarity.
 
-Run with ``--expressive`` to match :mod:`sine_wave_sweep` neuron coverage (all
-groups below).  Without it, only T4 and T5 subtypes are included in the sweep
-and XT outputs.
+By default only the T4 and T5 subtypes are included. With ``--expressive``,
+plots the same neuron groups as :mod:`sine_wave_sweep` (T4, T5, L, C_CT1,
+Tm_A, Mi_Tm, T_other) when those types exist in the model.
 
-With ``--expressive``, plots the same neuron groups as :mod:`sine_wave_sweep`
-(T4, T5, L, C_CT1, Tm_A, Mi_Tm, T_other) when those types exist in the model.
-Also writes space–time (XT) plots at a fixed edge speed (default 240°/s) for
-both light and dark edges: one PNG per cell type under ``edge_sweep/xt_plots/``
-per polarity, plus stimulus XTs: raw drive before input convolution
-(``stimulus_edge_*_{light|dark}_raw_xt.png``), and after input convolution when
-the model uses it (``stimulus_edge_*_{light|dark}_input_conv_xt.png``).
+Always writes space–time (XT) plots at a fixed edge speed (default 240°/s) for
+both light and dark edges: one PNG per included cell type under
+``edge_sweep/xt_plots/`` per polarity, plus stimulus XTs: raw drive before
+input convolution (``stimulus_edge_*_{light|dark}_raw_xt.png``), and after
+input convolution when the model uses it
+(``stimulus_edge_*_{light|dark}_input_conv_xt.png``).
+
+Figures go to ``<model_folder>/figures/edge_sweep/``.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.edge_sweep models/<model>/ [--expressive]
 """
-import sys
 from pathlib import Path
-
-# Add parent directory to path for imports
 
 import argparse
 
@@ -32,21 +33,11 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.data_handling.stimulus_generators import make_lr_edge, make_ud_edge
-from drosophila_model.analysis.model_analysis.analysis_utilities import input_conv_stimulus_timecourse, prepare_xt
-
-# Same groups as sine_wave_sweep.NEURON_GROUPS (keep in sync)
-NEURON_GROUPS = [
-    ("T4", ["T4a", "T4b", "T4c", "T4d"]),
-    ("T5", ["T5a", "T5b", "T5c", "T5d"]),
-    ("L", ["L2", "L3", "L4", "L5"]),
-    ("C_CT1", ["C2", "C3", "CT1_L", "CT1_M"]),
-    ("Tm_A", ["Tm1", "Tm2", "Tm4", "Tm9"]),
-    ("Mi_Tm", ["Mi1", "Tm3", "Mi4", "Mi9"]),
-    ("T_other", ["T1", "T2", "T3"]),
-]
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    NEURON_GROUPS, get_flow_key, input_conv_stimulus_timecourse, prepare_xt,
+)
 
 # XT plots: match a representative speed from the sweep (or nearest); both polarities
 XT_EDGE_VELOCITY_DEG_S = 240.0
@@ -55,8 +46,8 @@ XT_EDGE_VELOCITY_DEG_S = 240.0
 def generate_stimulus(direction, sample_phi, sample_theta, velocity, edge_polarity, dt, stim_time, pre_stim_time):
     """Generate a single edge stimulus for a given direction, velocity, and polarity.
 
-    Returns stimulus tensor of shape (1, time, columns) and the number of
-    warm-up time steps (pre_stim_time frames).
+    Returns a stimulus array of shape (1, time, columns); the first
+    ``pre_stim_time`` seconds are the warm-up period.
     """
     direction = direction.lower()
     if direction in ("right", "left"):
@@ -104,7 +95,7 @@ def main():
     parser.add_argument(
         "model_folder",
         type=str,
-        help="Path to model folder (containing model.pt and config.toml)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--expressive",
@@ -114,11 +105,11 @@ def main():
     )
     args = parser.parse_args()
 
-    model_folder = Path(args.model_folder)
-    model_config = load_config(model_folder / "config.toml")
-    model = nm.BaseRnn.load(model_folder / "model.pt")
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.BaseRnn.load(model_path)
 
-    dt = model_config["model"]["dt"]
+    dt = model.dt
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
 
@@ -143,25 +134,25 @@ def main():
                 all_neurons.append(ct)
 
     if not all_neurons:
-        print("No output cell types from selected groups — check model.unique_cell_types.")
+        print("No output cell types from selected groups - check model.unique_cell_types.")
         return
 
     output_neurons = all_neurons
 
     # Pre-allocate results storage
     results = None
-    decoder_key = next((k for k, m in model._readout_modules.items() if m.predicts_flow), None)
+    decoder_key = get_flow_key(model)
     if decoder_key is not None:
         results = {d: {p: np.zeros((num_velocities, 2)) for p in polarities} for d in directions}
     else:
-        print("Model has no decoder — skipping decoder figure.")
+        print("Model has no decoder - skipping decoder figure.")
 
     cell_results = {ct: {d: {p: np.zeros(num_velocities) for p in polarities} for d in directions} for ct in output_neurons}
 
     # --- loop over velocities (each has a different stim duration) ---
     for vi, velocity in enumerate(velocities):
         stim_time = fov_deg / velocity  # seconds to cross full FOV
-        print(f"Velocity {velocity} deg/s — stim_time = {stim_time:.2f}s")
+        print(f"Velocity {velocity} deg/s - stim_time = {stim_time:.2f}s")
 
         stim_list = []
         index_map = []  # (direction, polarity) for this batch
@@ -274,7 +265,7 @@ def main():
     for group_name, cell_types in active_groups:
         present = [ct for ct in cell_types if ct in cell_results]
         if not present:
-            print(f"Skipping group {group_name} — no matching neurons in model.")
+            print(f"Skipping group {group_name} - no matching neurons in model.")
             continue
 
         for polarity in polarities:
@@ -304,11 +295,11 @@ def main():
             plt.close(fig)
             print(f"Figure saved to {save_path}")
 
-    # --- XT plots at fixed edge speed (reuse batch from last velocity loop — re-run one velocity) ---
+    # --- XT plots at fixed edge speed (re-run that one velocity) ---
     xt_v = XT_EDGE_VELOCITY_DEG_S
     if xt_v not in velocities:
         xt_v = min(velocities, key=lambda v: abs(v - XT_EDGE_VELOCITY_DEG_S))
-        print(f"XT: {XT_EDGE_VELOCITY_DEG_S:g} deg/s not in sweep — using nearest {xt_v:g} deg/s.")
+        print(f"XT: {XT_EDGE_VELOCITY_DEG_S:g} deg/s not in sweep - using nearest {xt_v:g} deg/s.")
     stim_time_xt = fov_deg / xt_v
 
     stim_list_xt = []

@@ -9,22 +9,23 @@ linear filter estimate (Wiener filter) without matrix inversion or
 regularization. Pooling across convolutional units exploits the shared kernel
 to massively overdetermine the estimate.
 
-Usage:
-    python analysis/white_noise.py models/best_cells_30hz/
-    python analysis/white_noise.py models/best_cells_30hz/ --cell-types L1 L2 L3
-    python analysis/white_noise.py models/best_cells_30hz/ --duration 300 --num-lags 20
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.white_noise models/<run_folder>
+    python -m drosophila_model.analysis.model_analysis.white_noise models/<run_folder> --cell-types L1 L2 L3
+    python -m drosophila_model.analysis.model_analysis.white_noise models/<run_folder> --duration 300 --sta-duration-ms 300
 
-Outputs in ``output_dir`` include ``temporal_tau_mean_f2.png``,
-``temporal_tau_rms_f2.png``, ``temporal_tau_peak_abs.png`` (number-line
-summaries), plus ``tau_rms_ms``, ``tau_mean_ms``, ``tau_peak_abs_ms`` in
-``sta_data.npz`` (center-column STA; peak lag is argmax of ``|f(τ)|``).
+Figures go to ``output_dir`` (default ``<model_folder>/figures/white_noise/``):
+per-cell STAs plus ``temporal_tau_mean_f2.png``, ``temporal_tau_rms_f2.png``,
+``temporal_tau_peak_abs.png`` (number-line summaries). The STAs and
+``tau_rms_ms``, ``tau_mean_ms``, ``tau_peak_abs_ms`` (center-column STA; peak
+lag is argmax of ``|f(τ)|``) are saved to ``sta_data.npz`` in ``data_dir``
+(default ``<model_folder>/analysis_data/white_noise/``).
 ``tau_rms_ms`` is the **standard deviation** of lag (ms), :math:`\\sigma_\\tau
 =\\sqrt{\\mathrm{Var}[\\tau]}`, not the variance :math:`\\sigma_\\tau^2`;
 :math:`\\tau` is distributed as :math:`p(\\tau)\\propto f(\\tau)^2` over lags
 (normalized), not over stimulus intensity.
 """
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -49,9 +50,9 @@ SEED = 42
 # Overdetermination ratio = P × T_eff / (K_spatial × num_lags).
 #
 # Example at 30 Hz with defaults:
-#   K_spatial = 37 (FILTER_SIZE=7), num_lags = 9 (300 ms), params = 333
-#   P ≈ 800 columns, T = 600 frames (20 s) → P×T_eff ≈ 473,000
-#   Ratio ≈ 1400×  overdetermined — 20 s is more than sufficient.
+#   K_spatial = 61 (FILTER_SIZE=9), num_lags = 6 (200 ms), params = 366
+#   P ≈ 800 columns, T = 600 frames (20 s) → P×T_eff ≈ 475,000
+#   Ratio ≈ 1300×  overdetermined — 20 s is more than sufficient.
 STA_DURATION_MS = 200.0    # STA window duration in milliseconds
 FILTER_SIZE = 9            # hex grid diameter for spatial filter extraction
 CHUNK_SIZE = 3000          # frames per model.predict() call
@@ -140,10 +141,14 @@ def squared_kernel_temporal_moments(time_lags_ms, temporal_profile):
 
 
 def peak_abs_lag_ms(time_lags_ms, temporal_profile):
-    """Time lag (ms) where ``|f|`` is largest on the center-column STA."""
+    """Time lag (ms) where ``|f|`` is largest on the center-column STA.
+
+    NaN when the profile has no finite nonzero entry (no peak), matching
+    :func:`squared_kernel_temporal_moments` for a filter with no energy.
+    """
     prof = np.asarray(temporal_profile, dtype=np.float64)
     t = np.asarray(time_lags_ms, dtype=np.float64)
-    if prof.size == 0 or not np.any(np.isfinite(prof)):
+    if prof.size == 0 or not np.any(np.isfinite(prof) & (prof != 0)):
         return np.nan
     i = int(np.nanargmax(np.abs(prof)))
     return float(t[i])
@@ -269,7 +274,7 @@ def plot_sta(sta, pq_offsets, dt, cell_type, output_path):
     ax_xt.set_ylabel('Time lag (ms)')
     fig.colorbar(im, ax=ax_xt, fraction=0.046, pad=0.04)
 
-    # Top-right: 2D hex spatial filter at lag 0
+    # Top-right: 2D hex spatial filter at the peak lag
     ax_hex = fig.add_subplot(gs[0, 1])
     sc = ax_hex.scatter(
         xy[:, 0], xy[:, 1], c=spatial_peak, cmap='RdBu_r',
@@ -308,8 +313,30 @@ DEFAULT_CELL_TYPES = [
 ]
 
 
+def sta_polarity(sta_dict):
+    """Split cell types into ON / OFF by the sign of their STA peak.
+
+    Args:
+        sta_dict: mapping cell type -> STA array (K, num_lags).
+
+    Returns:
+        (on_cells, off_cells): lists of cell-type names whose largest-magnitude
+        STA entry is > 0 (ON) or < 0 (OFF). Cell types with an all-zero STA
+        (e.g. silent cells) have no polarity and are in neither list.
+    """
+    on_cells = []
+    off_cells = []
+    for ct, sta in sta_dict.items():
+        peak_idx = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)
+        if sta[peak_idx] > 0:
+            on_cells.append(ct)
+        elif sta[peak_idx] < 0:
+            off_cells.append(ct)
+    return on_cells, off_cells
+
+
 def run_white_noise(model, cell_types=None, silenced_neurons=None,
-                    output_dir=None, duration=STIM_DURATION_S,
+                    output_dir=None, data_dir=None, duration=STIM_DURATION_S,
                     sta_duration_ms=STA_DURATION_MS, filter_size=FILTER_SIZE):
     """Run white noise STA analysis on *model* and return extracted filters.
 
@@ -319,15 +346,16 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
         cell_types: List of cell type names to analyse. Defaults to
             ``DEFAULT_CELL_TYPES``.
         silenced_neurons: Optional list of neuron names to silence before
-            running the model.  ``output_strength_log`` is saved and
-            restored automatically.
-        output_dir: Path to write per-cell STA figures, ``sta_data.npz``
-            (includes ``tau_mean_ms``, ``tau_rms_ms`` — standard deviation of
-            lag in ms, :math:`\\sqrt{\\mathrm{Var}[\\tau]}`, under
-            :math:`p(\\tau)\\propto f^2` over **lags**), and
+            running the model; the model is restored afterwards.
+        output_dir: Path to write per-cell STA figures and
             ``temporal_tau_mean_f2.png``,
             ``temporal_tau_rms_f2.png``, ``temporal_tau_peak_abs.png``.
             If *None*, figure saving is skipped.
+        data_dir: Path to write ``sta_data.npz`` (the STAs plus
+            ``tau_mean_ms``, ``tau_rms_ms`` — standard deviation of
+            lag in ms, :math:`\\sqrt{\\mathrm{Var}[\\tau]}`, under
+            :math:`p(\\tau)\\propto f^2` over **lags** — and
+            ``tau_peak_abs_ms``). If *None*, it is not saved.
         duration: Stimulus duration in seconds.
         sta_duration_ms: STA window duration in milliseconds.
         filter_size: Hex grid diameter for spatial filter extraction.
@@ -342,33 +370,17 @@ def run_white_noise(model, cell_types=None, silenced_neurons=None,
     num_lags = int(round(sta_duration_ms / (dt * 1000)))
     num_columns = model.regions['optic_lobe'].num_columns
 
-    if model.regions['optic_lobe'].column_p_q is None:
-        raise RuntimeError('Model has no column_p_q; '
-                           'cannot compute hex neighbor structure.')
-
     # ── Apply silencing ───────────────────────────────────────────────
-    original_output_strength = None
-    original_input_strength = None
-    if silenced_neurons:
-        original_output_strength = model.output_strength_log.data.clone()
-        original_input_strength = model.input_strength_log.data.clone()
-        model.silence_neurons(silenced_neurons)
-
-    try:
-        return _run_white_noise_inner(
-            model, cell_types, output_dir, duration,
-            sta_duration_ms, filter_size,
-            dt, num_lags, num_columns,
-        )
-    finally:
-        if original_output_strength is not None:
-            model.output_strength_log.data.copy_(original_output_strength)
-            model.input_strength_log.data.copy_(original_input_strength)
+    args = (model, cell_types, output_dir, data_dir, duration, filter_size,
+            dt, num_lags, num_columns)
+    if not silenced_neurons:
+        return _run_white_noise_inner(*args)
+    with model.silenced(silenced_neurons):
+        return _run_white_noise_inner(*args)
 
 
-def _run_white_noise_inner(model, cell_types, output_dir, duration,
-                           sta_duration_ms, filter_size,
-                           dt, num_lags, num_columns):
+def _run_white_noise_inner(model, cell_types, output_dir, data_dir, duration,
+                           filter_size, dt, num_lags, num_columns):
     """Core analysis loop (called by :func:`run_white_noise`)."""
 
     # ── Generate stimulus ────────────────────────────────────────────
@@ -417,7 +429,7 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
         else:
             predict_kwargs['output_neurons'] = valid_cell_types
 
-        print(f'  Running model: frames {chunk_start}–{chunk_end}...')
+        print(f'  Running model: frames {chunk_start}-{chunk_end}...')
         with torch.no_grad():
             result = model.predict(
                 chunk,
@@ -461,21 +473,22 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
             plot_sta(sta, pq_offsets, dt, ct, out_path)
             print(f'    Saved {out_path}')
 
-        if sta_dict:
-            center_idx = int(np.argmin(np.abs(pq_offsets).sum(axis=1)))
-            time_lags_ms = np.arange(num_lags) * dt * 1000
-            cell_to_mu_ms = {}
-            cell_to_sigma_ms = {}
-            cell_to_peak_abs_ms = {}
-            for ct, sta in sta_dict.items():
-                prof = sta[center_idx]
-                mu_ms, sigma_ms = squared_kernel_temporal_moments(
-                    time_lags_ms, prof,
-                )
-                cell_to_mu_ms[ct] = mu_ms
-                cell_to_sigma_ms[ct] = sigma_ms
-                cell_to_peak_abs_ms[ct] = peak_abs_lag_ms(time_lags_ms, prof)
+    if sta_dict and (output_dir is not None or data_dir is not None):
+        center_idx = int(np.argmin(np.abs(pq_offsets).sum(axis=1)))
+        time_lags_ms = np.arange(num_lags) * dt * 1000
+        cell_to_mu_ms = {}
+        cell_to_sigma_ms = {}
+        cell_to_peak_abs_ms = {}
+        for ct, sta in sta_dict.items():
+            prof = sta[center_idx]
+            mu_ms, sigma_ms = squared_kernel_temporal_moments(
+                time_lags_ms, prof,
+            )
+            cell_to_mu_ms[ct] = mu_ms
+            cell_to_sigma_ms[ct] = sigma_ms
+            cell_to_peak_abs_ms[ct] = peak_abs_lag_ms(time_lags_ms, prof)
 
+        if output_dir is not None:
             path_mean = output_dir / 'temporal_tau_mean_f2.png'
             path_rms = output_dir / 'temporal_tau_rms_f2.png'
             path_peak = output_dir / 'temporal_tau_peak_abs.png'
@@ -496,7 +509,7 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
                     r'over lags (not intensity)'
                 ),
                 title=(
-                    'STA (center column): $\sigma_\tau$ of lag under $f^2$ (ms)'
+                    r'STA (center column): $\sigma_\tau$ of lag under $f^2$ (ms)'
                 ),
                 color='C1',
                 clip_xmin_zero=True,
@@ -512,36 +525,23 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
             print(f'    Saved {path_mean}')
             print(f'    Saved {path_rms}')
             print(f'    Saved {path_peak}')
-            mu_line = ', '.join(
-                f'{ct}={cell_to_mu_ms[ct]:.1f}'
-                for ct in sorted(
-                    sta_dict,
-                    key=lambda c: cell_to_mu_ms.get(c, float('nan')),
-                )
-                if np.isfinite(cell_to_mu_ms[ct])
-            )
-            sig_line = ', '.join(
-                f'{ct}={cell_to_sigma_ms[ct]:.1f}'
-                for ct in sorted(
-                    sta_dict,
-                    key=lambda c: cell_to_sigma_ms.get(c, float('nan')),
-                )
-                if np.isfinite(cell_to_sigma_ms[ct])
-            )
-            peak_line = ', '.join(
-                f'{ct}={cell_to_peak_abs_ms[ct]:.1f}'
-                for ct in sorted(
-                    sta_dict,
-                    key=lambda c: cell_to_peak_abs_ms.get(c, float('nan')),
-                )
-                if np.isfinite(cell_to_peak_abs_ms[ct])
-            )
-            print(f'  Temporal μ_τ (ms, center STA, f² kernel): {mu_line}')
-            print(f'  Temporal σ_τ (ms, center STA, f² kernel): {sig_line}')
-            print(f'  Peak |f| lag (ms, center STA): {peak_line}')
+            def _sorted_line(cell_to_ms):
+                # Drop NaNs before sorting: NaN keys break sorted()'s order.
+                finite = [ct for ct in sta_dict if np.isfinite(cell_to_ms[ct])]
+                return ', '.join(f'{ct}={cell_to_ms[ct]:.1f}'
+                                 for ct in sorted(finite, key=cell_to_ms.get))
 
+            print('  Temporal mu_tau (ms, center STA, f^2 kernel): '
+                  f'{_sorted_line(cell_to_mu_ms)}')
+            print('  Temporal sigma_tau (ms, center STA, f^2 kernel): '
+                  f'{_sorted_line(cell_to_sigma_ms)}')
+            print(f'  Peak |f| lag (ms, center STA): {_sorted_line(cell_to_peak_abs_ms)}')
+
+        if data_dir is not None:
+            data_dir = Path(data_dir)
+            data_dir.mkdir(parents=True, exist_ok=True)
             cts_ordered = list(sta_dict.keys())
-            data_path = output_dir / 'sta_data.npz'
+            data_path = data_dir / 'sta_data.npz'
             np.savez(
                 data_path,
                 pq_offsets=pq_offsets,
@@ -557,14 +557,7 @@ def _run_white_noise_inner(model, cell_types, output_dir, duration,
 
     # ── Report cell polarity ────────────────────────────────────────
     if sta_dict:
-        on_cells = []
-        off_cells = []
-        for ct, sta in sta_dict.items():
-            peak_idx = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)
-            if sta[peak_idx] >= 0:
-                on_cells.append(ct)
-            else:
-                off_cells.append(ct)
+        on_cells, off_cells = sta_polarity(sta_dict)
         print(f'  ON  cells (positive polarity): {", ".join(on_cells)}')
         print(f'  OFF cells (negative polarity): {", ".join(off_cells)}')
 
@@ -584,8 +577,10 @@ def main():
                         default=None,
                         help='Neuron types to silence before analysis')
     parser.add_argument('--output-dir', type=str, default=None,
-                        help='Output directory '
-                             '(default: <model_folder>/figures/white_noise)')
+                        help='Figure output directory '
+                             '(default: <model_folder>/figures/white_noise); '
+                             'sta_data.npz always goes to '
+                             '<model_folder>/analysis_data/white_noise')
     parser.add_argument('--duration', type=float, default=None,
                         help=f'Stimulus duration in seconds '
                              f'(default: {STIM_DURATION_S})')
@@ -603,8 +598,12 @@ def main():
     model = nm.BaseRnn.load(model_path)
     model.eval()
 
+    # Silenced runs get their own sub-folder so they don't overwrite the baseline.
+    condition = ('silenced_' + '_'.join(args.silenced_neurons)
+                 if args.silenced_neurons else '')
     output_dir = (Path(args.output_dir) if args.output_dir
-                  else model_folder / 'figures' / 'white_noise')
+                  else model_folder / 'figures' / 'white_noise' / condition)
+    data_dir = model_folder / 'analysis_data' / 'white_noise' / condition
 
     kwargs = {}
     if args.duration is not None:
@@ -619,6 +618,7 @@ def main():
         cell_types=args.cell_types,
         silenced_neurons=args.silenced_neurons,
         output_dir=output_dir,
+        data_dir=data_dir,
         **kwargs,
     )
 

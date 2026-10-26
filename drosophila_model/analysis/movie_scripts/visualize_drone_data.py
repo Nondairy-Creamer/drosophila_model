@@ -1,12 +1,18 @@
 """
 Visualize processed two-eye drone data as a movie.
 
-Processes raw drone videos on the fly via --dataset:
+Loads the baked ommatidium-sampled clips for --dataset via
+``drone_utilities.get_drone_stimulus`` (``<data_folder>/stimulus/baked/<dataset>.pt``,
+built by ``process_raw_data.py``) and shows them next to the raw videos, which
+are read only for display:
   * small_drone (equirectangular rig, raw videos in stimulus/raw/drone_videos)
   * rpi_drone   (dome rig, raw videos in stimulus/raw/rpi_drone/<recording>/)
 
+The rotation and translation panels show the baked ground-truth rates and
+their integrals (rotation as a rotation vector in degrees).
+
 Example:
-    python analysis/movie_scripts/visualize_drone_data.py --dataset rpi_drone --plot-extra
+    python -m drosophila_model.analysis.movie_scripts.visualize_drone_data --dataset rpi_drone --plot-extra
 
 Default layout (2x2):
   Row 0:  raw left camera frame  |  raw right camera frame
@@ -19,73 +25,29 @@ With --plot-extra (4x2):
   Row 3:  rotation rate          |  translation rate
 """
 import argparse
-import sys
 from pathlib import Path
-
-_repo_root = str(Path(__file__).parent.parent)
 
 import numpy as np
 import pandas as pd
-import torch
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.data_handling import drone_utilities as du
-from drosophila_model.model_definition.ego_motion import (
-    integrate_angular_velocity, integrate_translational_velocity,
+from drosophila_model.analysis.movie_scripts.movie_utilities import (
+    masked_rgba,
+    write_movie,
+    ylim_from_data,
 )
-from scipy.spatial.transform import Rotation
-
-
-def _load_new_pose(
-    npz_path: Path,
-    num_frames_sampled: int,
-    model_dt: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load velocity estimates from NPZ, resample, and integrate positions.
-
-    Velocities are resampled to the model time grid, then integrated
-    using SO(3)-aware integration from neural_models to obtain position
-    and rotation.
-
-    Returns:
-        (rotation_deg, position_m, rotation_deg_s, velocity_m_s)
-        each (num_frames_sampled, 3).
-    """
-    data = np.load(npz_path)
-    fps = float(data["fps"])
-    n_video = data["rotation_deg_s"].shape[0]
-    video_times = np.arange(n_video) / fps
-    sampled_times = np.arange(num_frames_sampled) * model_dt
-
-    def _resample(arr):
-        return np.column_stack([
-            np.interp(sampled_times, video_times, arr[:, i])
-            for i in range(arr.shape[1])
-        ])
-
-    rotation_deg_s = _resample(data["rotation_deg_s"])
-    velocity_m_s = _resample(data["velocity_m_s"])
-
-    omega_t = torch.tensor(rotation_deg_s, dtype=torch.float64)
-    vel_t = torch.tensor(velocity_m_s, dtype=torch.float64)
-
-    rotvec_deg = integrate_angular_velocity(omega_t, model_dt).numpy()
-    rotation_deg = Rotation.from_rotvec(np.deg2rad(rotvec_deg)).as_euler(
-        'xyz', degrees=True)
-    position_m = integrate_translational_velocity(
-        vel_t, omega_t, model_dt).numpy()
-
-    return rotation_deg, position_m, rotation_deg_s, velocity_m_s
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Make a movie showing two-eye stimulus with raw video and sampled ommatidia."
     )
-    parser.add_argument("--config", type=str, default="config.toml", help="Path to config file")
+    parser.add_argument("--config-path", "--config", dest="config_path", type=str,
+                        default="config.toml", help="Path to config file")
     parser.add_argument("--dataset", type=str, default="small_drone",
                         choices=["small_drone", "rpi_drone"],
-                        help="Which raw drone dataset to process and visualize")
+                        help="Which baked drone dataset to visualize")
     parser.add_argument("--stim-index", type=int, nargs="+", default=[0],
                         help="Clip indices to visualize (into the list of processed clips)")
     parser.add_argument("--fps", type=float, default=None,
@@ -96,13 +58,10 @@ def main() -> None:
                         help="Output directory for the movie")
     parser.add_argument("--plot-extra", action="store_true", default=False,
                         help="Show sampled ommatidia and rotation/translation rates")
-    parser.add_argument("--pose-dir", type=str, default=None,
-                        help="Directory with new pose .npz files (default: "
-                             "<data_folder>/stimulus/raw/drone_poses)")
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    data_folder = Path(config["data"]["data_folder"])
+    config = load_config(args.config_path)
+    data_folder = get_data_folder(config)
     output_folder = Path(args.output_dir)
     output_folder.mkdir(parents=True, exist_ok=True)
 
@@ -110,10 +69,9 @@ def main() -> None:
     column_phi_theta = column_info_df[["phi", "theta"]].to_numpy()
 
     model_dt = config["model"]["dt"]
-    drone_video_dir = data_folder / "stimulus" / "raw" / "drone_videos"
-    pose_dir = Path(args.pose_dir) if args.pose_dir else data_folder / "stimulus" / "raw" / "drone_poses"
+    raw_dir = data_folder / "stimulus" / "raw"
 
-    print(f"Processing raw drone clips (dataset={args.dataset})...")
+    print(f"Loading baked drone clips (dataset={args.dataset})...")
     drone_clips = du.get_drone_stimulus(
         model_dt, dataset=args.dataset, data_folder=data_folder,
         sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
@@ -134,58 +92,41 @@ def main() -> None:
         clip_id = sampled["clip_id"]
         video_dt = sampled["video_dt"]
 
-        from drosophila_model.data_handling.drone_utilities import load_video_grayscale
-        if args.dataset == "rpi_drone":
-            rec_dir = data_folder / "stimulus" / "raw" / "rpi_drone" / str(clip_id)
-            raw_left = load_video_grayscale(rec_dir / "left.mp4")
-            raw_right = load_video_grayscale(rec_dir / "right.mp4")
-        else:
-            raw_left = load_video_grayscale(drone_video_dir / f"left_{clip_id}.mp4")
-            raw_right = load_video_grayscale(drone_video_dir / f"right_{clip_id}.mp4")
-        raw = {"left": torch.from_numpy(raw_left), "right": torch.from_numpy(raw_right)}
-
-        num_frames_raw = raw["left"].shape[0]
         num_frames_sampled = sampled["right"].shape[0]
         num_frames = num_frames_sampled
+        raw_cap = None
         if args.max_frames is not None:
             num_frames = min(num_frames, args.max_frames)
+            # Decode only the raw frames the movie shows (see update()).
+            raw_cap = int(round((num_frames - 1) * model_dt / video_dt)) + 1
 
-        sampled_times = np.arange(num_frames_sampled) * model_dt
-        raw_times = np.arange(num_frames_raw) * video_dt
-
-        out_path = output_folder / f"two_eyes_clip_{clip_idx}.mp4"
-        print(f"\nClip {clip_idx}: {num_frames_raw} raw frames, "
-              f"{num_frames_sampled} sampled frames -> {out_path}")
-
-        in_fov_right = sampled["in_fov_right"].numpy()
-        in_fov_left = sampled["in_fov_left"].numpy()
-
-        def _to_numpy(x):
-            return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-
-        pose_npz = pose_dir / f"pose_{clip_id}.npz"
-        if args.dataset == "small_drone" and pose_npz.exists():
-            rot_pos, trans_pos, rot_rate, trans_rate = _load_new_pose(
-                pose_npz, num_frames_sampled, model_dt)
-            print(f"  Using new pose estimates from {pose_npz}")
+        if args.dataset == "rpi_drone":
+            rec_dir = raw_dir / "rpi_drone" / str(clip_id)
+            raw_left = du.load_video_grayscale(rec_dir / "left.mp4", max_frames=raw_cap)
+            raw_right = du.load_video_grayscale(rec_dir / "right.mp4", max_frames=raw_cap)
         else:
-            rot_pos = _to_numpy(sampled["rotation"])
-            trans_pos = _to_numpy(sampled["translation"])
-            rot_rate = _to_numpy(sampled["rotation_rate"])
-            trans_rate = _to_numpy(sampled["translation_rate"])
-            print(f"  Using old pose estimates (no {pose_npz})")
+            raw_left = du.load_video_grayscale(
+                raw_dir / "drone_videos" / f"left_{clip_id}.mp4", max_frames=raw_cap)
+            raw_right = du.load_video_grayscale(
+                raw_dir / "drone_videos" / f"right_{clip_id}.mp4", max_frames=raw_cap)
+
+        num_frames_raw = raw_left.shape[0]
+
+        out_path = output_folder / f"{args.dataset}_clip_{clip_idx}.mp4"
+        print(f"\nClip {clip_idx}: {num_frames_raw} raw frames decoded, "
+              f"{num_frames_sampled} sampled frames -> {out_path}")
 
         fps = args.fps if args.fps is not None else round(1.0 / video_dt)
 
         _make_two_eyes_movie(
-            raw_left=raw["left"].numpy(),
-            raw_right=raw["right"].numpy(),
+            raw_left=raw_left,
+            raw_right=raw_right,
             sampled_left=sampled["left"],
             sampled_right=sampled["right"],
-            rotation=rot_pos,
-            translation=trans_pos,
-            rotation_rate=rot_rate,
-            translation_rate=trans_rate,
+            rotation=np.asarray(sampled["rotation"]),
+            translation=np.asarray(sampled["translation"]),
+            rotation_rate=np.asarray(sampled["rotation_rate"]),
+            translation_rate=np.asarray(sampled["translation_rate"]),
             cell_x=cell_x,
             cell_z=cell_z,
             output_path=out_path,
@@ -193,8 +134,8 @@ def main() -> None:
             num_frames=num_frames,
             video_dt=video_dt,
             model_dt=model_dt,
-            in_fov_left=in_fov_left,
-            in_fov_right=in_fov_right,
+            in_fov_left=np.asarray(sampled["in_fov_left"]),
+            in_fov_right=np.asarray(sampled["in_fov_right"]),
             plot_extra=args.plot_extra,
         )
 
@@ -224,24 +165,11 @@ def _make_two_eyes_movie(
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
     import matplotlib.colors as mcolors
-    import imageio as iio
-
-
-    
-    from drosophila_model.analysis.model_analysis.analysis_utilities import fig_to_rgb
 
     rot_labels = ["roll", "pitch", "yaw"]
     trans_labels = ["x", "y", "z"]
     rot_colors = ["#e41a1c", "#377eb8", "#4daf4a"]
     trans_colors = ["#e41a1c", "#377eb8", "#4daf4a"]
-
-    def _fixed_ylim(data, margin_frac=0.1, min_margin=0.01):
-        finite = data[np.isfinite(data)] if np.issubdtype(data.dtype, np.floating) else data.ravel()
-        if finite.size == 0:
-            return -1, 1
-        lo, hi = finite.min(), finite.max()
-        margin = max(margin_frac * (hi - lo), min_margin)
-        return lo - margin, hi + margin
 
     if plot_extra:
         # 4x2: raw video, sampled ommatidia, rotation/translation pos, rates
@@ -272,14 +200,6 @@ def _make_two_eyes_movie(
         vmin = min(np.nanmin(sampled_left), np.nanmin(sampled_right))
         vmax = max(np.nanmax(sampled_left), np.nanmax(sampled_right))
         scatter_norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-        gray_cmap = plt.cm.gray
-        _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
-
-        def _masked_rgba(values, mask):
-            rgba = gray_cmap(scatter_norm(values))
-            if mask is not None:
-                rgba[~mask] = _MASK_COLOR
-            return rgba
 
         x_margin = 0.1 * (cell_x.max() - cell_x.min())
         z_margin = 0.1 * (cell_z.max() - cell_z.min())
@@ -292,14 +212,16 @@ def _make_two_eyes_movie(
         ax_sam_r.set_ylim(cell_z.min() - z_margin, cell_z.max() + z_margin)
         ax_sam_r.set_aspect("equal")
 
-        sc_l = ax_sam_l.scatter(cell_x, cell_z, c=_masked_rgba(sampled_left[0], in_fov_left),
+        sc_l = ax_sam_l.scatter(cell_x, cell_z,
+                                c=masked_rgba(sampled_left[0], in_fov_left, norm=scatter_norm),
                                 s=90, edgecolors="none")
-        sc_r = ax_sam_r.scatter(cell_x, cell_z, c=_masked_rgba(sampled_right[0], in_fov_right),
+        sc_r = ax_sam_r.scatter(cell_x, cell_z,
+                                c=masked_rgba(sampled_right[0], in_fov_right, norm=scatter_norm),
                                 s=90, edgecolors="none")
         ax_sam_l.set_title("Left Eye (sampled)")
         ax_sam_r.set_title("Right Eye (sampled)")
 
-    # Rotation position
+    # Rotation position (integrated rotation vector)
     rot_lines = []
     for label, color in zip(rot_labels, rot_colors):
         line, = ax_rot.plot([], [], color=color, label=label, linewidth=1.5)
@@ -307,8 +229,8 @@ def _make_two_eyes_movie(
     ax_rot.legend(loc="upper left", fontsize=8)
     ax_rot.set_ylabel("deg")
     ax_rot.set_xlabel("time (s)")
-    ax_rot.set_title("Rotation")
-    ax_rot.set_ylim(*_fixed_ylim(rotation[:num_frames], min_margin=1.0))
+    ax_rot.set_title("Rotation (rotation vector)")
+    ax_rot.set_ylim(*ylim_from_data(rotation[:num_frames], min_margin=1.0))
 
     # Translation position
     trans_lines = []
@@ -319,7 +241,7 @@ def _make_two_eyes_movie(
     ax_trans.set_ylabel("position")
     ax_trans.set_xlabel("time (s)")
     ax_trans.set_title("Translation")
-    ax_trans.set_ylim(*_fixed_ylim(translation[:num_frames], min_margin=0.01))
+    ax_trans.set_ylim(*ylim_from_data(translation[:num_frames], min_margin=0.01))
 
     # Rate panels (only when plot_extra)
     rot_rate_lines = []
@@ -332,7 +254,7 @@ def _make_two_eyes_movie(
         ax_rot_rate.set_ylabel("deg/s")
         ax_rot_rate.set_xlabel("time (s)")
         ax_rot_rate.set_title("Rotation Rate")
-        ax_rot_rate.set_ylim(*_fixed_ylim(rotation_rate[:num_frames], min_margin=1.0))
+        ax_rot_rate.set_ylim(*ylim_from_data(rotation_rate[:num_frames], min_margin=1.0))
 
         for label, color in zip(trans_labels, trans_colors):
             line, = ax_trans_rate.plot([], [], color=color, label=label, linewidth=1.5)
@@ -341,65 +263,62 @@ def _make_two_eyes_movie(
         ax_trans_rate.set_ylabel("velocity")
         ax_trans_rate.set_xlabel("time (s)")
         ax_trans_rate.set_title("Translation Rate")
-        ax_trans_rate.set_ylim(*_fixed_ylim(translation_rate[:num_frames], min_margin=0.01))
+        ax_trans_rate.set_ylim(*ylim_from_data(translation_rate[:num_frames], min_margin=0.01))
 
     plt.tight_layout()
 
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    step = max(1, int(round(video_dt / model_dt)))
-    frame_indices = list(range(0, num_frames, step))
-    print(f"Writing {len(frame_indices)} frames to {output_path} "
-          f"(step={step}, {frame_rate} fps)...")
+    # One rendered frame per raw video frame (at the nearest model step), so the
+    # native-rate movie plays in real time even when video_dt is not a whole
+    # number of model steps (rpi_drone: 20 fps video, 30 Hz model).
+    num_video_frames = int(np.ceil(num_frames * model_dt / video_dt - 1e-6))
+    frame_indices = [t for t in (int(round(k * video_dt / model_dt))
+                                 for k in range(num_video_frames))
+                     if t < num_frames]
+    print(f"Rendering {len(frame_indices)} frames (one per raw video frame)")
 
     times = np.arange(num_frames) * model_dt
 
-    with iio.get_writer(str(output_path), codec="libx264", fps=frame_rate) as writer:
-        for t in frame_indices:
-            raw_t = min(int(round(t * model_dt / video_dt)), raw_left.shape[0] - 1)
+    def update(k):
+        t = frame_indices[k]
+        raw_t = min(int(round(t * model_dt / video_dt)), raw_left.shape[0] - 1)
 
-            im_l.set_data(raw_left[raw_t])
-            im_r.set_data(raw_right[raw_t])
+        im_l.set_data(raw_left[raw_t])
+        im_r.set_data(raw_right[raw_t])
 
-            if plot_extra:
-                sc_l.set_facecolors(_masked_rgba(sampled_left[t], in_fov_left))
-                sc_r.set_facecolors(_masked_rgba(sampled_right[t], in_fov_right))
+        if plot_extra:
+            sc_l.set_facecolors(masked_rgba(sampled_left[t], in_fov_left, norm=scatter_norm))
+            sc_r.set_facecolors(masked_rgba(sampled_right[t], in_fov_right, norm=scatter_norm))
 
-            time_s = t * model_dt
-            ax_raw_l.set_title(f"Left Camera (t={time_s:.2f}s)")
-            ax_raw_r.set_title(f"Right Camera (t={time_s:.2f}s)")
+        time_s = t * model_dt
+        ax_raw_l.set_title(f"Left Camera (t={time_s:.2f}s)")
+        ax_raw_r.set_title(f"Right Camera (t={time_s:.2f}s)")
 
-            if plot_extra:
-                ax_sam_l.set_title(f"Left Eye (frame {t+1}/{num_frames})")
-                ax_sam_r.set_title(f"Right Eye (frame {t+1}/{num_frames})")
+        if plot_extra:
+            ax_sam_l.set_title(f"Left Eye (frame {t+1}/{num_frames})")
+            ax_sam_r.set_title(f"Right Eye (frame {t+1}/{num_frames})")
 
-            t_start = max(0, t - trail_frames + 1)
-            t_slice = slice(t_start, t + 1)
-            t_times = times[t_slice]
+        t_start = max(0, t - trail_frames + 1)
+        t_slice = slice(t_start, t + 1)
+        t_times = times[t_slice]
 
-            for i, line in enumerate(rot_lines):
-                line.set_data(t_times, rotation[t_slice, i])
-            ax_rot.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+        for i, line in enumerate(rot_lines):
+            line.set_data(t_times, rotation[t_slice, i])
+        ax_rot.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
 
-            for i, line in enumerate(trans_lines):
-                line.set_data(t_times, translation[t_slice, i])
-            ax_trans.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+        for i, line in enumerate(trans_lines):
+            line.set_data(t_times, translation[t_slice, i])
+        ax_trans.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
 
-            if plot_extra:
-                for i, line in enumerate(rot_rate_lines):
-                    line.set_data(t_times, rotation_rate[t_slice, i])
-                ax_rot_rate.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+        if plot_extra:
+            for i, line in enumerate(rot_rate_lines):
+                line.set_data(t_times, rotation_rate[t_slice, i])
+            ax_rot_rate.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
 
-                for i, line in enumerate(trans_rate_lines):
-                    line.set_data(t_times, translation_rate[t_slice, i])
-                ax_trans_rate.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
+            for i, line in enumerate(trans_rate_lines):
+                line.set_data(t_times, translation_rate[t_slice, i])
+            ax_trans_rate.set_xlim(t_times[0], t_times[0] + trail_frames * model_dt)
 
-            writer.append_data(fig_to_rgb(fig))
-            if (t + 1) % 50 == 0:
-                print(f"  Frame {t+1}/{num_frames}")
-
-    plt.close(fig)
-    print(f"Done! Movie saved to {output_path}")
+    write_movie(fig, update, len(frame_indices), output_path, frame_rate)
 
 
 if __name__ == "__main__":

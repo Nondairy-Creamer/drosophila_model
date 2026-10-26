@@ -1,7 +1,5 @@
 import torch
-from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import ego_motion as em
-from drosophila_model.model_definition import readouts as ru
 
 
 # ---------------------------------------------------------------------------
@@ -87,10 +85,11 @@ def mse_loss(y_true, y_hat, dim=None, eps=1e-6):
 # Unified interface:
 #   component_fn(model, outputs, target, train_mask, loss_start_step) -> scalar
 #
-# ``outputs`` is the dict produced by predict (readout keys + 'voltage'/
-# 'firing_rate' + optionally 'pred_rotation'/'pred_translation').
+# ``outputs`` is the flat readout dict from ``training_utilities.model_outputs``
+# (readout keys, plus 'pred_rotation'/'pred_translation' for two-eye data).
 # ``target`` is a dict with possible keys 'optic_flow', 'rotation',
-# 'translation'.
+# 'translation'. Components are selected by name from
+# ``[training].loss_components``.
 # ---------------------------------------------------------------------------
 
 def _mask_pred_target(pred, target_flow, train_mask, loss_start_step):
@@ -110,62 +109,33 @@ def _mask_pred_target(pred, target_flow, train_mask, loss_start_step):
     return pred_t, target_t
 
 
-def _flow_2ch_to_4ch(flow_2ch):
-    """Decompose 2-channel flow (x, y) into 4 rectified channels (right, left, up, down).
-
-    Channels: right = clamp(x, min=0), left = clamp(-x, min=0),
-              up = clamp(y, min=0), down = clamp(-y, min=0).
-    """
-    return torch.cat([
-        flow_2ch[..., 0:1].clamp(min=0),
-        (-flow_2ch[..., 0:1]).clamp(min=0),
-        flow_2ch[..., 1:2].clamp(min=0),
-        (-flow_2ch[..., 1:2]).clamp(min=0),
-    ], dim=-1)
-
-
 def flow_loss(model, outputs, target, train_mask, loss_start_step):
     """Normalized MSE between predicted flow and ground-truth optic flow.
 
-    Averages across all flow-type readouts present in *outputs*.
+    Averages across all flow readouts (``predicts_flow``, e.g.
+    ``FlowNeuronReadout`` / ``FlowConv2Readout``) in *outputs*.
     """
     target_flow = target['optic_flow']
+    flow_keys = [k for k, m in model._readout_modules.items()
+                 if getattr(m, 'predicts_flow', False)]
+    if not flow_keys:
+        raise ValueError(
+            "The 'flow_loss' loss needs a flow readout (predicts_flow=True, "
+            "e.g. FlowNeuronReadout or FlowConv2Readout) in "
+            "[model.regions.optic_lobe].readouts."
+        )
+    missing = [k for k in flow_keys if k not in outputs]
+    if missing:
+        raise ValueError(
+            f"Flow readout(s) {missing} produced no output: the optic-lobe "
+            f"region recorded nothing (none of its output neurons are in the "
+            f"model)."
+        )
     losses = []
-    for key, mod in model._readout_modules.items():
-        if getattr(mod, 'training_only', False):
-            continue
-        if not mod.predicts_flow or key not in outputs:
-            continue
+    for key in flow_keys:
         pred_t, target_t = _mask_pred_target(outputs[key], target_flow,
                                              train_mask, loss_start_step)
         losses.append(normalized_mse(pred_t, target_t))
-    if not losses:
-        return target_flow.new_tensor(0.0)
-    return sum(losses) / len(losses)
-
-
-def flow_loss_4ch(model, outputs, target, train_mask, loss_start_step):
-    """Normalized MSE for 4-channel rectified flow readouts.
-
-    Decomposes the 2-channel optic flow target into 4 rectified channels
-    (right, left, up, down) and compares against readouts with
-    ``output_extra_dims == (4,)``.
-    """
-    target_flow = target['optic_flow']
-    target_4ch = _flow_2ch_to_4ch(target_flow)
-    losses = []
-    for key, mod in model._readout_modules.items():
-        if getattr(mod, 'training_only', False):
-            continue
-        if not getattr(mod, 'predicts_flow', False) or key not in outputs:
-            continue
-        if getattr(mod, 'output_extra_dims', ()) != (4,):
-            continue
-        pred_t, target_t = _mask_pred_target(outputs[key], target_4ch,
-                                             train_mask, loss_start_step)
-        losses.append(normalized_mse(pred_t, target_t))
-    if not losses:
-        return target_flow.new_tensor(0.0)
     return sum(losses) / len(losses)
 
 
@@ -191,18 +161,32 @@ def odometry_loss(model, outputs, target, train_mask, loss_start_step):
 
 
 def motion_mag(model, outputs, target, train_mask, loss_start_step):
-    """Normalized MSE between predicted motion magnitude and ||optic_flow||."""
+    """Normalized MSE between predicted motion magnitude and ||optic_flow||.
+
+    Averages across all motion-magnitude readouts (``predicts_motion_mag``,
+    e.g. ``MotionMagReadout`` / ``MotionMagConv2Readout``) in *outputs*.
+    """
     target_flow = target['optic_flow']
     target_mag = target_flow.norm(dim=-1)           # (batch, time, cols)
-    mag_key = next(
-        (k for k, m in model._readout_modules.items()
-         if isinstance(m, ru.MotionMagReadout)),
-        None,
-    )
-    if mag_key is None:
-        return target_flow.new_tensor(0.0)
-    pred_mag = outputs[mag_key]
-    pred_t, target_t = _mask_pred_target(
-        pred_mag, target_mag, train_mask, loss_start_step)
-    return normalized_mse(pred_t, target_t)
+    mag_keys = [k for k, m in model._readout_modules.items()
+                if getattr(m, 'predicts_motion_mag', False)]
+    if not mag_keys:
+        raise ValueError(
+            "The 'motion_mag' loss needs a motion-magnitude readout "
+            "(MotionMagReadout or MotionMagConv2Readout) in "
+            "[model.regions.optic_lobe].readouts."
+        )
+    missing = [k for k in mag_keys if k not in outputs]
+    if missing:
+        raise ValueError(
+            f"Motion-magnitude readout(s) {missing} produced no output: the "
+            f"optic-lobe region recorded nothing (none of its output neurons "
+            f"are in the model)."
+        )
+    losses = []
+    for key in mag_keys:
+        pred_t, target_t = _mask_pred_target(
+            outputs[key], target_mag, train_mask, loss_start_step)
+        losses.append(normalized_mse(pred_t, target_t))
+    return sum(losses) / len(losses)
 

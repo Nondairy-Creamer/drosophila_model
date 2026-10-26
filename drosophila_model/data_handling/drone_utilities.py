@@ -1,8 +1,8 @@
 """Helper functions for turning raw drone-rig recordings into stimuli.
 
 This module holds all the drone-specific machinery: video loading, pose
-loading/estimation, ommatidium sampling, ego-motion solving, dome calibration,
-and the per-dataset processors. The thin per-type generators in
+loading/estimation, ommatidium sampling, dome calibration, ground-truth
+loading, and the per-dataset processors. The thin per-type generators in
 ``drosophila_model/data_handling/stimulus_generators.py`` (``small_drone`` and
 ``rpi_drone``) import :func:`get_drone_stimulus` and
 :func:`drone_clips_to_two_eye` from here, and analysis scripts import the
@@ -32,15 +32,24 @@ from drosophila_model.data_handling.sampling import (
     interpolate_to_model_dt,
 )
 
+# Consecutive segments of one drone clip are strongly correlated, so the
+# train/test split keeps contiguous blocks of about this many seconds of a clip
+# together (one group id per block; see drone_clips_to_two_eye). Blocks rather
+# than whole clips, so a single-clip rig such as rpi_drone still gets a test set.
+DRONE_GROUP_SECONDS = 10.0
 
-def load_video_grayscale(path):
-    """Load video as (T, H, W) uint8 grayscale frames."""
+
+def load_video_grayscale(path, max_frames=None):
+    """Load video as (T, H, W) uint8 grayscale frames.
+
+    ``max_frames`` stops decoding after that many frames (default: all).
+    """
     import cv2
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise FileNotFoundError(f'Cannot open video: {path}')
     frames = []
-    while True:
+    while max_frames is None or len(frames) < max_frames:
         ret, frame = cap.read()
         if not ret:
             break
@@ -69,14 +78,16 @@ def _load_or_estimate_pose(clip_id, data_dir, pose_dir):
 
     print(f'  No pose data at {npz_path}, running estimation...')
     from drosophila_model.data_handling.drone_pose import process_clip as estimate_clip, save_clip_result
-    from drosophila_model.data_handling.estimate_pose import EquirectRig
+    from drosophila_model.data_handling.estimate_pose import (
+        DEFAULT_SMOOTHNESS, DEFAULT_TAG_FAMILY, DEFAULT_TAG_SIZE, EquirectRig,
+    )
 
     image_size = get_image_size(data_dir, clip_id)
     rig = EquirectRig.create_default(image_size)
     result = estimate_clip(
         clip_id, data_dir, rig,
-        tag_size=0.16, tag_family='tag36h11',
-        smoothness=0.1, world_to_m=1.0,
+        tag_size=DEFAULT_TAG_SIZE, tag_family=DEFAULT_TAG_FAMILY,
+        smoothness=DEFAULT_SMOOTHNESS, world_to_m=1.0,
     )
     if result is None:
         return None
@@ -86,34 +97,15 @@ def _load_or_estimate_pose(clip_id, data_dir, pose_dir):
     return np.load(npz_path)
 
 
-def process_clip(clip_id, data_dir, pose_dir, monocular=False, default_fps=30.0):
-    """Process a single drone clip: load videos and batch-opt pose.
+def process_clip(clip_id, data_dir, pose_dir):
+    """Process a single drone clip: load both videos and the batch-opt pose.
 
-    When ``monocular`` is True, loads only ``right_{clip_id}.mp4`` and skips
-    the left video and pose entirely; ``video_dt`` is derived from the video
-    file (falls back to ``default_fps`` if the container does not report fps),
-    and the returned dict omits ``left``/rotation/translation keys.
-
-    Returns a dict with video tensors and (in stereo mode) rotation/translation
-    rates and locations, or ``None`` on failure.
+    Returns a dict with the left/right video tensors and the rotation (deg/s)
+    and translation (m/s) rates, or ``None`` on failure.
     """
-    import cv2
     data_dir = Path(data_dir)
-    right = load_video_grayscale(data_dir / f'right_{clip_id}.mp4')
-
-    if monocular:
-        cap = cv2.VideoCapture(str(data_dir / f'right_{clip_id}.mp4'))
-        fps = cap.get(cv2.CAP_PROP_FPS) or default_fps
-        cap.release()
-        video_dt = 1.0 / float(fps)
-        print(f'  Clip {clip_id} (monocular): {len(right)} frames ({len(right) * video_dt:.1f}s)')
-        return {
-            'right': torch.from_numpy(right),
-            'video_dt': video_dt,
-            'clip_id': clip_id,
-        }
-
     pose_dir = Path(pose_dir)
+    right = load_video_grayscale(data_dir / f'right_{clip_id}.mp4')
     left = load_video_grayscale(data_dir / f'left_{clip_id}.mp4')
 
     pose_data = _load_or_estimate_pose(clip_id, data_dir, pose_dir)
@@ -125,18 +117,12 @@ def process_clip(clip_id, data_dir, pose_dir, monocular=False, default_fps=30.0)
 
     rotation = torch.from_numpy(pose_data['rotation_deg_s'].astype(np.float32))
     translation = torch.from_numpy(pose_data['velocity_m_s'].astype(np.float32))
-    rotation_location = torch.from_numpy(
-        pose_data['rotation_deg'].astype(np.float32))
-    translation_location = torch.from_numpy(
-        pose_data['position_m'].astype(np.float32))
 
     min_len = min(len(left), len(right), len(rotation))
     left = left[:min_len]
     right = right[:min_len]
     rotation = rotation[:min_len]
     translation = translation[:min_len]
-    rotation_location = rotation_location[:min_len]
-    translation_location = translation_location[:min_len]
 
     print(f'  Clip {clip_id}: {min_len} frames ({min_len * video_dt:.1f}s)')
 
@@ -145,20 +131,17 @@ def process_clip(clip_id, data_dir, pose_dir, monocular=False, default_fps=30.0)
         'right': torch.from_numpy(right),
         'rotation': rotation,
         'translation': translation,
-        'rotation_location': rotation_location,
-        'translation_location': translation_location,
         'video_dt': video_dt,
         'clip_id': clip_id,
     }
 
 
-def sample_clip(clip, W_right, in_fov_right, W_left=None, in_fov_left=None):
-    """Spatially sample a raw clip at ommatidium locations.
+def sample_clip(clip, W_right, in_fov_right, W_left, in_fov_left):
+    """Spatially sample a raw stereo clip at ommatidium locations.
 
-    Returns a new dict with 'right' as (T, N) float32 in [0, 1] plus
-    video_dt/clip_id. If ``W_left`` and ``in_fov_left`` are provided, also
-    samples the left eye and includes rotation/translation fields when
-    present on the input clip.
+    Returns a new dict with 'right' / 'left' as (T, N) float32 in [0, 1]
+    (out-of-FOV columns set to 0.5), the per-eye FOV masks, video_dt/clip_id,
+    and the clip's rotation/translation rates.
     """
     T = clip['right'].shape[0]
 
@@ -166,189 +149,20 @@ def sample_clip(clip, W_right, in_fov_right, W_left=None, in_fov_left=None):
     sampled_right = np.asarray(W_right.dot(right_flat)).T / 255.0
     sampled_right[:, ~in_fov_right] = 0.5
 
-    result = {
+    left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
+    sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
+    sampled_left[:, ~in_fov_left] = 0.5
+
+    return {
         'right': torch.from_numpy(sampled_right),
+        'left': torch.from_numpy(sampled_left),
         'video_dt': clip['video_dt'],
         'clip_id': clip['clip_id'],
         'in_fov_right': torch.from_numpy(in_fov_right.copy()),
+        'in_fov_left': torch.from_numpy(in_fov_left.copy()),
+        'rotation': clip['rotation'],
+        'translation': clip['translation'],
     }
-
-    if W_left is not None and in_fov_left is not None:
-        left_flat = clip['left'].numpy().reshape(T, -1).T.astype(np.float32)
-        sampled_left = np.asarray(W_left.dot(left_flat)).T / 255.0
-        sampled_left[:, ~in_fov_left] = 0.5
-        result['left'] = torch.from_numpy(sampled_left)
-        result['in_fov_left'] = torch.from_numpy(in_fov_left.copy())
-
-    for k in ('rotation', 'translation', 'rotation_location', 'translation_location'):
-        if k in clip:
-            result[k] = clip[k]
-    return result
-
-
-def extract_odometry(phi, theta, d_right, d_up, omega_y_known, T_y_known):
-    """Estimate ego-motion from optic flow with known pitch rotation and lateral translation.
-
-    Solves for roll and yaw rotation (omega_x, omega_z) and forward/vertical
-    translation (T_x, T_z) while enforcing known pitch rate (omega_y) and
-    lateral translation rate (T_y).
-
-    Coordinate system:
-        - +X: Forward (phi=0, theta=pi/2)
-        - +Y: Left (phi=pi/2, theta=pi/2)
-        - +Z: Up (theta=0)
-
-    Flow sign convention:
-        - Positive d_right: rightward motion on retina
-        - Positive d_up: upward motion on retina
-
-    Args:
-        phi: (N,) azimuthal angles of viewing directions
-        theta: (N,) polar angles of viewing directions
-        d_right: (N,) or (T, N) angular flow in phi direction
-        d_up: (N,) or (T, N) angular flow in theta direction
-        omega_y_known: scalar or (T,) known rotation rate about Y axis (pitch)
-        T_y_known: scalar or (T,) known translation rate in Y (lateral)
-
-    Returns:
-        omega_star: (3,) or (T, 3) rotation vector [roll, pitch, yaw]
-        T_star: (3,) or (T, 3) translation vector [T_x, T_y, T_z]
-        Z_star: (N,) or (T, N) estimated depths
-    """
-
-    def cross_matrix(a):
-        ax, ay, az = a[..., 0], a[..., 1], a[..., 2]
-        O = torch.zeros_like(ax)
-        return torch.stack([
-            torch.stack([   O, -az,  ay], dim=-1),
-            torch.stack([  az,   O, -ax], dim=-1),
-            torch.stack([ -ay,  ax,   O], dim=-1)
-        ], dim=-2)
-
-    unbatched = d_right.dim() == 1
-    if unbatched:
-        d_right = d_right.unsqueeze(0)
-        d_up = d_up.unsqueeze(0)
-
-    T_len, N = d_right.shape
-    dev = d_right.device
-    dt = d_right.dtype
-
-    if not isinstance(omega_y_known, torch.Tensor):
-        omega_y_known = torch.tensor(omega_y_known, device=dev, dtype=dt)
-    if omega_y_known.dim() == 0:
-        omega_y_known = omega_y_known.expand(T_len)
-
-    if not isinstance(T_y_known, torch.Tensor):
-        T_y_known = torch.tensor(T_y_known, device=dev, dtype=dt)
-    if T_y_known.dim() == 0:
-        T_y_known = T_y_known.expand(T_len)
-
-    # 3D viewing directions (N, 3)
-    x = torch.stack((
-        torch.sin(theta) * torch.cos(phi),
-        torch.sin(theta) * torch.sin(phi),
-        torch.cos(theta)
-    ), dim=1)
-
-    # Basis vectors on the sphere (N, 3)
-    e_theta = torch.stack((
-        torch.cos(theta) * torch.cos(phi),
-        torch.cos(theta) * torch.sin(phi),
-        -torch.sin(theta)
-    ), dim=1)
-
-    e_phi = torch.stack((
-        -torch.sin(phi),
-        torch.cos(phi),
-        torch.zeros_like(phi)
-    ), dim=1)
-
-    # Reconstruct 3D flow from angular components
-    u = -d_right[..., None] * e_phi - d_up[..., None] * e_theta  # (T_len, N, 3)
-
-    # === Rotation: solve for omega_x, omega_z with known omega_y ===
-    A = cross_matrix(x)                        # (N, 3, 3)
-    A_flat = A.reshape(3 * N, 3)               # (3N, 3)
-    u_flat = u.reshape(T_len, 3 * N).T         # (3N, T_len)
-
-    # Subtract known omega_y contribution
-    omega_y_contrib = A_flat[:, 1:2] @ omega_y_known.unsqueeze(0)  # (3N, T_len)
-    u_adjusted = u_flat - omega_y_contrib
-
-    # Solve reduced 2-variable system for [omega_x, omega_z]
-    A_reduced = A_flat[:, [0, 2]]              # (3N, 2)
-    AtA = A_reduced.T @ A_reduced              # (2, 2)
-    Atb = A_reduced.T @ u_adjusted             # (2, T_len)
-    omega_xz = torch.linalg.solve(AtA, Atb).T  # (T_len, 2)
-
-    omega_star = torch.zeros(T_len, 3, device=dev, dtype=dt)
-    omega_star[:, 0] = omega_xz[:, 0]
-    omega_star[:, 1] = omega_y_known
-    omega_star[:, 2] = omega_xz[:, 1]
-
-    # === De-rotated flow ===
-    v = u - torch.einsum('nij,tj->tni', A, omega_star)  # (T_len, N, 3)
-
-    # === Translation: SVD for [Tx, Tz] direction, T_y known ===
-    translation_magnitude = torch.sqrt((v ** 2).mean(dim=(-2, -1)))  # (T_len,)
-
-    # Projection matrices: Pi_i = I - x_i x_i^T
-    outer = x.unsqueeze(2) @ x.unsqueeze(1)   # (N, 3, 3)
-    I_mat = torch.eye(3, device=dev, dtype=dt).expand(N, 3, 3)
-    P = I_mat - outer                          # (N, 3, 3)
-
-    # C = [v_i]_x @ Pi_i  (eliminates depth)
-    vx = cross_matrix(v)                       # (T_len, N, 3, 3)
-    C_blocks = vx @ P                          # (T_len, N, 3, 3)
-    C = C_blocks.reshape(T_len, 3 * N, 3)     # (T_len, 3N, 3)
-
-    trans_eps = 1e-6
-    has_translation = translation_magnitude > trans_eps
-
-    T_star = torch.zeros(T_len, 3, device=dev, dtype=dt)
-    T_star[:, 1] = T_y_known
-
-    if has_translation.any():
-        C_valid = C[has_translation]
-
-        # SVD on the unknown-component columns to find [Tx, Tz] direction
-        C_xz = C_valid[:, :, [0, 2]]                         # (T_v, 3N, 2)
-        _, _, Vh = torch.linalg.svd(C_xz, full_matrices=False)
-        T_dir_xz = Vh[:, -1]                                 # (T_v, 2)
-
-        # Embed into full 3D for sign disambiguation
-        T_dir = torch.zeros(T_dir_xz.shape[0], 3, device=dev, dtype=dt)
-        T_dir[:, 0] = T_dir_xz[:, 0]
-        T_dir[:, 2] = T_dir_xz[:, 1]
-
-        # Sign disambiguation: v · w > 0 ⟹ positive depths
-        w_i = torch.einsum('nij,tj->tni', P, T_dir)          # (T_v, N, 3)
-        v_valid = v[has_translation]
-        vdw = (v_valid * w_i).sum(dim=-1)                     # (T_v, N)
-        wnorm2 = (w_i * w_i).sum(dim=-1)                     # (T_v, N)
-        weighted_sign = (vdw * wnorm2).sum(dim=-1)            # (T_v,)
-        sign_flip = torch.where(weighted_sign < 0,
-                                torch.tensor(-1.0, device=dev, dtype=dt),
-                                torch.tensor(1.0, device=dev, dtype=dt))
-        T_dir = T_dir * sign_flip[:, None]
-
-        # Scale by translation magnitude
-        T_star[has_translation] = T_dir * translation_magnitude[has_translation, None]
-        T_star[:, 1] = T_y_known
-
-    # === Depth estimation ===
-    w = torch.einsum('nij,tj->tni', P, T_star)  # (T_len, N, 3)
-    v_dot_w = (v * w).sum(dim=-1)                # (T_len, N)
-    w_norm_sq = (w * w).sum(dim=-1)              # (T_len, N)
-    Z_star = w_norm_sq / (v_dot_w + 1e-12)      # (T_len, N)
-
-    if unbatched:
-        omega_star = omega_star.squeeze(0)
-        T_star = T_star.squeeze(0)
-        Z_star = Z_star.squeeze(0)
-
-    return omega_star, T_star, Z_star
 
 
 def _rot_y(deg):
@@ -412,11 +226,11 @@ def load_rpi_ground_truth(recording_dir):
     """Load rpi_drone ground truth aligned to video frames by timestamp.
 
     Frame timestamps come from ``stereo_frames.csv`` (one row per video frame).
-    Angular velocity (``gyro_x/y/z_dps``), linear velocity
-    (``vx/vy/vz_meterpersecond``) and position (``x/y/z_meter``) all come from
-    ``matt_data.csv`` and are linearly interpolated onto those frame times using
-    its ``time_s`` column, so differing sample rates between the logged ground
-    truth and the video are handled correctly.
+    Angular velocity (``gyro_x/y/z_dps``) and linear velocity
+    (``vx/vy/vz_meterpersecond``) come from ``matt_data.csv`` and are linearly
+    interpolated onto those frame times using its ``time_s`` column, so
+    differing sample rates between the logged ground truth and the video are
+    handled correctly.
 
     The gyro is already in deg/s (matching the ``small_drone`` dataset, which
     stores ``rotation_deg_s``). Axes map to the body frame (+x forward roll,
@@ -426,7 +240,6 @@ def load_rpi_ground_truth(recording_dir):
     Returns:
         rotation_rate: (T, 3) angular velocity in deg/s.
         translation_rate: (T, 3) linear velocity in m/s.
-        positions: (T, 3) position in m.
         frame_times: (T,) video frame times in seconds.
     """
     recording_dir = Path(recording_dir)
@@ -446,26 +259,23 @@ def load_rpi_ground_truth(recording_dir):
     rotation_rate[:, 2] *= -1.0  # gyro z is inverted vs +z-up yaw convention
     translation_rate = interp_cols(
         data, ['vx_meterpersecond', 'vy_meterpersecond', 'vz_meterpersecond'])
-    positions = interp_cols(data, ['x_meter', 'y_meter', 'z_meter'])
-    return rotation_rate, translation_rate, positions, frame_times
+    return rotation_rate, translation_rate, frame_times
 
 
 def process_small_drone_dataset(data_dir, pose_dir, sample_phi, sample_theta,
-                                filter_std=2.5, monocular=False):
+                                filter_std=2.5):
     """Process the equirectangular ``small_drone`` dataset into sampled clips.
 
     Reads the ``drone_videos`` folder: discovers ``left_N.mp4`` / ``right_N.mp4``
     pairs, loads (or estimates) pose,
     builds linear-FOV ommatidium sampling matrices, and returns a list of
-    sampled clip dicts. In ``monocular`` mode only the right videos/pose-free
-    path is used.
+    sampled clip dicts.
 
     Args:
         data_dir: directory containing the stereo videos.
         pose_dir: directory of batch-opt pose ``.npz`` files from drone_pose.py.
         sample_phi, sample_theta: (N,) ommatidium angles (radians).
         filter_std: Gaussian filter std in degrees.
-        monocular: process only right videos (no left, no pose).
 
     Returns:
         List of sampled clip dicts (empty if no clips are found).
@@ -483,22 +293,19 @@ def process_small_drone_dataset(data_dir, pose_dir, sample_phi, sample_theta,
             right_ids.add(int(p.stem.split('_')[1]))
         except (ValueError, IndexError):
             continue
-    if monocular:
-        clip_ids = sorted(right_ids)
-    else:
-        left_ids = set()
-        for p in data_dir.glob('left_*.mp4'):
-            try:
-                left_ids.add(int(p.stem.split('_')[1]))
-            except (ValueError, IndexError):
-                continue
-        clip_ids = sorted(left_ids & right_ids)
+    left_ids = set()
+    for p in data_dir.glob('left_*.mp4'):
+        try:
+            left_ids.add(int(p.stem.split('_')[1]))
+        except (ValueError, IndexError):
+            continue
+    clip_ids = sorted(left_ids & right_ids)
     print(f'[small_drone] Found {len(clip_ids)} clips: {clip_ids}')
 
     raw_clips = []
     for clip_id in clip_ids:
         print(f'[small_drone] Loading clip {clip_id}...')
-        clip = process_clip(clip_id, data_dir, pose_dir, monocular=monocular)
+        clip = process_clip(clip_id, data_dir, pose_dir)
         if clip is not None:
             raw_clips.append(clip)
 
@@ -514,14 +321,11 @@ def process_small_drone_dataset(data_dir, pose_dir, sample_phi, sample_theta,
     )
     in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
 
-    if monocular:
-        W_left, in_fov_left = None, None
-    else:
-        W_left = build_ommatidium_sampling_matrix(
-            (image_height, image_width), phi_left_lim, theta_lim,
-            -sample_phi, sample_theta, filter_std=filter_std,
-        )
-        in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
+    W_left = build_ommatidium_sampling_matrix(
+        (image_height, image_width), phi_left_lim, theta_lim,
+        -sample_phi, sample_theta, filter_std=filter_std,
+    )
+    in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
 
     clips = []
     for raw_clip in raw_clips:
@@ -591,21 +395,19 @@ def process_rpi_drone_dataset(data_dir, calib_dir, sample_phi, sample_theta,
         cap.release()
         video_dt = 1.0 / float(fps)
 
-        rotation_rate, translation_rate, positions, _ = load_rpi_ground_truth(rec)
+        rotation_rate, translation_rate, _ = load_rpi_ground_truth(rec)
 
         n_frames = min(len(right), len(left), len(rotation_rate))
         right = right[:n_frames]
         left = left[:n_frames]
         rotation_rate = rotation_rate[:n_frames]
         translation_rate = translation_rate[:n_frames]
-        positions = positions[:n_frames]
 
         raw_clip = {
             'right': torch.from_numpy(right),
             'left': torch.from_numpy(left),
             'rotation': torch.from_numpy(rotation_rate.astype(np.float32)),
             'translation': torch.from_numpy(translation_rate.astype(np.float32)),
-            'translation_location': torch.from_numpy(positions.astype(np.float32)),
             'video_dt': video_dt,
             'clip_id': rec.name,
         }
@@ -618,8 +420,7 @@ def process_rpi_drone_dataset(data_dir, calib_dir, sample_phi, sample_theta,
 
 
 def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
-                       sample_phi=None, sample_theta=None,
-                       frame_start=0, frame_end=None):
+                       sample_phi=None, sample_theta=None):
     """
     Load cached ommatidium-sampled clips for ``dataset`` and temporally
     interpolate them to ``model_dt``.
@@ -638,12 +439,11 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
     Args:
         model_dt: model time step for temporal interpolation (seconds).
         dataset: ``'small_drone'`` or ``'rpi_drone'``.
-        data_folder: data root; defaults to ``config['data']['data_folder']``.
+        data_folder: data root; defaults to ``[data].data_folder`` of the
+            working-directory ``config.toml``.
         sample_phi, sample_theta: (N,) right-eye ommatidium angles (radians).
             Optional; when given they are validated against the columns baked
             into the cache (raises on mismatch).
-        frame_start: first model time step to include (after interpolation).
-        frame_end: last model time step to include (None = end of clip).
 
     Returns:
         List of dicts, one per clip, each with keys:
@@ -658,8 +458,8 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
             'in_fov_right' / 'in_fov_left': (N,) bool column masks.
     """
     if data_folder is None:
-        from drosophila_model.config import load_config
-        data_folder = load_config()['data']['data_folder']
+        from drosophila_model.config import get_data_folder, load_config
+        data_folder = get_data_folder(load_config())
     data_folder = Path(data_folder)
 
     if dataset not in ('small_drone', 'rpi_drone'):
@@ -670,7 +470,7 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
     if not cache_path.exists():
         raise FileNotFoundError(
             f"Drone cache not found: {cache_path}. Build it first with:\n"
-            f"  python drosophila_model/data_handling/process_raw_data.py {dataset}"
+            f"  python -m drosophila_model.data_handling.process_raw_data {dataset}"
         )
     cached = torch.load(cache_path, weights_only=False)
     clips = cached['clips']
@@ -686,7 +486,7 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
             raise ValueError(
                 f"Requested ommatidium columns do not match those baked into "
                 f"{cache_path}. Re-run:\n"
-                f"  python drosophila_model/data_handling/process_raw_data.py {dataset}"
+                f"  python -m drosophila_model.data_handling.process_raw_data {dataset}"
             )
 
     results = []
@@ -701,7 +501,9 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
         sampled_right = interpolate_to_model_dt(sampled_right[None], video_dt, model_dt)[0]
         sampled_left = interpolate_to_model_dt(sampled_left[None], video_dt, model_dt)[0]
 
-        # Stored rotation/translation are already rates from extract_odometry
+        # The cached rotation/translation are native-rate body rates (deg/s,
+        # m/s): from the drone_pose.py pose fit (small_drone) or the logged
+        # gyro/velocity in matt_data.csv (rpi_drone).
         rot_rate_native = clip['rotation'].numpy()
         trans_rate_native = clip['translation'].numpy()
 
@@ -737,12 +539,12 @@ def get_drone_stimulus(model_dt, dataset='small_drone', *, data_folder=None,
                 f"Clip {clip['clip_id']} missing 'in_fov_right'/'in_fov_left'."
             )
         result = {
-            'right': sampled_right[frame_start:frame_end],
-            'left': sampled_left[frame_start:frame_end],
-            'rotation': rotation_interp[frame_start:frame_end],
-            'translation': translation_interp[frame_start:frame_end],
-            'rotation_rate': rot_rate_interp[frame_start:frame_end],
-            'translation_rate': trans_rate_interp[frame_start:frame_end],
+            'right': sampled_right,
+            'left': sampled_left,
+            'rotation': rotation_interp,
+            'translation': translation_interp,
+            'rotation_rate': rot_rate_interp,
+            'translation_rate': trans_rate_interp,
             'video_dt': video_dt,
             'clip_id': clip['clip_id'],
             'in_fov_right': clip['in_fov_right'],
@@ -762,7 +564,10 @@ def drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype):
     and the ground-truth rotation/translation rates carried alongside.
 
     Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
-    train_mask)``; optic_flow is all-NaN (real flow is recovered downstream).
+    train_mask, group_id)``; optic_flow is all-NaN (real flow is recovered
+    downstream). ``group_id`` gives each run of consecutive segments spanning
+    :data:`DRONE_GROUP_SECONDS` of one clip a shared id, so the train/test
+    split never separates neighbouring (strongly correlated) segments.
     """
     in_fov = torch.cat([
         drone_clips[0]['in_fov_right'],
@@ -778,9 +583,12 @@ def drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype):
             f"Capping to {max_clip_len * model_dt:.1f}s."
         )
         seg_len = max_clip_len
+    segs_per_group = max(1, int(round(DRONE_GROUP_SECONDS / (seg_len * model_dt))))
 
     seg_rights, seg_lefts, seg_rots, seg_trans = [], [], [], []
+    seg_groups = []
     n_segments = 0
+    n_groups = 0
     for clip in drone_clips:
         T_clip = clip['right'].shape[0]
         num_segments = T_clip // seg_len
@@ -792,6 +600,9 @@ def drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype):
         seg_lefts.append(clip['left'][:usable].reshape(num_segments, seg_len, -1))
         seg_rots.append(clip['rotation_rate'][:usable].reshape(num_segments, seg_len, 3))
         seg_trans.append(clip['translation_rate'][:usable].reshape(num_segments, seg_len, 3))
+        clip_groups = np.arange(num_segments) // segs_per_group
+        seg_groups.append(n_groups + clip_groups)
+        n_groups += int(clip_groups[-1]) + 1
 
     stim_right = np.concatenate(seg_rights, axis=0)
     stim_left = np.concatenate(seg_lefts, axis=0)
@@ -806,5 +617,7 @@ def drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype):
     observer_translation = torch.tensor(true_translation, device=device, dtype=dtype)
     train_mask = in_fov.unsqueeze(0).unsqueeze(0).expand(
         n_segments, seg_len, -1).to(device=device)
+    group_id = torch.as_tensor(np.concatenate(seg_groups), dtype=torch.long, device=device)
 
-    return stimulus, optic_flow, observer_rotation, observer_translation, train_mask
+    return (stimulus, optic_flow, observer_rotation, observer_translation,
+            train_mask, group_id)

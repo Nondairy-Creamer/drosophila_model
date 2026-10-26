@@ -5,19 +5,25 @@ The column is the **middle** of the L1/L2/L3 shared columns sorted by azimuth φ
 plus ``--column-offset``.  Stimulus is chosen with ``--stim-type``:
 
 * **edge** — same as ``edge_sweep``: light **and** dark edges at 240°/s, right & up,
-  FOV 180°, 0.5 s pre-stim (figures under ``figures/cell_input_traces/edge/``).
+  FOV 180°, 0.5 s pre-stim.
 * **sine** — same as ``sine_wave_sweep``: drifting sine (default 4 Hz, 30° wavelength,
-  1 s stim, 0.5 s pre-stim; figures under ``figures/cell_input_traces/sine/``).
+  1 s stim, 0.5 s pre-stim).
+
+Figures go to ``<model_folder>/figures/cell_input_traces/<stim_type>/``; the
+partner summaries (``t4a_partners.txt`` / ``t5a_partners.txt``) go to
+``<model_folder>/analysis_data/cell_input_traces/<stim_type>/``.
 
 Each presynaptic trace is ``W·g_out·g_in·FR``; each motion-detector FR panel includes
-``(1-ρ)·softplus(Σ+b)`` on a twin axis.  Partners outside the L1/L2/L3 grid yield
-NaN FR and thus NaN scaled paths.
+``f(Σ+b)`` on a twin axis, where ``f`` is the model's nonlinearity: the steady-state
+firing rate the summed plotted inputs would produce. This input decomposition is
+exact only for ``CurrentDynamics`` models (a warning is printed otherwise).  Partners
+outside the L1/L2/L3 grid yield NaN FR and thus NaN scaled paths.
 
-Usage:
-    python analysis/t4_input_traces.py models/100hz_best_drone/ --stim-type edge
-    python analysis/t4_input_traces.py models/100hz_best_drone/ --stim-type sine
-    python analysis/t4_input_traces.py models/100hz_best_drone/ --stim-type sine --wavelength 30 --temporal-frequency 4
-    python analysis/t4_input_traces.py models/100hz_best_drone/ --column-offset -1
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.cell_input_traces models/<model>/ --stim-type edge
+    python -m drosophila_model.analysis.model_analysis.cell_input_traces models/<model>/ --stim-type sine
+    python -m drosophila_model.analysis.model_analysis.cell_input_traces models/<model>/ --stim-type sine --wavelength 30 --temporal-frequency 4
+    python -m drosophila_model.analysis.model_analysis.cell_input_traces models/<model>/ --column-offset -1
 """
 from __future__ import annotations
 
@@ -35,59 +41,22 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from drosophila_model.config import load_config
 from drosophila_model.model_definition import dynamics as dm
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.data_handling.stimulus_generators import make_lr_edge, make_ud_edge, make_lr_sine_wave, make_ud_sine_wave
+from drosophila_model.data_handling.stimulus_generators import make_lr_sine_wave, make_ud_sine_wave
+from drosophila_model.analysis.model_analysis.edge_sweep import (
+    generate_stimulus as generate_stimulus_edge,
+)
 
-# --- Edge defaults (match edge_sweep / former t4_input_edge_traces) ---
+# --- Edge defaults (match edge_sweep) ---
 VELOCITY_DEG_S = 240.0
 FOV_DEG = 180.0
 PRE_STIM_TIME_S = 0.5
 
-# --- Sine defaults (match sine_wave_sweep / former t4_input_sine_traces) ---
+# --- Sine defaults (match sine_wave_sweep) ---
 STIM_TIME_S_SINE_DEFAULT = 1.0
 DEFAULT_TEMPORAL_FREQ_HZ = 4.0
 DEFAULT_WAVELENGTH_DEG = 30.0
-
-
-def generate_stimulus_edge(
-    direction: str,
-    sample_phi,
-    sample_theta,
-    velocity: float,
-    edge_polarity: str,
-    dt: float,
-    stim_time: float,
-    pre_stim_time: float,
-):
-    """Same contract as :func:`analysis.edge_sweep.generate_stimulus`."""
-    direction = direction.lower()
-    if direction in ("right", "left"):
-        vel = velocity if direction == "right" else -velocity
-        edge, _ = make_lr_edge(
-            sample_phi,
-            sample_theta,
-            velocity=vel,
-            edge_polarity=edge_polarity,
-            dt=dt,
-            stim_time=stim_time,
-            pre_stim_time=pre_stim_time,
-        )
-    elif direction in ("up", "down"):
-        vel = velocity if direction == "up" else -velocity
-        edge, _ = make_ud_edge(
-            sample_phi,
-            sample_theta,
-            velocity=vel,
-            edge_polarity=edge_polarity,
-            dt=dt,
-            stim_time=stim_time,
-            pre_stim_time=pre_stim_time,
-        )
-    else:
-        raise ValueError(f"Unknown direction: {direction}")
-    return edge[None, :, :]
 
 
 def generate_stimulus_sine(
@@ -100,7 +69,12 @@ def generate_stimulus_sine(
     stim_time: float,
     pre_stim_time: float,
 ):
-    """Same convention as :func:`analysis.sine_wave_sweep.generate_stimulus`."""
+    """Drifting sine of shape (1, time, columns).
+
+    Same direction convention as :func:`sine_wave_sweep.generate_stimulus`,
+    parameterised by temporal frequency instead of velocity
+    (velocity = temporal_frequency * wavelength).
+    """
     direction = direction.lower()
     if direction == "right":
         tf = temporal_frequency_hz
@@ -222,20 +196,23 @@ def trace_for_neuron(pred: dict, model: nm.BaseRnn, cell_type: str, neuron_idx: 
 
 
 def _synapse_weight_post_pre(model: nm.BaseRnn, post_idx: int, pre_idx: int) -> float:
-    """Signed sparse weight W[post, pre] (same layout as ``torch.sparse.mm`` in ``forward``)."""
+    """Sparse weight W[post, pre] as used by ``forward`` (rows = post, cols = pre).
+
+    Signed for current-based models; for ``ConductanceDynamics`` it is the
+    unsigned count in the presynaptic neuron's transmitter matrix.
+    """
     if isinstance(model, dm.ConductanceDynamics):
         nt = model.transmitters[pre_idx]
         ri = int(np.where(model.unique_transmitters == nt)[0][0])
         w = model.synapse_counts[ri]
     else:
         w = model.synapse_counts
-    co = w.coalesce()
-    idx = co.indices()
-    val = co.values()
-    m = (idx[0] == post_idx) & (idx[1] == pre_idx)
-    if not m.any():
-        return 0.0
-    return float(val[m].sum().cpu().item())
+    # Read row ``post_idx`` straight from the CSR matrix.
+    crow = w.crow_indices()
+    start, end = int(crow[post_idx]), int(crow[post_idx + 1])
+    cols = w.col_indices()[start:end]
+    vals = w.values()[start:end]
+    return float(vals[cols == pre_idx].sum().cpu().item())
 
 
 def postsynaptic_input_gain(model: nm.BaseRnn, post_idx: int) -> float:
@@ -255,15 +232,6 @@ def postsynaptic_offset(model: nm.BaseRnn, post_idx: int) -> float:
     with torch.no_grad():
         cti = int(model.neuron_to_type_index[post_idx].item())
         return float(model.offset[cti].cpu().item())
-
-
-def postsynaptic_persistence(model: nm.BaseRnn, post_idx: int) -> float:
-    """ρ = sigmoid(persistence_logit) for this cell type. If absent, return 0 so ``(1-ρ)=1``."""
-    if not hasattr(model, "persistence_logit"):
-        return 0.0
-    with torch.no_grad():
-        cti = int(model.neuron_to_type_index[post_idx].item())
-        return float(model.persistence_logit.sigmoid()[cti].cpu().item())
 
 
 def presynaptic_output_gain(model: nm.BaseRnn, pre_idx: int) -> float:
@@ -310,7 +278,6 @@ def run_t4_input_traces(
     stim_type: str,
     model_folder: Path,
     model: nm.BaseRnn,
-    model_config: dict,
     column_offset: int,
     min_trace_peak: float,
     # sine-only (ignored for edge)
@@ -322,8 +289,14 @@ def run_t4_input_traces(
     stim_type = stim_type.lower()
     if stim_type not in ("edge", "sine"):
         raise ValueError(f"stim_type must be 'edge' or 'sine', got {stim_type!r}")
+    if not isinstance(model, dm.CurrentDynamics):
+        print(
+            f"WARNING: {type(model).__name__} is not CurrentDynamics; the "
+            "W*g_out*g_in path scales and the f(sum+b) proxy are not its true "
+            "input decomposition."
+        )
 
-    dt = model_config["model"]["dt"]
+    dt = model.dt
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
 
@@ -388,8 +361,6 @@ def run_t4_input_traces(
     g_in_t5 = postsynaptic_input_gain(model, t5_idx)
     t4_offset = postsynaptic_offset(model, t4_idx)
     t5_offset = postsynaptic_offset(model, t5_idx)
-    t4_rho = postsynaptic_persistence(model, t4_idx)
-    t5_rho = postsynaptic_persistence(model, t5_idx)
     partner_path_scales_t4: dict[int, float] = {
         ni: presynaptic_path_scale(model, ni, t4_idx) for _, ni in partners_t4
     }
@@ -427,18 +398,8 @@ def run_t4_input_traces(
     directions = ["right", "up"]
     edge_polarities = ("light", "dark")
 
+    num_time = None  # set from the first generated stimulus
     if stim_type == "edge":
-        _probe = generate_stimulus_edge(
-            "right",
-            sample_phi,
-            sample_theta,
-            VELOCITY_DEG_S,
-            "light",
-            dt,
-            stim_time,
-            pre_stim,
-        )
-        num_time = _probe.shape[1]
         traces_edge: dict[str, dict[str, dict[str, np.ndarray]]] = {
             pol: {d: {} for d in directions} for pol in edge_polarities
         }
@@ -454,6 +415,8 @@ def run_t4_input_traces(
                     stim_time,
                     pre_stim,
                 )
+                if num_time is None:
+                    num_time = stim_np.shape[1]
                 assert stim_np.shape[1] == num_time
                 batch = torch.tensor(stim_np, device=model.device, dtype=model.dtype)
                 with torch.no_grad():
@@ -479,11 +442,11 @@ def run_t4_input_traces(
                     traces_edge[pol][direction][trace_key] = tr
         traces = traces_edge  # type: ignore[assignment]
     else:
-        _probe = gen_stim("right")
-        num_time = _probe.shape[1]
         traces_sin: dict[str, dict[str, np.ndarray]] = {d: {} for d in directions}
         for direction in directions:
             stim_np = gen_stim(direction)
+            if num_time is None:
+                num_time = stim_np.shape[1]
             assert stim_np.shape[1] == num_time
             batch = torch.tensor(stim_np, device=model.device, dtype=model.dtype)
             with torch.no_grad():
@@ -513,18 +476,20 @@ def run_t4_input_traces(
 
     partner_keys_all_t4 = [tk for tk, _l, ct, ni in plot_specs_t4 if ni is not None]
     partner_keys_all_t5 = [tk for tk, _l, ct, ni in plot_specs_t5 if ni is not None]
+
+    def _abs_peak(arrays: List[np.ndarray]) -> float:
+        """Max |value| ignoring NaN; NaN when every value is NaN (partner off the L1/L2/L3 grid)."""
+        stacked = np.abs(np.concatenate(arrays))
+        return float(np.nanmax(stacked)) if np.isfinite(stacked).any() else float("nan")
+
     peak_by_key: dict[str, float] = {}
     for lbl in partner_keys_all_t4 + partner_keys_all_t5:
         if stim_type == "edge":
-            peak_by_key[lbl] = max(
-                float(np.nanmax(np.abs(traces[pol][d][lbl])))  # type: ignore[index]
-                for pol in edge_polarities
-                for d in directions
+            peak_by_key[lbl] = _abs_peak(
+                [traces[pol][d][lbl] for pol in edge_polarities for d in directions]  # type: ignore[index]
             )
         else:
-            peak_by_key[lbl] = max(
-                float(np.nanmax(np.abs(traces[d][lbl]))) for d in directions  # type: ignore[index]
-            )
+            peak_by_key[lbl] = _abs_peak([traces[d][lbl] for d in directions])  # type: ignore[index]
 
     def _filter_plot_keys(keys: List[str]) -> List[str]:
         if min_trace_peak <= 0.0:
@@ -535,7 +500,7 @@ def run_t4_input_traces(
     partner_keys_plot_t5 = _filter_plot_keys(partner_keys_all_t5)
 
     print(
-        f"Presynaptic partners in COO: T4a→{len(partner_keys_all_t4)}, T5a→{len(partner_keys_all_t5)}; "
+        f"Presynaptic partners in COO: T4a<-{len(partner_keys_all_t4)}, T5a<-{len(partner_keys_all_t5)}; "
         f"plotting {len(partner_keys_plot_t4)}/{len(partner_keys_all_t4)} (T4) and "
         f"{len(partner_keys_plot_t5)}/{len(partner_keys_all_t5)} (T5) "
         f"(min-|trace-peak|={min_trace_peak}).",
@@ -546,6 +511,11 @@ def run_t4_input_traces(
 
     stim_start_s = pre_stim
     _, n_in_cycle = _color_cycle()
+    # Twin-axis proxy: steady-state rate f(Σ+b) of the summed plotted inputs,
+    # with f the model's own nonlinearity.
+    nl_name = type(model.nonlinearity).__name__
+    proxy_label = f"{nl_name}(Σ+b)"
+    proxy_ylabel = f"{nl_name}(Σ W·g_out·g_in·FR + b)"
 
     def _edge_stim_title(pol: str, direction: str) -> str:
         lab = "Light" if pol == "light" else "Dark"
@@ -574,7 +544,6 @@ def run_t4_input_traces(
             1,
             figsize=(10, 7),
             sharex=True,
-            gridspec_kw={"hspace": 0.28},
         )
         t4_y = tr_dict["T4a"]
         ax_t4.plot(time_s, t4_y, color="k", linewidth=1.5, label="T4a FR")
@@ -588,7 +557,7 @@ def run_t4_input_traces(
             )
             t_lin = torch.tensor(sum_linear_t4, device=model.device, dtype=model.dtype)
             with torch.no_grad():
-                sum_fr_proxy = ((1.0 - t4_rho) * torch.nn.functional.softplus(t_lin)).cpu().numpy()
+                sum_fr_proxy = model.nonlinearity(t_lin).cpu().numpy()
             ax_t4r = ax_t4.twinx()
             ax_t4r.plot(
                 time_s,
@@ -596,9 +565,9 @@ def run_t4_input_traces(
                 color="tab:gray",
                 linestyle=":",
                 linewidth=1.3,
-                label=f"(1-ρ)·softplus(Σ+b), ρ={t4_rho:.3f}",
+                label=proxy_label,
             )
-            ax_t4r.set_ylabel("(1-ρ)·softplus(Σ W·g_out·g_in·FR + b)")
+            ax_t4r.set_ylabel(proxy_ylabel)
             lines_l, lab_l = ax_t4.get_legend_handles_labels()
             lines_r, lab_r = ax_t4r.get_legend_handles_labels()
             ax_t4.legend(lines_l + lines_r, lab_l + lab_r, loc="best")
@@ -615,7 +584,7 @@ def run_t4_input_traces(
             )
         ax_t4.axvline(stim_start_s, color="gray", linestyle="--", linewidth=0.8)
         ax_t4.set_ylabel("Firing rate")
-        ax_t4.set_title(f"{stim_line}\nT4a neuron_idx={t4_idx}; {column_ctx}")
+        ax_t4.set_title(f"{stim_line}\nT4a neuron_idx={t4_idx}\n{column_ctx}")
         ax_t4.set_xlim(time_s[0], time_s[-1])
 
         t5_y = tr_dict["T5a"]
@@ -630,7 +599,7 @@ def run_t4_input_traces(
             )
             t_lin5 = torch.tensor(sum_linear_t5, device=model.device, dtype=model.dtype)
             with torch.no_grad():
-                sum_fr_proxy5 = ((1.0 - t5_rho) * torch.nn.functional.softplus(t_lin5)).cpu().numpy()
+                sum_fr_proxy5 = model.nonlinearity(t_lin5).cpu().numpy()
             ax_t5r = ax_t5.twinx()
             ax_t5r.plot(
                 time_s,
@@ -638,9 +607,9 @@ def run_t4_input_traces(
                 color="tab:olive",
                 linestyle=":",
                 linewidth=1.3,
-                label=f"(1-ρ)·softplus(Σ+b), ρ={t5_rho:.3f}",
+                label=proxy_label,
             )
-            ax_t5r.set_ylabel("(1-ρ)·softplus(Σ W·g_out·g_in·FR + b)")
+            ax_t5r.set_ylabel(proxy_ylabel)
             lines_l5, lab_l5 = ax_t5.get_legend_handles_labels()
             lines_r5, lab_r5 = ax_t5r.get_legend_handles_labels()
             ax_t5.legend(lines_l5 + lines_r5, lab_l5 + lab_r5, loc="best")
@@ -658,7 +627,7 @@ def run_t4_input_traces(
         ax_t5.axvline(stim_start_s, color="gray", linestyle="--", linewidth=0.8)
         ax_t5.set_xlabel("Time (s)")
         ax_t5.set_ylabel("Firing rate")
-        ax_t5.set_title(f"T5a neuron_idx={t5_idx}; same column as T4a ({column_ctx})")
+        ax_t5.set_title(f"T5a neuron_idx={t5_idx}; same column as T4a (column {col})")
         fig_fr.tight_layout()
         path_fr = fig_folder / f"{base}_t4_t5_firing_rate.png"
         fig_fr.savefig(path_fr, dpi=150)
@@ -719,7 +688,6 @@ def run_t4_input_traces(
         post_idx: int,
         g_in: float,
         offset: float,
-        rho: float,
         partners: List[Tuple[str, int]],
         path_scales: dict[int, float],
         pk_plot: List[str],
@@ -729,8 +697,7 @@ def run_t4_input_traces(
             stim_summary_line,
             f"{label}: neuron_index={post_idx}, {column_ctx}",
             f"g_in({label}) single factor applied to all listed inputs: {g_in:.6g}",
-            f"b({label}) offset (inside Σ+b before softplus on FR plot): {offset:.6g}",
-            f"ρ({label}) persistence (sigmoid of persistence_logit): {rho:.6g}",
+            f"b({label}) offset (inside {proxy_label} on the FR plot): {offset:.6g}",
             f"Connectome: {len(partners)} distinct presynaptic neurons (all types) synapse onto this {label}; "
             f"each is a separate column/neighbor. Plotted {len(pk_plot)}/{len(pk_all)} "
             f"with max|trace|>={min_trace_peak} (use --min-trace-peak 0 for all).",
@@ -749,14 +716,16 @@ def run_t4_input_traces(
             )
         return lines_loc
 
-    for fname, label, post_idx, g_in, off, rho, partners, scales, pk_plot, pk_all in (
+    # Text summaries are not figures, so they go under analysis_data/.
+    summary_folder = model_folder / "analysis_data" / "cell_input_traces" / stim_type
+    summary_folder.mkdir(parents=True, exist_ok=True)
+    for fname, label, post_idx, g_in, off, partners, scales, pk_plot, pk_all in (
         (
             "t4a_partners.txt",
             "T4a",
             t4_idx,
             g_in_t4,
             t4_offset,
-            t4_rho,
             partners_t4,
             partner_path_scales_t4,
             partner_keys_plot_t4,
@@ -768,14 +737,13 @@ def run_t4_input_traces(
             t5_idx,
             g_in_t5,
             t5_offset,
-            t5_rho,
             partners_t5,
             partner_path_scales_t5,
             partner_keys_plot_t5,
             partner_keys_all_t5,
         ),
     ):
-        summary_path = fig_folder / fname
+        summary_path = summary_folder / fname
         summary_path.write_text(
             "\n".join(
                 _partner_summary_lines(
@@ -783,14 +751,14 @@ def run_t4_input_traces(
                     post_idx,
                     g_in,
                     off,
-                    rho,
                     partners,
                     scales,
                     pk_plot,
                     pk_all,
                 )
             )
-            + "\n"
+            + "\n",
+            encoding="utf-8",
         )
         print(f"Wrote {summary_path}")
 
@@ -802,14 +770,14 @@ def main() -> None:
     parser.add_argument(
         "model_folder",
         type=str,
-        help="Path to model folder (containing model.pt and config.toml)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--stim-type",
         type=str,
         choices=("edge", "sine"),
         default="edge",
-        help="Stimulus family: moving light+dark edges (240°/s, right & up) or drifting sine grating. Default: %(default)s.",
+        help="Stimulus family: moving light+dark edges (240 deg/s, right & up) or drifting sine grating. Default: %(default)s.",
     )
     parser.add_argument(
         "--temporal-frequency",
@@ -837,7 +805,7 @@ def main() -> None:
         type=int,
         default=0,
         metavar="N",
-        help="After sorting shared L1/L2/L3 columns by azimuth φ, use the middle column (index "
+        help="After sorting shared L1/L2/L3 columns by azimuth phi, use the middle column (index "
         "(n-1)//2) plus this integer offset. T4a and T5a are taken from the same column. Default: %(default)s.",
     )
     parser.add_argument(
@@ -845,20 +813,22 @@ def main() -> None:
         type=float,
         default=1e-9,
         metavar="X",
-        help="Only plot presynaptic traces whose max |value| (over time and both directions) is ≥ X. "
+        help="Only plot presynaptic traces whose max |value| (over time and both directions) is >= X. "
         "Use 0 for every partner. Default: %(default)s.",
     )
     args = parser.parse_args()
 
-    model_folder = Path(args.model_folder)
-    model_config = load_config(model_folder / "config.toml")
-    model = nm.BaseRnn.load(model_folder / "model.pt")
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.BaseRnn.load(model_path)
+    if not hasattr(model, 'input_strength_log'):
+        sys.exit(f"cell_input_traces decomposes inputs through per-cell-type gains, "
+                 f"which {type(model).__name__} does not have.")
 
     run_t4_input_traces(
         stim_type=args.stim_type,
         model_folder=model_folder,
         model=model,
-        model_config=model_config,
         column_offset=args.column_offset,
         min_trace_peak=args.min_trace_peak,
         temporal_frequency_hz=args.temporal_frequency,

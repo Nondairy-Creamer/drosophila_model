@@ -3,21 +3,21 @@ Run a trained model on a freshly generated one-eye stimulus and visualize
 cell responses in a diamond layout with the stimulus in the center.
 
 Given a set of 4 cell types, produces a movie with:
-  - Center: stimulus intensity (small scatter)
+  - Center: stimulus intensity (hex mosaic)
   - Diamond positions: cell responses (right, left, up, down)
 
-Uses the same model loading and stimulus generation as run_model_on_stimulus.py.
+When the four cell types are T4 subtypes (the default T4a-d), two more movies
+are rendered: the matching T5 subtypes, and the T4+T5 sum per direction.
 
-Usage:
-    python movie_scripts/run_model_on_stimulus_cells.py models/my_model/
-    python movie_scripts/run_model_on_stimulus_cells.py models/my_model/ --cell-types T5a T5b T5c T5d
-    python movie_scripts/run_model_on_stimulus_cells.py models/my_model/ --stim-type random_sine --config path/to/config.toml
+Uses the same model loading and stimulus generation as run_model_on_stimulus.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus_cells models/my_model/
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus_cells models/my_model/ --cell-types Tm1 Tm2 Tm4 Tm9
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus_cells models/my_model/ --stim-type random_sine --config-path path/to/config.toml
 """
 import argparse
-import sys
 from pathlib import Path
-
-_repo_root = str(Path(__file__).parent.parent)
 
 import numpy as np
 import torch
@@ -50,8 +50,12 @@ def main() -> None:
         description="Run model on a stimulus and visualize cell responses in diamond layout."
     )
     parser.add_argument("model_folder", type=str, help="Path to model folder or model.pt")
-    parser.add_argument("--config", type=str, default=None,
-                        help="Path to config.toml (default: uses workspace config.toml)")
+    parser.add_argument("--config-path", "--config", dest="config_path", type=str,
+                        default="config.toml",
+                        help="Path to config.toml (default: ./config.toml)")
+    parser.add_argument("--data-config-path", type=str, default="config_data.toml",
+                        help="Path to the stimulus-generation config overlay "
+                             "(default: ./config_data.toml)")
     parser.add_argument("--cell-types", type=str, nargs=4, default=['T4a', 'T4b', 'T4c', 'T4d'],
                         help="Four cell types to plot in diamond (right, left, up, down)")
     parser.add_argument("--stim-type", type=str, default="random_sine",
@@ -59,8 +63,9 @@ def main() -> None:
     parser.add_argument("--sine-direction", type=str, nargs="+", default=None,
                         choices=["right", "left", "up", "down"],
                         help="Direction(s) for directional_sine stimulus type (default: all four)")
-    parser.add_argument("--input-neurons", type=str, nargs="+", default=['L1', 'L2', 'L3'],
-                        help="Input neuron types for model.predict")
+    parser.add_argument("--input-neurons", type=str, nargs="+", default=None,
+                        help="Input neuron types for model.predict (default: the "
+                             "optic lobe's configured inputs, as in training)")
     parser.add_argument("--num-stim", type=int, default=4,
                         help="Number of stimuli to use per direction (ignored if --stim-index is set)")
     parser.add_argument("--stim-index", type=int, nargs="+", default=None,
@@ -75,7 +80,7 @@ def main() -> None:
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
 
-    config = load_config(args.config) if args.config else load_config()
+    config = load_config(args.config_path, args.data_config_path)
     model = nm.BaseRnn.load(model_path)
 
     device = model.device
@@ -84,8 +89,7 @@ def main() -> None:
     column_phi_theta = model.regions['optic_lobe'].column_phi_theta
 
     # Force stimulus generation to use the model's dt and device so the resampled
-    # stimulus rate matches the movie playback rate, and device matches the model
-    # (config can specify a cuda device that doesn't exist on this machine).
+    # stimulus rate matches the movie playback rate, and device matches the model.
     cfg_dt = float(config['model']['dt'])
     if abs(cfg_dt - model_dt) > 1e-9:
         print(f"Overriding config dt {cfg_dt} -> model dt {model_dt} for stimulus generation")
@@ -122,8 +126,12 @@ def main() -> None:
             device=device, dtype=dtype)
         train_mask = _select_stim(train_mask, args.stim_index, args.num_stim)
 
-    t5_types = ['T5a', 'T5b', 'T5c', 'T5d']
-    output_neurons = list(set(args.input_neurons + args.cell_types + t5_types))
+    # T4 subtypes also get their T5 partners and the T4+T5 sum rendered.
+    if all(t.startswith('T4') for t in args.cell_types):
+        t5_types = ['T5' + t[2:] for t in args.cell_types]
+    else:
+        t5_types = []
+    output_neurons = list(dict.fromkeys(args.cell_types + t5_types))
 
     print(f"Running model prediction ({stimulus.shape[0]} stimuli, "
           f"{stimulus.shape[1]} frames each)...")
@@ -157,28 +165,32 @@ def main() -> None:
 
     stim_np = stimulus.detach().cpu().numpy()
     # Mask out-of-FOV columns to NaN so the hex-mosaic factory drops them
-    # (and per-frame normalization below uses only in-FOV columns).
-    train_mask_np = train_mask.detach().cpu().numpy().astype(bool)
-    stim_np = np.where(train_mask_np, stim_np, np.nan)
+    # (and per-frame normalization below uses only in-FOV columns). The
+    # pre-stimulus frames are left out of the loss (train_mask False) but are
+    # on screen, so they take the field of view of the first stimulus frame.
+    pre_stim_steps = int(round(config['data']['shared']['pre_stim_time'] / model_dt))
+    fov_mask = train_mask.detach().cpu().numpy().astype(bool)
+    fov_mask[:, :pre_stim_steps] = fov_mask[:, pre_stim_steps:pre_stim_steps + 1]
+    stim_np = np.where(fov_mask, stim_np, np.nan)
     # Per-frame min-max normalize so each frame spans the full data range
     # (the diamond scatter cmap uses Normalize(0, 1), so we map to [0, 1]).
     frame_min = np.nanmin(stim_np, axis=-1, keepdims=True)
     frame_max = np.nanmax(stim_np, axis=-1, keepdims=True)
     frame_range = frame_max - frame_min
     safe_range = np.where(frame_range > 0, frame_range, 1.0)
-    stim_np = (stim_np - frame_min) / safe_range
+    # Uniform frames (e.g. the mean-gray pre-stimulus period) show as mid-gray.
+    stim_np = np.where(frame_range > 0, (stim_np - frame_min) / safe_range,
+                       np.where(np.isnan(stim_np), np.nan, 0.5))
     diamond_scale = 1.8
     diamond_offset = 2.0 * diamond_scale + 0.4  # leave a small gap between center stim and panels
 
-    sum_types = [(t4, t5) for t4, t5 in zip(args.cell_types, t5_types)]
-    sum_labels = [f"{t4}+{t5}" for t4, t5 in sum_types]
-    sum_save_name = "t4_plus_t5"
-
-    groups = [
-        (args.cell_types, args.cell_types, "_".join(args.cell_types).lower()),
-        (t5_types, t5_types, "_".join(t5_types).lower()),
-        (sum_labels, sum_types, sum_save_name),
-    ]
+    groups = [(args.cell_types, args.cell_types, "_".join(args.cell_types).lower())]
+    if t5_types:
+        sum_types = list(zip(args.cell_types, t5_types))
+        groups += [
+            (t5_types, t5_types, "_".join(t5_types).lower()),
+            ([f"{t4}+{t5}" for t4, t5 in sum_types], sum_types, "t4_plus_t5"),
+        ]
 
     for label_list, source_list, save_name in groups:
         seq_data = {}
@@ -187,7 +199,9 @@ def main() -> None:
                 cell_resp = sum(pred[s].detach().cpu().numpy() for s in src)
             else:
                 cell_resp = pred[src].detach().cpu().numpy()
-            cell_resp /= np.nanpercentile(cell_resp, args.color_percentile)
+            # Out of place: on CPU .numpy() shares memory with the recorded
+            # firing rates, which later groups read again.
+            cell_resp = cell_resp / max(np.nanpercentile(cell_resp, args.color_percentile), 1e-12)
             cell_resp = interp_nan_column(cell_resp, cell_phi, cell_theta)
             seq_data[label] = cell_resp
         seq_data['stimulus'] = stim_np

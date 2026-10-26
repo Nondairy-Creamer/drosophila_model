@@ -1,16 +1,16 @@
 """
 Panoramic odometry benchmark.
 
-Generates random panoramic stimuli with smoothly varying rotation, runs
-the model's ego-motion pipeline, and saves ground-truth vs predicted
-odometry figures (rate and integrated pose) for each stimulus.
+Generates random panoramic stimuli with smoothly varying rotation (one per
+panorama in ``all_panoramic.pt``, for the first ``--num-panos`` panoramas),
+runs the model's two-eye ego-motion pipeline, and saves ground-truth vs
+predicted odometry figures (rate and integrated pose) for each stimulus.
 
 Usage:
-    python analysis/pano_sweep.py models/my_model/
-    python analysis/pano_sweep.py models/my_model/ --num-panos 10 --stim-time 10
+    python -m drosophila_model.analysis.model_analysis.pano_sweep models/<model>/
+    python -m drosophila_model.analysis.model_analysis.pano_sweep models/<model>/ --num-panos 10 --stim-time 10
 """
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -18,111 +18,10 @@ import numpy as np
 import torch
 
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.model_definition import ego_motion as em
 from drosophila_model.data_handling import stimulus_generators as su
-
-
-def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
-    a_flat, b_flat = a.ravel(), b.ravel()
-    denom = np.linalg.norm(a_flat) * np.linalg.norm(b_flat)
-    return float(np.dot(a_flat, b_flat) / denom) if denom > 1e-12 else 0.0
-
-
-def _save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,
-                      model_dt, title, output_path):
-    import matplotlib
-    matplotlib.use("Agg")
-    from matplotlib import pyplot as plt
-
-    true_rot, pred_rot = np.asarray(true_rot), np.asarray(pred_rot)
-    true_trans, pred_trans = np.asarray(true_trans), np.asarray(pred_trans)
-
-    T = true_rot.shape[0]
-    times = np.arange(T) * model_dt
-    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
-    trans_labels = ["X", "Y", "Z"]
-
-    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
-    for i in range(3):
-        ax = axes[i, 0]
-        ax.plot(times, true_rot[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_rot[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{rot_labels[i]} (deg/s)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Rotational Velocity")
-
-        ax = axes[i, 1]
-        ax.plot(times, true_trans[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_trans[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{trans_labels[i]} (m/s)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Translational Velocity")
-
-    axes[2, 0].set_xlabel("Time (s)")
-    axes[2, 1].set_xlabel("Time (s)")
-    fig.suptitle(f"{title} — Velocity", fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(str(output_path), dpi=150)
-    plt.close(fig)
-    print(f"  Saved rate figure -> {output_path}")
-
-
-def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
-                            model_dt, title, output_path):
-    import matplotlib
-    matplotlib.use("Agg")
-    from matplotlib import pyplot as plt
-
-    true_rot, pred_rot = np.asarray(true_rot), np.asarray(pred_rot)
-    true_trans, pred_trans = np.asarray(true_trans), np.asarray(pred_trans)
-
-    true_rot_int = em.integrate_angular_velocity(
-        torch.tensor(true_rot, dtype=torch.float64), model_dt).numpy()
-    pred_rot_int = em.integrate_angular_velocity(
-        torch.tensor(pred_rot, dtype=torch.float64), model_dt).numpy()
-    true_pos = em.integrate_translational_velocity(
-        torch.tensor(true_trans, dtype=torch.float64),
-        torch.tensor(true_rot, dtype=torch.float64), model_dt).numpy()
-    pred_pos = em.integrate_translational_velocity(
-        torch.tensor(pred_trans, dtype=torch.float64),
-        torch.tensor(pred_rot, dtype=torch.float64), model_dt).numpy()
-
-    T = true_rot.shape[0]
-    times = np.arange(T) * model_dt
-    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
-    trans_labels = ["X", "Y", "Z"]
-
-    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
-    for i in range(3):
-        ax = axes[i, 0]
-        ax.plot(times, true_rot_int[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_rot_int[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{rot_labels[i]} (deg)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Integrated Rotation")
-
-        ax = axes[i, 1]
-        ax.plot(times, true_pos[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_pos[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{trans_labels[i]} (m)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Integrated Translation")
-
-    axes[2, 0].set_xlabel("Time (s)")
-    axes[2, 1].set_xlabel("Time (s)")
-    fig.suptitle(f"{title} — Integrated Pose", fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(str(output_path), dpi=150)
-    plt.close(fig)
-    print(f"  Saved integrated figure -> {output_path}")
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    cos_sim, save_integrated_figure, save_rate_figure,
+)
 
 
 def run_pano_sweep(
@@ -132,8 +31,12 @@ def run_pano_sweep(
     pre_stim_time: float = 0.5,
     velocity_amp: float = 100.0,
     velocity_time_scale: float = 0.3,
+    seed: int = 0,
 ) -> dict:
     """Run pano sweep and return results.
+
+    Panorama ``i`` (``i < num_panos``) gets its own random velocity trace,
+    all drawn from ``seed``.
 
     Returns:
         dict with keys 'rot_cosines' (list[float]) and
@@ -160,25 +63,37 @@ def run_pano_sweep(
     output_dir = model_folder / "figures" / "pano_sweep"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # random_pano is a single-viewpoint render: its registered offset is 0.
+    camera_offset = su.camera_offset_for_stimulus('random_pano')
+
+    num_available = len(su._load_all_panos())
+    if num_panos > num_available:
+        print(f"Only {num_available} panoramas available; using all of them.")
+        num_panos = num_available
+
+    # One generator call gives each of the first num_panos panoramas its own
+    # velocity trace, ordered pano-major with 2 * num_repeats (symmetrised)
+    # repeats per panorama, so example 2 * i is panorama i's first repeat.
+    print(f"\nGenerating random-velocity panoramas (seed={seed})...")
+    stimulus_both, _, rotation_vectors, oob_mask = su.get_random_velocity_pano(
+        both_phi, both_theta,
+        velocity_amp=velocity_amp,
+        velocity_time_scale=velocity_time_scale,
+        num_repeats=1,
+        dt=model_dt,
+        stim_time=stim_time,
+        seed=seed,
+        pano_indices=list(range(num_panos)),
+    )
+
     rot_cosines = []
 
     for pi in range(num_panos):
-        seed = pi
-        print(f"\n--- Pano {pi} (seed={seed}) ---")
+        print(f"\n--- Pano {pi} ---")
 
-        stimulus_both, optic_flow_both, rotation_vectors, oob_mask = su.get_random_velocity_pano(
-            both_phi, both_theta,
-            velocity_amp=velocity_amp,
-            velocity_time_scale=velocity_time_scale,
-            num_repeats=1,
-            dt=model_dt,
-            stim_time=stim_time,
-            seed=seed,
-        )
-
-        stim = stimulus_both[0]
-        rot_vectors = rotation_vectors[0]
-        oob = oob_mask[0]
+        stim = stimulus_both[2 * pi]
+        rot_vectors = rotation_vectors[2 * pi]
+        oob = oob_mask[2 * pi]
 
         true_rot_rate = rot_vectors * (180.0 / np.pi)
         true_trans_rate = np.zeros_like(true_rot_rate)
@@ -214,21 +129,22 @@ def run_pano_sweep(
         with torch.no_grad():
             pred_rot, pred_trans, _, _ = model.regions['optic_lobe'].estimate_ego_motion_from_image(
                 right_input, left_input, oob_columns=oob_columns,
+                camera_offset=camera_offset,
             )
 
         pred_rot_np = pred_rot[0].cpu().numpy()
         pred_trans_np = pred_trans[0].cpu().numpy()
 
-        rot_cos = _cos_sim(true_rot_rate[pre_stim_frames:], pred_rot_np[pre_stim_frames:])
+        rot_cos = cos_sim(true_rot_rate[pre_stim_frames:], pred_rot_np[pre_stim_frames:])
         rot_cosines.append(rot_cos)
         print(f"  Rotation cosine similarity: {rot_cos:.4f}")
 
-        title = f"Pano {pi} (seed={seed})"
-        _save_rate_figure(
+        title = f"Pano {pi}"
+        save_rate_figure(
             true_rot_rate, pred_rot_np, true_trans_rate, pred_trans_np,
             model_dt, title, output_dir / f"pano_{pi}_rate.png",
         )
-        _save_integrated_figure(
+        save_integrated_figure(
             true_rot_rate, pred_rot_np, true_trans_rate, pred_trans_np,
             model_dt, title, output_dir / f"pano_{pi}_integrated.png",
         )

@@ -3,52 +3,28 @@ Compare stimulus preprocessing pipelines on the central ommatidium trace.
 
 Generates the same rotating natural panorama and shows how log-scale,
 zero-centering, and highpass filtering change the intensity time series
-that reaches the photoreceptors.
+that is fed to the model's input columns (L1-L3).
 
-Usage:
-    python view_stimulus_preprocessing.py
-    python view_stimulus_preprocessing.py --velocity 60 --direction left
-    python view_stimulus_preprocessing.py --highpass-taus 0.1 0.5 1.0
+The model (``--model``: a trained run folder or its model.pt) only supplies
+the column geometry and dt. The figure goes to
+<model_folder>/figures/view_stimulus_preprocessing unless ``--save`` is given.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.view_stimulus_preprocessing --model models/<run>
+    python -m drosophila_model.analysis.model_analysis.view_stimulus_preprocessing --model models/<run> --velocity 60 --direction left
+    python -m drosophila_model.analysis.model_analysis.view_stimulus_preprocessing --model models/<run> --highpass-taus 0.1 0.5 1.0
 """
 import argparse
 from pathlib import Path
 
 import numpy as np
-import matplotlib
 from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.data_handling.stimulus_generators import get_constant_velocity_pano
-
-
-DEFAULT_MODEL_PATH = "models/hand_tuned/model.pt"
-
-
-def _central_column_index(sample_phi, sample_theta):
-    """Column closest to forward-viewing (phi=0, theta=pi/2)."""
-    ref = np.array([0.0, 1.0, 0.0])
-    xyz = np.stack([
-        np.sin(sample_theta) * np.cos(sample_phi),
-        np.sin(sample_theta) * np.sin(sample_phi),
-        np.cos(sample_theta),
-    ], axis=1)
-    return int(np.argmax(xyz @ ref))
-
-
-def _exponential_highpass(block, dt, tau):
-    """Subtract a causal exponential lowpass from each column to remove DC.
-
-    First-order IIR lowpass:  y[t] = α·y[t-1] + (1-α)·x[t],  α = exp(-dt/τ)
-    Returns:  x[t] - y[t]
-    """
-    alpha = np.exp(-dt / tau)
-    out = np.empty_like(block)
-    lp = block[:, 0, :].copy()
-    out[:, 0, :] = 0.0
-    for t in range(1, block.shape[1]):
-        lp = alpha * lp + (1.0 - alpha) * block[:, t, :]
-        out[:, t, :] = block[:, t, :] - lp
-    return out
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    central_column_index, exponential_highpass,
+)
 
 
 def main():
@@ -56,8 +32,9 @@ def main():
         description="Visualize stimulus preprocessing on the central ommatidium."
     )
     parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL_PATH,
-        help="Path to saved model .pt file (used for column geometry and dt).",
+        "--model", type=str, required=True,
+        help="Trained run folder or its model.pt (used for column geometry "
+             "and dt).",
     )
     parser.add_argument(
         "--direction", type=str, default="right",
@@ -86,31 +63,33 @@ def main():
     )
     parser.add_argument(
         "--save", type=str, default=None,
-        help="Save figure to this path instead of showing interactively "
+        help="Path to save the figure "
              "(default: <model_folder>/figures/view_stimulus_preprocessing/preprocessing.png).",
     )
     args = parser.parse_args()
 
     # ── Load model (for geometry and dt only) ─────────────────────────
-    print(f"Loading model from {args.model} …")
+    print(f"Loading model from {args.model} ...")
     model = nm.BaseRnn.load(args.model)
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     dt = model.dt
 
-    if args.save is None:
+    if args.save:
+        save_path = Path(args.save)
+    else:
         model_path = Path(args.model)
         model_folder = model_path.parent if model_path.is_file() else model_path
-        args.save = str(model_folder / "figures" / "view_stimulus_preprocessing"
-                        / "preprocessing.png")
+        save_path = (model_folder / "figures" / "view_stimulus_preprocessing"
+                     / "preprocessing.png")
 
-    center_idx = _central_column_index(
+    center_idx = central_column_index(
         np.asarray(sample_phi), np.asarray(sample_theta)
     )
     print(
         f"Central ommatidium: column {center_idx} "
-        f"(phi={np.degrees(sample_phi[center_idx]):.1f}°, "
-        f"theta={np.degrees(sample_theta[center_idx]):.1f}°)"
+        f"(phi={np.degrees(sample_phi[center_idx]):.1f} deg, "
+        f"theta={np.degrees(sample_theta[center_idx]):.1f} deg)"
     )
 
     # ── Generate raw panorama (no preprocessing) ──────────────────────
@@ -149,21 +128,24 @@ def main():
     variants.append(("log-scale + zero-center", 2.0 * raw_log[0, :, center_idx] - 1.0))
 
     for tau in args.highpass_taus:
-        hp = _exponential_highpass(raw, dt, tau)
+        hp = exponential_highpass(raw, dt, tau)
         variants.append((f"HP τ={tau}s", hp[0, :, center_idx]))
 
     for tau in args.highpass_taus:
         zc = 2.0 * raw - 1.0
-        hp = _exponential_highpass(zc, dt, tau)
+        hp = exponential_highpass(zc, dt, tau)
         variants.append((f"zero-center + HP τ={tau}s", hp[0, :, center_idx]))
 
     for tau in args.highpass_taus:
-        hp = _exponential_highpass(raw_log, dt, tau)
+        hp = exponential_highpass(raw_log, dt, tau)
         variants.append((f"log + HP τ={tau}s", hp[0, :, center_idx]))
 
     # ── Plot ──────────────────────────────────────────────────────────
     n = len(variants)
-    fig, axes = plt.subplots(n, 1, figsize=(12, 1.8 * n), sharex=True, squeeze=False)
+    # Constrained layout keeps the suptitle clear of the top axes, which
+    # tight_layout does not for a figure this tall.
+    fig, axes = plt.subplots(n, 1, figsize=(12, 1.8 * n), sharex=True, squeeze=False,
+                             layout="constrained")
 
     for i, (label, trace) in enumerate(variants):
         ax = axes[i, 0]
@@ -179,16 +161,11 @@ def main():
         f"{args.velocity} deg/s, pano {args.pano_index}",
         fontsize=12, fontweight="bold",
     )
-    plt.tight_layout()
 
-    if args.save:
-        save_path = Path(args.save)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-        print(f"Figure saved to {save_path}")
-    else:
-        plt.show()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"Figure saved to {save_path}")
 
 
 if __name__ == "__main__":

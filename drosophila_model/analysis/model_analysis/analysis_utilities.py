@@ -2,26 +2,65 @@
 Shared utilities for analysis scripts.
 
 Provides:
+  - Cell-type groupings shared by the sweep / view scripts (NEURON_GROUPS,
+    CELL_TYPE_GROUPS)
+  - Trained-model helpers (run_eye_offset, compute_average_connections,
+    get_flow_key)
   - Matplotlib helpers (fig_to_rgb, centered_norm)
-  - Data prep (prepare_xt, input_conv_stimulus_timecourse, interp_nan_column)
-  - Hex grid (hex_grid_points)
-  - Model prediction (predict_optic_flow, run_model_on_stimuli)
-  - Movie creation (make_flow_comparison_movie)
+  - Data prep (prepare_xt, input_conv_stimulus_timecourse, interp_nan_column,
+    central_column_index, exponential_highpass)
+  - Odometry comparison (cos_sim, save_rate_figure, save_integrated_figure)
+  - Flow projection / colouring (angular_flow_to_cartesian_xz,
+    flow_direction_colors, update_direction_quiver, add_direction_colorwheel)
+  - Per-eye flow rendering (eye_cell_y, eye_color_flip, project_eye_flow,
+    prepare_eye_quiver, setup_eye_axis, eye_quiver_colors,
+    init_eye_quiver, update_eye_quiver, add_eye_colorwheel)
+  - Movie creation (make_flow_comparison_movie, make_stimulus_flow_movie)
 """
-import argparse
-import sys
-from copy import deepcopy
 from pathlib import Path
-
-# Add parent directory to path for imports
 
 import numpy as np
 import pandas as pd
 import torch
 
-from drosophila_model.config import load_config
-from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.data_handling import stimulus_generators as su
+from drosophila_model.model_definition import ego_motion as em
+
+
+# Neuron groups plotted by the sweep scripts (sine_wave_sweep, edge_sweep):
+# (group name, cell types).
+NEURON_GROUPS = [
+    ("T4", ["T4a", "T4b", "T4c", "T4d"]),
+    ("T5", ["T5a", "T5b", "T5c", "T5d"]),
+    ("L", ["L2", "L3", "L4", "L5"]),
+    ("C_CT1", ["C2", "C3", "CT1_L", "CT1_M"]),
+    ("Tm_A", ["Tm1", "Tm2", "Tm4", "Tm9"]),
+    ("Mi_Tm", ["Mi1", "Tm3", "Mi4", "Mi9"]),
+    ("T_other", ["T1", "T2", "T3"]),
+]
+
+# Response-panel rows of the view_* scripts: row label -> cell types.
+CELL_TYPE_GROUPS = {
+    "Lamina (L1-L3)":   ["L1", "L2", "L3"],
+    "Lamina (L4-L5)":   ["L4", "L5"],
+    "C2 / C3":          ["C2", "C3"],
+    "T4 inputs":        ["Mi1", "Tm3", "Mi4", "Mi9"],
+    "T5 inputs":        ["Tm1", "Tm2", "Tm4", "Tm9"],
+    "T4":               ["T4a", "T4b", "T4c", "T4d"],
+    "T5":               ["T5a", "T5b", "T5c", "T5d"],
+}
+
+
+def run_eye_offset(run_config):
+    """Right-eye camera offset a trained model's dataset was recorded with.
+
+    Pass it as ``camera_offset=`` to ``estimate_ego_motion_from_image`` when
+    replaying a model's own training data, so ego-motion is solved with the
+    same rig geometry as in training. ``run_config`` is the dict returned by
+    :func:`drosophila_model.config.load_run_config`. Returns ``None`` (a
+    single viewpoint) for one-eye runs.
+    """
+    offset = run_config['run_info'].get('eye_offset')
+    return tuple(float(x) for x in offset) if offset is not None else None
 
 
 def compute_average_connections(model):
@@ -29,8 +68,11 @@ def compute_average_connections(model):
     Compute the average synapse count between each pair of cell types.
 
     Handles both connectome layouts: a single sparse ``synapse_counts`` tensor
-    (most models) and a list of per-neurotransmitter sparse tensors
-    (e.g. ``ConductanceDynamics``), which are summed into one signed matrix.
+    (most models; signed after synapse signing) and a list of
+    per-neurotransmitter sparse tensors (``ConductanceDynamics``), which are
+    merged into one matrix. The conductance matrices are never signed (sign
+    enters through the reversal potentials), so for those models the result
+    is an unsigned average count.
 
     Returns:
         ave_con: numpy array of shape (num_cell_types, num_cell_types)
@@ -42,7 +84,7 @@ def compute_average_connections(model):
 
     # Normalise each tensor (CSR or COO) to coalesced COO and merge. The
     # per-transmitter matrices have disjoint presynaptic columns, so stacking
-    # the entries and coalescing reconstructs the full signed count matrix.
+    # the entries and coalescing reconstructs the full count matrix.
     index_parts = []
     value_parts = []
     for mat in mats:
@@ -80,118 +122,15 @@ def compute_average_connections(model):
     return ave_con
 
 
-def path_from_a_to_b(model, start_names, end_names, top_n=20, max_iterations=20, n_extra_steps=3, verbose=True):
-    """
-    Find the neurons needed to connect start neurons to end neurons by iteratively
-    following the top N outgoing connections.
-
-    Args:
-        model: CurrentModel model
-        start_names: list of starting cell type names
-        end_names: list of ending cell type names
-        top_n: number of top connections to follow from each neuron
-        max_iterations: maximum number of iterations before giving up
-        n_extra_steps: number of extra iterations after finding all end neurons
-                       (to capture major outputs of destination neurons)
-        verbose: if True, print progress
-
-    Returns:
-        path_neurons: list of all unique neuron names in the path
-    """
-    # Compute average connections matrix
-    ave_con = compute_average_connections(model)
-
-    # Get input strengths for all cell types (for weighting outgoing connections)
-    all_input_strengths = model.input_strength_log.exp().detach().cpu().numpy()
-
-    # Create name to index mapping
-    name_to_idx = {name: i for i, name in enumerate(model.unique_cell_types)}
-
-    # Helper function to do one iteration of expansion
-    def expand_frontier(current_neurons, all_neurons):
-        new_neurons = set()
-        for neuron_name in current_neurons:
-            if neuron_name not in name_to_idx:
-                continue
-            cell_index = name_to_idx[neuron_name]
-
-            # Get outgoing connections weighted by input strength of receivers
-            # ave_con[:, cell_index] gives connections FROM cell_index TO each post_type
-            outgoing_weighted = ave_con[:, cell_index] * all_input_strengths
-
-            # Get top N connections (by absolute value, in case of negative weights)
-            top_indices = np.argsort(np.abs(outgoing_weighted))[::-1][:top_n]
-
-            for idx in top_indices:
-                if outgoing_weighted[idx] > 0:  # only include if there's a connection
-                    target_name = model.unique_cell_types[idx]
-                    if target_name not in all_neurons:
-                        new_neurons.add(target_name)
-        return new_neurons
-
-    # Initialize with start neurons
-    current_neurons = set(start_names)  # frontier: neurons to explore this iteration
-    all_neurons = set(start_names)      # all discovered neurons
-    end_names_set = set(end_names)
-
-    iteration = 0
-    found_all = False
-
-    # Phase 1: expand until we find all end neurons
-    while not end_names_set.issubset(all_neurons) and iteration < max_iterations:
-        iteration += 1
-        new_neurons = expand_frontier(current_neurons, all_neurons)
-        all_neurons.update(new_neurons)
-
-        if verbose:
-            found_ends = end_names_set.intersection(all_neurons)
-            print(f"Iteration {iteration}: {len(new_neurons)} new neurons, "
-                  f"{len(all_neurons)} total, {len(found_ends)}/{len(end_names)} targets found")
-
-        current_neurons = new_neurons
-
-        if len(new_neurons) == 0:
-            if verbose:
-                print("No new neurons found, stopping.")
-            break
-
-    found_all = end_names_set.issubset(all_neurons)
-
-    if verbose:
-        if found_all:
-            print(f"\nFound all {len(end_names)} target neurons in {iteration} iterations")
-        else:
-            missing = end_names_set - all_neurons
-            print(f"\nCould not find {len(missing)} target neurons: {missing}")
-
-    # Phase 2: do extra steps to capture outputs of destination neurons
-    if n_extra_steps > 0 and verbose:
-        print(f"\nDoing {n_extra_steps} extra steps to capture outputs...")
-
-    for extra in range(n_extra_steps):
-        new_neurons = expand_frontier(current_neurons, all_neurons)
-        all_neurons.update(new_neurons)
-
-        if verbose:
-            print(f"Extra step {extra + 1}: {len(new_neurons)} new neurons, {len(all_neurons)} total")
-
-        current_neurons = new_neurons
-
-        if len(new_neurons) == 0:
-            if verbose:
-                print("No new neurons found, stopping extra steps.")
-            break
-
-    if verbose:
-        print(f"Total neurons in path: {len(all_neurons)}")
-
-    return sorted(all_neurons)
-
-
 def get_flow_key(model):
-    """Return the output key for the first flow (eye-asymmetric) readout."""
+    """Return the output key for the first flow (eye-asymmetric) readout.
+
+    Returns ``None`` when the model has no flow readout. Regularizer entries
+    in ``_readout_modules`` have no ``predicts_flow`` attribute and are skipped.
+    """
     return next(
-        (k for k, m in model._readout_modules.items() if m.predicts_flow),
+        (k for k, m in model._readout_modules.items()
+         if getattr(m, 'predicts_flow', False)),
         None,
     )
 
@@ -246,17 +185,18 @@ def prepare_xt(
 
 
 def input_conv_stimulus_timecourse(model, inputs: torch.Tensor) -> torch.Tensor:
-    """Apply :meth:`~neural_models.BaseRnn.apply_input_conv` at each time step.
+    """Apply :meth:`~regions.OpticLobeRegion.apply_input_conv` at each time step.
 
-    Matches the input path inside :meth:`~neural_models.BaseRnn.predict` when
-    ``use_input_conv`` is True (spatial pre-filter, local contrast norm, temporal LRU).
+    Matches the input path inside :meth:`~neural_models.ConnectomeModel.predict`
+    when ``use_input_conv`` is True (spatial pre-filter, local contrast norm,
+    temporal LRU).
 
     If ``model.regions['optic_lobe'].use_input_conv`` is False, returns *inputs* unchanged.
 
     Parameters
     ----------
     model
-        A model with optional ``use_input_conv`` and ``apply_input_conv``.
+        A model with an ``'optic_lobe'`` region.
     inputs
         Shape *(batch, time, num_columns)* on the model device/dtype.
 
@@ -321,162 +261,155 @@ def interp_nan_column(
     return time_by_neurons
 
 
-# ---------------------------------------------------------------------------
-# Hex grid helpers
-# ---------------------------------------------------------------------------
+def central_column_index(sample_phi, sample_theta):
+    """Column closest to forward-viewing (phi=0, theta=pi/2)."""
+    ref = np.array([1.0, 0.0, 0.0])  # sin(pi/2)*cos(0), sin(pi/2)*sin(0), cos(pi/2)
+    xyz = np.stack([
+        np.sin(sample_theta) * np.cos(sample_phi),
+        np.sin(sample_theta) * np.sin(sample_phi),
+        np.cos(sample_theta),
+    ], axis=1)
+    return int(np.argmax(xyz @ ref))
 
 
-def hex_grid_points(axial_coords: np.ndarray) -> np.ndarray:
-    """Convert axial *(q, r)* hex coordinates to flat-top *(x, y)* points."""
-    q = axial_coords[:, 0].astype(np.float64)
-    r = axial_coords[:, 1].astype(np.float64)
-    grid_x = 1.5 * q
-    grid_y = np.sqrt(3.0) * (r + 0.5 * q)
-    return np.stack([grid_x, grid_y], axis=1)
+def exponential_highpass(block, dt, tau):
+    """Subtract a causal exponential lowpass from each column to remove DC.
 
-
-# ---------------------------------------------------------------------------
-# Model prediction helpers
-# ---------------------------------------------------------------------------
-
-
-def _apply_config_overrides(config: dict, overrides: dict | None) -> dict:
-    if not overrides:
-        return config
-    for key, value in overrides.items():
-        if isinstance(value, dict) and isinstance(config.get(key), dict):
-            config[key] = {**config[key], **value}
-        else:
-            config[key] = value
-    return config
-
-
-def predict_optic_flow(
-    model: nm.BaseRnn, stimulus: torch.Tensor
-) -> torch.Tensor:
-    """Run the model and return predicted optic flow."""
-    flow_key = get_flow_key(model)
-    if flow_key is None:
-        raise ValueError("Model has no flow readout configured. Cannot predict optic flow.")
-    with torch.no_grad():
-        outputs = model.predict(stimulus, input_neurons=["L1", "L2", "L3"])['outputs']['optic_lobe']
-        return outputs[flow_key]
-
-
-def run_model_on_stimuli(
-    model_path: str | Path = "models/best_model",
-    device: str | None = None,
-    stimulus_types: list[str] | None = None,
-    stimulus_specs: list[dict] | None = None,
-    max_stimuli: int | None = None,
-) -> dict[str, dict[str, torch.Tensor]]:
-    """Generate stimuli, run a model, and collect responses.
-
-    Parameters
-    ----------
-    max_stimuli : int or None
-        If given, keep at most this many stimuli per stimulus type.
-
-    Returns a dict keyed by stimulus name with values containing
-    ``stimulus``, ``optic_flow``, ``pred_flow``, ``column_xyz``, and ``dt``.
+    First-order IIR lowpass:  y[t] = α·y[t-1] + (1-α)·x[t],  α = exp(-dt/τ)
+    Returns:  x[t] - y[t]
     """
-    model_path = Path(model_path)
-    model_folder = model_path.parent if model_path.is_file() else model_path
-    config = load_config(model_folder / "config.toml")
-    data_config = config['data']
-    model = nm.BaseRnn.load(model_path, device=device)
-
-    column_phi_theta = model.regions['optic_lobe'].column_phi_theta
-    column_xyz = model.regions['optic_lobe'].get_column_xyz()
-
-    if stimulus_specs is None:
-        if stimulus_types is None:
-            stimulus_types = ["sintel", "flow360", "flyview", "random_sine"]
-        stimulus_specs = []
-        stimulus_map = {
-            "sintel": ("sintel", None),
-            "flow360": ("flow_360", None),
-            "flyview": ("flyview", None),
-            "random_sine": ("random_sine", "column_phi_theta"),
-        }
-        for stim_name in stimulus_types:
-            if stim_name not in stimulus_map:
-                raise ValueError(f"Unsupported stimulus type: {stim_name}")
-            stim_type, column_info = stimulus_map[stim_name]
-            stimulus_specs.append(
-                {
-                    "name": stim_name,
-                    "stimulus_type": stim_type,
-                    "column_info": column_info,
-                }
-            )
-
-    responses: dict[str, dict[str, torch.Tensor]] = {}
-    for spec in stimulus_specs:
-        stim_config = deepcopy(config)
-        stim_config["model"]["device"] = str(model.device)
-        stim_config = _apply_config_overrides(
-            stim_config, spec.get("config_overrides")
-        )
-        # Generation params come from the data config; drop pre-stim so the
-        # response reflects the driven portion only.
-        stim_data_config = deepcopy(data_config)
-        stim_data_config["shared"]["pre_stim_time"] = 0.0
-        column_info = spec.get("column_info")
-        if column_info == "column_phi_theta":
-            column_info = column_phi_theta
-        stimulus_kwargs = spec.get("stimulus_kwargs", {})
-        stim_data = su.get_stimulus(
-            spec["stimulus_type"],
-            stim_config,
-            column_info,
-            num_eyes=1,
-            data_config=stim_data_config,
-            **stimulus_kwargs,
-        )
-        stimulus, optic_flow = stim_data.stimulus, stim_data.optic_flow
-        if stimulus.shape[0] > 1:
-            stimulus, optic_flow = stimulus[1:], optic_flow[1:]
-
-        if max_stimuli is not None and stimulus.shape[0] > max_stimuli:
-            stimulus = stimulus[:max_stimuli]
-            optic_flow = optic_flow[:max_stimuli]
-
-        pred_flow = predict_optic_flow(model, stimulus)
-        entry: dict[str, torch.Tensor] = {
-            "stimulus": stimulus,
-            "optic_flow": optic_flow,
-            "pred_flow": pred_flow,
-            "column_xyz": torch.tensor(
-                column_xyz, device=model.device, dtype=model.dtype
-            ),
-            "dt": torch.tensor(model.dt, device=model.device, dtype=model.dtype),
-        }
-
-        if model.regions['optic_lobe'].use_input_conv:
-            with torch.no_grad():
-                stim_dev = stimulus.to(device=model.device, dtype=model.dtype)
-                filtered_frames = []
-                for si in range(stim_dev.shape[0]):
-                    filter_state = None
-                    for t in range(stim_dev.shape[1]):
-                        y_t, filter_state = model.regions['optic_lobe'].apply_input_conv(
-                            stim_dev[si : si + 1, t, :], filter_state
-                        )
-                        filtered_frames.append(y_t)
-                entry["filtered_stimulus"] = torch.stack(filtered_frames).reshape(
-                    stim_dev.shape
-                ).cpu()
-
-        responses[spec["name"]] = entry
-
-    return responses
+    alpha = np.exp(-dt / tau)
+    out = np.empty_like(block)
+    # block shape: (batch, time, columns)
+    lp = block[:, 0, :].copy()
+    out[:, 0, :] = 0.0
+    for t in range(1, block.shape[1]):
+        lp = alpha * lp + (1.0 - alpha) * block[:, t, :]
+        out[:, t, :] = block[:, t, :] - lp
+    return out
 
 
-# NOTE: `generate_optic_flow`, `load_viewing_directions`, and the
-# `cross_matrix` helper formerly lived here. They moved to
-# `drosophila_model.model_definition.ego_motion` (canonical home — sister to
-# `estimate_from_flow`). Import them from there.
+# ---------------------------------------------------------------------------
+# Odometry comparison helpers
+# ---------------------------------------------------------------------------
+
+
+def cos_sim(a: np.ndarray, b: np.ndarray) -> float:
+    """Global cosine similarity over flattened, finite entries."""
+    a, b = np.asarray(a).ravel(), np.asarray(b).ravel()
+    finite = np.isfinite(a) & np.isfinite(b)
+    a, b = a[finite], b[finite]
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(np.dot(a, b) / denom) if denom > 1e-12 else 0.0
+
+
+def save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,
+                     model_dt, title, output_path):
+    """Save a 3x2 figure comparing ground-truth vs model velocity estimates.
+
+    Left column: rotational velocity (roll, pitch, yaw).
+    Right column: translational velocity (x, y, z).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    true_rot, pred_rot = np.asarray(true_rot), np.asarray(pred_rot)
+    true_trans, pred_trans = np.asarray(true_trans), np.asarray(pred_trans)
+
+    T = true_rot.shape[0]
+    times = np.arange(T) * model_dt
+    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
+    trans_labels = ["X", "Y", "Z"]
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
+    for i in range(3):
+        ax = axes[i, 0]
+        ax.plot(times, true_rot[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_rot[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{rot_labels[i]} (deg/s)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Rotational Velocity")
+
+        ax = axes[i, 1]
+        ax.plot(times, true_trans[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_trans[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{trans_labels[i]} (m/s)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Translational Velocity")
+
+    axes[2, 0].set_xlabel("Time (s)")
+    axes[2, 1].set_xlabel("Time (s)")
+    fig.suptitle(f"{title} — Velocity", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+    print(f"  Saved rate figure -> {output_path}")
+
+
+def save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
+                           model_dt, title, output_path):
+    """Save a 3x2 figure comparing integrated ground-truth vs model pose.
+
+    Left column: integrated rotation (cumulative angle in degrees).
+    Right column: integrated translation (cumulative position in metres).
+    Uses the SO(3)-aware integrators in ``ego_motion``.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    true_rot, pred_rot = np.asarray(true_rot), np.asarray(pred_rot)
+    true_trans, pred_trans = np.asarray(true_trans), np.asarray(pred_trans)
+
+    true_rot_t = torch.tensor(true_rot, dtype=torch.float64)
+    pred_rot_t = torch.tensor(pred_rot, dtype=torch.float64)
+    true_trans_t = torch.tensor(true_trans, dtype=torch.float64)
+    pred_trans_t = torch.tensor(pred_trans, dtype=torch.float64)
+
+    true_rot_int = em.integrate_angular_velocity(true_rot_t, model_dt).numpy()
+    pred_rot_int = em.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
+    true_pos = em.integrate_translational_velocity(
+        true_trans_t, true_rot_t, model_dt).numpy()
+    pred_pos = em.integrate_translational_velocity(
+        pred_trans_t, pred_rot_t, model_dt).numpy()
+
+    T = true_rot.shape[0]
+    times = np.arange(T) * model_dt
+    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
+    trans_labels = ["X", "Y", "Z"]
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
+    for i in range(3):
+        ax = axes[i, 0]
+        ax.plot(times, true_rot_int[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_rot_int[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{rot_labels[i]} (deg)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Integrated Rotation")
+
+        ax = axes[i, 1]
+        ax.plot(times, true_pos[:, i], linewidth=1.2, label="Ground truth")
+        ax.plot(times, pred_pos[:, i], linewidth=1.2, linestyle="--", label="Model")
+        ax.set_ylabel(f"{trans_labels[i]} (m)")
+        ax.grid(True, alpha=0.3)
+        if i == 0:
+            ax.legend(fontsize=8)
+            ax.set_title("Integrated Translation")
+
+    axes[2, 0].set_xlabel("Time (s)")
+    axes[2, 1].set_xlabel("Time (s)")
+    fig.suptitle(f"{title} — Integrated Pose", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+    print(f"  Saved integrated figure -> {output_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +511,7 @@ def add_direction_colorwheel(fig, rect=None, flip_lr=False):
     flip_lr : bool
         If True, mirror the hue pattern left–right (equivalently θ → π − θ in hue
         space) and swap east/west tick glyphs. Use when flow panels use a
-        horizontally flipped x-axis (e.g. ``setup_eye_axes`` right eye) so the
+        horizontally flipped x-axis (e.g. ``setup_eye_axis(..., 'right')``) so the
         legend matches on-screen arrow directions.
     """
     from matplotlib.colors import hsv_to_rgb
@@ -725,15 +658,6 @@ def setup_eye_axis(ax, cell_x, cell_z, eye, x_margin=None, z_margin=None):
     ax.set_aspect("equal")
 
 
-def setup_eye_axes(ax_left, ax_right, cell_x, cell_z, x_margin=None, z_margin=None):
-    """Configure a paired (left, right) eye panel. Thin wrapper around
-    :func:`setup_eye_axis`."""
-    setup_eye_axis(ax_left, cell_x, cell_z, "left",
-                   x_margin=x_margin, z_margin=z_margin)
-    setup_eye_axis(ax_right, cell_x, cell_z, "right",
-                   x_margin=x_margin, z_margin=z_margin)
-
-
 def eye_quiver_colors(vx, vz, max_mag, eye):
     """Color hues for an eye panel's quiver, screen-direction-consistent."""
     return flow_direction_colors(vx, vz, max_mag, flip_lr=eye_color_flip(eye))
@@ -815,19 +739,14 @@ def make_flow_comparison_movie(
     from matplotlib import pyplot as plt
     import matplotlib.colors as mcolors
     import imageio as iio_v2
+    # Imported here: movie_utilities imports this module at import time.
+    from drosophila_model.analysis.movie_scripts.movie_utilities import masked_rgba
 
     num_time, _ = stimulus.shape
     stim_min, stim_max = np.nanmin(stimulus), np.nanmax(stimulus)
     stim_norm = mcolors.Normalize(vmin=stim_min, vmax=stim_max)
 
-    _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
     gray_cmap = plt.cm.gray
-
-    def _masked_rgba(values, mask_t, cmap, norm):
-        rgba = cmap(norm(values))
-        if mask_t is not None:
-            rgba[~mask_t] = _MASK_COLOR
-        return rgba
 
     true_flow_vx, true_flow_vz, _, true_norm, true_arrow_scale = prepare_eye_quiver(
         true_flow, cell_x, cell_y, cell_z, eye)
@@ -872,25 +791,29 @@ def make_flow_comparison_movie(
     sc_stim = ax_stim.scatter(
         cell_x,
         cell_z,
-        c=_masked_rgba(stimulus[0, :], mask_0, gray_cmap, stim_norm),
+        c=masked_rgba(stimulus[0, :], mask_0, gray_cmap, stim_norm),
         s=90,
         edgecolors="none",
     )
     title_label = f"Stimulus ({stim_name})" if stim_name else "Stimulus"
     ax_stim.set_title(title_label)
-    fig.colorbar(sc_stim, ax=ax_stim, label="intensity")
+    # The scatters carry explicit RGBA colours, so the colorbars need their own
+    # mappable for the gray stimulus scale.
+    fig.colorbar(plt.cm.ScalarMappable(cmap=gray_cmap, norm=stim_norm),
+                 ax=ax_stim, label="intensity")
 
     sc_filt = None
     if has_pred and has_filtered:
         sc_filt = ax_bottom_left.scatter(
             cell_x,
             cell_z,
-            c=_masked_rgba(filtered_stimulus[0, :], mask_0, gray_cmap, filt_norm),
+            c=masked_rgba(filtered_stimulus[0, :], mask_0, gray_cmap, filt_norm),
             s=90,
             edgecolors="none",
         )
         ax_bottom_left.set_title("Filtered Stimulus")
-        fig.colorbar(sc_filt, ax=ax_bottom_left, label="intensity")
+        fig.colorbar(plt.cm.ScalarMappable(cmap=gray_cmap, norm=filt_norm),
+                     ax=ax_bottom_left, label="intensity")
 
     quiver_kw = dict(angles="xy", scale_units="xy", width=0.003)
     q_true = init_eye_quiver(
@@ -908,9 +831,9 @@ def make_flow_comparison_movie(
         )
         ax_pred.set_title("Predicted Optic Flow")
 
-    add_eye_colorwheel(fig)
-
     plt.tight_layout()
+    # After tight_layout: the fixed-position polar wheel is not a subplot.
+    add_eye_colorwheel(fig)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -921,9 +844,9 @@ def make_flow_comparison_movie(
     ) as writer:
         for t in range(num_time):
             mask_t = mask[t] if mask is not None else None
-            sc_stim.set_facecolors(_masked_rgba(stimulus[t, :], mask_t, gray_cmap, stim_norm))
+            sc_stim.set_facecolors(masked_rgba(stimulus[t, :], mask_t, gray_cmap, stim_norm))
             if sc_filt is not None:
-                sc_filt.set_facecolors(_masked_rgba(filtered_stimulus[t, :], mask_t, gray_cmap, filt_norm))
+                sc_filt.set_facecolors(masked_rgba(filtered_stimulus[t, :], mask_t, gray_cmap, filt_norm))
 
             update_eye_quiver(q_true, true_flow_vx[t, :], true_flow_vz[t, :],
                               true_max_mag, eye)
@@ -975,33 +898,3 @@ def make_stimulus_flow_movie(
         mask=mask,
         eye=eye,
     )
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Analyze RNN optic flow predictions."
-    )
-    parser.add_argument(
-        "model_folder",
-        type=str,
-        help="Path to model folder or model.pt",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        help="Device to run the model on (default: cpu)",
-    )
-    args = parser.parse_args()
-
-    responses = run_model_on_stimuli(args.model_folder, device=args.device)
-    print(f"Loaded responses for: {', '.join(responses.keys())}")
-
-
-if __name__ == "__main__":
-    main()

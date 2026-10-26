@@ -1,4 +1,19 @@
-import os
+"""Printable board stimuli for the drone recordings.
+
+Renders two full-size board images (``board_dim`` inches at
+``samples_per_inch``) whose spatial scale is set so one wavelength subtends
+``wavelength_angle`` degrees at ``drone_dist`` inches from the board:
+
+- ``sine_stimulus.png``: a 2D sine plaid with that wavelength.
+- ``bandpass_noise_stimulus.png``: Gaussian white noise band-pass filtered by
+  a difference of Gaussians tuned to the plaid's peak spatial frequency.
+
+Outputs go to ``figures/board_stimulus/``.
+
+Usage:
+    python -m drosophila_model.analysis.model_analysis.board_stimulus
+"""
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,14 +22,7 @@ from scipy.ndimage import gaussian_filter
 board_dim = [40, 30]  # inches x by y
 drone_dist = 12  # inches
 wavelength_angle = 45
-wavelength_inches = drone_dist * np.tan(wavelength_angle * np.pi / 180)
-
 samples_per_inch = 10
-nx = int(board_dim[0] * samples_per_inch)
-ny = int(board_dim[1] * samples_per_inch)
-
-figures_dir = os.path.join("figures", "board_stimulus")
-os.makedirs(figures_dir, exist_ok=True)
 
 
 def save_stimulus(stim, path):
@@ -26,21 +34,33 @@ def save_stimulus(stim, path):
     plt.close(fig)
 
 
-x = np.linspace(0, board_dim[0], nx, endpoint=False)
-y = np.linspace(0, board_dim[1], ny, endpoint=False)
-xx, yy = np.meshgrid(x, y)
-sine_stim = np.sin(2 * np.pi * xx / wavelength_inches) * np.sin(2 * np.pi * yy / wavelength_inches)
-save_stimulus(sine_stim, os.path.join(figures_dir, "sine_stimulus.png"))
+def main():
+    wavelength_inches = drone_dist * np.tan(wavelength_angle * np.pi / 180)
+    nx = int(board_dim[0] * samples_per_inch)
+    ny = int(board_dim[1] * samples_per_inch)
+
+    figures_dir = Path("figures") / "board_stimulus"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    x = np.linspace(0, board_dim[0], nx, endpoint=False)
+    y = np.linspace(0, board_dim[1], ny, endpoint=False)
+    xx, yy = np.meshgrid(x, y)
+    sine_stim = np.sin(2 * np.pi * xx / wavelength_inches) * np.sin(2 * np.pi * yy / wavelength_inches)
+    save_stimulus(sine_stim, figures_dir / "sine_stimulus.png")
+
+    rng = np.random.default_rng(1)
+    noise = rng.standard_normal((ny, nx))
+    target_freq = np.sqrt(2) / wavelength_inches  # peak of the sine's Fourier energy (cycles/inch)
+    sigma_ratio = 1.6  # sigma2 / sigma1; ~Marr's LoG approximation
+    sigma1_inches = np.sqrt(np.log(sigma_ratio**2) / (2 * np.pi**2 * (sigma_ratio**2 - 1))) / target_freq
+    sigma2_inches = sigma_ratio * sigma1_inches
+    sigma1_samples = sigma1_inches * samples_per_inch
+    sigma2_samples = sigma2_inches * samples_per_inch
+    dog = gaussian_filter(noise, sigma=sigma1_samples) - gaussian_filter(noise, sigma=sigma2_samples)
+    noise_stim = dog / np.max(np.abs(dog))
+    save_stimulus(noise_stim, figures_dir / "bandpass_noise_stimulus.png")
+    print(f"Saved board stimuli to {figures_dir}")
 
 
-rng = np.random.default_rng(1)
-noise = rng.standard_normal((ny, nx))
-target_freq = np.sqrt(2) / wavelength_inches  # peak of the sine's Fourier energy (cycles/inch)
-sigma_ratio = 1.6  # sigma2 / sigma1; ~Marr's LoG approximation
-sigma1_inches = np.sqrt(np.log(sigma_ratio**2) / (2 * np.pi**2 * (sigma_ratio**2 - 1))) / target_freq
-sigma2_inches = sigma_ratio * sigma1_inches
-sigma1_samples = sigma1_inches * samples_per_inch
-sigma2_samples = sigma2_inches * samples_per_inch
-dog = gaussian_filter(noise, sigma=sigma1_samples) - gaussian_filter(noise, sigma=sigma2_samples)
-noise_stim = dog / np.max(np.abs(dog))
-save_stimulus(noise_stim, os.path.join(figures_dir, "white_noise_stimulus.png"))
+if __name__ == "__main__":
+    main()

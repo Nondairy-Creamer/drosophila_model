@@ -7,7 +7,8 @@ optic flow + per-column depth via
 ``ego_motion.estimate_ego_motion_known_depth``. We compare that reconstruction
 against the ground-truth odometry stored in the dataset (``rotation_rate`` deg/s
 and ``translation_rate`` units/s, both body frame). Datasets without those
-fields fall back to deriving body-frame velocities from the renderer trajectory
+fields (e.g. the older ``fib_fly_view_dataset.pkl``, selected with ``--pkl``)
+fall back to deriving body-frame velocities from the renderer trajectory
 (``positions`` + ``roll_pitch_yaw``) using the repo's
 ``R = Rz(yaw) @ Ry(pitch) @ Rx(roll)`` convention.
 
@@ -24,6 +25,8 @@ Usage:
     python -m drosophila_model.analysis.model_analysis.verify_flyview_odometry
     python -m drosophila_model.analysis.model_analysis.verify_flyview_odometry --clips 0 5 10
     python -m drosophila_model.analysis.model_analysis.verify_flyview_odometry --negate-flow
+    python -m drosophila_model.analysis.model_analysis.verify_flyview_odometry --noise-sweep
+    python -m drosophila_model.analysis.model_analysis.verify_flyview_odometry --pkl fib_fly_view_dataset.pkl
 """
 import argparse
 from pathlib import Path
@@ -34,7 +37,7 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.model_definition.ego_motion import (
     load_viewing_directions,
     estimate_ego_motion_known_depth,
@@ -72,10 +75,11 @@ def reconstruct_odometry(flow, depth, phi, theta, fps, flow_flip, swap_flow=Fals
                          noise_std=0.0, rng=None):
     """Solve (rotation deg/s, translation units/s) from flow + depth.
 
-    Mirrors ``bake_fly_view_dataset``: flow is rad/frame, optionally sign-flipped
-    (the bake default), scaled to rad/s, and fed with per-column depth into the
-    closed-form known-depth solver. ``swap_flow`` exchanges the d_right / d_up
-    components before solving (diagnostic for a basis swap).
+    Mirrors ``bake_fly_view_dataset``: flow is rad/frame, scaled to rad/s, and
+    fed with per-column depth into the closed-form known-depth solver.
+    ``flow_flip`` negates the flow first (diagnostic only; the bake does not
+    flip). ``swap_flow`` exchanges the d_right / d_up components before solving
+    (diagnostic for a basis swap).
 
     ``noise_std`` (rad/s) adds i.i.d. Gaussian noise to each retinal flow
     component (after sign/scale, before the solve), simulating measurement error
@@ -144,7 +148,7 @@ def _corr(a, b):
 
 
 def plot_clip(clip_idx, recon_rot, recon_trans, true_rot, true_trans, dt, out_dir,
-              tag="", truth_label="truth"):
+              dataset_name, tag="", truth_label="truth"):
     n = recon_rot.shape[0]
     time = np.arange(n) * dt
     sl = slice(1, -1) if n > 2 else slice(None)
@@ -179,7 +183,7 @@ def plot_clip(clip_idx, recon_rot, recon_trans, true_rot, true_trans, dt, out_di
     fig.suptitle(title, fontsize=13)
     plt.tight_layout()
     suffix = f"_{tag}" if tag else ""
-    out_path = out_dir / f"flyview_odometry_clip_{clip_idx}{suffix}.png"
+    out_path = out_dir / f"flyview_odometry_{dataset_name}_clip_{clip_idx}{suffix}.png"
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  Saved {out_path}")
@@ -190,21 +194,23 @@ def _rms(a):
 
 
 def run_noise_sweep(d, clips, phi, theta, fps, flow_flip, noise_fracs, n_trials,
-                    out_dir, seed=0):
+                    out_dir, dataset_name, seed=0, swap_flow=False, tag=""):
     """Add Gaussian noise to the ground-truth flow, reconstruct, and measure how
-    much each DOF gets perturbed vs the noise-free (perfect) reconstruction.
+    far each DOF's reconstruction is from the stored ground-truth odometry.
 
     The noise level is a fraction of each clip's own RMS retinal flow speed
-    (rad/s), so ``noise_frac=0.05`` is 5% flow noise. For each DOF we report the
-    RMS reconstruction error normalized by that DOF's ground-truth RMS, averaged
-    over the requested clips and trials. This isolates the conditioning question:
-    if translation flow is small relative to rotation flow, the translation
-    estimate should blow up far faster with noise than rotation does.
+    (rad/s), so ``noise_frac=0.05`` is 5% flow noise. For each DOF we report
+    RMS(recon - truth) / std(truth), averaged over the requested clips and
+    trials. This isolates the conditioning question: if translation flow is
+    small relative to rotation flow, the translation estimate should blow up
+    far faster with noise than rotation does. ``swap_flow`` is passed to
+    :func:`reconstruct_odometry`; ``tag`` (the diagnostic flags in use) is
+    appended to the figure name.
     """
     rng = np.random.default_rng(seed)
     rot_axes = AXIS_LABELS
     trans_axes = AXIS_LABELS
-    # err[kind][noise_idx] -> list over (clip, trial, axis) of normalized RMS error
+    # Sums and counts of normalized RMS error per (noise level, axis).
     rot_err = np.zeros((len(noise_fracs), 3))
     trans_err = np.zeros((len(noise_fracs), 3))
     rot_count = np.zeros((len(noise_fracs), 3))
@@ -228,7 +234,7 @@ def run_noise_sweep(d, clips, phi, theta, fps, flow_flip, noise_fracs, n_trials,
             noise_std = frac * flow_rms
             for _ in range(n_trials if frac > 0 else 1):
                 rec_rot, rec_trans = reconstruct_odometry(
-                    flow, depth, phi, theta, fps, flow_flip,
+                    flow, depth, phi, theta, fps, flow_flip, swap_flow=swap_flow,
                     noise_std=noise_std, rng=rng)
                 for i in range(3):
                     denom_r = true_rot[sl, i].std() + 1e-12
@@ -266,9 +272,8 @@ def run_noise_sweep(d, clips, phi, theta, fps, flow_flip, noise_fracs, n_trials,
             label="rotation (mean over axes)", linewidth=2)
     ax.plot(fracs_pct, trans_err.mean(axis=1), "s-", color="#e41a1c",
             label="translation (mean over axes)", linewidth=2)
-    for i, a in enumerate(rot_axes):
+    for i in range(3):
         ax.plot(fracs_pct, rot_err[:, i], ":", color="#377eb8", alpha=0.4)
-    for i, a in enumerate(trans_axes):
         ax.plot(fracs_pct, trans_err[:, i], ":", color="#e41a1c", alpha=0.4)
     ax.set_xlabel("Flow noise (% of clip RMS flow speed)")
     ax.set_ylabel("Normalized RMS error  [RMS(recon - truth) / std(truth)]")
@@ -276,7 +281,8 @@ def run_noise_sweep(d, clips, phi, theta, fps, flow_flip, noise_fracs, n_trials,
                  f"{len(clips)} clips, {n_trials} trials/level (dotted = per-axis)")
     ax.legend()
     ax.grid(True, alpha=0.3)
-    out_path = out_dir / "flyview_odometry_noise_sweep.png"
+    out_path = (out_dir / f"flyview_odometry_{dataset_name}_noise_sweep"
+                          f"{f'_{tag}' if tag else ''}.png")
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -300,30 +306,41 @@ def main():
                         help="Noise levels as fraction of each clip's RMS flow speed.")
     parser.add_argument("--noise-trials", type=int, default=10,
                         help="Random noise realizations averaged per noise level.")
-    parser.add_argument("--config-path", type=str, default=None)
+    parser.add_argument("--pkl", type=str, default="fib_forest_fly_view_dataset_fwd.pkl",
+                        help="Fly-view dataset pickle, relative to <data_folder>/stimulus/raw "
+                             "or absolute (default: fib_forest_fly_view_dataset_fwd.pkl). "
+                             "Datasets without rotation_rate / translation_rate use the "
+                             "trajectory-derived truth.")
+    parser.add_argument("--config-path", type=str, default=None,
+                        help="Config TOML giving [data].data_folder (default: config.toml)")
     args = parser.parse_args()
     flow_flip = args.negate_flow
 
     import pickle
     config = load_config(args.config_path or "config.toml")
-    data_folder = Path(config["data"]["data_folder"])
-    pkl_path = data_folder / "stimulus" / "raw" / "fib_forest_fly_view_dataset_fwd.pkl"
+    data_folder = get_data_folder(config)
+    pkl_path = data_folder / "stimulus" / "raw" / args.pkl
     with open(pkl_path, "rb") as f:
         d = pickle.load(f)
 
     fps = float(d["fps"])
     dt = 1.0 / fps
-    phi, theta = load_viewing_directions()
+    phi, theta = load_viewing_directions(data_folder)
     n_clips = len(d["responses"])
     clips = args.clips if args.clips is not None else [c for c in (0, 5, 10, 15) if c < n_clips]
 
-    out_dir = Path(__file__).resolve().parents[3] / "figures" / "verify_flyview_odometry"
+    out_dir = Path("figures") / "verify_flyview_odometry"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Figure names carry the dataset name and the diagnostic flags so --pkl /
+    # --negate-flow / --swap-flow runs don't overwrite each other.
+    dataset_name = Path(args.pkl).stem
+    tag = "_".join(name for name, on in (("negate", flow_flip), ("swap", args.swap_flow)) if on)
     print(f"fps={fps:.4f}, flow_flip={flow_flip}, {n_clips} clips total -> {out_dir}")
 
     if args.noise_sweep:
         run_noise_sweep(d, clips, phi, theta, fps, flow_flip,
-                        args.noise_fracs, args.noise_trials, out_dir)
+                        args.noise_fracs, args.noise_trials, out_dir,
+                        dataset_name, swap_flow=args.swap_flow, tag=tag)
         print("Done.")
         return
 
@@ -342,7 +359,7 @@ def main():
             flow, depth, phi, theta, fps, flow_flip, swap_flow=args.swap_flow)
         true_rot, true_trans, truth_label = file_odometry(d, idx, fps)
         plot_clip(idx, recon_rot, recon_trans, true_rot, true_trans, dt, out_dir,
-                  tag="swap" if args.swap_flow else "", truth_label=truth_label)
+                  dataset_name, tag=tag, truth_label=truth_label)
 
         sl = slice(1, -1)
         rot_recon_all.append(recon_rot[sl])

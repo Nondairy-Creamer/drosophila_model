@@ -1,28 +1,32 @@
 """Load region slices of the canonical neuropil-keyed connectome bundle.
 
 The bundle is produced once by :mod:`format_connectome_data` and stored under
-``config['data']['data_folder'] / 'connectome_data' / 'baked'``:
+``<[data].data_folder>/connectome_data/baked``:
 
 - ``cell_info.parquet`` — universal per-neuron table:
   ``root_id, primary_type, neurotransmitter, neuropils`` (``neuropils`` is
   a ``list[str]`` column holding the union of every neuropil this neuron
-  has at least one synapse in).
-- ``synapses.parquet`` — universal directed edges:
+  has at least one synapse in; the loader requires the column but does not
+  use it — membership comes from the thresholded synapse table).
+- ``synapses.parquet`` — universal directed edges, one row per
+  ``(pre, post, neuropil)``:
   ``pre_root_id, post_root_id, synapse_counts, nt_type, neuropil``.
 - ``<region>_*.parquet`` — per-region geometry / lookups, owned and loaded
   by the corresponding :class:`regions.RegionView` subclass (e.g.
-  ``optic_lobe_columns.parquet`` and ``optic_lobe_column_index.parquet``).
+  ``optic_lobe_columns.parquet``, which ships with the connectome data
+  rather than being written by ``format_connectome_data``, and
+  ``optic_lobe_column_index.parquet``).
 
 :func:`load_connectome` takes a ``{region_name: {'neuropils': [...],
 'side': 'right'|'left'|'both', 'intrinsic': bool}}`` mapping. Each region
 declares its bilateral neuropil base names (e.g. ``['ME', 'LO', 'LOP',
 'LA']`` for the optic lobe); the loader resolves them against ``side`` by
-appending ``_R`` / ``_L`` suffixes as needed. Membership is computed
-against the thresholded synapse table (``count_threshold``): with
-``intrinsic=False`` (default) a neuron is claimed if it has at least one
-above-threshold connection in any of a region's resolved neuropils; with
-``intrinsic=True`` only if *every* one of its above-threshold connections
-lies within them. Membership is **union** across regions — the same
+appending ``_R`` / ``_L`` suffixes as needed. ``count_threshold`` applies
+to the total synapse count of a neuron pair, summed over neuropils. Membership
+uses the above-threshold connections: with ``intrinsic=False`` (default) a
+neuron is claimed if it has at least one above-threshold connection with
+synapses in any of a region's resolved neuropils; with ``intrinsic=True`` only
+if *every* one of its above-threshold connections lies within them. Membership is **union** across regions — the same
 neuron can belong to multiple regions, but only contributes one row to
 the model's neuron axis.
 
@@ -33,6 +37,7 @@ region's ``cell_indices`` from those.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Optional
@@ -40,9 +45,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 
 
+# ``neuropils`` is part of the bundle schema but not read here (membership is
+# computed from the synapse table).
 _CORE_CELL_INFO_COLS = ('root_id', 'primary_type', 'neurotransmitter', 'neuropils')
 _VALID_SIDES = ('right', 'left', 'both')
 
@@ -58,7 +65,10 @@ class ConnectomeData:
     at ``data_folder / 'connectome_data' / 'baked'``.
 
     Fields:
-        synapse_counts_coo: ``(E, 3)`` int64 — ``[pre_root_id, post_root_id, count]``.
+        synapse_counts_coo: ``(E, 3)`` int64 —
+            ``[pre_root_id, post_root_id, count]``, one row per neuron pair
+            (the pair's ``synapses.parquet`` rows summed over neuropils), so
+            the model's ``synapse_count_threshold`` applies per pair.
         root_ids: ``(N,)`` int64 — per-neuron root IDs.
         cell_types: ``(N,)`` str — per-neuron primary cell-type label.
         neurotransmitters: ``(N,)`` str.
@@ -84,11 +94,6 @@ class ConnectomeData:
     region_membership: dict[str, np.ndarray] = field(default_factory=dict)
     region_specs: dict[str, dict] = field(default_factory=dict)
     data_folder: str = ''
-
-    @property
-    def regions(self) -> list[str]:
-        """Regions loaded into this payload, in insertion order of ``region_specs``."""
-        return list(self.region_specs.keys())
 
     def to_serializable_dict(self) -> dict:
         """Return this connectome's fields as a plain dict for serialization.
@@ -177,8 +182,8 @@ def resolve_sided_neuropils(
 def load_connectome(
     region_specs: dict[str, dict],
     *,
+    count_threshold: int,
     data_folder: Optional[str] = None,
-    count_threshold: int = 1,
 ) -> ConnectomeData:
     """Load a multi-region slice of the canonical connectome bundle.
 
@@ -191,15 +196,16 @@ def load_connectome(
             ``_L``/``_R`` expansion of bilateral names. ``intrinsic``
             (default ``False``) controls membership stringency — see
             :func:`load_connectome_from_dataframes`.
-        data_folder: Override the data folder. Defaults to
-            ``config['data']['data_folder']``.
-        count_threshold: Minimum ``|synapse_counts|`` for a connection to
-            count toward region membership. Pass the model's
+        count_threshold: Minimum total synapse count of a neuron pair (summed
+            over neuropils) for the connection to count toward region
+            membership. Pass the model's
             ``synapse_count_threshold`` so membership is computed against the
             same thresholded matrix that drives the dynamics.
+        data_folder: Override the data folder. Defaults to
+            ``[data].data_folder`` of ``config.toml``.
     """
     if data_folder is None:
-        data_folder = load_config()['data']['data_folder']
+        data_folder = get_data_folder(load_config())
     folder = Path(data_folder)
 
     baked = folder / 'connectome_data' / 'baked'
@@ -218,8 +224,8 @@ def load_connectome_from_dataframes(
     synapses_df: pd.DataFrame,
     *,
     region_specs: dict[str, dict],
+    count_threshold: int,
     data_folder: str = '',
-    count_threshold: int = 1,
 ) -> ConnectomeData:
     """Build a :class:`ConnectomeData` from already-loaded DataFrames.
 
@@ -228,11 +234,11 @@ def load_connectome_from_dataframes(
     ``data_folder`` should still point at the on-disk bundle so region
     subclasses can find their per-area parquet files.
 
-    Region membership is computed against the **thresholded** synapse table:
-    only connections with ``|synapse_counts| >= count_threshold`` count, so a
-    neuron opted into a region by a single sub-threshold synapse under the old
-    behaviour is no longer included. Each region's ``intrinsic`` flag controls
-    the rule:
+    Region membership is computed against the **thresholded** connectome:
+    only neuron pairs whose total synapse count (summed over neuropils)
+    reaches ``count_threshold`` count, so weak connections never opt a neuron
+    into a region. A connection is "in" every neuropil where it has synapses.
+    Each region's ``intrinsic`` flag controls the rule:
 
     - ``intrinsic=False`` (default): a neuron is in region R if it has at
       least one above-threshold connection (as pre OR post) in any of R's
@@ -243,7 +249,8 @@ def load_connectome_from_dataframes(
       project/receive strongly outside the area).
 
     ``count_threshold`` should match the model's ``synapse_count_threshold``
-    so membership and dynamics see the same matrix.
+    so membership and dynamics see the same matrix. The returned
+    ``synapse_counts_coo`` has one row per neuron pair.
     """
     if not region_specs:
         raise ValueError("`region_specs` must be a non-empty {region: {...}} dict.")
@@ -295,25 +302,19 @@ def load_connectome_from_dataframes(
             )
 
     # Per-neuron set of neuropils carrying an above-threshold connection (as
-    # pre OR post). This is the thresholded analogue of the cell_info
-    # ``neuropils`` union column: an edge below ``count_threshold`` can no
-    # longer opt a neuron into a region.
+    # pre OR post). The threshold applies to each pair's total over all
+    # neuropils; a strong pair counts in every neuropil it has synapses in.
+    pair_total = synapses_df.groupby(
+        ['pre_root_id', 'post_root_id'])['synapse_counts'].transform('sum')
     strong = synapses_df.loc[
-        synapses_df['synapse_counts'].abs() >= count_threshold,
+        pair_total.abs() >= count_threshold,
         ['pre_root_id', 'post_root_id', 'neuropil'],
     ].dropna(subset=['neuropil'])
     endpoints = pd.concat([
         strong[['pre_root_id', 'neuropil']].rename(columns={'pre_root_id': 'root_id'}),
         strong[['post_root_id', 'neuropil']].rename(columns={'post_root_id': 'root_id'}),
     ], ignore_index=True).drop_duplicates()
-    strong_neuropils = (
-        endpoints.groupby('root_id')['neuropil'].apply(set).to_dict()
-    )
-    empty: frozenset = frozenset()
-    per_neuron_neuropils = [
-        strong_neuropils.get(int(rid), empty)
-        for rid in cell_info_df['root_id'].to_numpy()
-    ]
+    root_ids = cell_info_df['root_id'].to_numpy()
 
     # Per-region membership mask. ``intrinsic=False``: any above-threshold
     # connection in R. ``intrinsic=True``: at least one in R and all of the
@@ -321,19 +322,13 @@ def load_connectome_from_dataframes(
     region_membership_indf: dict[str, np.ndarray] = {}
     keep = np.zeros(len(cell_info_df), dtype=bool)
     for name, region_set in resolved.items():
+        in_region = endpoints['neuropil'].isin(region_set)
+        any_in = np.isin(root_ids, endpoints.loc[in_region, 'root_id'].to_numpy())
         if intrinsic_flags[name]:
-            mask = np.fromiter(
-                (
-                    (not s.isdisjoint(region_set)) and s.issubset(region_set)
-                    for s in per_neuron_neuropils
-                ),
-                dtype=bool, count=len(per_neuron_neuropils),
-            )
+            any_out = np.isin(root_ids, endpoints.loc[~in_region, 'root_id'].to_numpy())
+            mask = any_in & ~any_out
         else:
-            mask = np.fromiter(
-                (not s.isdisjoint(region_set) for s in per_neuron_neuropils),
-                dtype=bool, count=len(per_neuron_neuropils),
-            )
+            mask = any_in
         region_membership_indf[name] = mask
         keep |= mask
 
@@ -355,15 +350,17 @@ def load_connectome_from_dataframes(
     # neurons: keep every synapse between two kept neurons regardless of which
     # neuropil it sits in. A synapse between two AL neurons that happens to be
     # made outside the AL is still part of this circuit and must be included.
+    # One row per pair: sum the pair's per-neuropil rows so the model's
+    # synapse_count_threshold applies to whole connections.
     syn = synapses_df[
         synapses_df['pre_root_id'].isin(kept_ids)
         & synapses_df['post_root_id'].isin(kept_ids)
-    ]
+    ].groupby(['pre_root_id', 'post_root_id'], as_index=False)['synapse_counts'].sum()
 
     return ConnectomeData(
         synapse_counts_coo=syn[
             ['pre_root_id', 'post_root_id', 'synapse_counts']
-        ].to_numpy(),
+        ].to_numpy(dtype=np.int64),
         root_ids=cell_info_df['root_id'].to_numpy(),
         cell_types=cell_info_df['primary_type'].to_numpy(),
         neurotransmitters=cell_info_df['neurotransmitter'].to_numpy(),
@@ -385,8 +382,8 @@ def get_connectome_subset(
 
     Args:
         cell_info_df: DataFrame with cell information (must have 'primary_type'
-            and 'root_id' columns, plus the 'neuropils' column the loader
-            consumes).
+            and 'root_id' columns, plus the other columns
+            :func:`load_connectome_from_dataframes` requires).
         synapse_counts_df: DataFrame with synapse counts (must have
             'pre_root_id' and 'post_root_id' columns).
         cell_types: List of primary cell-type names to keep.
@@ -394,6 +391,12 @@ def get_connectome_subset(
     Returns:
         Tuple of (filtered_cell_info_df, filtered_synapse_counts_df).
     """
+    missing = sorted(set(cell_types) - set(cell_info_df['primary_type']))
+    if missing:
+        warnings.warn(
+            f"use_connectome_subset: cell types not in the connectome are ignored: {missing}",
+            stacklevel=2,
+        )
     filtered_cell_info_df = cell_info_df[
         cell_info_df['primary_type'].isin(cell_types)
     ].copy().reset_index(drop=True)

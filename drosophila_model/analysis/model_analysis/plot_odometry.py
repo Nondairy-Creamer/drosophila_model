@@ -1,14 +1,18 @@
 """
 Plot predicted vs true odometry (rotation and translation) for a two-eye model.
 
+Replays the model's own training stimuli (``cell_inputs.pt`` / ``target.pt``,
+the training split) through the two-eye ego-motion solver with the run's
+camera offset, excluding columns that are never in view (as training does).
+
 Layout (3 x 2):
   Left column: Rotation x, y, z  (deg/s)
   Right column: Translation x, y, z
 
 Usage:
-    python analysis/plot_odometry.py models/20260226_190611_gpu8_run0/
-    python analysis/plot_odometry.py models/best_model --stim-index 5
-    python analysis/plot_odometry.py models/best_model --num-stimuli 10
+    python -m drosophila_model.analysis.model_analysis.plot_odometry models/<model>/
+    python -m drosophila_model.analysis.model_analysis.plot_odometry models/<model>/ --stim-index 5
+    python -m drosophila_model.analysis.model_analysis.plot_odometry models/<model>/ --num-stimuli 10
 """
 import argparse
 import sys
@@ -21,19 +25,20 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 
+from drosophila_model.config import load_run_config
 from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.analysis.model_analysis.analysis_utilities import run_eye_offset
 
 
 AXIS_LABELS = ['x (roll)', 'y (pitch)', 'z (yaw)']
 
 
-def plot_odometry_single(model, cell_inputs_all, true_rot_all, true_trans_all,
-                         stim_index, dt, output_dir):
+def plot_odometry_single(model, cell_inputs_all, train_mask_all, true_rot_all, true_trans_all,
+                         stim_index, dt, output_dir, eye_offset):
     """Generate and save an odometry plot for a single stimulus."""
-    device = model.device
-    dtype = model.dtype
-
     stim_input = cell_inputs_all[stim_index:stim_index + 1]
+    # Columns never in view are excluded from the solve, as in training.
+    oob = ~train_mask_all[stim_index].any(dim=0)
     true_rot = true_rot_all[stim_index].cpu().numpy()
     true_trans = true_trans_all[stim_index].cpu().numpy()
 
@@ -43,7 +48,8 @@ def plot_odometry_single(model, cell_inputs_all, true_rot_all, true_trans_all,
 
     print(f"  Stimulus {stim_index} ({stim_input.shape[1]} frames)...")
     with torch.no_grad():
-        pred_rot, pred_trans, _, _ = model.regions['optic_lobe'].estimate_ego_motion_from_image(right_input, left_input)
+        pred_rot, pred_trans, _, _ = model.regions['optic_lobe'].estimate_ego_motion_from_image(
+            right_input, left_input, oob_columns=oob, camera_offset=eye_offset)
 
     pred_rot = pred_rot[0].cpu().numpy()
     pred_trans = pred_trans[0].cpu().numpy()
@@ -112,17 +118,17 @@ def main() -> None:
     dtype = model.dtype
     dt = model.dt
 
+    eye_offset = run_eye_offset(load_run_config(model_folder))
+
     print("Loading inputs and targets...")
     cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
-    if isinstance(cell_inputs_data, dict):
-        cell_inputs_all = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
-    else:
-        cell_inputs_all = cell_inputs_data.to(device=device, dtype=dtype)
+    cell_inputs_all = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
+    train_mask_all = cell_inputs_data['train_mask'].to(device=device)
     target_loaded = torch.load(model_folder / 'target.pt', map_location=device)
 
-    if not isinstance(target_loaded, dict) or 'rotation' not in target_loaded:
-        print("Error: target.pt does not contain odometry data (expected dict with 'rotation' / 'translation').")
-        sys.exit(1)
+    if 'rotation' not in target_loaded:
+        sys.exit("Error: target.pt has no odometry data ('rotation' / 'translation'); "
+                 "the model was not trained on two-eye data.")
 
     true_rot_all = target_loaded['rotation'].to(device=device, dtype=dtype)
     true_trans_all = target_loaded['translation'].to(device=device, dtype=dtype)
@@ -130,6 +136,8 @@ def main() -> None:
     num_total = cell_inputs_all.shape[0]
 
     if args.stim_index is not None:
+        if not 0 <= args.stim_index < num_total:
+            sys.exit(f"--stim-index {args.stim_index} is out of range (0..{num_total - 1}).")
         stim_indices = [args.stim_index]
     else:
         n = min(args.num_stimuli, num_total)
@@ -140,8 +148,8 @@ def main() -> None:
 
     print(f"Plotting odometry for {len(stim_indices)} stimuli (out of {num_total} total)...")
     for idx in stim_indices:
-        plot_odometry_single(model, cell_inputs_all, true_rot_all, true_trans_all,
-                             idx, dt, output_dir)
+        plot_odometry_single(model, cell_inputs_all, train_mask_all, true_rot_all, true_trans_all,
+                             idx, dt, output_dir, eye_offset)
 
     print("Done!")
 

@@ -3,8 +3,6 @@
 Generates optic flow from known rotation/translation parameters, then checks
 that ``OpticLobeRegion.estimate_ego_motion_from_flow`` recovers them.
 """
-from pathlib import Path
-
 import pytest
 import torch
 
@@ -14,11 +12,11 @@ from drosophila_model.model_definition.ego_motion import (
     generate_optic_flow,
     load_viewing_directions,
 )
-from test_model_factory import (
-    _resolve_data_folder,
-    build_model_from_test_config,
-    load_test_config,
-)
+from drosophila_model.model_definition.regions import OpticLobeRegion
+from tests.model_factory import data_folder
+
+# Zero-offset (body-centred) solver; a staticmethod, so no model is needed.
+estimate_ego_motion_from_flow = OpticLobeRegion.estimate_ego_motion_from_flow
 
 TRANSLATION_THRESHOLD = 1e-5
 
@@ -33,29 +31,19 @@ def _align_translation_sign(T_pred, T_true):
 
 @pytest.fixture(scope="module")
 def viewing_dirs():
-    """Load viewing directions once for the whole module."""
-    config, repo_root = load_test_config()
-    data_folder = _resolve_data_folder(repo_root, config["data"]["data_folder"])
-    phi, theta = load_viewing_directions(data_folder)
+    """Load the real column viewing directions once for the whole module."""
+    phi, theta = load_viewing_directions(data_folder())
     return phi, theta
 
 
-@pytest.fixture(scope="module")
-def model():
-    """Build a model instance for calling ego-motion estimation."""
-    m, _, _, _ = build_model_from_test_config(readouts=[])
-    m.eval()
-    return m
-
-
-def test_pure_rotation(viewing_dirs, model):
+def test_pure_rotation(viewing_dirs):
     """Recover rotation when translation is zero."""
     phi, theta = viewing_dirs
     omega_true = torch.tensor([0.1, -0.2, 0.15])
     T_true = torch.tensor([0.0, 0.0, 0.0])
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, 1.0)
-    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -63,7 +51,7 @@ def test_pure_rotation(viewing_dirs, model):
     assert T_pred.norm() < TRANSLATION_THRESHOLD
 
 
-def test_pure_translation(viewing_dirs, model):
+def test_pure_translation(viewing_dirs):
     """Recover translation direction when rotation is zero."""
     phi, theta = viewing_dirs
     N = len(theta)
@@ -73,7 +61,7 @@ def test_pure_translation(viewing_dirs, model):
     Z = torch.ones(N) * 2.0
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -83,7 +71,7 @@ def test_pure_translation(viewing_dirs, model):
     assert (T_pred_dir - T_true).norm() < 0.25
 
 
-def test_combined_motion(viewing_dirs, model):
+def test_combined_motion(viewing_dirs):
     """Recover both rotation and translation simultaneously."""
     phi, theta = viewing_dirs
     N = len(theta)
@@ -93,19 +81,19 @@ def test_combined_motion(viewing_dirs, model):
     Z = torch.ones(N) * 3.0
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
     T_pred_dir = _align_translation_sign(T_pred, T_true)
-    # Tolerances reflect the geometry produced by format_connectome_data.py
-    # (phi span ~2.5 rad). Narrower spans give less leverage on the
-    # cross-eye rotation axis.
+    # Tolerances reflect the column geometry in
+    # connectome_data/baked/optic_lobe_columns.parquet (phi span ~2.5 rad).
+    # Narrower spans give less leverage on the cross-eye rotation axis.
     assert (omega_pred - omega_true).norm() < 0.15
     assert (T_pred_dir - T_true).norm() < 0.15
 
 
-def test_varying_depth(viewing_dirs, model):
+def test_varying_depth(viewing_dirs):
     """Recover motion parameters with spatially varying depth."""
     phi, theta = viewing_dirs
     omega_true = torch.tensor([0.02, 0.03, -0.05])
@@ -115,7 +103,7 @@ def test_varying_depth(viewing_dirs, model):
     Z = 5.0 - 2.0 * x_component
 
     d_right, d_up = generate_optic_flow(phi, theta, omega_true, T_true, Z)
-    omega_pred, T_pred, rho_pred = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
+    omega_pred, T_pred, rho_pred = estimate_ego_motion_from_flow(
         phi, theta, d_right, d_up,
     )
 
@@ -130,7 +118,7 @@ def test_varying_depth(viewing_dirs, model):
     assert depth_corr > 0.5
 
 
-def test_noisy_flow(viewing_dirs, model):
+def test_noisy_flow(viewing_dirs):
     """Estimation degrades gracefully with additive noise."""
     phi, theta = viewing_dirs
     N = len(theta)
@@ -146,7 +134,7 @@ def test_noisy_flow(viewing_dirs, model):
     d_right_noisy = d_right + noise_level * torch.randn_like(d_right)
     d_up_noisy = d_up + noise_level * torch.randn_like(d_up)
 
-    omega_pred, T_pred, _ = model.regions["optic_lobe"].estimate_ego_motion_from_flow(
+    omega_pred, T_pred, _ = estimate_ego_motion_from_flow(
         phi, theta, d_right_noisy, d_up_noisy,
     )
 

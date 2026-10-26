@@ -15,26 +15,27 @@ Two-eye layout (3x2):
 If ground-truth flow is unavailable (all NaN), predicted flow from odometry
 (rotation + translation, constant depth Z=1) is shown instead.
 
-Usage:
-    python movie_scripts/stimulus_flow.py --stim-type flyview
-    python movie_scripts/stimulus_flow.py --two-eyes --stim-type small_drone
+Columns outside the field of view are drawn yellow. Movies are written to
+``figures/stimulus_flow/`` (relative to the repo root) unless --output-dir is set.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.movie_scripts.stimulus_flow --stim-type small_drone
+    python -m drosophila_model.analysis.movie_scripts.stimulus_flow --no-two-eyes --stim-type flyview
 """
 import argparse
-import sys
 from pathlib import Path
 
 
 import numpy as np
 import pandas as pd
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.data_handling import stimulus_generators as su
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
     masked_rgba,
     write_movie,
     ylim_from_data,
-    fig_to_rgb,
     make_stimulus_flow_movie,
     synthesize_two_eye_flow_from_odometry,
     prepare_eye_quiver,
@@ -49,7 +50,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Make a movie showing stimulus and true optic flow (no model needed)."
     )
-    parser.add_argument("--config", type=str, default="config.toml", help="Path to config file")
+    parser.add_argument("--config-path", "--config", dest="config_path", type=str,
+                        default="config.toml",
+                        help="Path to config.toml (default: ./config.toml)")
+    parser.add_argument("--data-config-path", type=str, default="config_data.toml",
+                        help="Path to the stimulus-generation config overlay "
+                             "(default: ./config_data.toml)")
     parser.add_argument("--two-eyes", action=argparse.BooleanOptionalAction, default=True,
                         help="Use two-eye stimulus (default: two eyes; "
                              "pass --no-two-eyes for a single eye)")
@@ -62,24 +68,29 @@ def main() -> None:
     parser.add_argument("--stim-time", type=float, default=None,
                         help="Override stim_time from config (seconds)")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory for the movie")
+                        help="Output directory for the movie (default: figures/stimulus_flow)")
     args = parser.parse_args()
 
     if args.stim_type is None:
         args.stim_type = "small_drone" if args.two_eyes else "flyview"
+    if args.stim_type == "directional_sine":
+        parser.error("--stim-type directional_sine needs a sine direction, which this "
+                     "script does not take")
     if args.stim_index is None:
         args.stim_index = [3] if args.two_eyes else [5]
 
-    config = load_config(args.config)
+    config = load_config(args.config_path, args.data_config_path)
+    # No model is involved: generate the stimulus on the CPU.
+    config['model']['device'] = 'cpu'
     data_config = config['data']
-    data_folder = Path(config['data']['data_folder'])
+    data_folder = get_data_folder(config)
 
     if args.stim_time is not None:
         data_config["shared"]["stim_time"] = args.stim_time
 
     # expanding_dot: training config often requests 50 light + 50 dark; movies only
     # need the requested --stim-index rows — trim batch so load is ~1 trial, not 100.
-    if args.stim_type == "expanding_dot" and args.stim_index is not None:
+    if args.stim_type == "expanding_dot":
         su.trim_expanding_dot_config_for_max_index(data_config, max(args.stim_index))
 
     output_folder = Path(args.output_dir) if args.output_dir else Path("figures/stimulus_flow")
@@ -104,22 +115,38 @@ def main() -> None:
                      cell_x, cell_y, cell_z)
 
 
+def _display_mask(train_mask, config, data_config):
+    """Field-of-view mask for display from an ``(examples, T, columns)`` train mask.
+
+    The leading pre-stimulus frames are excluded from the loss
+    (``train_mask`` False) but are on screen; show them with the field of view
+    of the first stimulus frame instead of painting every column as masked.
+    """
+    pre_stim_steps = int(round(data_config['shared']['pre_stim_time'] / config['model']['dt']))
+    mask = train_mask.cpu().numpy().astype(bool)
+    mask[:, :pre_stim_steps] = mask[:, pre_stim_steps:pre_stim_steps + 1]
+    return mask
+
+
 def _run_one_eye(args, config, data_config, column_phi_theta, output_folder, frame_rate,
                  cell_x, cell_y, cell_z):
     print("Loading stimulus and optic flow...")
     data = su.get_stimulus(
         args.stim_type, config, column_phi_theta, num_eyes=1, data_config=data_config)
-    stimulus, optic_flow, train_mask = data.stimulus, data.optic_flow, data.train_mask
-    stimulus = stimulus.cpu().numpy()
-    optic_flow = optic_flow.cpu().numpy()
-    train_mask = train_mask.cpu().numpy()
+    stimulus = data.stimulus.cpu().numpy()
+    optic_flow = data.optic_flow.cpu().numpy()
+    train_mask = _display_mask(data.train_mask, config, data_config)
 
     print(f"Stimulus shape: {stimulus.shape}")
     print(f"Optic flow shape: {optic_flow.shape}")
 
     for stim_index in args.stim_index:
+        if stim_index >= stimulus.shape[0]:
+            print(f"Skipping stim {stim_index}: only {stimulus.shape[0]} examples available")
+            continue
+
         print(f"\nCreating movie for stimulus {stim_index} with {stimulus.shape[1]} frames...")
-        out_path = output_folder / f'stimulus_flow_stim_{stim_index}.mp4'
+        out_path = output_folder / f'{args.stim_type}_one_eye_stim_{stim_index}.mp4'
         make_stimulus_flow_movie(
             stimulus[stim_index], optic_flow[stim_index],
             cell_x, cell_z, out_path, frame_rate,
@@ -131,19 +158,16 @@ def _run_two_eyes(args, config, data_config, column_phi_theta, output_folder, fr
                   cell_x, cell_y, cell_z):
     N = column_phi_theta.shape[0]
     model_dt = config["model"]["dt"]
-    pre_stim_steps = int(data_config["shared"]["pre_stim_time"] / model_dt)
+    pre_stim_steps = int(round(data_config["shared"]["pre_stim_time"] / model_dt))
 
     print("Loading two-eye stimulus and odometry...")
     data = su.get_stimulus(args.stim_type, config, column_phi_theta, num_eyes=2,
                            data_config=data_config)
-    stimulus, optic_flow = data.stimulus, data.optic_flow
-    observer_rotation, observer_translation, train_mask = (
-        data.rotation, data.translation, data.train_mask)
-    stimulus = stimulus.numpy()
-    observer_rotation = observer_rotation.numpy()
-    observer_translation = observer_translation.numpy()
-    train_mask = train_mask.numpy()
-    optic_flow = optic_flow.numpy()
+    stimulus = data.stimulus.cpu().numpy()
+    observer_rotation = data.rotation.cpu().numpy()
+    observer_translation = data.translation.cpu().numpy()
+    train_mask = _display_mask(data.train_mask, config, data_config)
+    optic_flow = data.optic_flow.cpu().numpy()
 
     print(f"Stimulus shape: {stimulus.shape}")
 
@@ -155,7 +179,7 @@ def _run_two_eyes(args, config, data_config, column_phi_theta, output_folder, fr
             print(f"Skipping stim {stim_index}: only {stimulus.shape[0]} examples available")
             continue
 
-        out_path = output_folder / f"two_eyes_stim_{stim_index}.mp4"
+        out_path = output_folder / f"{args.stim_type}_two_eyes_stim_{stim_index}.mp4"
         print(f"\nCreating movie for stimulus {stim_index} -> {out_path}")
 
         stim_right = stimulus[stim_index, :, :N]
@@ -166,9 +190,10 @@ def _run_two_eyes(args, config, data_config, column_phi_theta, output_folder, fr
         mask_left = train_mask[stim_index, :, N:]
 
         if np.all(np.isnan(flow_right[pre_stim_steps:])):
-            print("  Ground truth flow unavailable — using predicted flow from odometry (Z=1)")
+            print("  Ground truth flow unavailable - using predicted flow from odometry (Z=1)")
             flow_right, flow_left = synthesize_two_eye_flow_from_odometry(
-                observer_rotation[stim_index], observer_translation[stim_index], phi, theta)
+                observer_rotation[stim_index], observer_translation[stim_index], phi, theta,
+                eye_offset=data.eye_offset)
             flow_label = "Predicted Flow (Z=1)"
         else:
             flow_label = "Flow"
@@ -218,7 +243,8 @@ def _make_two_eyes_input_movie(
                     if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
     arrow_scale = 0.2 / flow_max_mag if flow_max_mag > 0 else 1.0
 
-    fig, axes = plt.subplots(3, 2, figsize=(12.8, 14), dpi=100,
+    # 1280x1408 px: both multiples of 16, so the H.264 writer need not resize.
+    fig, axes = plt.subplots(3, 2, figsize=(12.8, 14.08), dpi=100,
                              gridspec_kw={"height_ratios": [3, 3, 2]})
     ax_sam_l, ax_sam_r = axes[0, 0], axes[0, 1]
     ax_flow_l, ax_flow_r = axes[1, 0], axes[1, 1]
@@ -246,8 +272,6 @@ def _make_two_eyes_input_movie(
     q_l = init_eye_quiver(ax_flow_l, cell_x, cell_z, flow_l_vx[0], flow_l_vz[0], flow_max_mag, "left", **quiver_kw)
     ax_flow_l.set_title(f"Left Eye {flow_label}")
 
-    add_eye_colorwheel(fig)
-
     rot_labels = ["roll", "pitch", "yaw"]
     trans_labels = ["x", "y", "z"]
     colors = ["#e41a1c", "#377eb8", "#4daf4a"]
@@ -273,6 +297,8 @@ def _make_two_eyes_input_movie(
     ax_rot_rate.set_ylim(*ylim_from_data(rotation_rate[:num_frames], min_margin=1.0))
     ax_trans_rate.set_ylim(*ylim_from_data(translation_rate[:num_frames], min_margin=0.01))
     plt.tight_layout()
+    # After tight_layout: the fixed-position polar wheel is not a subplot.
+    add_eye_colorwheel(fig)
 
     times = np.arange(num_frames) * model_dt
 

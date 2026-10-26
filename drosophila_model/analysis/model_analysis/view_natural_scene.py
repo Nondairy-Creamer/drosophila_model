@@ -1,17 +1,18 @@
 """
-Show a single natural-panorama stimulus through the HandTunedModel and plot
-activity traces for each cell-type group over time.
+Show a single natural-panorama stimulus through a model and plot activity
+traces for each cell-type group over time.
 
-Usage:
-    python view_natural_scene.py                           # defaults
-    python view_natural_scene.py --direction left --velocity 60
-    python view_natural_scene.py --model models/hand_tuned/model.pt
+The stimulus drives the model's default input cells (L1-L3). ``--model`` is
+a trained run folder or its model.pt. Figures go to
+<model_folder>/figures/view_natural_scene unless ``--save`` is given.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.view_natural_scene --model models/<run>
+    python -m drosophila_model.analysis.model_analysis.view_natural_scene --model models/<run> --direction left --velocity 60
 """
 import argparse
 from pathlib import Path
-import sys
 
-import matplotlib
 from matplotlib import pyplot as plt
 import numpy as np
 import torch
@@ -19,65 +20,25 @@ import torch
 from drosophila_model.model_definition import neural_models as nm
 
 from drosophila_model.data_handling.stimulus_generators import get_constant_velocity_pano
-
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    CELL_TYPE_GROUPS, central_column_index, exponential_highpass,
+)
 
 # ── Defaults ──────────────────────────────────────────────────────────
-DEFAULT_MODEL_PATH = "models/hand_tuned/model.pt"
 DEFAULT_DIRECTION = "right"
 DEFAULT_VELOCITY = 30.0      # deg/s
 DEFAULT_STIM_TIME = 3.0      # seconds of motion
 DEFAULT_PRE_STIM_TIME = 0.5  # static panorama before motion
 DEFAULT_PANO_INDEX = 0       # which panorama from all_panoramic.pt
 
-INPUT_NEURONS = ["R1-6"]
-
-def _central_column_index(sample_phi, sample_theta):
-    """Column closest to forward-viewing (phi=0, theta=pi/2)."""
-    ref = np.array([0.0, 1.0, 0.0])  # sin(pi/2)*cos(0), sin(pi/2)*sin(0), cos(pi/2)
-    xyz = np.stack([
-        np.sin(sample_theta) * np.cos(sample_phi),
-        np.sin(sample_theta) * np.sin(sample_phi),
-        np.cos(sample_theta),
-    ], axis=1)
-    return int(np.argmax(xyz @ ref))
-
-
-def _exponential_highpass(block, dt, tau):
-    """Subtract a causal exponential lowpass from each column to remove DC.
-
-    First-order IIR lowpass:  y[t] = α·y[t-1] + (1-α)·x[t],  α = exp(-dt/τ)
-    Returns:  x[t] - y[t]
-    """
-    alpha = np.exp(-dt / tau)
-    out = np.empty_like(block)
-    # block shape: (batch, time, columns)
-    lp = block[:, 0, :].copy()
-    out[:, 0, :] = 0.0
-    for t in range(1, block.shape[1]):
-        lp = alpha * lp + (1.0 - alpha) * block[:, t, :]
-        out[:, t, :] = block[:, t, :] - lp
-    return out
-
-
-CELL_TYPE_GROUPS = {
-    "Photoreceptors":   ["R1-6"],
-    "Lamina (L1-L3)":   ["L1", "L2", "L3"],
-    "Lamina (L4-L5)":   ["L4", "L5"],
-    "C2 / C3":          ["C2", "C3"],
-    "T4 inputs":        ["Mi1", "Tm3", "Mi4", "Mi9"],
-    "T5 inputs":        ["Tm1", "Tm2", "Tm4", "Tm9"],
-    "T4":               ["T4a", "T4b", "T4c", "T4d"],
-    "T5":               ["T5a", "T5b", "T5c", "T5d"],
-}
-
 
 def main():
     parser = argparse.ArgumentParser(
-        description="View natural-scene response for the HandTunedModel."
+        description="View a model's response to a rotating natural panorama."
     )
     parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL_PATH,
-        help="Path to saved model .pt file.",
+        "--model", type=str, required=True,
+        help="Trained run folder or its model.pt.",
     )
     parser.add_argument(
         "--direction", type=str, default=DEFAULT_DIRECTION,
@@ -113,15 +74,9 @@ def main():
         help="Time constant (seconds) for causal exponential highpass filter "
              "applied per column before the model. Removes DC offset.",
     )
-    readout_group = parser.add_mutually_exclusive_group()
-    readout_group.add_argument(
+    parser.add_argument(
         "--show-voltage", action="store_const", const="voltage", dest="readout",
         help="Plot raw voltage (pre-activation) instead of firing rate.",
-    )
-    readout_group.add_argument(
-        "--show-synaptic-current", action="store_const", const="synaptic_current", dest="readout",
-        help="Plot synaptic current (omega * W @ v, before activation). "
-             "This is the signal that the activation function clips.",
     )
     parser.set_defaults(readout="firing_rate")
     parser.add_argument(
@@ -131,13 +86,14 @@ def main():
     )
     parser.add_argument(
         "--save", type=str, default=None,
-        help="Save figure to this path instead of showing interactively "
-             "(default: <model_folder>/figures/view_natural_scene/natural_pano_response.png).",
+        help="Path of the response figure; the RMS figure and hex animations "
+             "are saved next to it (default: <model_folder>/figures/"
+             "view_natural_scene/natural_pano_response_<direction>.png).",
     )
     parser.add_argument(
         "--hex", action="store_true",
         help="Render hex mosaic animations of the stimulus and/or a cell "
-             "type's response using FlyEye.",
+             "type's response using fly_eye.visualize_stimulus.",
     )
     parser.add_argument(
         "--hex-fps", type=int, default=30,
@@ -149,18 +105,23 @@ def main():
              "(e.g. --hex-cell-type T4a T5a).  Requires --hex.",
     )
     args = parser.parse_args()
+    if args.hex_cell_type and not args.hex:
+        parser.error("--hex-cell-type requires --hex.")
 
     # ── Load model ────────────────────────────────────────────────────
-    print(f"Loading model from {args.model} …")
+    print(f"Loading model from {args.model} ...")
     model = nm.BaseRnn.load(args.model)
-    print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, omega={model.get_omega():.4f}")
+    print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types")
 
-    if args.save is None:
+    if args.save:
+        save_path = Path(args.save)
+    else:
         model_path = Path(args.model)
         model_folder = model_path.parent if model_path.is_file() else model_path
-        args.save = str(model_folder / "figures" / "view_natural_scene"
-                        / f"natural_pano_response_{args.direction}.png")
-    
+        save_path = (model_folder / "figures" / "view_natural_scene"
+                     / f"natural_pano_response_{args.direction}.png")
+    save_dir = save_path.parent
+
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
     dt = model.dt
@@ -192,27 +153,23 @@ def main():
         block = 2.0 * block - 1.0
 
     if args.highpass_tau is not None:
-        print(f"  Applying exponential highpass filter (τ={args.highpass_tau} s)")
-        block = _exponential_highpass(block, dt, args.highpass_tau)
+        print(f"  Applying exponential highpass filter (tau={args.highpass_tau} s)")
+        block = exponential_highpass(block, dt, args.highpass_tau)
 
     stimulus = torch.tensor(block, device=model.device, dtype=model.dtype)
     time_axis = np.arange(stimulus.shape[1]) * dt - args.pre_stim_time
     print(f"  Stimulus shape: {stimulus.shape}  (batch, time, columns)")
 
     # ── Run model ─────────────────────────────────────────────────────
-    print("Running model …")
+    print("Running model ...")
     with torch.no_grad():
-        result = model.predict(
-            stimulus,
-            input_neurons=INPUT_NEURONS,
-            output_neurons=output_types,
-        )
+        result = model.predict(stimulus, output_neurons=output_types)
     outputs = result["outputs"]["optic_lobe"]
 
     # ── Resolve column indices ────────────────────────────────────────
     show_columns = args.columns
     if show_columns is not None:
-        center_idx = _central_column_index(
+        center_idx = central_column_index(
             np.asarray(sample_phi), np.asarray(sample_theta)
         )
         show_columns = [center_idx if c == -1 else c for c in show_columns]
@@ -294,17 +251,13 @@ def main():
     )
     plt.tight_layout()
 
-    if args.save:
-        save_path = Path(args.save)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        rms_path = save_path.parent / (save_path.stem + "_rms" + save_path.suffix)
-        fig_rms.savefig(rms_path, dpi=150)
-        plt.close("all")
-        print(f"Figure saved to {save_path}")
-        print(f"Figure saved to {rms_path}")
-    else:
-        plt.show()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    rms_path = save_dir / (save_path.stem + "_rms" + save_path.suffix)
+    fig_rms.savefig(rms_path, dpi=150)
+    plt.close("all")
+    print(f"Figure saved to {save_path}")
+    print(f"Figure saved to {rms_path}")
 
     # ── Hex mosaic animations ─────────────────────────────────────────
     if args.hex:
@@ -321,20 +274,13 @@ def main():
         frame_idx = np.arange(0, n_total, step)
         frame_times = frame_idx * dt - args.pre_stim_time
 
-        save_dir = None
-        if args.save:
-            save_dir = Path(args.save).parent
-
         # --- Stimulus animation ---
         stim_frames = block[0, frame_idx, :]  # (F, N_columns)
         stim_titles = [f"pano {args.pano_index} {args.direction} "
                        f"{args.velocity}°/s  t={t:.3f}s" for t in frame_times]
-
-        stim_filename = None
-        if save_dir:
-            stim_filename = str(
-                save_dir / f"hex_stim_pano{args.pano_index}_{args.direction}_{args.velocity:.0f}dps.mp4"
-            )
+        stim_filename = str(
+            save_dir / f"hex_stim_pano{args.pano_index}_{args.direction}_{args.velocity:.0f}dps.mp4"
+        )
 
         cmap = mpl_cm.gray(np.linspace(0, 1, 256))
         if args.zero_center or args.highpass_tau is not None:
@@ -345,35 +291,31 @@ def main():
             column_p_q, stim_frames,
             colormap=cmap, fps=target_fps,
             filename=stim_filename,
-            plot=(save_dir is None),
+            plot=False,
             titles=stim_titles,
         )
 
         # --- Cell-type response animations ---
-        if args.hex_cell_type:
-            for ct in args.hex_cell_type:
-                if ct not in outputs[readout_key]:
-                    print(f"  Warning: cell type '{ct}' not in outputs, skipping.")
-                    continue
-                resp_full = outputs[readout_key][ct][0].cpu().numpy()  # (T, N_columns)
-                resp_frames = resp_full[frame_idx]
-                resp_titles = [f"{ct} {readout_label}  t={t:.3f}s" for t in frame_times]
+        for ct in args.hex_cell_type or []:
+            if ct not in outputs[readout_key]:
+                print(f"  Warning: cell type '{ct}' not in outputs, skipping.")
+                continue
+            resp_full = outputs[readout_key][ct][0].cpu().numpy()  # (T, N_columns)
+            resp_frames = resp_full[frame_idx]
+            resp_titles = [f"{ct} {readout_label}  t={t:.3f}s" for t in frame_times]
+            resp_filename = str(
+                save_dir / f"hex_{ct}_pano{args.pano_index}_{args.direction}_{args.velocity:.0f}dps.mp4"
+            )
 
-                resp_filename = None
-                if save_dir:
-                    resp_filename = str(
-                        save_dir / f"hex_{ct}_pano{args.pano_index}_{args.direction}_{args.velocity:.0f}dps.mp4"
-                    )
-
-                print(f"  Hex response: {ct} ({len(frame_idx)} frames)")
-                visualize_column_responses(
-                    column_p_q, resp_frames,
-                    colormap=mpl_cm.coolwarm(np.linspace(0, 1, 256)),
-                    fps=target_fps,
-                    filename=resp_filename,
-                    plot=(save_dir is None),
-                    titles=resp_titles,
-                )
+            print(f"  Hex response: {ct} ({len(frame_idx)} frames)")
+            visualize_column_responses(
+                column_p_q, resp_frames,
+                colormap=mpl_cm.coolwarm(np.linspace(0, 1, 256)),
+                fps=target_fps,
+                filename=resp_filename,
+                plot=False,
+                titles=resp_titles,
+            )
 
 
 if __name__ == "__main__":

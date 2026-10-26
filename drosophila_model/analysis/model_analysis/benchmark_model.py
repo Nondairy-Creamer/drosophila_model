@@ -1,20 +1,26 @@
 """
 Full model benchmark suite.
 
-Runs all analyses on a trained model:
+Runs these analyses on a trained model, in this order (each can be skipped):
   1. edge_sweep             — edge velocity tuning curves
-  2. pano_sweep             — panoramic ego-motion estimation (5 stimuli)
-  3. drone_sweep            — drone video ego-motion estimation (3 clips)
-  4. white_noise_silencing  — STA filter recovery + silencing comparison
-  5. sine_wave_silencing    — tuning curves + silencing comparison
-  6. performance_sweep      — flow + ego-motion cosine on sine waves,
-                              random pano, and flyview
+  2. pano_sweep             — panoramic ego-motion estimation (--num-panos,
+                              default 1)
+  3. white_noise_silencing  — STA filter recovery + silencing comparison
+  4. sine_wave_silencing    — tuning curves + silencing comparison
+  5. drone_sweep            — drone video ego-motion estimation (--num-clips,
+                              default 1); skipped when the baked
+                              small_drone.pt cache is missing
+  6. performance_sweep      — flow + ego-motion cosine on the held-out baked
+                              test split (``<type>_test.pt``) of random_sine,
+                              random_pano and flyview; families with no baked
+                              test file are skipped
 
-All figures are saved under <model_folder>/figures/.
+All figures are saved under <model_folder>/figures/ (the white-noise STA data
+under <model_folder>/analysis_data/white_noise_silencing/).
 
-Usage:
-    python analysis/benchmark_model.py models/my_model/
-    python analysis/benchmark_model.py models/my_model/ --skip-drone
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.benchmark_model models/my_model/
+    python -m drosophila_model.analysis.model_analysis.benchmark_model models/my_model/ --skip-drone
 """
 import argparse
 import subprocess
@@ -23,13 +29,23 @@ from pathlib import Path
 
 import numpy as np
 
+from drosophila_model.config import get_data_folder, load_config
 
-def _run_subprocess(label: str, cmd: list[str]) -> None:
+_ANALYSIS_PACKAGE = "drosophila_model.analysis.model_analysis"
+
+
+def _banner(label: str) -> None:
     sep = "=" * 60
     print(f"\n{sep}")
     print(f"  {label}")
     print(f"{sep}\n")
-    result = subprocess.run(cmd)
+
+
+def _run_subprocess(label: str, module: str, *args: str) -> None:
+    """Run ``python -m <analysis package>.<module> <args>`` and warn on failure."""
+    _banner(label)
+    result = subprocess.run(
+        [sys.executable, "-m", f"{_ANALYSIS_PACKAGE}.{module}", *args])
     if result.returncode != 0:
         print(f"WARNING: {label} exited with code {result.returncode}")
 
@@ -60,23 +76,16 @@ def main() -> None:
                         help="Pano stimulus duration in seconds (default: 5.0)")
     args = parser.parse_args()
 
-    analysis_dir = Path(__file__).parent
     model_folder = args.model_folder
 
     # --- Edge sweep (subprocess — no return value needed) ---
     if not args.skip_edge:
-        _run_subprocess("Edge Sweep", [
-            sys.executable, str(analysis_dir / "edge_sweep.py"),
-            model_folder,
-        ])
+        _run_subprocess("Edge Sweep", "edge_sweep", model_folder)
 
     # --- Pano sweep (import directly to capture metrics) ---
     pano_results = None
     if not args.skip_pano:
-        sep = "=" * 60
-        print(f"\n{sep}")
-        print(f"  Panoramic Sweep")
-        print(f"{sep}\n")
+        _banner("Panoramic Sweep")
         from drosophila_model.analysis.model_analysis.pano_sweep import run_pano_sweep
         pano_results = run_pano_sweep(
             model_folder,
@@ -86,55 +95,46 @@ def main() -> None:
 
     # --- White noise silencing (subprocess — includes baseline) ---
     if not args.skip_white_noise_silencing:
-        _run_subprocess("White Noise Silencing", [
-            sys.executable, str(analysis_dir / "white_noise_silencing.py"),
-            model_folder,
-        ])
+        _run_subprocess("White Noise Silencing", "white_noise_silencing", model_folder)
 
     # --- Sine wave silencing (subprocess) ---
     if not args.skip_sine_silencing:
-        _run_subprocess("Sine Wave Silencing", [
-            sys.executable, str(analysis_dir / "sine_wave_silencing.py"),
-            model_folder,
-        ])
+        _run_subprocess("Sine Wave Silencing", "sine_wave_silencing", model_folder)
 
     # --- Drone sweep (import directly to capture metrics) ---
     drone_results = None
     if not args.skip_drone:
-        sep = "=" * 60
-        print(f"\n{sep}")
-        print(f"  Drone Sweep")
-        print(f"{sep}\n")
+        _banner("Drone Sweep")
         from drosophila_model.analysis.model_analysis.drone_sweep import run_drone_sweep
-        drone_results = run_drone_sweep(
-            model_folder,
-            num_clips=args.num_clips,
-        )
+        # Check for the baked cache up front (rather than catching
+        # FileNotFoundError) so other missing files still fail loudly.
+        drone_cache = get_data_folder(load_config()) / 'stimulus' / 'baked' / 'small_drone.pt'
+        if drone_cache.exists():
+            drone_results = run_drone_sweep(
+                model_folder,
+                num_clips=args.num_clips,
+            )
+        else:
+            print(f"Skipping drone sweep: {drone_cache} not found. Build it with:\n"
+                  "  python -m drosophila_model.data_handling.process_raw_data small_drone")
 
     # --- Performance sweep (import directly to capture metrics) ---
     performance_results = None
     if not args.skip_performance:
-        sep = "=" * 60
-        print(f"\n{sep}")
-        print(f"  Performance Sweep")
-        print(f"{sep}\n")
+        _banner("Performance Sweep")
         from drosophila_model.analysis.model_analysis.performance_sweep import run_performance_sweep
         performance_results = run_performance_sweep(model_folder)
 
     # --- Cell polarity from baseline STA ---
     on_cells = []
     off_cells = []
-    sta_data_path = (Path(model_folder) / 'figures' / 'white_noise_silencing'
+    sta_data_path = (Path(model_folder) / 'analysis_data' / 'white_noise_silencing'
                      / 'baseline' / 'sta_data.npz')
     if sta_data_path.exists():
-        sta_data = np.load(sta_data_path, allow_pickle=True)
-        for ct in sta_data['cell_types']:
-            sta = sta_data[f'sta_{ct}']
-            peak_idx = np.unravel_index(np.argmax(np.abs(sta)), sta.shape)
-            if sta[peak_idx] >= 0:
-                on_cells.append(ct)
-            else:
-                off_cells.append(ct)
+        from drosophila_model.analysis.model_analysis.white_noise import sta_polarity
+        sta_data = np.load(sta_data_path)
+        on_cells, off_cells = sta_polarity(
+            {ct: sta_data[f'sta_{ct}'] for ct in sta_data['cell_types']})
 
     # --- Summary ---
     print(f"\n{'='*60}")

@@ -19,7 +19,8 @@ with that dynamics::
 
     ModelClass = compose_model_class('CurrentDynamics')
     cdata = connectome_loading.load_connectome(
-        {'optic_lobe': {'neuropils': ['ME', 'LO', 'LOP', 'LA'], 'side': 'right'}}
+        {'optic_lobe': {'neuropils': ['ME', 'LO', 'LOP', 'LA'], 'side': 'right'}},
+        count_threshold=2,
     )
     model = ModelClass(connectome=cdata, ...)
 
@@ -30,7 +31,7 @@ Config files name the dynamics + the per-region sides::
     dynamics_type = 'CurrentDynamics'
 
     [model.regions.optic_lobe]
-    side = 'right'                       # 'right' | 'left' | 'both'
+    side = 'right'                       # the optic lobe supports only 'right'
 
 Saved checkpoints carry the dynamics string so ``BaseRnn.load`` can re-compose
 the class on load.
@@ -38,7 +39,7 @@ the class on load.
 
 from __future__ import annotations
 
-from logging import warning
+import contextlib
 import inspect
 import os
 import subprocess
@@ -51,14 +52,28 @@ import numpy as np
 import torch
 
 from drosophila_model.model_definition import dynamics
-from drosophila_model.config import load_config
-from drosophila_model.model_definition.connectome_loading import (
-    ConnectomeData,
-    load_connectome,
-    load_connectome_from_dataframes,
-)
+from drosophila_model.config import get_data_folder, load_config, resolve_device
+from drosophila_model.model_definition.connectome_loading import ConnectomeData
 from drosophila_model.model_definition.model_layers import CellTypeLayerNorm
 from drosophila_model.model_definition import regions as regions_mod
+
+
+# torch warns once per process, on the first sparse COO / CSR tensor it
+# builds, that CSR support is beta and that COO invariant checks are off.
+# Neither is actionable here, so both are silenced where the model's sparse
+# matrices are built or loaded.
+_SPARSE_WARNING_MESSAGES = (
+    'Sparse CSR tensor support is in beta state',
+    'Sparse invariant checks are implicitly disabled',
+)
+
+
+@contextlib.contextmanager
+def _quiet_sparse_warnings():
+    with warnings.catch_warnings():
+        for message in _SPARSE_WARNING_MESSAGES:
+            warnings.filterwarnings('ignore', message=message, category=UserWarning)
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +84,9 @@ from drosophila_model.model_definition import regions as regions_mod
 class SerializableModel:
     """Save / load / init-input tracking for any ``torch.nn.Module`` subclass.
 
-    Used by both :class:`BaseRnn` and :class:`engineering_models.ConvModel` so
-    they share a single checkpoint format. Class identity on load is resolved
-    via the ``_resolve_class_from_payload`` hook: the default returns the
-    calling ``cls`` (e.g. ``ConvModel.load(path)`` instantiates ``ConvModel``);
+    Defines the checkpoint format used by :class:`BaseRnn`. Class identity on
+    load is resolved via the ``_resolve_class_from_payload`` hook: the default
+    returns the calling ``cls`` (``cls.load(path)`` instantiates ``cls``);
     :class:`BaseRnn` overrides it to compose dynamics + anatomy from the
     ``dynamics_type`` and ``model_type`` strings saved in the payload.
     """
@@ -124,9 +138,9 @@ class SerializableModel:
     def _resolve_class_from_payload(cls, payload):
         """Return the concrete class to instantiate when loading.
 
-        Default: the calling class (e.g. ``ConvModel.load(...)`` instantiates
-        ``ConvModel``). :class:`BaseRnn` overrides this to compose dynamics
-        + anatomy from the saved ``dynamics_type`` and ``model_type`` strings.
+        Default: the calling class (``cls.load(...)`` instantiates ``cls``).
+        :class:`BaseRnn` overrides this to compose dynamics + anatomy from the
+        saved ``dynamics_type`` and ``model_type`` strings.
         """
         return cls
 
@@ -135,8 +149,8 @@ class SerializableModel:
         """Constructor argument names accepted across ``model_cls``'s MRO.
 
         Used to strip saved/forwarded ``init_inputs`` down to keys some
-        ``__init__`` actually accepts (guards against stray locals captured by
-        older ``_save_init_inputs`` snapshots).
+        ``__init__`` actually accepts (``_save_init_inputs`` snapshots every
+        local of the ``__init__`` frame, not only its arguments).
         """
         accepted = set()
         for klass in model_cls.__mro__:
@@ -193,19 +207,38 @@ class SerializableModel:
 
     @classmethod
     def load(cls, path, device=None, dtype=None, freeze_params: bool = True):
+        """Load a model saved by :meth:`save` (``path`` may be its folder).
+
+        ``device`` defaults to ``[model].device`` of the ``config.toml`` in the
+        working directory (CPU when CUDA is unavailable). The connectome's
+        parquets are read from that config's ``[data].data_folder`` (or the
+        saved folder when config.toml doesn't set one). ``freeze_params``
+        disables gradients and puts the model in eval mode.
+        """
         path = Path(path)
         if path.is_dir():
             path = path / "model.pt"
-        data = torch.load(path, map_location='cpu', weights_only=False)
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"No saved model at {path.resolve()}. "
+                "Pass a trained model's folder or its model.pt."
+            )
+        with _quiet_sparse_warnings():
+            data = torch.load(path, map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
 
-        if device is not None:
-            inputs['device'] = device
-        else:
-            try:
-                inputs['device'] = load_config()['model']['device']
-            except Exception:
-                inputs.setdefault('device', 'cpu')
+        # The device comes from the argument, else this machine's config.toml
+        # (falling back to CPU when CUDA is unavailable); config.toml also
+        # says where the data bundle lives. An explicit device makes the
+        # config's device irrelevant, so its CUDA fallback warning is dropped.
+        with warnings.catch_warnings():
+            if device is not None:
+                warnings.filterwarnings(
+                    'ignore', message=r"Config device '.*' requested but CUDA is not available",
+                    category=UserWarning)
+            local_config = load_config()
+        inputs['device'] = resolve_device(device if device is not None
+                                          else local_config['model']['device'])
 
         if dtype is not None:
             inputs['dtype'] = dtype
@@ -216,20 +249,24 @@ class SerializableModel:
             connectome = ConnectomeData.from_serializable_dict(connectome)
             inputs['connectome'] = connectome
 
-        # The saved connectome carries the data_folder frozen at training
-        # time (often a stale relative path). Refresh it from the current
-        # config so region parquets resolve against the live data bundle.
-        if connectome is not None and hasattr(connectome, 'data_folder'):
-            try:
-                connectome.data_folder = load_config()['data']['data_folder']
-            except Exception:
-                pass
+        # The saved connectome carries the data_folder of the training
+        # machine. Point it at this machine's data bundle when config.toml
+        # sets one (so region parquets resolve); keep the saved folder only
+        # when config.toml leaves it unset and the saved folder still exists
+        # (an empty saved folder, e.g. from load_connectome_from_dataframes'
+        # default, counts as unset). get_data_folder raises a clear error
+        # otherwise.
+        if connectome is not None and (
+            local_config['data'].get('data_folder')
+            or not connectome.data_folder
+            or not Path(connectome.data_folder).is_dir()
+        ):
+            connectome.data_folder = str(get_data_folder(local_config))
 
         model_cls = cls._resolve_class_from_payload(data)
         inputs['init_new_model'] = False
 
-        # Strip saved keys that no constructor in the MRO accepts (guards
-        # against stray locals that older _save_init_inputs may have captured).
+        # Strip saved keys that no constructor in the MRO accepts.
         accepted = cls._accepted_init_input_names(model_cls)
         inputs = {k: v for k, v in inputs.items() if k in accepted}
 
@@ -257,12 +294,12 @@ class SerializableModel:
         except (subprocess.CalledProcessError, FileNotFoundError):
             current_commit = None
 
-        if model_commit is not None:
-            print(f"Model git commit: {model_commit}")
-        if current_commit is not None:
-            print(f"Local git commit: {current_commit}")
-        else:
-            print("local commit hash not detected")
+        if model_commit and current_commit and model_commit != current_commit:
+            warnings.warn(
+                f"{path} was trained on git commit {model_commit[:8]}; the "
+                f"local code is at {current_commit[:8]}.",
+                stacklevel=2,
+            )
 
         return model
 
@@ -275,24 +312,26 @@ class SerializableModel:
 class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     """Connectome-agnostic RNN base.
 
-    Owns ``predict``, ``set_sigma_max``, ``find_steady_state``,
-    ``add_noise_to_parameters``, save/load, and the static ego-motion math.
-    All connectome-specific state (synapse matrix, cell types, columns) lives
-    on :class:`ConnectomeModel` so a hypothetical non-connectome RNN can sit
-    alongside it.
+    Owns the nonlinearity, the seeded ``rng``, ``device`` / ``dtype`` / ``dt``,
+    ``add_noise_to_parameters``, ``set_sigma_max`` and save/load (with the
+    class-identity hooks that re-compose the dynamics class on load).
+    ``predict``, ``find_steady_state`` and all connectome-specific state
+    (synapse matrix, cell types, regions) live on :class:`ConnectomeModel`.
+
+    The ``nonlinearity`` / ``use_layer_norm`` defaults here apply only to
+    direct construction; config-driven builds (``run_model``) pass
+    ``[model].nonlinearity`` and ``[model].use_layer_norm`` explicitly.
 
     Concrete subclasses (via the dynamics mixins) supply:
         - ``forward(v_prev, u_t, stim_to_cell_mapping=None) -> v_next``
         - ``firing_rate(v) -> fr``
-        - ``calc_sigma_max() -> sigma`` (only required if ``set_sigma_max`` is called)
+        - ``calc_sigma_max() -> sigma``
         - ``_apply_sigma_scale(scale_factor)``  (mutates whichever parameter
           controls overall recurrent gain)
     """
 
     # Default spectral-norm target for the linearised dynamics matrix.
     max_allowed_sigma = 0.95
-    # HandTunedDynamics flips this to True so predict() records synaptic current.
-    records_synaptic_current = False
 
     def __init__(self, *,
                  nonlinearity='Softplus', device='cpu', dtype='float32',
@@ -325,7 +364,6 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
 
     @abstractmethod
     def firing_rate(self, v):
-        return self.nonlinearity(v)
         """Convert voltage to firing rate."""
 
     # ------------------------------------------------------------------
@@ -352,9 +390,8 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
             rho_tolerance = 0.01
             damping_factor = 0.3
 
-            for iter_idx in range(max_scaling_iters):
+            for _ in range(max_scaling_iters):
                 sigma_max = self.calc_sigma_max()
-                print(iter_idx, ':', sigma_max)
                 if abs(sigma_max - self.max_allowed_sigma) < rho_tolerance:
                     break
                 scale_factor = (self.max_allowed_sigma / sigma_max) ** damping_factor
@@ -364,20 +401,59 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     # to(): move plain (non-Parameter, non-Buffer) tensor attributes too
     # ------------------------------------------------------------------
 
+    # Plain attributes (a tensor or a list of tensors) that nn.Module.to()
+    # doesn't see: the sparse synapse matrices kept by ConnectomeModel and
+    # the dynamics mixins, and the integer neuron -> cell-type index.
+    _plain_tensor_attrs = (
+        'synapse_counts', 'synapse_counts_T',
+        'synapse_counts_pos', 'synapse_counts_neg',
+        'neuron_to_type_index',
+    )
+
     def to(self, *args, **kwargs):
+        """``nn.Module.to`` that also moves :attr:`_plain_tensor_attrs`.
+
+        As in ``nn.Module.to``, a dtype only applies to floating-point
+        tensors (integer indices just change device). ``self.device`` and
+        ``self.dtype`` are kept in sync.
+        """
+        device, dtype, non_blocking, _ = torch._C._nn._parse_to(*args, **kwargs)
         result = super().to(*args, **kwargs)
-        if hasattr(result, 'synapse_counts') and isinstance(result.synapse_counts, torch.Tensor):
-            result.synapse_counts = result.synapse_counts.to(*args, **kwargs)
-        if hasattr(result, 'neuron_to_type_index') and isinstance(result.neuron_to_type_index, torch.Tensor):
-            result.neuron_to_type_index = result.neuron_to_type_index.to(*args, **kwargs)
-        device = None
-        if args and isinstance(args[0], (torch.device, str)):
-            device = torch.device(args[0])
-        elif 'device' in kwargs:
-            device = torch.device(kwargs['device'])
+
+        def _move(t):
+            if dtype is not None and t.is_floating_point():
+                return t.to(device=device, dtype=dtype, non_blocking=non_blocking)
+            return t.to(device=device, non_blocking=non_blocking)
+
+        for name in self._plain_tensor_attrs:
+            value = getattr(result, name, None)
+            if isinstance(value, torch.Tensor):
+                setattr(result, name, _move(value))
+            elif isinstance(value, list) and all(isinstance(t, torch.Tensor) for t in value):
+                setattr(result, name, [_move(t) for t in value])
+
         if device is not None:
             result.device = device
+        if dtype is not None:
+            result.dtype = dtype
         return result
+
+    # ------------------------------------------------------------------
+    # Save/load class identity: re-compose dynamics x anatomy on load
+    # ------------------------------------------------------------------
+
+    def _save_class_identity(self):
+        return {
+            'model_type': type(self)._model_type_name,
+            'dynamics_type': type(self)._dynamics_type_name,
+        }
+
+    @classmethod
+    def _resolve_class_from_payload(cls, payload):
+        return compose_model_class(
+            payload['dynamics_type'],
+            payload.get('model_type', 'ConnectomeModel'),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +469,8 @@ class ConnectomeModel(BaseRnn):
     ``{area: side}`` filter), preprocesses it (synapse-count threshold +
     neurotransmitter filter), then registers one
     :class:`regions.RegionView` per area in ``self.regions``. Each region
-    owns its own side (``'right'`` / ``'left'`` / ``'both'``). Area-specific
+    owns its own side (``'right'`` / ``'left'`` / ``'both'``; the optic lobe
+    supports only ``'right'``). Area-specific
     operations (e.g. ``predict_two_eyes`` for the optic lobe) live on those
     region objects — the model itself stays anatomy-agnostic.
     """
@@ -455,9 +532,6 @@ class ConnectomeModel(BaseRnn):
         self.num_cell_types = self.unique_cell_types.shape[0]
 
         self.transmitters = neurotransmitters
-        self.cell_type_transmitters = np.array([
-            neurotransmitters[cell_types == ct][0] for ct in self.unique_cell_types
-        ])
         self.unique_transmitters = np.unique(self.transmitters)
         self.num_transmitters = len(self.unique_transmitters)
 
@@ -478,10 +552,11 @@ class ConnectomeModel(BaseRnn):
         cols = torch.tensor(synapse_counts_coo[:, 0], device=self.device, dtype=torch.int64)
         values = torch.tensor(synapse_counts_coo[:, 2], device=self.device, dtype=self.dtype)
         indices = torch.stack([rows, cols], dim=0)
-        self.synapse_counts = torch.sparse_coo_tensor(
-            indices, values, size=(self.num_neurons, self.num_neurons),
-            dtype=self.dtype, device=self.device,
-        ).coalesce().to_sparse_csr()
+        with _quiet_sparse_warnings():
+            self.synapse_counts = torch.sparse_coo_tensor(
+                indices, values, size=(self.num_neurons, self.num_neurons),
+                dtype=self.dtype, device=self.device,
+            ).coalesce().to_sparse_csr()
 
         # Per-neuron -> per-cell-type index.
         self.neuron_to_type_index = torch.zeros(
@@ -524,7 +599,9 @@ class ConnectomeModel(BaseRnn):
         """Filter the raw connectome and convert root IDs to matrix indices.
 
         Filtering (in order):
-          1. Remove connections below the synapse count threshold.
+          1. Remove ``synapse_counts_coo`` rows below the synapse count
+             threshold. :class:`ConnectomeData` has one row per neuron pair
+             (summed over neuropils), so the threshold applies per pair.
           2. Remove neurons with invalid neurotransmitters.
           3. Remove per-region cell-type exclusions (e.g. photoreceptor
              terminals from the optic lobe; see
@@ -610,18 +687,6 @@ class ConnectomeModel(BaseRnn):
                 merged[name] = mod
         return merged
 
-    @property
-    def has_decoder(self):
-        return any(getattr(mod, 'predicts_flow', False)
-                   for mod in self._readout_modules.values())
-
-    def find_readout_region(self, readout_name):
-        """Return the region that owns ``readout_name`` (or ``None``)."""
-        for region in self.regions.values():
-            if readout_name in region._readout_modules:
-                return region
-        return None
-
     # ------------------------------------------------------------------
     # Connectome helpers used by dynamics mixins
     # ------------------------------------------------------------------
@@ -649,8 +714,10 @@ class ConnectomeModel(BaseRnn):
     def _sign_synapses(self):
         """Sign ``synapse_counts`` in place by presynaptic neurotransmitter.
 
-        Excitatory NTs -> positive, inhibitory NTs -> negative. Modifies both
-        ``synapse_counts`` (CSR) and ``synapse_counts_coo`` (numpy).
+        Excitatory NTs -> positive, inhibitory NTs -> negative. Every
+        presynaptic NT is one of the two (``_preprocess_connectome`` drops
+        neurons with any other NT). Modifies both ``synapse_counts`` (CSR)
+        and ``synapse_counts_coo`` (numpy).
         """
         sc = self.synapse_counts
         col = sc.col_indices()
@@ -663,11 +730,6 @@ class ConnectomeModel(BaseRnn):
             synapse_sign[pre_transmitters == nt] = 1
         for nt in self.inhibitory_nt:
             synapse_sign[pre_transmitters == nt] = -1
-
-        unknown_mask = synapse_sign == 0
-        if np.any(unknown_mask):
-            unknown_nts = np.unique(pre_transmitters[unknown_mask])
-            warning(f"Unknown neurotransmitters {unknown_nts} - these synapses will be set to 0")
 
         synapse_sign_tensor = torch.tensor(synapse_sign, device=self.device, dtype=self.dtype)
         signed_values = sc.values() * synapse_sign_tensor
@@ -682,67 +744,67 @@ class ConnectomeModel(BaseRnn):
             signed_values.detach().cpu().numpy(),
         ])
 
-    def _apply_sign_flip(self, presynaptic_cell_type, postsynaptic_cell_type, factor):
-        """Multiply all edges from ``pre`` cell type to ``post`` cell type by ``factor``.
+    def _sign_override_factors(self, pre_neurons, post_neurons):
+        """Per-edge factor from every region's ``sign_overrides``.
 
-        Default ``factor=-1`` flips signs. ``factor=0`` ablates. Mutates both
-        ``synapse_counts`` (CSR) and ``synapse_counts_coo`` (numpy). Used by
-        :meth:`_apply_region_sign_overrides` (automatic, anatomy-driven) and
-        by :meth:`HandTunedDynamics.flip_sign_between_cell_types` (manual,
-        per-research-script).
+        ``pre_neurons`` / ``post_neurons`` are matrix indices of the edges.
+        Each region declares anatomy-prior corrections as
+        ``(pre_cell_type, post_cell_type, factor)``: connection types whose
+        functional sign disagrees with the bulk-NT classification (e.g. the
+        optic lobe's GABAergic C2 / C3 contacts onto L1 / L2 are excitatory).
+        ``factor=-1`` inverts the connection's sign, ``factor=0`` ablates it,
+        other magnitudes scale it. Returns a float array (1 where no override
+        applies). Every dynamics applies these factors in its own terms: the
+        signed-matrix dynamics multiply the edge weight
+        (:meth:`_apply_region_sign_overrides`), ``ConductanceDynamics`` moves a
+        sign-inverted edge to an opposite-sign transmitter's conductance.
+        Cell types missing from the loaded connectome are skipped with a
+        warning.
         """
-        pre_ti = self._cell_type_name_to_index(presynaptic_cell_type)
-        post_ti = self._cell_type_name_to_index(postsynaptic_cell_type)
-        if pre_ti is None or post_ti is None:
-            return
+        pre_neurons = np.asarray(pre_neurons, dtype=np.int64)
+        post_neurons = np.asarray(post_neurons, dtype=np.int64)
+        type_index = self.neuron_to_type_index.cpu().numpy()
+        pre_types = type_index[pre_neurons]
+        post_types = type_index[post_neurons]
+        factors = np.ones(len(pre_neurons), dtype=np.float64)
+        for region in self.regions.values():
+            for pre, post, factor in region.sign_overrides:
+                pre_ti = self._cell_type_name_to_index(pre)
+                post_ti = self._cell_type_name_to_index(post)
+                if pre_ti is None or post_ti is None:
+                    continue
+                factors[(pre_types == pre_ti) & (post_types == post_ti)] *= factor
+        return factors
 
+    def _apply_region_sign_overrides(self):
+        """Multiply the signed ``synapse_counts`` by the region sign overrides.
+
+        Used by the signed-matrix dynamics (Current, CurrentDivisive) after
+        :meth:`_sign_synapses`; see :meth:`_sign_override_factors`. Mutates
+        both ``synapse_counts`` (CSR) and ``synapse_counts_coo`` (numpy).
+        """
         sc = self.synapse_counts
         pre_n = sc.col_indices()
         post_n = self._csr_row_indices(sc)
-        values = sc.values().clone()
-
-        pre_types = self.neuron_to_type_index[pre_n]
-        post_types = self.neuron_to_type_index[post_n]
-        mask = (pre_types == pre_ti) & (post_types == post_ti)
-
-        fac = torch.as_tensor(factor, device=values.device, dtype=values.dtype)
-        values = torch.where(mask, values * fac, values)
+        factors = self._sign_override_factors(pre_n.cpu().numpy(), post_n.cpu().numpy())
+        values = sc.values() * torch.as_tensor(
+            factors, device=sc.values().device, dtype=sc.values().dtype)
 
         self.synapse_counts = torch.sparse_csr_tensor(
             sc.crow_indices(), pre_n, values, size=sc.size(),
         )
-
         self.synapse_counts_coo = np.column_stack([
             pre_n.cpu().numpy(),
             post_n.cpu().numpy(),
             values.detach().cpu().numpy(),
         ])
 
-    def _apply_region_sign_overrides(self):
-        """Apply each region's ``sign_overrides`` list to ``synapse_counts``.
-
-        Each region declares anatomy-prior sign corrections — connection types
-        whose biological sign disagrees with the bulk-NT classification (e.g.
-        optic-lobe ``C2`` / ``C3`` are GABAergic but their L1/L2 contacts are
-        functionally excitatory). Each entry is
-        ``(pre_cell_type, post_cell_type, factor)``; ``factor=-1`` flips the
-        sign, ``factor=0`` ablates. Cell types not present in the loaded
-        connectome subset silently no-op via :meth:`_apply_sign_flip`.
-
-        Called automatically after :meth:`_sign_synapses` in each dynamics
-        ``__init__`` so the overrides apply to every dynamics model.
-        """
-        for region in self.regions.values():
-            for pre, post, factor in region.sign_overrides:
-                self._apply_sign_flip(pre, post, factor)
-
     def _initialize_synapse_signs(self):
         """Sign synapses by NT, then apply region-level anatomy overrides.
 
-        Single entry point shared by all dynamics ``__init__`` methods and by
-        :meth:`HandTunedDynamics._renormalize_from_raw`. Region overrides run
-        BEFORE any user-driven ``HandTunedDynamics._sign_flips`` so research
-        scripts can still flip on top of the default anatomy priors.
+        Single entry point shared by the signed-matrix dynamics ``__init__``
+        methods (``ConductanceDynamics`` applies the overrides through its
+        per-transmitter matrices instead).
         """
         self._sign_synapses()
         self._apply_region_sign_overrides()
@@ -788,12 +850,13 @@ class ConnectomeModel(BaseRnn):
         ``neuron_to_type_index``, region ``cell_indices``) is regenerated by the
         normal construction path — then transfers this model's trained
         parameters onto it via :meth:`_transfer_parameters_to`. ``steady_state``
-        is left at its constructed default; call :meth:`find_steady_state` on the
-        returned model if an exact resting state is needed.
+        (the initial state predictions and training start from) is copied over
+        for the retained neurons, matched by root id, so the trimmed model
+        starts from the same state as this one.
 
-        Dynamics-agnostic: works for any dynamics mixin because every trained
-        parameter is indexed by cell type, by neurotransmitter, or by fixed
-        readout geometry — none are per-neuron.
+        Relies on every dynamics (Current, CurrentDivisive, Conductance)
+        keeping its state in parameters indexed by cell type, by
+        neurotransmitter, or by fixed readout geometry.
         """
         connectome = self.init_inputs.get('connectome')
         if connectome is None:
@@ -819,10 +882,43 @@ class ConnectomeModel(BaseRnn):
         new_model = model_cls(**inputs)
         self._transfer_parameters_to(new_model)
 
+        # Keep this model's initial state for the retained neurons.
+        old_pos = {int(rid): i for i, rid in enumerate(self.root_ids)}
+        pos = torch.tensor(
+            [old_pos[int(rid)] for rid in new_model.root_ids],
+            dtype=torch.int64, device=self.steady_state.device,
+        )
+        with torch.no_grad():
+            new_model.steady_state.copy_(self.steady_state[pos])
+
         new_model.eval()
         for param in new_model.parameters():
             param.requires_grad_(False)
         return new_model
+
+    def _transfer_dynamics_parameters(self, new_model):
+        """Hook for dynamics whose parameters are not indexed by cell type.
+
+        Copy such parameters into the trimmed ``new_model`` and return their
+        names (e.g. ``CellAnnDynamics``'s per-type-pair weights). Default:
+        nothing to do.
+        """
+        return set()
+
+    @contextlib.contextmanager
+    def silenced(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
+        """Context manager: :meth:`silence_neurons`, restoring the model on exit.
+
+        Works for every dynamics: the whole ``state_dict`` is snapshotted and
+        reloaded, whatever parameters the dynamics' silencing touches.
+        """
+        saved = {k: v.detach().clone() for k, v in self.state_dict().items()}
+        self.silence_neurons(neurons_to_silence, invert_silencing=invert_silencing,
+                             silence_inputs=silence_inputs)
+        try:
+            yield self
+        finally:
+            self.load_state_dict(saved)
 
     def _transfer_parameters_to(self, new_model):
         """Copy this model's trained parameters into a trimmed ``new_model``.
@@ -848,9 +944,12 @@ class ConnectomeModel(BaseRnn):
             new_model.num_transmitters: (self.num_transmitters, tx_index),
         }
 
+        handled = self._transfer_dynamics_parameters(new_model)
         old_params = dict(self.named_parameters())
         with torch.no_grad():
             for name, new_p in new_model.named_parameters():
+                if name in handled:
+                    continue
                 if name not in old_params:
                     raise KeyError(
                         f"parameter {name!r} present in trimmed model but not "
@@ -940,8 +1039,6 @@ class ConnectomeModel(BaseRnn):
         )
         output_per_region = self._resolve_output_neurons(output_neurons)
 
-        record_synaptic = getattr(self, 'records_synaptic_current', False)
-
         region_outputs: dict = {}
         region_mappings: dict = {}
         for name, region in self.regions.items():
@@ -952,7 +1049,7 @@ class ConnectomeModel(BaseRnn):
             if isinstance(spec, dict):
                 # Round-trip: spec is a precomputed readout_dict.
                 result = region.initialize_recording(
-                    num_batches, num_time, [], meta, record_synaptic,
+                    num_batches, num_time, [], meta,
                     precomputed_output_mapping=spec,
                 )
             else:
@@ -960,7 +1057,7 @@ class ConnectomeModel(BaseRnn):
                 if not spec:
                     continue
                 result = region.initialize_recording(
-                    num_batches, num_time, spec, meta, record_synaptic,
+                    num_batches, num_time, spec, meta,
                 )
             if result is None:
                 continue
@@ -984,11 +1081,10 @@ class ConnectomeModel(BaseRnn):
             if self.use_layer_norm:
                 v = self.layer_norm(v)
             fr = self.firing_rate(v)
-            syn_current = self.compute_synaptic_current(v) if record_synaptic else None
 
             for name in region_outputs:
                 self.regions[name].record_step(
-                    t, v, fr, syn_current,
+                    t, v, fr,
                     region_outputs[name], region_mappings[name],
                 )
 
@@ -1015,8 +1111,11 @@ class ConnectomeModel(BaseRnn):
 
         ``input_neurons`` may be:
           - ``None``: each region uses its own ``default_input_neurons``.
-          - list of cell-type names: filtered to known types; routed to
-            the first region whose ``build_input_mapping`` claims it.
+          - list of cell-type names: filtered to types present in the model
+            (a ``ValueError`` if none are), then handed to the first region
+            that contains any of them and whose ``build_input_mapping``
+            claims them. Types outside that region are dropped with a
+            warning.
           - pre-built ``stim_to_cell_mapping`` dict: passed through
             unchanged; ``input_meta`` is reconstructed enough to drive
             ``initialize_recording``.
@@ -1055,15 +1154,32 @@ class ConnectomeModel(BaseRnn):
             )
 
         filtered = [n for n in input_neurons if n in self.unique_cell_types]
+        if not filtered:
+            raise ValueError(
+                f"None of input_neurons={list(input_neurons)!r} are in the "
+                f"model (cell types can be dropped by a region's "
+                f"neurons_to_exclude, an unsupported neurotransmitter, the "
+                f"synapse-count threshold or use_connectome_subset)."
+            )
         for name, region in self.regions.items():
-            result = region.build_input_mapping(filtered)
+            region_types = set(self.cell_types[region.cell_indices.cpu().numpy()])
+            claimed = [n for n in filtered if n in region_types]
+            if not claimed:
+                continue
+            result = region.build_input_mapping(claimed)
             if result is not None:
+                dropped = [n for n in input_neurons if n not in claimed]
+                if dropped:
+                    warnings.warn(
+                        f"input_neurons {dropped!r} are not in region "
+                        f"{name!r} (or not in the model) and get no input."
+                    )
                 mapping, meta = result
                 return mapping, {name: meta}
 
         raise ValueError(
-            f"No region implements build_input_mapping for input_neurons="
-            f"{filtered!r}."
+            f"No region could build an input mapping for input_neurons="
+            f"{filtered!r} (e.g. optic-lobe input types that share no column)."
         )
 
     def _resolve_output_neurons(self, output_neurons):
@@ -1081,21 +1197,15 @@ class ConnectomeModel(BaseRnn):
           - list of cell-type names: each entry routed to the first region
             whose cell-type set includes it (today: all to optic_lobe).
           - ``{region_name: readout_dict}``: per-region passthrough.
-          - bare ``readout_dict`` (legacy single-region): attributed to the
-            first region.
         """
         if isinstance(output_neurons, dict):
-            # Distinguish per-region passthrough vs. legacy single-region
-            # readout_dict. Per-region keys are all region names; legacy
-            # keys are cell-type names whose values carry ``column_indices``.
-            looks_per_region = bool(output_neurons) and all(
-                k in self.regions for k in output_neurons
-            )
-            if looks_per_region:
-                return dict(output_neurons)
-            # Legacy bare readout_dict: attribute to first region.
-            owner = next(iter(self.regions))
-            return {owner: output_neurons}
+            unknown = [k for k in output_neurons if k not in self.regions]
+            if unknown:
+                raise ValueError(
+                    f"output_neurons mapping keys must be region names "
+                    f"{list(self.regions)}; got {unknown}."
+                )
+            return dict(output_neurons)
 
         if output_neurons is None:
             return {
@@ -1123,6 +1233,12 @@ class ConnectomeModel(BaseRnn):
         return u_t, filter_state
 
     def find_steady_state(self, run_time=100, max_iter=25):
+        """Run the model on zero input until its state stops changing.
+
+        Stores the final state in ``steady_state`` and returns ``True``,
+        unless the dynamics blow up (non-finite or exploding state): then
+        ``steady_state`` is left unchanged and ``False`` is returned.
+        """
         print("Finding steady state ...")
         # Region-agnostic: each region reports the size of its slice of
         # the input axis. Summed gives the total stimulus width.
@@ -1139,22 +1255,36 @@ class ConnectomeModel(BaseRnn):
             if torch.allclose(final_state, initial_state, atol=1e-3):
                 print('steady state found after', i + 1, 'iterations')
                 self.steady_state.copy_(final_state.detach().squeeze(0))
-                return
+                return True
 
+            last_diff = (final_state - initial_state).abs().mean()
             initial_state = final_state.detach().clone()
 
+        # NaN fails the ratio test below, so check finiteness explicitly
+        # rather than storing a NaN steady state.
         final_ave = final_state.abs().mean()
-        if final_ave / (initial_ave + 1) > 1e6:
+        if not torch.isfinite(final_state).all() or final_ave / (initial_ave + 1) > 1e6:
             print('Warning: cannot find steady state, dynamics may be unstable')
-            return
+            return False
 
-        print('Average abs diff:', (final_state - initial_state).abs().mean())
+        print('Average abs diff:', last_diff)
         print('steady state not found after', max_iter, 'iterations')
         self.steady_state.copy_(final_state.detach().squeeze(0))
+        return True
 
 # ---------------------------------------------------------------------------
 # Dynamic class composition: dynamics x ConnectomeModel
 # ---------------------------------------------------------------------------
+
+
+def dynamics_kwargs(model_config: dict) -> dict:
+    """Constructor kwargs specific to ``model_config['dynamics_type']``.
+
+    Only ``CellAnnDynamics`` takes one (``[model].cell_ann_depth``).
+    """
+    if model_config['dynamics_type'] == 'CellAnnDynamics':
+        return {'cell_ann_depth': model_config['cell_ann_depth']}
+    return {}
 
 
 def compose_model_class(dynamics_type: str, model_type: str = 'ConnectomeModel'):
@@ -1183,13 +1313,18 @@ def compose_model_class(dynamics_type: str, model_type: str = 'ConnectomeModel')
     if cached is not None:
         return cached
 
-    try:
-        dynamics_cls = getattr(dynamics, dynamics_type)
-    except AttributeError as e:
+    # The valid names are the *Dynamics classes defined in dynamics.py.
+    available = sorted(
+        name for name, obj in vars(dynamics).items()
+        if isinstance(obj, type) and obj.__module__ == dynamics.__name__
+        and name.endswith('Dynamics')
+    )
+    if dynamics_type not in available:
         raise ValueError(
-            f"Unknown dynamics_type {dynamics_type!r}. Add it to dynamics.py "
-            f"or fix the config."
-        ) from e
+            f"Unknown dynamics_type {dynamics_type!r}; available: "
+            f"{', '.join(available)}. Add it to dynamics.py or fix the config."
+        )
+    dynamics_cls = getattr(dynamics, dynamics_type)
 
     anatomy_cls = ConnectomeModel
     name = f'{model_type}_{dynamics_type}'
@@ -1202,24 +1337,3 @@ def compose_model_class(dynamics_type: str, model_type: str = 'ConnectomeModel')
 
 
 _COMPOSED_CLASS_CACHE: dict[tuple[str, str], type] = {}
-
-
-def _baseRnn_save_class_identity(self):
-    return {
-        'model_type': type(self)._model_type_name,
-        'dynamics_type': type(self)._dynamics_type_name,
-    }
-
-
-@classmethod
-def _baseRnn_resolve_class_from_payload(cls, payload):
-    return compose_model_class(
-        payload['dynamics_type'],
-        payload.get('model_type', 'ConnectomeModel'),
-    )
-
-
-# Attach to BaseRnn here (defined out-of-class so the factory above can
-# reference BaseRnn and the cache without forward-reference gymnastics).
-BaseRnn._save_class_identity = _baseRnn_save_class_identity
-BaseRnn._resolve_class_from_payload = _baseRnn_resolve_class_from_payload

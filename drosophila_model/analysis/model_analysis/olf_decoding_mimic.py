@@ -1,10 +1,11 @@
-"""Mimic of OlfactionConnectomeModel `concentration_divnorm.py`.
+"""Connectome port of an external concentration / divisive-normalisation experiment.
 
-Faithful port of the external `concentration_divnorm.py` concentration /
-divisive-normalisation experiment, with **one change**: the antennal-lobe
-dynamics are produced by antenna-lobe :class:`ConnectomeModel` instances built
-from :mod:`drosophila_model.model_definition.neural_models` instead of the
-reference's hand-signed ``W`` matrix + ``BatchedALSim`` simulator.
+Faithful port of ``concentration_divnorm.py`` from a separate olfaction
+project (the "reference"; neither it nor its ``olfactory.py`` helpers or
+``BatchedALSim`` simulator are part of this repo), with **one change**: the
+antennal-lobe dynamics are produced by antenna-lobe :class:`ConnectomeModel`
+instances built from :mod:`drosophila_model.model_definition.neural_models`
+instead of the reference's hand-signed ``W`` matrix + simulator.
 
 What the experiment does
 ------------------------
@@ -13,8 +14,8 @@ glomeruli (those with both an ORN type and a uniglomerular ALPN type). Each
 trial draws a log-uniform concentration spanning ~3 decades. Four
 representations are decoded for odor identity:
 
-  1. Static ORN drive       = ReLU(E @ c + noise)            (olfactory.py style)
-  2. Static PN (div norm)    = ORN / (sigma + mean(ORN))      (olfactory.py style)
+  1. Static ORN drive       = ReLU(E @ c + noise)            (reference style)
+  2. Static PN (div norm)    = ORN / (sigma + mean(ORN))      (reference style)
   3. Connectome ORN/ALPN with **subtractive** inhibition  (classical LN model)
   4. Connectome ORN/ALPN with **divisive**   inhibition  (Carandini-Heeger)
 
@@ -40,9 +41,11 @@ representations are per-glomerulus averages of the recorded ORN / PN firing
 rates at the readout time.
 
 A 2x2 figure is written under ``figures/olf_decoding_mimic/`` and the
-connectome simulation is cached to disk.
+connectome simulation is cached under ``cache/olf_decoding_mimic/`` (both
+relative to the working directory, i.e. the repo root; ``cache/`` is
+gitignored and safe to delete).
 
-Run with::
+Run (from the repo root) with::
 
     python -m drosophila_model.analysis.model_analysis.olf_decoding_mimic
 """
@@ -58,10 +61,8 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.model_definition import connectome_loading as cl
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
@@ -137,9 +138,9 @@ MODE_STYLE = {
     'divisive':    {'hatch': '//', 'linestyle': '--', 'marker': '^'},
 }
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-OUT_DIR = _PROJECT_ROOT / 'figures' / 'olf_decoding_mimic'
-CACHE_DIR = OUT_DIR / 'cache'
+# Relative to the working directory (run from the repo root).
+OUT_DIR = Path('figures') / 'olf_decoding_mimic'
+CACHE_DIR = Path('cache') / 'olf_decoding_mimic'
 OUT_PNG = OUT_DIR / 'concentration_divnorm.png'
 
 
@@ -151,13 +152,15 @@ OUT_PNG = OUT_DIR / 'concentration_divnorm.png'
 def build_models():
     """Load the AL connectome once and build one model per inhibition mode.
 
-    Returns ``(models, region, lookups)`` where ``models`` maps mode name ->
-    composed ConnectomeModel, ``region`` is the (shared-geometry) antenna-lobe
-    region of the first model, and ``lookups`` is the tuple returned by
-    :func:`glom_lookups`.
+    Returns ``(models, lookups)`` where ``models`` maps mode name -> composed
+    ConnectomeModel and ``lookups`` is the tuple returned by
+    :func:`glom_lookups` (shared geometry, computed from the first model).
+
+    The data folder and ``[model].synapse_count_threshold`` (used for both
+    region membership and the dynamics matrix) come from the local config.
     """
     config = load_config()
-    data_folder = config['data']['data_folder']
+    count_threshold = config['model']['synapse_count_threshold']
     region_specs = {
         'antenna_lobe': {
             'neuropils': regions_mod.AntennaLobeRegion.neuropils,
@@ -166,7 +169,8 @@ def build_models():
     }
     region_kwargs = {'antenna_lobe': {'side': 'both'}}
     connectome = cl.load_connectome(
-        region_specs=region_specs, data_folder=data_folder,
+        region_specs=region_specs, data_folder=get_data_folder(config),
+        count_threshold=count_threshold,
     )
 
     models = {}
@@ -175,7 +179,7 @@ def build_models():
         model = ModelClass(
             connectome=connectome,
             nonlinearity='ReLU',
-            count_threshold=2,
+            count_threshold=count_threshold,
             use_layer_norm=False,
             device=DEVICE,
             dtype=DTYPE,
@@ -189,8 +193,7 @@ def build_models():
         model.eval()
         models[mode] = model
 
-    first = models[MODES_TO_RUN[0]]
-    return models, first.regions['antenna_lobe'], glom_lookups(first)
+    return models, glom_lookups(models[MODES_TO_RUN[0]])
 
 
 def glom_lookups(model):
@@ -254,7 +257,11 @@ def _scale_inhibition(model, factor):
     Reproduces a ``gain_inh`` independent of ``gain_exc``: with
     ``input_strength = gain_exc``, the divisive denominator term is
     ``input_strength * (factor * W-) @ r = gain_inh * W- @ r``.
+
+    ``W-`` is rebuilt from the (unchanged) signed ``synapse_counts`` first, so
+    repeated calls do not compound the scaling.
     """
+    model._build_signed_split()
     sc = model.synapse_counts_neg
     model.synapse_counts_neg = torch.sparse_csr_tensor(
         sc.crow_indices(), sc.col_indices(), sc.values() * float(factor),
@@ -283,12 +290,10 @@ def divisive_norm(x, sigma):
 
 
 def fit_predict(X_train, y_train, X_test, C=DECODER_C, max_iter=300):
-    pipe = Pipeline([
-        #('scaler', StandardScaler()),
-        ('lr', LogisticRegression(C=C, max_iter=max_iter, solver='lbfgs')),
-    ])
-    pipe.fit(X_train, y_train)
-    return pipe.predict(X_test)
+    """Fit an (unscaled) multinomial logistic decoder and predict ``X_test``."""
+    clf = LogisticRegression(C=C, max_iter=max_iter, solver='lbfgs')
+    clf.fit(X_train, y_train)
+    return clf.predict(X_test)
 
 
 def experiment_hash(*items, n_bytes=4):
@@ -341,7 +346,7 @@ def build_channel_input(batch_intensities, n_steps, dt, t_on, t_off,
 
 
 @torch.no_grad()
-def simulate_per_glom(model, region, intensities_channels, seeds, read_steps,
+def simulate_per_glom(model, intensities_channels, seeds, read_steps,
                       orn_types, pn_types, matched_gloms,
                       orn_type_of_glom, pn_types_of_glom,
                       batch_size=MODEL_BATCH_SIZE, label=None):
@@ -395,7 +400,7 @@ def simulate_per_glom(model, region, intensities_channels, seeds, read_steps,
     return orn_out, alpn_out
 
 
-def run_or_load_connectome(model, region, mode, intensities_channels, seeds,
+def run_or_load_connectome(model, mode, intensities_channels, seeds,
                            read_steps, lookups, exp_hash):
     """Per-mode connectome simulation with disk caching."""
     orn_types, pn_types, matched_gloms, orn_type_of_glom, pn_types_of_glom = lookups
@@ -421,7 +426,7 @@ def run_or_load_connectome(model, region, mode, intensities_channels, seeds,
           f"gain_inh={cfg['gain_inh']:g}  sigma={cfg['sigma']:g}")
     set_dynamics(model, mode)
     c_orn, c_alpn = simulate_per_glom(
-        model, region, intensities_channels, seeds, read_steps,
+        model, intensities_channels, seeds, read_steps,
         orn_types, pn_types, matched_gloms, orn_type_of_glom, pn_types_of_glom,
         label=f'{mode} trials',
     )
@@ -439,7 +444,7 @@ def run_or_load_connectome(model, region, mode, intensities_channels, seeds,
 def main():
     torch.manual_seed(SEED)
     print("Building antenna-lobe models (subtractive + divisive)...")
-    models, region, lookups = build_models()
+    models, lookups = build_models()
     orn_types, pn_types, matched_gloms, orn_type_of_glom, pn_types_of_glom = lookups
     n_gloms = len(matched_gloms)
     print(f"  AL cells: {models[MODES_TO_RUN[0]].num_neurons} | "
@@ -488,7 +493,7 @@ def main():
     connectome = {}
     for mode in MODES_TO_RUN:
         c_orn, c_alpn = run_or_load_connectome(
-            models[mode], region, mode, intensities_channels, trial_seeds,
+            models[mode], mode, intensities_channels, trial_seeds,
             read_steps, lookups, exp_hash,
         )
         connectome[mode] = {'orn': c_orn, 'alpn': c_alpn}
@@ -566,7 +571,7 @@ def main():
               f"{M_DEMO_CONCS} concs x {K_DEMO_REPEATS} repeats...")
         set_dynamics(models[mode], mode)
         d_orn, d_alpn = simulate_per_glom(
-            models[mode], region, demo_channels, demo_seeds, read_steps,
+            models[mode], demo_channels, demo_seeds, read_steps,
             orn_types, pn_types, matched_gloms, orn_type_of_glom, pn_types_of_glom,
         )
         demo_conn[mode] = {

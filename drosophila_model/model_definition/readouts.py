@@ -1,19 +1,25 @@
-"""Readout and regularizer modules for BaseRnn.
+"""Readout and regularizer modules for the optic-lobe region.
 
-**Readouts** are ``torch.nn.Module`` subclasses with two class-level attributes:
+**Readouts** are ``torch.nn.Module`` subclasses with these class-level
+attributes:
 
 * ``output_extra_dims`` – tuple of ints giving the trailing shape beyond
   ``(batch, num_columns)``.  For example ``(2,)`` for 2-D optic flow.
 * ``eye_asymmetric`` – ``True`` when the readout produces an output that
   differs between left and right eyes (e.g. horizontal flow is flipped).
+* ``predicts_flow`` – ``True`` for 2-D (right, up) optic-flow readouts (used
+  by the ``flow_loss`` loss and the ego-motion solver).
+* ``predicts_motion_mag`` – ``True`` for scalar motion-magnitude readouts
+  (used by the ``motion_mag`` loss).
 
 **Regularizers** are ``torch.nn.Module`` subclasses with ``training_only = True``.
 They are called once per ``predict()`` (after the time loop) with the model as
 input and return a scalar loss term.  They are skipped when the model is in
 eval mode.
 
-Both are listed in the config ``readouts`` key and discovered automatically by
-``BaseRnn`` — no registry to update.
+Both are listed by class name in ``[model.regions.optic_lobe].readouts`` and
+built by ``OpticLobeRegion.instantiate_readouts`` (looked up by name in this
+module, so there is no registry to update).
 """
 
 import numpy as np
@@ -35,24 +41,24 @@ class HexGridReadout(torch.nn.Module):
 
     Handles:
     * Column-to-neuron mapping (shared across all hex-grid readouts).
-    * Stacking ``HexGridConv`` layers with optional BatchNorm + softplus
-      between them.
+    * Stacking ``HexGridConv`` layers with softplus between them.
     * Optional denominator normalisation (last channel passed through softplus
       and used to divide the remaining channels).
 
-    Subclasses only need to set ``output_extra_dims``, ``eye_asymmetric``, and call
+    Subclasses only need to set the class-level flags (``output_extra_dims``,
+    ``eye_asymmetric``, ``predicts_flow`` / ``predicts_motion_mag``) and call
     ``super().__init__`` with the desired conv configuration.
     """
 
     output_extra_dims: tuple = ()
     eye_asymmetric: bool = False
     predicts_flow: bool = False
+    predicts_motion_mag: bool = False
 
     def __init__(self, *, neurons_to_decode=None, column_p_q, cell_types,
                  column_indices, num_neurons, num_columns,
                  num_channels, conv_sizes,
                  positive_weights=False, use_bias=True,
-                 use_batch_norm=False,
                  use_denominator=False, denom_eps=1e-2,
                  regularizer_parameters=None,
                  device=None, dtype=None, **_kwargs):
@@ -60,11 +66,16 @@ class HexGridReadout(torch.nn.Module):
         if len(num_channels) != len(conv_sizes):
             raise ValueError("num_channels and conv_sizes must have the same length.")
 
-        self.use_batch_norm = use_batch_norm
         self.use_denominator = use_denominator
         self.denom_eps = denom_eps
 
         reg_params = regularizer_parameters or {}
+        unknown = set(reg_params) - {'input_layer_l1'}
+        if unknown:
+            raise ValueError(
+                f"Unknown regularizer_parameters {sorted(unknown)}; the only "
+                f"supported key is 'input_layer_l1'."
+            )
         l1_weight = reg_params.get('input_layer_l1', _DEFAULT_INPUT_LAYER_L1)
         self._regularizer_config = {DecoderWeightL1Reg: l1_weight} if l1_weight else {}
         if neurons_to_decode is None:
@@ -78,7 +89,6 @@ class HexGridReadout(torch.nn.Module):
         in_features = len(self.neurons_to_decode)
         self.conv_sizes = list(conv_sizes)
         self.conv_layers = torch.nn.ModuleList()
-        self.batch_norms = torch.nn.ModuleList()
         for i, (channels, csz) in enumerate(zip(num_channels, conv_sizes)):
             is_last = (i == len(num_channels) - 1)
             self.conv_layers.append(HexGridConv(
@@ -91,10 +101,6 @@ class HexGridReadout(torch.nn.Module):
                 positive_weights=positive_weights if is_last else False,
                 use_bias=use_bias if is_last else True,
             ))
-            if not is_last and use_batch_norm:
-                self.batch_norms.append(
-                    torch.nn.BatchNorm1d(channels).to(device=device, dtype=dtype)
-                )
             in_features = channels
 
     def _build_column_to_neuron_mapping(self, cell_types, column_indices,
@@ -152,8 +158,6 @@ class HexGridReadout(torch.nn.Module):
             x = conv(x)
             is_intermediate = (i < len(self.conv_layers) - 1)
             if is_intermediate:
-                if self.use_batch_norm:
-                    x = self.batch_norms[i](x.permute(0, 2, 1)).permute(0, 2, 1)
                 x = torch.nn.functional.softplus(x)
 
         if self.use_denominator:
@@ -263,7 +267,7 @@ class FlowConv2Readout(HexGridReadout):
 
 
 class FlowConv3Readout(HexGridReadout):
-    """Two-layer hex-grid conv decoder producing 2-D optic flow."""
+    """Three-layer hex-grid conv decoder producing 2-D optic flow."""
 
     output_extra_dims = (2,)
     eye_asymmetric = True
@@ -277,37 +281,12 @@ class FlowConv3Readout(HexGridReadout):
         )
 
 
-class FlowConv2Readout4ch(HexGridReadout):
-    """Two-layer positive-weight hex-grid conv decoder producing 4-channel rectified flow.
-
-    Outputs (right, left, up, down) non-negative components trained against
-    ``clamp(flow_x, 0)``, ``clamp(-flow_x, 0)``, ``clamp(flow_y, 0)``,
-    ``clamp(-flow_y, 0)``.  Uses softplus between layers and a denominator
-    channel in the second layer.
-    """
-
-    output_extra_dims = (4,)
-    eye_asymmetric = True
-    predicts_flow = True
-
-    def __init__(self, *, readout_neurons=None, **kwargs):
-        super().__init__(
-            neurons_to_decode=readout_neurons,
-            num_channels=[8, 5], conv_sizes=[5, 5], use_denominator=True, use_bias=True,
-            positive_weights=True,
-            **kwargs,
-        )
-
-    def flip_for_left_eye(self, x):
-        """Swap right↔left channels to account for the mirrored column sampling."""
-        return x[..., [1, 0, 2, 3]]
-
-
 class MotionMagReadout(HexGridReadout):
     """Positive-weight single-layer conv producing scalar motion magnitude."""
 
     output_extra_dims = ()
     eye_asymmetric = False
+    predicts_motion_mag = True
 
     def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
@@ -317,11 +296,14 @@ class MotionMagReadout(HexGridReadout):
             **kwargs,
         )
 
+
 class MotionMagConv2Readout(HexGridReadout):
-    """Positive-weight single-layer conv producing scalar motion magnitude."""
+    """Two-layer conv producing scalar motion magnitude (positive weights in
+    the last layer)."""
 
     output_extra_dims = ()
     eye_asymmetric = False
+    predicts_motion_mag = True
 
     def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
@@ -330,6 +312,7 @@ class MotionMagConv2Readout(HexGridReadout):
             positive_weights=True, use_bias=False, use_denominator=False,
             **kwargs,
         )
+
 
 # ---------------------------------------------------------------------------
 # Regularizer base class and concrete regularizers
@@ -405,6 +388,22 @@ class DecoderWeightL1Reg(Regularizer):
         return self.l1_weight * readout.conv_layers[0].weight.abs().sum()
 
 
-# The L1Reg regularizer above already iterates ``model._readout_modules``;
-# that aggregated property still works because ConnectomeModel exposes
-# region-owned readouts via a flat view.
+def is_configurable(cls) -> bool:
+    """Whether ``cls`` may be listed in ``[model.regions.optic_lobe].readouts``.
+
+    True for the concrete readouts (``predicts_flow`` / ``predicts_motion_mag``)
+    and the standalone regularizers; False for base classes, imported helpers
+    and ``DecoderWeightL1Reg`` (built automatically, tied to one readout).
+    """
+    if not (isinstance(cls, type) and issubclass(cls, torch.nn.Module)):
+        return False
+    if issubclass(cls, Regularizer):
+        return cls not in (Regularizer, DecoderWeightL1Reg)
+    return bool(getattr(cls, 'predicts_flow', False)
+                or getattr(cls, 'predicts_motion_mag', False))
+
+
+def configurable_names() -> list[str]:
+    """Sorted names of the classes :func:`is_configurable` accepts."""
+    return sorted(name for name, obj in globals().items()
+                  if not name.startswith('_') and is_configurable(obj))

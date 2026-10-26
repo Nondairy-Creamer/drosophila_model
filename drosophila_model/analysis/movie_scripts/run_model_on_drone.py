@@ -1,34 +1,41 @@
 """
 Run a trained model on drone data and visualize predicted flow + odometry.
 
-Processes the raw small_drone videos, runs the model on the sampled stimulus,
-and renders:
+Loads the ommatidium-sampled ``small_drone`` clips from the baked cache
+(``<data_folder>/stimulus/baked/small_drone.pt``, built by
+``process_raw_data small_drone``), runs the model's two-eye ego-motion
+estimate on each requested clip, and renders:
 
   Row 0: Left eye stimulus       |  Right eye stimulus
   Row 1: Left eye predicted flow |  Right eye predicted flow
-  Row 2: True vs predicted rotation | True vs predicted translation
+  (Row 2 with --depth: left/right estimated nearness)
+  Last row: True vs predicted rotation | True vs predicted translation
 
-Usage:
-    python analysis/run_model_on_drone.py models/my_model/
-    python analysis/run_model_on_drone.py models/my_model/ --stim-index 1
+plus static rate / integrated-pose figures per clip.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_drone models/my_model/
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_drone models/my_model/ --stim-index 1
 """
 import argparse
-import sys
 from pathlib import Path
-
-_repo_root = str(Path(__file__).parent.parent)
 
 import numpy as np
 import torch
 
-from drosophila_model.config import load_config
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.model_definition import ego_motion as em
 from drosophila_model.data_handling import drone_utilities as du
-
-
+from drosophila_model.data_handling import stimulus_generators as su
 from drosophila_model.analysis.model_analysis.analysis_utilities import (
-    fig_to_rgb,
+    cos_sim, save_integrated_figure, save_rate_figure,
+)
+
+from drosophila_model.analysis.movie_scripts.movie_utilities import (
+    masked_rgba,
+    write_movie,
+    ylim_from_data,
+    subtract_rotation_flow,
+    get_flow_key,
     prepare_eye_quiver,
     setup_eye_axis,
     init_eye_quiver,
@@ -53,25 +60,36 @@ def main() -> None:
     parser.add_argument("--translation", action="store_true",
                         help="Plot rotation-adjusted (translation-only) flow instead of full flow")
     parser.add_argument("--depth", action="store_true",
-                        help="Add a row showing estimated per-column depth (1/ρ) heatmap")
+                        help="Add a row showing the estimated per-column nearness "
+                             "(rho ~ 1/depth) heatmap")
+    parser.add_argument("--save-data", action="store_true",
+                        help="Also save each clip's model inputs, ego-motion estimates and "
+                             "T4/T5 activity to "
+                             "<model_folder>/analysis_data/run_model_on_drone/")
     args = parser.parse_args()
 
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
-    local_config = load_config()
 
     print(f"Loading model from {model_path}...")
     model = nm.BaseRnn.load(model_path)
-    model.eval()
 
     model_dt = model.dt
-    data_folder = Path(local_config["data"]["data_folder"])
-    drone_video_dir = data_folder / "stimulus" / "raw" / "drone_videos"
+    column_phi_theta = model.regions['optic_lobe'].column_phi_theta
 
-    print("Processing drone clips...")
+    flow_key = get_flow_key(model)
+    if flow_key is None:
+        raise SystemExit("Model has no flow readout (predicts_flow=True); "
+                         "cannot estimate ego-motion.")
+
+    print("Loading drone clips...")
     drone_clips = du.get_drone_stimulus(
-        model_dt, dataset="small_drone", data_folder=data_folder)
+        model_dt, dataset="small_drone",
+        sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1])
     print(f"Found {len(drone_clips)} clips")
+    # Solve ego-motion with the rig geometry registered for this dataset,
+    # as training does.
+    camera_offset = su.camera_offset_for_stimulus("small_drone")
 
     column_xyz = model.regions['optic_lobe'].get_column_xyz()
     cell_x, cell_y, cell_z = column_xyz[:, 0], column_xyz[:, 1], column_xyz[:, 2]
@@ -79,6 +97,7 @@ def main() -> None:
     output_dir = (Path(args.output_dir) if args.output_dir
                   else model_folder / "figures" / "run_model_on_drone")
     output_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = model_folder / "analysis_data" / "run_model_on_drone"
 
     for clip_idx in args.stim_index:
         if clip_idx >= len(drone_clips):
@@ -110,38 +129,27 @@ def main() -> None:
         print(f"Clip {clip_idx} (id={clip_id}): running model on {num_frames} frames, N={N}...")
         with torch.no_grad():
             pred_rot, pred_trans, right_res, left_res = model.regions['optic_lobe'].estimate_ego_motion_from_image(
-                right_input, left_input, oob_columns=oob,
+                right_input, left_input, oob_columns=oob, camera_offset=camera_offset,
             )
 
-        decoder_key = next(k for k, m in model._readout_modules.items() if m.predicts_flow)
-        pred_flow_right = right_res["outputs"]["optic_lobe"][decoder_key][0].cpu().numpy()
-        pred_flow_left = left_res["outputs"]["optic_lobe"][decoder_key][0].cpu().numpy()
+        pred_flow_right = right_res["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()
+        pred_flow_left = left_res["outputs"]["optic_lobe"][flow_key][0].cpu().numpy()
         pred_rot_np = pred_rot[0].cpu().numpy()
         pred_trans_np = pred_trans[0].cpu().numpy()
-
-        t4_keys = ["T4a", "T4b", "T4c", "T4d"]
-        t5_keys = ["T5a", "T5b", "T5c", "T5d"]
-        fr_right = right_res["outputs"]["optic_lobe"].get("firing_rate", {})
-        fr_left = left_res["outputs"]["optic_lobe"].get("firing_rate", {})
-        t4_right = {k: fr_right[k][0].cpu().numpy() for k in t4_keys if k in fr_right}
-        t4_left = {k: fr_left[k][0].cpu().numpy() for k in t4_keys if k in fr_left}
-        t5_right = {k: fr_right[k][0].cpu().numpy() for k in t5_keys if k in fr_right}
-        t5_left = {k: fr_left[k][0].cpu().numpy() for k in t5_keys if k in fr_left}
 
         nearness_right = None
         nearness_left = None
         if args.depth:
             nearness_right, nearness_left = _estimate_depth_per_column(
-                model, right_res, left_res, decoder_key, oob, num_frames, N,
+                model, right_res, left_res, flow_key, oob, num_frames, N,
             )
             nearness_right, nearness_left = _mask_pole_columns(
-                nearness_right, nearness_left, pred_trans_np, model.regions['optic_lobe'].column_phi_theta,
+                nearness_right, nearness_left, pred_trans_np, column_phi_theta,
             )
 
         if args.translation:
-            pred_flow_right, pred_flow_left = _subtract_rotation_flow(
-                pred_flow_right, pred_flow_left,
-                pred_rot_np, model.regions['optic_lobe'].column_phi_theta,
+            pred_flow_right, pred_flow_left = subtract_rotation_flow(
+                pred_flow_right, pred_flow_left, pred_rot_np, column_phi_theta,
             )
 
         true_rot_rate = clip["rotation_rate"][:num_frames]
@@ -151,53 +159,33 @@ def main() -> None:
         trans_scale = np.std(true_trans_rate) / (np.std(pred_trans_np) + 1e-12)
         pred_trans_scaled = pred_trans_np * trans_scale
 
-        _save_rate_figure(
+        title = f"Clip {clip_idx} (id={clip_id})"
+        save_rate_figure(
             true_rot_rate, pred_rot_np, true_trans_rate, pred_trans_scaled,
-            model_dt, clip_idx, clip_id,
-            output_dir / f"drone_rate_clip_{clip_idx}.png",
+            model_dt, title, output_dir / f"drone_rate_clip_{clip_idx}.png",
         )
-        _save_integrated_figure(
+        save_integrated_figure(
             true_rot_rate, pred_rot_np, true_trans_rate, pred_trans_scaled,
-            model_dt, clip_idx, clip_id,
-            output_dir / f"drone_integrated_clip_{clip_idx}.png",
+            model_dt, title, output_dir / f"drone_integrated_clip_{clip_idx}.png",
         )
 
-        # Load raw stereo videos (uses a local frame-capped loader).
-        # Number of raw video frames corresponding to num_frames model steps.
-        num_video_frames = int(np.ceil(num_frames * model_dt / video_dt)) + 1
-        raw_left_path = drone_video_dir / f"left_{clip_id}.mp4"
-        raw_right_path = drone_video_dir / f"right_{clip_id}.mp4"
-        raw_left = _load_video_grayscale(raw_left_path, max_frames=num_video_frames)
-        raw_right = _load_video_grayscale(raw_right_path, max_frames=num_video_frames)
-        print(f"  Loaded raw videos: left {raw_left.shape}, right {raw_right.shape}")
-
-        dump_path = output_dir / f"drone_model_data_clip_{clip_idx}.pt"
-        dump = {
-            "clip_idx": clip_idx,
-            "clip_id": clip_id,
-            "model_dt": model_dt,
-            "video_dt": video_dt,
-            "num_frames": num_frames,
-            "raw_left_video": raw_left,
-            "raw_right_video": raw_right,
-            "left_movie": clip["left"][:num_frames],
-            "right_movie": clip["right"][:num_frames],
-            "left_model_input": left_input[0].cpu().numpy(),
-            "right_model_input": right_input[0].cpu().numpy(),
-            "in_fov_left": in_fov_left,
-            "in_fov_right": in_fov_right,
-            "pred_rotation_rate": pred_rot_np,
-            "pred_translation_rate": pred_trans_np,
-            "pred_translation_rate_scaled": pred_trans_scaled,
-            "true_rotation_rate": true_rot_rate,
-            "true_translation_rate": true_trans_rate,
-            "t4_activity_left": t4_left,
-            "t4_activity_right": t4_right,
-            "t5_activity_left": t5_left,
-            "t5_activity_right": t5_right,
-        }
-        torch.save(dump, dump_path)
-        print(f"  Saved model data dict -> {dump_path}")
+        if args.save_data:
+            _save_clip_data(
+                data_dir / f"drone_model_data_clip_{clip_idx}.pt",
+                right_res, left_res,
+                clip_idx=clip_idx, clip_id=clip_id, model_dt=model_dt,
+                video_dt=video_dt, num_frames=num_frames,
+                left_movie=clip["left"][:num_frames],
+                right_movie=clip["right"][:num_frames],
+                left_model_input=left_input[0].cpu().numpy(),
+                right_model_input=right_input[0].cpu().numpy(),
+                in_fov_left=in_fov_left, in_fov_right=in_fov_right,
+                pred_rotation_rate=pred_rot_np,
+                pred_translation_rate=pred_trans_np,
+                pred_translation_rate_scaled=pred_trans_scaled,
+                true_rotation_rate=true_rot_rate,
+                true_translation_rate=true_trans_rate,
+            )
 
         # Normalize translation to unit std (direction only, scale is arbitrary)
         true_std = np.std(true_trans_rate)
@@ -208,12 +196,8 @@ def main() -> None:
             pred_trans_np = pred_trans_np / pred_std
 
         # Cosine similarity over all time points and dimensions (flattened)
-        def _cos_sim_flat(a, b):
-            a_flat, b_flat = a.ravel(), b.ravel()
-            return np.dot(a_flat, b_flat) / (np.linalg.norm(a_flat) * np.linalg.norm(b_flat) + 1e-12)
-
-        rot_cos = _cos_sim_flat(true_rot_rate, pred_rot_np)
-        trans_cos = _cos_sim_flat(true_trans_rate, pred_trans_np)
+        rot_cos = cos_sim(true_rot_rate, pred_rot_np)
+        trans_cos = cos_sim(true_trans_rate, pred_trans_np)
         print(f"  Rotation  cosine similarity: {rot_cos:.4f}")
         print(f"  Translation cosine similarity: {trans_cos:.4f}")
 
@@ -244,135 +228,26 @@ def main() -> None:
         )
 
 
-def _load_video_grayscale(path, max_frames=None):
-    """Load video as grayscale uint8 frames, optionally capped at max_frames."""
-    import cv2
-    cap = cv2.VideoCapture(str(path))
-    frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-        if max_frames is not None and len(frames) >= max_frames:
-            break
-    cap.release()
-    if not frames:
-        raise FileNotFoundError(f"No frames read from video: {path}")
-    return np.stack(frames)
+def _save_clip_data(path, right_res, left_res, **fields):
+    """Save one clip's inputs, estimates and T4/T5 firing rates (``--save-data``).
 
-
-def _save_rate_figure(true_rot, pred_rot, true_trans, pred_trans,
-                      model_dt, clip_idx, clip_id, output_path):
-    """Save a 3x2 figure comparing ground-truth vs model velocity estimates.
-
-    Left column: rotational velocity (roll, pitch, yaw).
-    Right column: translational velocity (x, y, z).
+    ``fields`` are stored as-is; T4/T5 activity per eye is added as
+    ``t4_activity_left`` / ``t4_activity_right`` / ``t5_activity_*`` dicts of
+    ``(T, columns)`` arrays keyed by cell type.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    from matplotlib import pyplot as plt
-
-    true_rot = np.asarray(true_rot)
-    pred_rot = np.asarray(pred_rot)
-    true_trans = np.asarray(true_trans)
-    pred_trans = np.asarray(pred_trans)
-
-    T = true_rot.shape[0]
-    times = np.arange(T) * model_dt
-    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
-    trans_labels = ["X", "Y", "Z"]
-
-    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
-    for i in range(3):
-        ax = axes[i, 0]
-        ax.plot(times, true_rot[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_rot[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{rot_labels[i]} (deg/s)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Rotational Velocity")
-
-        ax = axes[i, 1]
-        ax.plot(times, true_trans[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_trans[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{trans_labels[i]} (m/s)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Translational Velocity")
-
-    axes[2, 0].set_xlabel("Time (s)")
-    axes[2, 1].set_xlabel("Time (s)")
-    fig.suptitle(f"Clip {clip_idx} (id={clip_id}) — Velocity", fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(str(output_path), dpi=150)
-    plt.close(fig)
-    print(f"  Saved rate figure → {output_path}")
-
-
-def _save_integrated_figure(true_rot, pred_rot, true_trans, pred_trans,
-                            model_dt, clip_idx, clip_id, output_path):
-    """Save a 3x2 figure comparing integrated ground-truth vs model pose.
-
-    Left column: integrated rotation (cumulative angle in degrees).
-    Right column: integrated translation (cumulative position in metres).
-    Uses SO(3)-aware integration from neural_models.
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    from matplotlib import pyplot as plt
-
-    true_rot = np.asarray(true_rot)
-    pred_rot = np.asarray(pred_rot)
-    true_trans = np.asarray(true_trans)
-    pred_trans = np.asarray(pred_trans)
-
-    true_rot_t = torch.tensor(true_rot, dtype=torch.float64)
-    pred_rot_t = torch.tensor(pred_rot, dtype=torch.float64)
-    true_trans_t = torch.tensor(true_trans, dtype=torch.float64)
-    pred_trans_t = torch.tensor(pred_trans, dtype=torch.float64)
-
-    true_rot_int = em.integrate_angular_velocity(true_rot_t, model_dt).numpy()
-    pred_rot_int = em.integrate_angular_velocity(pred_rot_t, model_dt).numpy()
-    true_pos = em.integrate_translational_velocity(
-        true_trans_t, true_rot_t, model_dt).numpy()
-    pred_pos = em.integrate_translational_velocity(
-        pred_trans_t, pred_rot_t, model_dt).numpy()
-
-    T = true_rot.shape[0]
-    times = np.arange(T) * model_dt
-    rot_labels = ["Roll (X)", "Pitch (Y)", "Yaw (Z)"]
-    trans_labels = ["X", "Y", "Z"]
-
-    fig, axes = plt.subplots(3, 2, figsize=(14, 8), sharex=True)
-    for i in range(3):
-        ax = axes[i, 0]
-        ax.plot(times, true_rot_int[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_rot_int[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{rot_labels[i]} (deg)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Integrated Rotation")
-
-        ax = axes[i, 1]
-        ax.plot(times, true_pos[:, i], linewidth=1.2, label="Ground truth")
-        ax.plot(times, pred_pos[:, i], linewidth=1.2, linestyle="--", label="Model")
-        ax.set_ylabel(f"{trans_labels[i]} (m)")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend(fontsize=8)
-            ax.set_title("Integrated Translation")
-
-    axes[2, 0].set_xlabel("Time (s)")
-    axes[2, 1].set_xlabel("Time (s)")
-    fig.suptitle(f"Clip {clip_idx} (id={clip_id}) — Integrated Pose", fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(str(output_path), dpi=150)
-    plt.close(fig)
-    print(f"  Saved integrated figure → {output_path}")
+    t4_keys = ["T4a", "T4b", "T4c", "T4d"]
+    t5_keys = ["T5a", "T5b", "T5c", "T5d"]
+    fr_right = right_res["outputs"]["optic_lobe"].get("firing_rate", {})
+    fr_left = left_res["outputs"]["optic_lobe"].get("firing_rate", {})
+    dump = dict(fields)
+    for name, keys in (("t4", t4_keys), ("t5", t5_keys)):
+        dump[f"{name}_activity_left"] = {
+            k: fr_left[k][0].cpu().numpy() for k in keys if k in fr_left}
+        dump[f"{name}_activity_right"] = {
+            k: fr_right[k][0].cpu().numpy() for k in keys if k in fr_right}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(dump, path)
+    print(f"  Saved model data dict -> {path}")
 
 
 def _estimate_depth_per_column(model, right_res, left_res, decoder_key,
@@ -450,53 +325,6 @@ def _mask_pole_columns(nearness_right, nearness_left, pred_trans,
             np.where(valid_l, nearness_left, np.nan))
 
 
-def _subtract_rotation_flow(pred_flow_right, pred_flow_left, omega, column_phi_theta):
-    """Subtract rotation-induced flow, returning translation-only angular flow.
-
-    Uses the same decomposition as ego_motion.estimate_from_flow:
-        u_rot = x × omega
-        d_right_rot = -(u_rot · e_phi),  d_up_rot = -(u_rot · e_theta)
-
-    Args:
-        pred_flow_right: (T, N, 2) predicted angular flow for right eye
-        pred_flow_left:  (T, N, 2) predicted angular flow for left eye
-        omega: (T, 3) estimated rotation [roll, pitch, yaw]
-        column_phi_theta: (N, 2) column positions [phi, theta] for the right eye
-
-    Returns:
-        trans_flow_right, trans_flow_left: same shapes, rotation subtracted
-    """
-    phi_r = column_phi_theta[:, 0]
-    theta = column_phi_theta[:, 1]
-    phi_l = -phi_r
-
-    def _rotation_angular_flow(phi, theta, omega):
-        x = np.stack([np.sin(theta) * np.cos(phi),
-                      np.sin(theta) * np.sin(phi),
-                      np.cos(theta)], axis=-1)
-        e_phi = np.stack([-np.sin(phi), np.cos(phi), np.zeros_like(phi)], axis=-1)
-        e_theta = np.stack([np.cos(theta) * np.cos(phi),
-                            np.cos(theta) * np.sin(phi),
-                            -np.sin(theta)], axis=-1)
-        u_rot = np.cross(x[None, :, :], omega[:, None, :])
-        d_right_rot = -np.einsum('tnj,nj->tn', u_rot, e_phi)
-        d_up_rot = -np.einsum('tnj,nj->tn', u_rot, e_theta)
-        return d_right_rot, d_up_rot
-
-    dr_r, du_r = _rotation_angular_flow(phi_r, theta, omega)
-    dr_l, du_l = _rotation_angular_flow(phi_l, theta, omega)
-
-    out_right = pred_flow_right.copy()
-    out_right[:, :, 0] -= dr_r
-    out_right[:, :, 1] -= du_r
-
-    out_left = pred_flow_left.copy()
-    out_left[:, :, 0] -= dr_l
-    out_left[:, :, 1] -= du_l
-
-    return out_right, out_left
-
-
 def _make_movie(
     stimulus_left, stimulus_right,
     pred_flow_left, pred_flow_right,
@@ -509,33 +337,24 @@ def _make_movie(
     flow_label="predicted flow",
     nearness_left=None, nearness_right=None,
 ):
+    """Movie of every ``step``-th model frame: stimulus, flow, optional
+    nearness, and trailing true-vs-predicted rotation/translation rates."""
     import matplotlib
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
     import matplotlib.colors as mcolors
-    import imageio as iio
 
     num_frames = stimulus_left.shape[0]
     trail_frames = int(round(trail_sec / model_dt))
     times = np.arange(num_frames) * model_dt
     frame_indices = list(range(0, num_frames, step))
 
-    _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
     gray_cmap = plt.cm.gray
     show_nearness = nearness_left is not None and nearness_right is not None
 
-    def _masked_rgba(values, mask, norm):
-        rgba = gray_cmap(norm(values))
-        if mask is not None:
-            rgba[~mask] = _MASK_COLOR
-        return rgba
-
     def _nearness_rgba(values, mask, norm):
-        valid = mask & np.isfinite(values)
-        rgba = np.empty((values.shape[0], 4))
-        rgba[:] = gray_cmap(norm(values))
-        rgba[~valid] = _MASK_COLOR
-        return rgba
+        # Columns without a finite nearness are painted like out-of-FOV ones.
+        return masked_rgba(values, mask & np.isfinite(values), gray_cmap, norm)
 
     def _nearness_norm_for_frame(t):
         """Per-frame Normalize shared by both eyes, computed from finite,
@@ -599,10 +418,10 @@ def _make_movie(
     setup_eye_axis(ax_stim_l, cell_x, cell_z, "left")
     setup_eye_axis(ax_stim_r, cell_x, cell_z, "right")
     sc_stim_l = ax_stim_l.scatter(
-        cell_x, cell_z, c=_masked_rgba(stimulus_left[0], in_fov_left, stim_norm),
+        cell_x, cell_z, c=masked_rgba(stimulus_left[0], in_fov_left, gray_cmap, stim_norm),
         s=90, edgecolors="none")
     sc_stim_r = ax_stim_r.scatter(
-        cell_x, cell_z, c=_masked_rgba(stimulus_right[0], in_fov_right, stim_norm),
+        cell_x, cell_z, c=masked_rgba(stimulus_right[0], in_fov_right, gray_cmap, stim_norm),
         s=90, edgecolors="none")
     ax_stim_l.set_title("Left Eye (stimulus)")
     ax_stim_r.set_title("Right Eye (stimulus)")
@@ -618,7 +437,6 @@ def _make_movie(
         flow_vx_r[0], flow_vz_r[0], max_mag, "right", **quiver_kw)
     ax_flow_l.set_title(f"Left Eye ({flow_label})")
     ax_flow_r.set_title(f"Right Eye ({flow_label})")
-    add_eye_colorwheel(fig)
 
     if show_nearness:
         setup_eye_axis(ax_near_l, cell_x, cell_z, "left")
@@ -634,20 +452,15 @@ def _make_movie(
         ax_near_r.set_title("Right Eye (nearness ρ ∝ 1/Z)")
         near_sm = plt.cm.ScalarMappable(cmap=gray_cmap, norm=near_norm0)
         near_sm.set_array([])
-        near_cbar = fig.colorbar(
+        fig.colorbar(
             near_sm, ax=ax_near_r, location="right",
             shrink=0.85, pad=0.02, label="ρ ∝ 1/Z",
         )
 
-    # Row 2: rotation and translation (true vs predicted)
+    # Last row: rotation and translation (true vs predicted)
     rot_labels = ["roll", "pitch", "yaw"]
     trans_labels = ["x", "y", "z"]
     colors = ["#e41a1c", "#377eb8", "#4daf4a"]
-
-    def _ylim(data, margin_frac=0.1, min_margin=0.01):
-        lo, hi = np.nanmin(data), np.nanmax(data)
-        margin = max(margin_frac * (hi - lo), min_margin)
-        return lo - margin, hi + margin
 
     rot_true_lines, rot_pred_lines = [], []
     for label, color in zip(rot_labels, colors):
@@ -660,7 +473,7 @@ def _make_movie(
     ax_rot.set_xlabel("time (s)")
     ax_rot.set_title("Rotation Rate")
     all_rot = np.concatenate([true_rot, pred_rot], axis=0)
-    ax_rot.set_ylim(*_ylim(all_rot, min_margin=1.0))
+    ax_rot.set_ylim(*ylim_from_data(all_rot, min_margin=1.0))
 
     trans_true_lines, trans_pred_lines = [], []
     for label, color in zip(trans_labels, colors):
@@ -673,52 +486,46 @@ def _make_movie(
     ax_trans.set_xlabel("time (s)")
     ax_trans.set_title("Translation Rate")
     all_trans = np.concatenate([true_trans, pred_trans], axis=0)
-    ax_trans.set_ylim(*_ylim(all_trans, min_margin=0.01))
+    ax_trans.set_ylim(*ylim_from_data(all_trans, min_margin=0.01))
 
     plt.tight_layout()
+    # After tight_layout: the fixed-position polar wheel is not a subplot.
+    add_eye_colorwheel(fig)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    print(f"  Writing {len(frame_indices)} frames at {frame_rate} fps...")
+    def update(k):
+        t = frame_indices[k]
+        sc_stim_l.set_facecolors(masked_rgba(stimulus_left[t], in_fov_left, gray_cmap, stim_norm))
+        sc_stim_r.set_facecolors(masked_rgba(stimulus_right[t], in_fov_right, gray_cmap, stim_norm))
 
-    with iio.get_writer(str(output_path), codec="libx264", fps=frame_rate) as writer:
-        for t in frame_indices:
-            sc_stim_l.set_facecolors(_masked_rgba(stimulus_left[t], in_fov_left, stim_norm))
-            sc_stim_r.set_facecolors(_masked_rgba(stimulus_right[t], in_fov_right, stim_norm))
+        update_eye_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag, "left")
+        update_eye_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag, "right")
 
-            update_eye_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag, "left")
-            update_eye_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag, "right")
+        if show_nearness:
+            near_norm = _nearness_norm_for_frame(t)
+            sc_near_l.set_facecolors(_nearness_rgba(nearness_left[t], in_fov_left, near_norm))
+            sc_near_r.set_facecolors(_nearness_rgba(nearness_right[t], in_fov_right, near_norm))
+            near_sm.set_clim(vmin=near_norm.vmin, vmax=near_norm.vmax)
+            near_sm.changed()
 
-            if show_nearness:
-                near_norm = _nearness_norm_for_frame(t)
-                sc_near_l.set_facecolors(_nearness_rgba(nearness_left[t], in_fov_left, near_norm))
-                sc_near_r.set_facecolors(_nearness_rgba(nearness_right[t], in_fov_right, near_norm))
-                near_sm.set_clim(vmin=near_norm.vmin, vmax=near_norm.vmax)
-                near_sm.changed()
+        time_s = t * model_dt
+        ax_stim_l.set_title(f"Left Eye (t={time_s:.2f}s)")
+        ax_stim_r.set_title(f"Right Eye (t={time_s:.2f}s)")
 
-            time_s = t * model_dt
-            ax_stim_l.set_title(f"Left Eye (t={time_s:.2f}s)")
-            ax_stim_r.set_title(f"Right Eye (t={time_s:.2f}s)")
+        t_start = max(0, t - trail_frames + 1)
+        t_slice = slice(t_start, t + 1)
+        t_times = times[t_slice]
 
-            t_start = max(0, t - trail_frames + 1)
-            t_slice = slice(t_start, t + 1)
-            t_times = times[t_slice]
+        for i in range(3):
+            rot_true_lines[i].set_data(t_times, true_rot[t_slice, i])
+            rot_pred_lines[i].set_data(t_times, pred_rot[t_slice, i])
+        ax_rot.set_xlim(t_times[0], t_times[0] + trail_sec)
 
-            for i in range(3):
-                rot_true_lines[i].set_data(t_times, true_rot[t_slice, i])
-                rot_pred_lines[i].set_data(t_times, pred_rot[t_slice, i])
-            ax_rot.set_xlim(t_times[0], t_times[0] + trail_sec)
+        for i in range(3):
+            trans_true_lines[i].set_data(t_times, true_trans[t_slice, i])
+            trans_pred_lines[i].set_data(t_times, pred_trans[t_slice, i])
+        ax_trans.set_xlim(t_times[0], t_times[0] + trail_sec)
 
-            for i in range(3):
-                trans_true_lines[i].set_data(t_times, true_trans[t_slice, i])
-                trans_pred_lines[i].set_data(t_times, pred_trans[t_slice, i])
-            ax_trans.set_xlim(t_times[0], t_times[0] + trail_sec)
-
-            writer.append_data(fig_to_rgb(fig))
-            if (t + 1) % 100 == 0:
-                print(f"    Frame {t+1}/{num_frames}")
-
-    plt.close(fig)
-    print(f"  Done! -> {output_path}")
+    write_movie(fig, update, len(frame_indices), output_path, frame_rate, log_every=100)
 
 
 if __name__ == "__main__":

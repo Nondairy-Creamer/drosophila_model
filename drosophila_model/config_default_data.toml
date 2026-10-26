@@ -7,14 +7,14 @@
 #
 # Layout:
 #   [shared]            -- parameters common to every dataset (stim_time,
-#                          pre/post-stim padding, generation seed).
+#                          pre-stim padding, generation seed, train/test split).
 #   [<stimulus_type>]   -- one table per generator, holding only the
 #                          parameters that generator actually uses (e.g.
 #                          temporal_frequencies for the sine/flicker stimuli,
 #                          velocity_* for the panoramas). Datasets with no
-#                          extra parameters (flyview, full_field_step,
-#                          small_drone, rpi_drone, ...) need no table; the
-#                          generators fall back to [shared] alone.
+#                          extra parameters (flyview, small_drone, rpi_drone,
+#                          ...) need no table; the generators fall back to
+#                          [shared] alone.
 #
 # Every key in the user overlay must already exist here (strict validation),
 # so add new generator parameters to this file first.
@@ -22,13 +22,16 @@
 [shared]
 stim_time = 1.0
 pre_stim_time = 0.5
-post_stim_time = 0.0
 seed = 0
 # Fraction (0, 1] of each baked dataset to use for training. At bake time
-# create_training_data.py splits each dataset along the example axis into a
-# `<type>_train.pt` (first `train_fraction`) and `<type>_test.pt` (the
-# remaining 1 - train_fraction). Training loads only the `_train.pt`; the
-# `_test.pt` is reserved for later analysis.
+# create_training_data splits each dataset by source group (correlated
+# examples -- segments of one clip, repeats of one panorama, phase/contrast
+# variants of one grating -- share a group and stay together): the groups are
+# shuffled with `seed`, the first `train_fraction` of them go to
+# `<type>_train.pt` and the rest to `<type>_test.pt`. Training loads only the
+# `_train.pt`; the `_test.pt` is held out for evaluation. A type table may set
+# its own `train_fraction` (add the key to that table here first); at 1.0 no
+# `_test.pt` is written.
 train_fraction = 0.75
 
 [random_pano]
@@ -44,15 +47,23 @@ num_repeats = 1
 [static_sine]
 temporal_frequencies = [2, 4, 8]
 
+# Analysis-only probe (placeholder zero flow targets); not bakeable.
 [edge]
 edge_velocities = [30, 60, 120, 240]
 
 [counterphase_sine]
 temporal_frequencies = [2, 4, 8]
 
+# Tiny probe sets (three luminance levels / one flicker per frequency): train
+# on all of them.
+[full_field_step]
+train_fraction = 1.0
+
 [full_field_flicker]
 flicker_temporal_frequencies = [1.0]
+train_fraction = 1.0
 
+# Analysis-only probe (placeholder zero flow targets); not bakeable.
 [expanding_dot]
 num_light = 50
 num_dark = 50

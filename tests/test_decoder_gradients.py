@@ -1,11 +1,11 @@
 import torch
 
 from drosophila_model.training import loss_functions as lf
-from tests.test_model_factory import build_model_from_test_config
+from tests.model_factory import build_model_from_test_config
 
 
 def test_model_gradients():
-    model, _, input_neurons, _ = build_model_from_test_config(
+    model, _ = build_model_from_test_config(
         readouts=['FlowConv2Readout'],
         use_input_conv=True,
     )
@@ -13,7 +13,7 @@ def test_model_gradients():
 
     torch.manual_seed(42)
     inputs = torch.randn((1, 20, model.regions['optic_lobe'].num_columns), dtype=model.dtype, device=model.device)
-    outputs = model.predict(inputs, input_neurons=input_neurons, output_neurons=model.unique_cell_types.tolist())['outputs']
+    outputs = model.predict(inputs, output_neurons=model.unique_cell_types.tolist())['outputs']
     optic_outputs = outputs['optic_lobe']
     target = torch.zeros_like(optic_outputs["FlowConv2Readout"]) + 1
 
@@ -22,7 +22,6 @@ def test_model_gradients():
 
     grad_nonzero = {}
     for name, param in model.named_parameters():
-        print(name)
         assert param.requires_grad
         assert param.grad is not None
         assert torch.isfinite(param.grad).all()

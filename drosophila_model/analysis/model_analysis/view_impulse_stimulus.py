@@ -1,107 +1,59 @@
 """
-Visualize full-field impulse (flash) stimuli and HandTunedModel responses.
+Visualize full-field impulse (flash) stimuli and a model's responses.
 
-Runs two conditions through the model:
-  - Increment: all columns step from 0 → +1 for a brief pulse, then back to 0.
-  - Decrement: all columns step from 0 → -1 for a brief pulse, then back to 0.
+Runs two conditions through the model, driving its default input cells
+(L1-L3):
+  - Increment: all columns step from 0 to +amplitude for a brief pulse, then back to 0.
+  - Decrement: all columns step from 0 to -amplitude for a brief pulse, then back to 0.
 
 Produces:
   1. Stimulus trace (time × value) for each condition.
   2. Cell-type response traces (column-averaged and optionally per-column).
-  3. (optional) Hex mosaic animations via FlyEye for model responses.
+  3. (optional) Hex mosaic animations via fly_eye.visualize_stimulus for
+     model responses.
 
-Usage:
-    python view_impulse_stimulus.py
-    python view_impulse_stimulus.py --model models/hand_tuned/model.pt
-    python view_impulse_stimulus.py --pulse-duration 0.05 --columns -1
-    python view_impulse_stimulus.py --hex --hex-cell-type T4a L1 --save-dir figures/
+``--model`` is a trained run folder or its model.pt. Figures go to
+<model_folder>/figures/view_impulse_stimulus unless ``--save-dir`` is given.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.view_impulse_stimulus --model models/<run>
+    python -m drosophila_model.analysis.model_analysis.view_impulse_stimulus --model models/<run> --pulse-duration 0.05 --columns -1
+    python -m drosophila_model.analysis.model_analysis.view_impulse_stimulus --model models/<run> --hex --hex-cell-type T4a L1
 """
 import argparse
 from pathlib import Path
-import sys
 
-import matplotlib
 from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
 
 from drosophila_model.model_definition import neural_models as nm
+from drosophila_model.analysis.model_analysis.analysis_utilities import central_column_index
 
 # ── Defaults ──────────────────────────────────────────────────────────
-DEFAULT_MODEL_PATH = "models/hand_tuned/model.pt"
 DEFAULT_PRE_STIM_TIME = 0.5     # seconds before pulse
 DEFAULT_POST_STIM_TIME = 2.0    # seconds after pulse
 DEFAULT_PULSE_DURATION = None    # None = single timestep
 DEFAULT_AMPLITUDE = 50.0
 
-INPUT_NEURONS = ["R1-6"]
-
 CELL_TYPE_GROUPS = {
-    "Photoreceptors":   ["R1-6"],
-    "Lamina (L1-L6)":   ["L1", "L2", "L3", "L4","L5"],
+    "Lamina (L1-L5)":   ["L1", "L2", "L3", "L4", "L5"],
     "Lamina (Other)":   ["Lai", "T1"],
     "C2 / C3":          ["C2", "C3"],
     "T4 inputs":        ["Mi1", "Tm3", "Mi4", "Mi9"],
-    "T5 inputs":        ["Tm1", "Tm2", "Tm4", "Tm9","CT1_L"],
+    "T5 inputs":        ["Tm1", "Tm2", "Tm4", "Tm9", "CT1_L"],
     "T4":               ["T4a", "T4b", "T4c", "T4d"],
     "T5":               ["T5a", "T5b", "T5c", "T5d"],
 }
-
-
-def _run_input_decomposition(model, stim_tensor, input_neurons, target_cell_type):
-    """Re-run model step-by-step, decomposing synaptic inputs to *target_cell_type*.
-
-    Returns dict mapping presynaptic type name to (batch, time, num_columns) tensor.
-    """
-    num_batches, num_time, _ = stim_tensor.shape
-
-    filtered_input = [n for n in input_neurons if n in model.unique_cell_types]
-    input_neuron_indices, input_column_indices = model.regions['optic_lobe'].get_shared_columns(filtered_input)
-    stim_to_cell_mapping = {
-        'neuron_index': torch.tensor(input_neuron_indices, device=model.device, dtype=torch.int64),
-        'stimulus_index': torch.tensor(input_column_indices, device=model.device, dtype=torch.int64),
-    }
-
-    v = model.steady_state.unsqueeze(0).expand(num_batches, -1)
-    filter_state = None
-    contributions = {}
-
-    for t in range(num_time):
-        u_t = stim_tensor[:, t, :]
-        if model.regions['optic_lobe'].use_input_conv:
-            u_t, filter_state = model.regions['optic_lobe'].apply_input_conv(u_t, filter_state)
-        v = model(v, u_t, stim_to_cell_mapping)
-        if model.use_layer_norm:
-            v = model.layer_norm(v)
-
-        decomp = model.decompose_synaptic_input(v, target_cell_type)
-        for pt, vals in decomp.items():
-            if pt not in contributions:
-                contributions[pt] = torch.full(
-                    (num_batches, num_time, model.regions['optic_lobe'].num_columns), float('nan'),
-                    device=model.device, dtype=model.dtype,
-                )
-            contributions[pt][:, t, :] = vals
-
-    return contributions
-
-
-def _central_column_index(sample_phi, sample_theta):
-    ref = np.array([0.0, 1.0, 0.0])
-    xyz = np.stack([
-        np.sin(sample_theta) * np.cos(sample_phi),
-        np.sin(sample_theta) * np.sin(sample_phi),
-        np.cos(sample_theta),
-    ], axis=1)
-    return int(np.argmax(xyz @ ref))
 
 
 def _make_impulse(n_columns, dt, pre_stim_time, post_stim_time,
                   pulse_duration, amplitude):
     """Build a full-field impulse stimulus array.
 
-    Returns (time, columns) array and the index of pulse onset.
+    Returns the (time, columns) array and the pulse length in time steps
+    (one step when ``pulse_duration`` is None).
     """
     pre_steps = int(round(pre_stim_time / dt))
     if pulse_duration is None:
@@ -113,7 +65,7 @@ def _make_impulse(n_columns, dt, pre_stim_time, post_stim_time,
 
     stim = np.zeros((total_steps, n_columns), dtype=np.float64)
     stim[pre_steps:pre_steps + pulse_steps, :] = amplitude
-    return stim, pre_steps
+    return stim, pulse_steps
 
 
 def main():
@@ -121,8 +73,8 @@ def main():
         description="Visualize full-field impulse stimuli and model responses."
     )
     parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL_PATH,
-        help="Path to saved model .pt file.",
+        "--model", type=str, required=True,
+        help="Trained run folder or its model.pt.",
     )
     parser.add_argument(
         "--pre-stim-time", type=float, default=DEFAULT_PRE_STIM_TIME,
@@ -138,15 +90,11 @@ def main():
     )
     parser.add_argument(
         "--amplitude", type=float, default=DEFAULT_AMPLITUDE,
-        help="Pulse amplitude (default 1.0).",
+        help=f"Pulse amplitude (default {DEFAULT_AMPLITUDE}).",
     )
-    readout_group = parser.add_mutually_exclusive_group()
-    readout_group.add_argument(
+    parser.add_argument(
         "--show-voltage", action="store_const", const="voltage", dest="readout",
-    )
-    readout_group.add_argument(
-        "--show-synaptic-current", action="store_const", const="synaptic_current",
-        dest="readout",
+        help="Plot raw voltage (pre-activation) instead of firing rate.",
     )
     parser.set_defaults(readout="firing_rate")
     parser.add_argument(
@@ -155,17 +103,13 @@ def main():
     )
     parser.add_argument(
         "--save-dir", type=str, default=None,
-        help="Save figures to this directory instead of showing interactively "
+        help="Directory to save figures and animations "
              "(default: <model_folder>/figures/view_impulse_stimulus).",
     )
     parser.add_argument(
-        "--show-inputs-to", type=str, default=None, metavar="CELL_TYPE",
-        help="Decompose and plot per-presynaptic-type synaptic inputs "
-             "to this cell type (e.g. --show-inputs-to T4a).",
-    )
-    parser.add_argument(
         "--hex", action="store_true",
-        help="Render hex mosaic animations of model responses.",
+        help="Render hex mosaic animations of model responses "
+             "(requires --hex-cell-type).",
     )
     parser.add_argument(
         "--hex-fps", type=int, default=30,
@@ -177,17 +121,18 @@ def main():
              "(e.g. --hex-cell-type T4a L1).  Requires --hex.",
     )
     args = parser.parse_args()
+    if bool(args.hex) != bool(args.hex_cell_type):
+        parser.error("--hex and --hex-cell-type must be given together.")
 
     # ── Load model ────────────────────────────────────────────────────
-    print(f"Loading model from {args.model} …")
+    print(f"Loading model from {args.model} ...")
     model = nm.BaseRnn.load(args.model)
-    print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, "
-          f"omega={model.get_omega():.4f}")
+    print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types")
 
-    if args.save_dir is None:
-        model_path = Path(args.model)
-        model_folder = model_path.parent if model_path.is_file() else model_path
-        args.save_dir = str(model_folder / "figures" / "view_impulse_stimulus")
+    model_path = Path(args.model)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    save_dir = (Path(args.save_dir) if args.save_dir
+                else model_folder / "figures" / "view_impulse_stimulus")
 
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
@@ -199,13 +144,13 @@ def main():
     )
     output_types = [ct for ct in output_types if ct in model.unique_cell_types]
 
-    center_col = _central_column_index(
+    center_col = central_column_index(
         np.asarray(sample_phi), np.asarray(sample_theta)
     )
 
     # ── Build impulse stimuli ─────────────────────────────────────────
     amp = abs(args.amplitude)
-    inc_stim, onset_idx = _make_impulse(
+    inc_stim, pulse_steps = _make_impulse(
         n_columns, dt, args.pre_stim_time, args.post_stim_time,
         args.pulse_duration, amplitude=amp,
     )
@@ -221,20 +166,15 @@ def main():
     stim_tensor = torch.tensor(stim_batch, device=model.device, dtype=model.dtype)
     time_axis = np.arange(stim_batch.shape[1]) * dt - args.pre_stim_time
 
-    pulse_steps = 1 if args.pulse_duration is None else max(1, int(round(args.pulse_duration / dt)))
     pulse_dur_actual = pulse_steps * dt
-    print(f"  Impulse: amplitude=±{amp}, pulse={pulse_dur_actual*1000:.1f} ms "
+    print(f"  Impulse: amplitude=+/-{amp}, pulse={pulse_dur_actual*1000:.1f} ms "
           f"({pulse_steps} steps)")
     print(f"  {stim_batch.shape[1]} timesteps, {n_columns} columns")
 
     # ── Run model ─────────────────────────────────────────────────────
-    print("Running model …")
+    print("Running model ...")
     with torch.no_grad():
-        result = model.predict(
-            stim_tensor,
-            input_neurons=INPUT_NEURONS,
-            output_neurons=output_types,
-        )
+        result = model.predict(stim_tensor, output_neurons=output_types)
     outputs = result["outputs"]["optic_lobe"]
 
     # ── Resolve column indices ────────────────────────────────────────
@@ -298,7 +238,9 @@ def main():
 
             ax.axvline(0, color="gray", linewidth=0.5, linestyle=":")
             ax.axhline(0, color="gray", linewidth=0.5, linestyle=":")
-            ax.legend(fontsize=6, loc="upper right")
+            # Groups whose cell types are all absent from the model stay empty.
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(fontsize=6, loc="upper right")
             if row == 0:
                 ax.set_title(cond_name, fontsize=11, fontweight="bold")
             if ci == 0:
@@ -343,7 +285,8 @@ def main():
 
             ax.axvline(0, color="gray", linewidth=0.5, linestyle=":")
             ax.axhline(0, color="gray", linewidth=0.5, linestyle=":")
-            ax.legend(fontsize=6, loc="upper right")
+            if ax.get_legend_handles_labels()[0]:
+                ax.legend(fontsize=6, loc="upper right")
             if row == 0:
                 ax.set_title(cond_name, fontsize=11, fontweight="bold")
             if ci == 0:
@@ -365,83 +308,19 @@ def main():
     )
     plt.tight_layout()
 
-    # ── Figure 4 (optional): decomposed synaptic inputs ─────────────
-    fig_decomp = None
-    if args.show_inputs_to:
-        target_ct = args.show_inputs_to
-        if not hasattr(model, 'decompose_synaptic_input'):
-            print(f"  Input decomposition not supported for {type(model).__name__}")
-        elif target_ct not in model.unique_cell_types:
-            print(f"  Cell type '{target_ct}' not found in model")
-        else:
-            print(f"Decomposing synaptic inputs to {target_ct} …")
-            with torch.no_grad():
-                contributions = _run_input_decomposition(
-                    model, stim_tensor, INPUT_NEURONS, target_ct,
-                )
-            if not contributions:
-                print(f"  No synaptic inputs found for {target_ct}")
-            else:
-                # Sort presynaptic types by peak column-mean magnitude
-                peak_mag = {}
-                for pt, vals in contributions.items():
-                    mean_trace = torch.nanmean(vals, dim=2).cpu().numpy()
-                    peak_mag[pt] = np.max(np.abs(mean_trace))
-                sorted_types = sorted(peak_mag, key=lambda k: peak_mag[k],
-                                      reverse=True)
-
-                fig_decomp, axes_decomp = plt.subplots(
-                    1, n_conds, figsize=(5 * n_conds, 4), squeeze=False,
-                )
-                for ci, cond_name in enumerate(cond_names):
-                    ax = axes_decomp[0, ci]
-                    for pt in sorted_types:
-                        trace = torch.nanmean(
-                            contributions[pt][ci], dim=1,
-                        ).cpu().numpy()
-                        ax.plot(time_axis, trace, label=pt, linewidth=1.2)
-                    ax.axvline(0, color="gray", linewidth=0.5, linestyle=":")
-                    ax.axhline(0, color="gray", linewidth=0.5, linestyle=":")
-                    ax.legend(fontsize=7, loc="best")
-                    ax.set_title(cond_name, fontsize=11, fontweight="bold")
-                    ax.set_xlabel("Time (s)")
-                    if ci == 0:
-                        ax.set_ylabel("Synaptic input")
-
-                # Unify y-axis across conditions
-                ylims = [axes_decomp[0, ci].get_ylim() for ci in range(n_conds)]
-                ymin = min(lo for lo, _ in ylims)
-                ymax = max(hi for _, hi in ylims)
-                for ci in range(n_conds):
-                    axes_decomp[0, ci].set_ylim(ymin, ymax)
-
-                fig_decomp.suptitle(
-                    f"Synaptic inputs to {target_ct} — ±{amp}, "
-                    f"{pulse_dur_actual*1000:.1f} ms pulse",
-                    fontsize=13, fontweight="bold",
-                )
-                plt.tight_layout()
-
-    # ── Save or show static figures ──────────────────────────────────
-    if args.save_dir:
-        save_dir = Path(args.save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        stim_path = save_dir / f"impulse_stimulus_{pulse_dur_actual*1000:.0f}ms.png"
-        resp_path = save_dir / f"impulse_responses_{pulse_dur_actual*1000:.0f}ms.png"
-        rms_path = save_dir / f"impulse_responses_rms_{pulse_dur_actual*1000:.0f}ms.png"
-        fig_stim.savefig(stim_path, dpi=150)
-        fig_resp.savefig(resp_path, dpi=150)
-        fig_rms.savefig(rms_path, dpi=150)
-        print(f"Saved: {stim_path}")
-        print(f"Saved: {resp_path}")
-        print(f"Saved: {rms_path}")
-        if fig_decomp is not None:
-            decomp_path = save_dir / f"impulse_inputs_to_{args.show_inputs_to}_{pulse_dur_actual*1000:.0f}ms.png"
-            fig_decomp.savefig(decomp_path, dpi=150)
-            print(f"Saved: {decomp_path}")
-        plt.close("all")
-    else:
-        plt.show()
+    # ── Save static figures ───────────────────────────────────────────
+    pulse_tag = f"{pulse_dur_actual*1000:.0f}ms"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    stim_path = save_dir / f"impulse_stimulus_{pulse_tag}.png"
+    resp_path = save_dir / f"impulse_responses_{pulse_tag}.png"
+    rms_path = save_dir / f"impulse_responses_rms_{pulse_tag}.png"
+    fig_stim.savefig(stim_path, dpi=150)
+    fig_resp.savefig(resp_path, dpi=150)
+    fig_rms.savefig(rms_path, dpi=150)
+    print(f"Saved: {stim_path}")
+    print(f"Saved: {resp_path}")
+    print(f"Saved: {rms_path}")
+    plt.close("all")
 
     # ── Hex mosaic animations ─────────────────────────────────────────
     if args.hex:
@@ -458,40 +337,33 @@ def main():
         frame_idx = np.arange(0, n_total, step)
         frame_times = frame_idx * dt - args.pre_stim_time
 
-        save_dir = Path(args.save_dir) if args.save_dir else None
+        for ci, cond_name in enumerate(cond_names):
+            safe_name = cond_name.lower()
 
-        if args.hex_cell_type:
-            for cond_name in cond_names:
-                ci = cond_names.index(cond_name)
-                safe_name = cond_name.lower()
+            for ct in args.hex_cell_type:
+                if ct not in outputs[readout_key]:
+                    print(f"  Warning: cell type '{ct}' not in outputs, skipping.")
+                    continue
+                resp_full = outputs[readout_key][ct][ci].cpu().numpy()
+                resp_frames = resp_full[frame_idx]
+                resp_titles = [
+                    f"{cond_name} — {ct} {readout_label}  t={t:.3f}s"
+                    for t in frame_times
+                ]
+                resp_filename = str(
+                    save_dir / f"impulse_hex_{ct}_{safe_name}_{pulse_tag}.mp4"
+                )
 
-                for ct in args.hex_cell_type:
-                    if ct not in outputs[readout_key]:
-                        print(f"  Warning: cell type '{ct}' not in outputs, skipping.")
-                        continue
-                    resp_full = outputs[readout_key][ct][ci].cpu().numpy()
-                    resp_frames = resp_full[frame_idx]
-                    resp_titles = [
-                        f"{cond_name} — {ct} {readout_label}  t={t:.3f}s"
-                        for t in frame_times
-                    ]
-
-                    resp_filename = None
-                    if save_dir:
-                        resp_filename = str(
-                            save_dir / f"impulse_hex_{ct}_{safe_name}_{pulse_dur_actual*1000:.0f}ms.mp4"
-                        )
-
-                    print(f"  Hex response: {ct} / {cond_name} "
-                          f"({len(frame_idx)} frames @ {target_fps} fps)")
-                    visualize_column_responses(
-                        column_p_q, resp_frames,
-                        colormap=mpl_cm.coolwarm(np.linspace(0, 1, 256)),
-                        fps=target_fps,
-                        filename=resp_filename,
-                        plot=(save_dir is None),
-                        titles=resp_titles,
-                    )
+                print(f"  Hex response: {ct} / {cond_name} "
+                      f"({len(frame_idx)} frames @ {target_fps} fps)")
+                visualize_column_responses(
+                    column_p_q, resp_frames,
+                    colormap=mpl_cm.coolwarm(np.linspace(0, 1, 256)),
+                    fps=target_fps,
+                    filename=resp_filename,
+                    plot=False,
+                    titles=resp_titles,
+                )
 
 
 if __name__ == "__main__":

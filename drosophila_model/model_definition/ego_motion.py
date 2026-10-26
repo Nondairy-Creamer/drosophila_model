@@ -3,15 +3,14 @@ and the forward direction (synthetic optic flow from ego-motion).
 
 Pure-tensor helpers with one disk read (``load_viewing_directions``). Consumed
 by :class:`regions.OpticLobeRegion` (the only region with optic flow), the
-ego-motion test suite, ``stimulus_utilities`` (for ground-truth flow), and
-analysis / movie scripts that need to integrate target trajectories.
+ego-motion test suite, ``data_handling.stimulus_generators`` (for ground-truth
+flow), and analysis / movie scripts that need to integrate target trajectories.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -574,24 +573,27 @@ def integrate_translational_velocity(v, omega_deg, dt):
 
 
 def load_viewing_directions(data_folder: str | Path | None = None):
-    """Load optic-lobe column phi/theta and stack both hemispheres.
+    """Load optic-lobe column phi/theta and stack both eyes.
+
+    Reads every right-eye column of ``optic_lobe_columns.parquet`` in
+    ``column_index`` order, the same column set and order as
+    ``OpticLobeRegion`` and the baked stimuli.
 
     Args:
         data_folder: Path to the data root containing ``connectome_data/``.
-            When ``None``, falls back to
-            ``load_config()['data']['data_folder']``.
+            When ``None``, uses ``[data].data_folder`` of ``config.toml``.
 
     Returns:
-        phi, theta: ``(2*N_columns,)`` tensors, with the second half
-        mirrored across the midline (``-phi``).
+        phi, theta: ``(2*N_columns,)`` float32 tensors: the right-eye columns,
+        then their mirror across the midline (``-phi``) for the left eye.
     """
     if data_folder is None:
-        from drosophila_model.config import load_config
-        data_folder = load_config()['data']['data_folder']
+        from drosophila_model.config import get_data_folder, load_config
+        data_folder = get_data_folder(load_config())
     data_folder = Path(data_folder)
     column_info_df = pd.read_parquet(
         data_folder / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
-    )
+    ).sort_values('column_index')
 
     theta_half = torch.tensor(column_info_df['theta'].values, dtype=torch.float32)
     phi_half = torch.tensor(column_info_df['phi'].values, dtype=torch.float32)

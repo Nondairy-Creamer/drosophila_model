@@ -2,63 +2,21 @@
 Compute and plot the azimuthal spatial power spectrum of the natural panoramas.
 
 Shows where the model's sine-wave test wavelengths (e.g. 30 deg, 60 deg) sit
-relative to the energy distribution of natural scenes.
+relative to the energy distribution of natural scenes. Reads the baked
+``<data_folder>/stimulus/baked/all_panoramic.pt``.
 
-Usage:
-    python view_spatial_frequency.py
-    python view_spatial_frequency.py --max-panos 10
-    python view_spatial_frequency.py --wavelengths 15 30 60 90
-    python view_spatial_frequency.py --save figures/view_spatial_frequency/spatial_frequency.png
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.view_spatial_frequency
+    python -m drosophila_model.analysis.model_analysis.view_spatial_frequency --max-panos 10
+    python -m drosophila_model.analysis.model_analysis.view_spatial_frequency --wavelengths 15 30 60 90
 """
 import argparse
 from pathlib import Path
-import sys
 
-import matplotlib
 from matplotlib import pyplot as plt
 import numpy as np
-import torch
 
-from drosophila_model.config import load_config
-
-
-def _load_all_panos():
-    """Load (N, H, W) panoramas from the consolidated .pt file."""
-    pt_path = (
-        Path(load_config()['data']['data_folder'])
-        / 'stimulus' / 'raw' / 'all_panoramic.pt'
-    )
-    if not pt_path.exists():
-        raise FileNotFoundError(
-            f"Consolidated panoramic file not found at {pt_path.resolve()}. "
-            "Please run the consolidation step first."
-        )
-    panos = torch.load(pt_path, weights_only=True)
-    return panos.numpy().astype(np.float64)
-
-
-def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
-    """Gaussian low-pass + [0,1] normalization (mirrors stimulus_utilities._filter_pano)."""
-    from scipy.ndimage import gaussian_filter
-
-    pano_y_lim = -np.array([47, -58]) * np.pi / 180 + np.pi / 2
-    pano_x_lim = np.array([np.pi, -np.pi])
-
-    pano_height, pano_width = pano.shape
-    y_pixels_per_rad = pano_height / (pano_y_lim[1] - pano_y_lim[0])
-    x_pixels_per_rad = pano_width / (pano_x_lim[0] - pano_x_lim[1])
-    sigma_y = filter_std_rad * y_pixels_per_rad
-    sigma_x = filter_std_rad * x_pixels_per_rad
-
-    pano_out = gaussian_filter(
-        pano.astype(np.float64), sigma=[sigma_y, sigma_x], mode=['nearest', 'wrap']
-    )
-    pano_min, pano_max = pano_out.min(), pano_out.max()
-    if pano_max > pano_min:
-        pano_out = (pano_out - pano_min) / (pano_max - pano_min)
-    else:
-        pano_out = np.zeros_like(pano_out)
-    return pano_out
+from drosophila_model.data_handling.stimulus_generators import _filter_pano, _load_all_panos
 
 
 def azimuthal_power_spectrum(pano):
@@ -95,17 +53,15 @@ def main():
         help="Wavelengths (degrees) to mark on the plot.",
     )
     parser.add_argument(
-        "--save", type=str, default=None,
-        help="Save figure to this path instead of showing interactively "
+        "--save", type=str,
+        default="figures/view_spatial_frequency/spatial_frequency.png",
+        help="Path to save the figure "
              "(default: figures/view_spatial_frequency/spatial_frequency.png).",
     )
     args = parser.parse_args()
 
-    if args.save is None:
-        args.save = "figures/view_spatial_frequency/spatial_frequency.png"
-
     # ── Load panoramas ────────────────────────────────────────────────
-    print("Loading panoramas …")
+    print("Loading panoramas ...")
     all_panos = _load_all_panos()
     total, H, W = all_panos.shape
 
@@ -128,13 +84,13 @@ def main():
     wavelength_deg = 360.0 / freq_bins
 
     # ── Compute spectra ───────────────────────────────────────────────
-    print("Computing power spectra …")
+    print("Computing power spectra ...")
     raw_powers = np.zeros(n_freq)
     filt_powers = np.zeros(n_freq)
 
     for i in range(n_panos):
         raw_powers += azimuthal_power_spectrum(panos[i])
-        filt_powers += azimuthal_power_spectrum(_filter_pano(panos[i]))
+        filt_powers += azimuthal_power_spectrum(_filter_pano(panos[i])[0])
     raw_powers /= n_panos
     filt_powers /= n_panos
 
@@ -161,14 +117,11 @@ def main():
     ax.grid(True, which="both", alpha=0.3)
     plt.tight_layout()
 
-    if args.save:
-        save_path = Path(args.save)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-        print(f"Figure saved to {save_path}")
-    else:
-        plt.show()
+    save_path = Path(args.save)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"Figure saved to {save_path}")
 
 
 if __name__ == "__main__":

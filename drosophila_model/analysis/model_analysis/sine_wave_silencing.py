@@ -2,14 +2,17 @@
 
 Runs :func:`sine_wave_sweep.run_sine_wave_sweep` once without silencing
 (baseline) and then for each silencing configuration.  For every silenced
-condition a bar chart shows the relative mean response amplitude of each
-cell type compared to the unsilenced baseline.
+condition a bar chart shows each cell type's modulation ratio relative to the
+unsilenced baseline.  The modulation ratio of a cell type is
+``(max + 0.05) / (min + 0.05)`` of its mean responses across directions and
+temporal frequencies, computed per wavelength.
 
-Usage:
-    python analysis/sine_wave_silencing.py models/best_cells_30hz/
+Cell types the model lacks are dropped from the silencing configurations.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.sine_wave_silencing models/<run_folder>
 """
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -19,7 +22,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
-from sine_wave_sweep import run_sine_wave_sweep
+from drosophila_model.analysis.model_analysis.sine_wave_sweep import run_sine_wave_sweep
 
 # ── Silencing configurations ─────────────────────────────────────────
 SILENCING_CONFIGS = [
@@ -29,7 +32,6 @@ SILENCING_CONFIGS = [
     ['L3'],
     ['Y1'],
     ['L1', 'L2'],
-    # ['L1', 'L2', 'L3'],
     ['Mi9', 'Mi4'],
     ['Mi9', 'Mi4', 'CT1_M'],
     ['Mi9', 'Mi4', 'CT1_M', 'C3'],
@@ -47,46 +49,75 @@ SILENCING_CONFIGS = [
     ['C3'],
     ['C2', 'C3'],
     ['CT1_M'],
-    # ['T4a'],
-    # ['T4b'],
-    # ['T4c'],
-    # ['T4d'],
-    # ['T5a'],
-    # ['T5b'],
-    # ['T5c'],
-    # ['T5d'],
 ]
 
+# Offset that keeps the modulation ratio finite for near-zero responses.
+MODULATION_OFFSET = 0.05
 
-def _config_label(silenced):
+
+def config_label(silenced):
     """Human-readable label for a silencing configuration."""
     if not silenced:
         return 'baseline'
     return 'silence_' + '+'.join(silenced)
 
 
-def _response_amplitude_per_wavelength(cell_results_ct):
-    """(max + 0.05) / (min + 0.05) across directions/frequencies, per wavelength."""
+def present_silencing_configs(configs, cell_types):
+    """Restrict silencing configurations to the cell types the model has.
+
+    Configurations left empty are skipped (the baseline ``[]`` is kept), and
+    configurations that collapse onto an earlier one are dropped, so labels
+    always name what was actually silenced.
+    """
+    present = set(cell_types)
+    kept_configs = []
+    for config in configs:
+        kept = [ct for ct in config if ct in present]
+        missing = [ct for ct in config if ct not in present]
+        if config and not kept:
+            print(f'Skipping silencing of {"+".join(config)}: '
+                  'none of these cell types are in the model.')
+            continue
+        if kept in kept_configs:
+            print(f'Skipping silencing of {"+".join(config)}: same as '
+                  f'{config_label(kept)} in this model.')
+            continue
+        if missing:
+            print(f'Silencing {"+".join(kept)} instead of {"+".join(config)} '
+                  f'(not in the model: {", ".join(missing)}).')
+        kept_configs.append(kept)
+    return kept_configs
+
+
+def _modulation_ratio_per_wavelength(cell_results_ct):
+    """Per wavelength: (max + offset) / (min + offset) of the mean responses.
+
+    Max and min run over all directions and temporal frequencies.  The ratio
+    is NaN when ``min + offset <= 0`` (possible for non-ReLU nonlinearities).
+    """
     wavelength_vals = {}
     for dir_dict in cell_results_ct.values():
         for wl, arr in dir_dict.items():
             wavelength_vals.setdefault(wl, []).append(arr)
-    return {wl: float((np.max(np.concatenate(arrs)) + 0.05)
-                       / (np.min(np.concatenate(arrs)) + 0.05))
-            for wl, arrs in wavelength_vals.items()}
+    ratios = {}
+    for wl, arrs in wavelength_vals.items():
+        vals = np.concatenate(arrs)
+        denom = np.min(vals) + MODULATION_OFFSET
+        ratios[wl] = (float((np.max(vals) + MODULATION_OFFSET) / denom)
+                      if denom > 0 else np.nan)
+    return ratios
 
 
 def relative_response_ratio(baseline_results_ct, silenced_results_ct):
-    """Single cell type: mean over wavelengths of (silenced range / baseline range)."""
-    base_ranges = _response_amplitude_per_wavelength(baseline_results_ct)
-    sil_ranges = _response_amplitude_per_wavelength(silenced_results_ct)
-    per_wl_ratios = []
-    for wl in base_ranges:
-        if base_ranges[wl] > 0:
-            per_wl_ratios.append(sil_ranges.get(wl, 0.0) / base_ranges[wl])
-        else:
-            per_wl_ratios.append(0.0)
-    return float(np.mean(per_wl_ratios))
+    """Single cell type: mean over wavelengths of silenced / baseline modulation ratio.
+
+    Wavelengths whose ratio is undefined are skipped; NaN if none is defined.
+    """
+    base_ratios = _modulation_ratio_per_wavelength(baseline_results_ct)
+    sil_ratios = _modulation_ratio_per_wavelength(silenced_results_ct)
+    per_wl = [sil_ratios.get(wl, np.nan) / base_ratios[wl] for wl in base_ratios]
+    per_wl = [r for r in per_wl if np.isfinite(r)]
+    return float(np.mean(per_wl)) if per_wl else np.nan
 
 
 def _mean_response_over_direction(cell_results_ct, direction):
@@ -120,12 +151,12 @@ def direction_selectivity_index(cell_results_ct, subtype_letter):
     raise ValueError(f'Unknown subtype letter: {subtype_letter!r}')
 
 
-def plot_relative_amplitudes(baseline_results, silenced_results,
+def plot_relative_modulation(baseline_results, silenced_results,
                              silenced_neurons, output_path):
-    """Bar chart of per-cell-type response range relative to baseline."""
+    """Bar chart of per-cell-type modulation ratio relative to baseline."""
     common_types = sorted(set(baseline_results) & set(silenced_results))
     if not common_types:
-        print('  No overlapping cell types to compare — skipping plot.')
+        print('  No overlapping cell types to compare - skipping plot.')
         return
 
     ratios = []
@@ -139,7 +170,7 @@ def plot_relative_amplitudes(baseline_results, silenced_results,
     ax.axhline(1.0, color='k', linewidth=0.8, linestyle='--')
     ax.set_xticks(x)
     ax.set_xticklabels(common_types, rotation=45, ha='right', fontsize=8)
-    ax.set_ylabel('Relative response ratio')
+    ax.set_ylabel('Relative modulation ratio')
     ax.set_title(f'Silenced: {"+".join(silenced_neurons)}')
     ax.set_ylim(0, 2)
 
@@ -156,7 +187,7 @@ def plot_t4_t5_ds_vs_ratio(
         output_root,
         family,
 ):
-    """Scatter: relative response ratio (x) vs direction selectivity (y) per subtype.
+    """Scatter: relative modulation ratio (x) vs direction selectivity (y) per subtype.
 
     ``family`` is ``'T4'`` or ``'T5'``. Includes baseline at ratio 1.0 (large markers)
     plus one point per silencing experiment (smaller markers).
@@ -169,7 +200,7 @@ def plot_t4_t5_ds_vs_ratio(
     y_base = {}
 
     for config in silencing_configs:
-        label = _config_label(config)
+        label = config_label(config)
         silenced_results = all_results.get(label, {})
         is_baseline = not config
         exp_name = '+'.join(config) if config else ''
@@ -183,7 +214,7 @@ def plot_t4_t5_ds_vs_ratio(
                 ratio = relative_response_ratio(baseline_results[st],
                                                 silenced_results[st])
             ds = direction_selectivity_index(silenced_results[st], letter)
-            if not np.isfinite(ds):
+            if not (np.isfinite(ds) and np.isfinite(ratio)):
                 continue
             if is_baseline:
                 x_base[st] = ratio
@@ -194,7 +225,7 @@ def plot_t4_t5_ds_vs_ratio(
                 exp_tags[st].append(exp_name)
 
     if not x_base and not any(xs[st] for st in subtypes):
-        print(f'  No T4/T5 data for {family} DS scatter — skipping.')
+        print(f'  No T4/T5 data for {family} DS scatter - skipping.')
         return
 
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -239,9 +270,9 @@ def plot_t4_t5_ds_vs_ratio(
 
     ax.axhline(0.0, color='gray', linewidth=0.6, linestyle=':')
     ax.axvline(1.0, color='k', linewidth=0.7, linestyle='--', alpha=0.7)
-    ax.set_xlabel('Relative response ratio (silenced / baseline)')
+    ax.set_xlabel('Relative modulation ratio (silenced / baseline)')
     ax.set_ylabel('Direction selectivity index')
-    ax.set_title(f'{family}: DS vs relative amplitude')
+    ax.set_title(f'{family}: DS vs relative modulation ratio')
     ax.legend(loc='best', fontsize=9)
     ax.set_ylim(-1.05, 1.05)
 
@@ -273,10 +304,12 @@ def main():
     output_root = (Path(args.output_dir) if args.output_dir
                    else model_folder / 'figures' / 'sine_wave_silencing')
 
+    configs = present_silencing_configs(SILENCING_CONFIGS, model.unique_cell_types)
+
     # ── Run each silencing configuration ─────────────────────────────
     all_results = {}
-    for config in SILENCING_CONFIGS:
-        label = _config_label(config)
+    for config in configs:
+        label = config_label(config)
         sub_dir = output_root / label
         print(f'\n{"=" * 60}')
         print(f'Running: {label}')
@@ -290,24 +323,24 @@ def main():
         )
         all_results[label] = cell_results
 
-    # ── Relative-amplitude comparison plots ──────────────────────────
+    # ── Relative modulation-ratio comparison plots ───────────────────
     baseline_results = all_results.get('baseline', {})
     if not baseline_results:
-        print('Baseline run produced no results — cannot compute ratios.')
+        print('Baseline run produced no results - cannot compute ratios.')
         return
 
-    for config in SILENCING_CONFIGS:
+    for config in configs:
         if not config:
             continue
-        label = _config_label(config)
+        label = config_label(config)
         silenced_results = all_results.get(label, {})
-        out_path = output_root / f'relative_amplitude_{label}.png'
-        plot_relative_amplitudes(baseline_results, silenced_results, config,
-                                out_path)
+        out_path = output_root / f'relative_modulation_{label}.png'
+        plot_relative_modulation(baseline_results, silenced_results, config,
+                                 out_path)
 
-    plot_t4_t5_ds_vs_ratio(baseline_results, all_results, SILENCING_CONFIGS,
+    plot_t4_t5_ds_vs_ratio(baseline_results, all_results, configs,
                            output_root, 'T4')
-    plot_t4_t5_ds_vs_ratio(baseline_results, all_results, SILENCING_CONFIGS,
+    plot_t4_t5_ds_vs_ratio(baseline_results, all_results, configs,
                            output_root, 'T5')
 
     print('\nAll silencing experiments complete.')

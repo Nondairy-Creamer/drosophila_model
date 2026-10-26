@@ -1,19 +1,24 @@
 """ORN vs PN odor-identity decoding from a CurrentDivisive AL model.
 
-Runs an antenna-lobe-only ConnectomeModel with ``CurrentDivisiveDynamics``
-against ``NUM_ODORS`` sparse non-negative odor patterns. Each odor is
-presented ``NUM_TRIALS`` times at independent log-uniform concentrations
-(spanning ``LOG_INT_HI - LOG_INT_LO`` decades) plus additive input noise.
+Runs an antenna-lobe-only ConnectomeModel (``DYNAMICS_TYPE``, default
+``CurrentDivisiveDynamics``) against ``NUM_ODORS`` sparse non-negative odor
+patterns. Each odor is presented ``NUM_TRIALS`` times at independent
+log-uniform concentrations (spanning ``LOG_INT_HI - LOG_INT_LO`` decades);
+optional per-step input noise is set by ``INPUT_NOISE_STD`` (0 = off).
 Odor identity is decoded from type-averaged firing rates of (a) ORNs and
 (b) PNs using multinomial logistic regression.
 
-Outputs a 3-panel figure: overall held-out accuracy, accuracy binned by
-log10 concentration, and per-cell-type concentration tuning for one demo
-odor.
+Writes to ``figures/antenna_lobe_decoding/``: a 3-panel figure (overall
+accuracy, accuracy binned by log10 concentration, per-cell-type
+concentration tuning for one demo odor) for the held-out split and for the
+training split, plus ORN/PN time traces for the demo odor.
 
 This script does not save the model or the activity tensors. It's a
 single-shot analysis of how much odor-identity information survives the
 ORN -> AL -> PN transformation under the divisive-normalisation dynamics.
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.antenna_lobe_decoding
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.model_definition import connectome_loading as cl
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.model_definition import regions as regions_mod
@@ -114,19 +119,6 @@ DYNAMICS_TYPE = 'CurrentDivisiveDynamics'
 # ``initialize_parameters``. ConductanceDynamics is intentionally absent:
 # its biophysical defaults are already sensible and on a different scale.
 _CURRENT_FAMILY = ('CurrentDynamics', 'CurrentDivisiveDynamics')
-# DYNAMICS_TYPE = 'CurrentDynamics'
-
-# Minimum cells-per-type to include a PN-substring type in the readout.
-# Region default is 5; lowering to 2 recovers the long tail of singleton
-# / doubleton PN types so PN feature dim matches ORN's.
-MIN_CELLS_PER_PN_TYPE = 5
-
-# Device/dtype come from the local config (config.toml overlaying
-# config_default.toml) via load_config(), so the GPU/CPU choice is set in
-# one place — config['model']['device'] — rather than hard-coded here.
-_CONFIG = load_config()
-DEVICE = _CONFIG['model']['device']
-DTYPE = _CONFIG['model']['dtype']
 
 # Concentration-binned accuracy and demo concentration sweep.
 N_CONC_BINS = 8
@@ -137,9 +129,8 @@ DEMO_ODOR_IDX = 0
 # is going to happen is in the fully-engaged regime.
 TRACE_LOG_INT = 1.0
 
-# Project root is two levels up from drosophila_model/analysis/model_analysis/.
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-OUT_DIR = _PROJECT_ROOT / 'figures' / 'antenna_lobe_decoding'
+# Relative to the working directory (run from the repo root).
+OUT_DIR = Path('figures') / 'antenna_lobe_decoding'
 OUT_PNG = OUT_DIR / 'decoding_accuracy.png'
 OUT_PNG_TRAIN = OUT_DIR / 'decoding_accuracy_train.png'
 OUT_PNG_TRACES = OUT_DIR / 'time_traces.png'
@@ -148,9 +139,14 @@ ORN_COLOR = '#d35'
 PN_COLOR = '#3a9'
 
 
-def build_model():
-    """Compose ``DYNAMICS_TYPE`` + AntennaLobeRegion and return it."""
-    data_folder = _CONFIG['data']['data_folder']
+def build_model(config):
+    """Compose ``DYNAMICS_TYPE`` + AntennaLobeRegion and return it.
+
+    ``config`` is the local :func:`load_config` dict: it supplies the data
+    folder, the device/dtype and ``[model].synapse_count_threshold`` (used for
+    both region membership and the dynamics matrix).
+    """
+    count_threshold = config['model']['synapse_count_threshold']
 
     region_specs = {
         'antenna_lobe': {
@@ -162,21 +158,24 @@ def build_model():
 
     connectome = cl.load_connectome(
         region_specs=region_specs,
-        data_folder=data_folder,
-        count_threshold=2,
+        data_folder=get_data_folder(config),
+        count_threshold=count_threshold,
     )
 
     ModelClass = nm.compose_model_class(DYNAMICS_TYPE)
     model = ModelClass(
         connectome=connectome,
         nonlinearity='ReLU',
-        count_threshold=2,
+        count_threshold=count_threshold,
         use_layer_norm=False,
-        device=DEVICE,
-        dtype=DTYPE,
+        device=config['model']['device'],
+        dtype=config['model']['dtype'],
         region_kwargs=region_kwargs,
         dt=DT,
         seed=SEED,
+        # The current/divisive family gets its gains pinned by
+        # initialize_parameters, so set_sigma_max would be thrown away.
+        init_new_model=DYNAMICS_TYPE not in _CURRENT_FAMILY,
     )
     # Pure inference: freeze every parameter so autograd doesn't waste
     # memory tracking the per-trial unrolls. Mirrors what
@@ -184,27 +183,6 @@ def build_model():
     for param in model.parameters():
         param.requires_grad_(False)
     return model
-
-
-def expand_pn_output_types(model, min_cells=MIN_CELLS_PER_PN_TYPE):
-    """Override ``region.default_output_neurons`` with every PN-substring
-    cell type in the AL slice that has at least ``min_cells`` cells.
-
-    The region's own default uses ``_MIN_CELLS_PER_TYPE = 5`` which
-    drops most uniglomerular PNs (one per glomerulus) because they
-    typically appear as singletons or doubletons in the connectome's
-    upstream typing. Lowering to ``2`` recovers the full PN census so
-    PN decoding has comparable feature dimensionality to ORN decoding.
-    """
-    region = model.regions['antenna_lobe']
-    slice_types = model.cell_types[region.cell_indices.cpu().numpy()]
-    unique_types, type_counts = np.unique(slice_types, return_counts=True)
-    pn_types = sorted(
-        str(t) for t, c in zip(unique_types, type_counts)
-        if c >= min_cells and region._PN_SUBSTRING in str(t)
-    )
-    region.default_output_neurons = pn_types
-    return pn_types
 
 
 def initialize_parameters(
@@ -218,7 +196,8 @@ def initialize_parameters(
 ):
     """Pin all per-cell-type dynamics parameters to uniform values.
 
-    Skips ``set_sigma_max`` and instead pins ``input_strength`` and
+    Replaces ``set_sigma_max`` (which :func:`build_model` skips for the
+    current/divisive family): pins ``input_strength`` and
     ``output_strength`` to scalars so the effective recurrent operator
     is the signed connectome times ``input_strength * output_strength``
     — i.e. a clean global gain knob. Sigma, offset, persistence, and
@@ -252,9 +231,10 @@ def make_odor_patterns(n_input_channels, rng):
     """Sparse non-negative encoding patterns, shape (NUM_ODORS, n_channels)."""
     patterns = np.abs(rng.standard_normal((NUM_ODORS, n_input_channels)))
     patterns *= (rng.random(patterns.shape) < INPUT_SPARSITY)
-    # Patch all-zero odors so every odor activates >=1 channel — matches the
-    # external make_encoding_matrix. Without this ~0.8% of odors (0.9**n_chan)
-    # are empty and undecodable at any concentration, dragging accuracy down.
+    # Patch all-zero odors so every odor activates >=1 channel (as
+    # olf_decoding_mimic.make_encoding_matrix does). Otherwise a fraction
+    # (1 - INPUT_SPARSITY)**n_chan of odors is empty and undecodable at any
+    # concentration, dragging accuracy down.
     empty = np.where(patterns.sum(axis=1) == 0)[0]
     for o in empty:
         j = rng.integers(n_input_channels)
@@ -702,6 +682,7 @@ def plot_results(
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
     print(f"Saved figure to {out_path}")
 
 
@@ -741,17 +722,15 @@ def plot_time_traces(
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
     print(f"Saved time-trace figure to {out_path}")
 
 
 def main():
     rng = np.random.default_rng(SEED)
     print(f"Building AL-only {DYNAMICS_TYPE} model ...")
-    model = build_model()
+    model = build_model(load_config())
     region = model.regions['antenna_lobe']
-    pn_types = expand_pn_output_types(model)
-    print(f"  Expanded PN readout (min_cells={MIN_CELLS_PER_PN_TYPE}): "
-          f"{len(pn_types)} types")
     n_input_channels = region.input_stim_size
     print(f"  num_neurons = {model.num_neurons}, "
           f"num_input_channels (glomeruli) = {n_input_channels}, "
@@ -774,7 +753,6 @@ def main():
         print(f"Using {DYNAMICS_TYPE} built-in biophysical init "
               f"(no uniform parameter pinning)")
 
-    print("Finding steady state ...")
     model.find_steady_state()
 
     print(f"Generating {NUM_ODORS} odors x {NUM_TRIALS} trials "

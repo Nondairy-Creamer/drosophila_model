@@ -1,15 +1,16 @@
 """
 Plot input convolution filter parameters.
 
-Generates:
-  - input_conv_filters.png  (spatial kernels on hex grid)
+Generates (in ``<model_folder>/figures/plot_input_conv_filters/`` or
+``--output-dir``):
+  - input_conv_filters.png  (pre-filter and local-mean spatial kernels on hex grid)
   - input_conv_lru.png      (LRU mode components + full impulse response)
+
+Usage:
+    python -m drosophila_model.analysis.model_analysis.plot_input_conv_filters models/<model>/
 """
 import argparse
-import sys
 from pathlib import Path
-
-# Add parent directory to path for imports
 
 import numpy as np
 import matplotlib
@@ -32,6 +33,42 @@ def compute_lru_impulse_response(lru, num_steps=20, dt=0.01):
     return h, t
 
 
+def _conv_weights(conv):
+    """Effective spatial kernel of a HexGridConv (normalised if positive)."""
+    weight = conv.weight[0, :, 0].detach()
+    if conv.positive_weights:
+        weight = weight.exp()
+        weight = weight / weight.sum()
+    return weight.cpu().numpy()
+
+
+def _plot_hex_kernel(fig, ax, weights, conv_size, title):
+    """Scatter a hex-grid kernel, colour-coded around zero."""
+    grid = ml.HexGridConv.pq_to_xy(ml.HexGridConv.hex_grid_pq_offsets(conv_size))
+    vmin, vmax = centered_norm(weights)
+    scatter = ax.scatter(
+        grid[:, 0],
+        grid[:, 1],
+        c=weights,
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+        s=760,
+        linewidths=0.6,
+        edgecolors="black",
+    )
+    ax.set_title(title)
+    ax.set_xlabel("hex x")
+    ax.set_ylabel("hex y")
+    ax.set_aspect("equal", adjustable="box")
+    x_min, x_max = float(grid[:, 0].min()), float(grid[:, 0].max())
+    y_min, y_max = float(grid[:, 1].min()), float(grid[:, 1].max())
+    pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
+    ax.set_xlim(x_min - pad, x_max + pad)
+    ax.set_ylim(y_min - pad, y_max + pad)
+    fig.colorbar(scatter, ax=ax, shrink=0.8, pad=0.02)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot input convolution filter parameters.")
     parser.add_argument(
@@ -40,105 +77,36 @@ def main() -> None:
         help="Path to model folder or model.pt",
     )
     parser.add_argument(
-        "--output-path",
+        "--output-dir",
         type=str,
         default=None,
-        help="Optional output file path (default: <model_folder>/figures/plot_input_conv_filters/input_conv_filters.png)",
+        help="Output directory (default: <model_folder>/figures/plot_input_conv_filters)",
     )
     parser.add_argument(
         "--impulse-steps",
         type=int,
         default=20,
-        help="Number of time steps for impulse response plot (default: 100)",
+        help="Number of time steps for impulse response plot (default: 20)",
     )
     args = parser.parse_args()
 
     model_path = Path(args.model_folder)
-    model_pt = model_path / "model.pt" if model_path.is_dir() else model_path
-    model = nm.BaseRnn.load(model_pt, device="cpu")
-    if not model.regions['optic_lobe'].use_input_conv:
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.BaseRnn.load(model_path)
+    region = model.regions['optic_lobe']
+    if not region.use_input_conv:
         raise ValueError("Model does not have input convolution enabled.")
 
-    raw_weight = model.regions['optic_lobe'].input_spatial_conv.weight[0, :, 0].detach()
-    if model.regions['optic_lobe'].input_spatial_conv.positive_weights:
-        raw_weight = raw_weight.exp()
-        raw_weight = raw_weight / raw_weight.sum()
-    conv_xy = raw_weight.cpu().numpy()
-
-    has_pre_conv = hasattr(model, 'input_pre_conv')
-    num_plots = 1 + int(has_pre_conv)
-    fig, axes = plt.subplots(1, num_plots, figsize=(5 * num_plots, 4), dpi=150)
-    if num_plots == 1:
-        axes = [axes]
-    ax_idx = 0
-
-    if has_pre_conv:
-        pre_weight = model.regions['optic_lobe'].input_pre_conv.weight[0, :, 0].detach()
-        if model.regions['optic_lobe'].input_pre_conv.positive_weights:
-            pre_weight = pre_weight.exp()
-            pre_weight = pre_weight / pre_weight.sum()
-        pre_xy = pre_weight.cpu().numpy()
-
-        pre_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.regions['optic_lobe'].input_pre_conv_size)
-        pre_grid = ml.HexGridConv.pq_to_xy(pre_offsets)
-        vmin_pre, vmax_pre = centered_norm(pre_xy)
-        scatter_pre = axes[ax_idx].scatter(
-            pre_grid[:, 0],
-            pre_grid[:, 1],
-            c=pre_xy,
-            cmap="coolwarm",
-            vmin=vmin_pre,
-            vmax=vmax_pre,
-            s=760,
-            linewidths=0.6,
-            edgecolors="black",
-        )
-        axes[ax_idx].set_title("pre-filter (spatial)")
-        axes[ax_idx].set_xlabel("hex x")
-        axes[ax_idx].set_ylabel("hex y")
-        axes[ax_idx].set_aspect("equal", adjustable="box")
-        x_min, x_max = float(pre_grid[:, 0].min()), float(pre_grid[:, 0].max())
-        y_min, y_max = float(pre_grid[:, 1].min()), float(pre_grid[:, 1].max())
-        pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
-        axes[ax_idx].set_xlim(x_min - pad, x_max + pad)
-        axes[ax_idx].set_ylim(y_min - pad, y_max + pad)
-        fig.colorbar(scatter_pre, ax=axes[ax_idx], shrink=0.8, pad=0.02)
-        ax_idx += 1
-
-    pq_offsets = ml.HexGridConv.hex_grid_pq_offsets(model.regions['optic_lobe'].conv_size_x)
-    spatial_weights = conv_xy
-    grid_points = ml.HexGridConv.pq_to_xy(pq_offsets)
-
-    vmin_xy, vmax_xy = centered_norm(spatial_weights)
-    scatter = axes[ax_idx].scatter(
-        grid_points[:, 0],
-        grid_points[:, 1],
-        c=spatial_weights,
-        cmap="coolwarm",
-        vmin=vmin_xy,
-        vmax=vmax_xy,
-        s=760,
-        linewidths=0.6,
-        edgecolors="black",
-    )
-    axes[ax_idx].set_title("local mean (spatial kernel)")
-    axes[ax_idx].set_xlabel("hex x")
-    axes[ax_idx].set_ylabel("hex y")
-    axes[ax_idx].set_aspect("equal", adjustable="box")
-    x_min, x_max = float(grid_points[:, 0].min()), float(grid_points[:, 0].max())
-    y_min, y_max = float(grid_points[:, 1].min()), float(grid_points[:, 1].max())
-    pad = 0.15 * max(x_max - x_min, y_max - y_min, 1.0)
-    axes[ax_idx].set_xlim(x_min - pad, x_max + pad)
-    axes[ax_idx].set_ylim(y_min - pad, y_max + pad)
-    fig.colorbar(scatter, ax=axes[ax_idx], shrink=0.8, pad=0.02)
-
+    # use_input_conv builds both the pre-filter and the local-mean conv.
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
+    _plot_hex_kernel(fig, axes[0], _conv_weights(region.input_pre_conv),
+                     region.input_pre_conv_size, "pre-filter (spatial)")
+    _plot_hex_kernel(fig, axes[1], _conv_weights(region.input_spatial_conv),
+                     region.conv_size_x, "local mean (spatial kernel)")
     fig.tight_layout()
 
-    if args.output_path:
-        figures_dir = Path(args.output_path).parent
-    else:
-        model_root = model_path.parent if model_path.is_file() else model_path
-        figures_dir = model_root / "figures" / "plot_input_conv_filters"
+    figures_dir = (Path(args.output_dir) if args.output_dir
+                   else model_folder / "figures" / "plot_input_conv_filters")
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     spatial_path = figures_dir / "input_conv_filters.png"
@@ -152,10 +120,10 @@ def main() -> None:
     t = np.arange(num_steps) * dt
 
     with torch.no_grad():
-        modes, feedthrough = model.regions['optic_lobe'].temporal_lru.impulse_response_components(num_t=num_steps)
+        modes, feedthrough = region.temporal_lru.impulse_response_components(num_t=num_steps)
         modes = modes.cpu().numpy()
         feedthrough_val = feedthrough.item()
-        h, _ = compute_lru_impulse_response(model.regions['optic_lobe'].temporal_lru, num_steps=num_steps, dt=dt)
+        h, _ = compute_lru_impulse_response(region.temporal_lru, num_steps=num_steps, dt=dt)
 
     fig_lru, (ax_comp, ax_full) = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
 

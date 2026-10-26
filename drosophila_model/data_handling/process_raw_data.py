@@ -18,27 +18,28 @@ model ``dt`` happens later in
 panorama cache stores the unfiltered images; the Gaussian ommatidial filtering
 is applied at generation time in ``stimulus_generators._filter_pano``.
 
-The second stage,
-``drosophila_model/data_handling/create_training_data.py``, reads these caches
-(via the on-the-fly generators) and writes the fixed, training-ready datasets
-to ``stimulus/training/<stimulus_type>.pt``.
+The second stage, ``drosophila_model.data_handling.create_training_data``,
+reads these caches (via the on-the-fly generators) and writes the fixed,
+training-ready datasets to ``stimulus/training/<stimulus_type>_train.pt`` and
+``<stimulus_type>_test.pt``.
 
 Usage::
 
-    python drosophila_model/data_handling/process_raw_data.py            # all
-    python drosophila_model/data_handling/process_raw_data.py small_drone
-    python drosophila_model/data_handling/process_raw_data.py rpi_drone
-    python drosophila_model/data_handling/process_raw_data.py random_pano
+    python -m drosophila_model.data_handling.process_raw_data            # all
+    python -m drosophila_model.data_handling.process_raw_data small_drone
+    python -m drosophila_model.data_handling.process_raw_data rpi_drone
+    python -m drosophila_model.data_handling.process_raw_data random_pano
+    python -m drosophila_model.data_handling.process_raw_data flyview
 """
 import argparse
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.data_handling import drone_utilities as du
+from drosophila_model.data_handling.sampling import load_column_phi_theta
 
 RAW_TYPES = ('small_drone', 'rpi_drone', 'random_pano', 'flyview')
 
@@ -53,33 +54,20 @@ def loadmat_v73(path):
     return out
 
 
-def load_column_phi_theta(data_folder):
-    """Load right-eye column (phi, theta) from the baked connectome columns.
-
-    Matches the default source used by ``get_drone_stimulus`` so the cached
-    clips are sampled at the same ommatidium locations.
-    """
-    col_path = (
-        Path(data_folder) / 'connectome_data' / 'baked' / 'optic_lobe_columns.parquet'
-    )
-    if not col_path.exists():
-        raise FileNotFoundError(
-            f"Optic-lobe column file not found: {col_path}. "
-            "It is produced when the connectome is baked."
-        )
-    col_df = pd.read_parquet(col_path)
-    return col_df['phi'].to_numpy(), col_df['theta'].to_numpy()
-
-
 def process_drone(dataset, data_folder):
     """Process a drone rig into ommatidium-sampled clips and cache them.
+
+    The clips are sampled at the right-eye columns (and their left-eye mirror)
+    of ``optic_lobe_columns.parquet``; the columns are stored in the cache and
+    ``get_drone_stimulus`` checks callers' columns against them.
 
     Returns the path of the written ``.pt`` file.
     """
     data_folder = Path(data_folder)
     raw_dir = data_folder / 'stimulus' / 'raw'
     baked_dir = data_folder / 'stimulus' / 'baked'
-    sample_phi, sample_theta = load_column_phi_theta(data_folder)
+    column_phi_theta = load_column_phi_theta(data_folder)
+    sample_phi, sample_theta = column_phi_theta[:, 0], column_phi_theta[:, 1]
 
     if dataset == 'small_drone':
         clips = du.process_small_drone_dataset(
@@ -176,7 +164,7 @@ def process_raw_data(raw_type, config=None, config_path=None):
     """Bake ``raw_type`` from its raw inputs into a ``stimulus/baked`` cache."""
     if config is None:
         config = load_config(config_path or 'config.toml')
-    data_folder = config['data']['data_folder']
+    data_folder = get_data_folder(config)
 
     if raw_type in ('small_drone', 'rpi_drone'):
         return process_drone(raw_type, data_folder)
@@ -184,22 +172,18 @@ def process_raw_data(raw_type, config=None, config_path=None):
         return process_random_pano(data_folder)
     if raw_type == 'flyview':
         from drosophila_model.data_handling import stimulus_generators as sg
-        stim_dir = Path(data_folder) / 'stimulus'
-        return sg.bake_fly_view_dataset(
-            data_path=stim_dir / 'raw' / 'fib_forest_fly_view_dataset_fwd.pkl',
-            out_path=stim_dir / 'baked' / 'flyview.pt',
-        )
+        return sg.bake_fly_view_dataset(data_folder=data_folder)
     raise ValueError(
         f"Unknown raw_type '{raw_type}'; expected one of {RAW_TYPES}.")
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(
         description='Bake raw inputs into cached .pt files under stimulus/baked.'
     )
     parser.add_argument(
         'raw_type', type=str, nargs='?', default=None, choices=RAW_TYPES,
-        help='Raw dataset to process (small_drone, rpi_drone, random_pano). '
+        help=f"Raw dataset to process ({', '.join(RAW_TYPES)}). "
              'Omit to process all of them.'
     )
     parser.add_argument(
@@ -211,3 +195,7 @@ if __name__ == '__main__':
     raw_types = [args.raw_type] if args.raw_type is not None else list(RAW_TYPES)
     for raw_type in raw_types:
         process_raw_data(raw_type, config_path=args.config_path)
+
+
+if __name__ == '__main__':
+    main()

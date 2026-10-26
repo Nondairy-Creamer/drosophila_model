@@ -1,15 +1,23 @@
 """Estimate drone pose trajectory from dual-camera AprilTag observations.
 
-Uses batch optimization (reprojection error minimization) over all frames
-from two rigidly-mounted cameras to recover the drone body pose at each
-timestep.  More accurate than per-frame PnP because it jointly optimizes
-across both cameras and can incorporate temporal smoothness.
+Pose-estimation engine for the ``small_drone`` rig. Uses batch optimization
+(reprojection error minimization) over all frames from two rigidly-mounted
+cameras to recover the drone body pose at each timestep. More accurate than
+per-frame PnP because it jointly optimizes across both cameras and can
+incorporate temporal smoothness.
 
-Pipeline:
-    1. Detect AprilTags in both camera streams
-    2. Load calibration (intrinsics per camera, body↔camera extrinsics)
-    3. Initialize poses via per-frame PnP
-    4. Refine with batch least-squares (minimize reprojection error)
+Only the tag side length is needed; no tag positions are known in advance:
+
+    1. Detect AprilTags in both camera streams.
+    2. Initialise the body pose per frame by single-tag PnP against the
+       most-detected ("anchor") tag, whose local frame is the world frame.
+    3. Initialise the other ("float") tag's pose relative to the anchor.
+    4. Refine all body poses and the float-tag pose jointly with batch
+       least-squares (reprojection error + temporal smoothness).
+
+Camera models: :class:`EquirectRig` (the default; pixels map linearly to body
+azimuth/polar angle, matching the small_drone footage) or a pinhole
+:class:`DualCameraRig` loaded from a calibration JSON.
 
 Transform conventions (T_A_B means "transforms points from B to A"):
     T_world_body  – drone pose:   p_world = T_world_body @ p_body
@@ -18,11 +26,9 @@ Transform conventions (T_A_B means "transforms points from B to A"):
 Dependencies:
     pip install numpy scipy opencv-python pupil-apriltags
 
-Usage:
-    python -m drosophila_model.data_handling.estimate_pose \\
-        --left-video left_0.mp4 --right-video right_0.mp4 \\
-        --calibration calibration.json --tag-map tags.json \\
-        --output trajectory.npz
+This is a library module: the batch CLI is :mod:`drone_pose`, whose
+``process_clip`` :mod:`drone_utilities` also calls on demand when baking
+``small_drone`` clips that have no pose file yet.
 """
 
 import numpy as np
@@ -30,12 +36,16 @@ import cv2
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 from scipy import sparse
-from dataclasses import dataclass, field
-from pathlib import Path
-import argparse
+from dataclasses import dataclass
 import json
 
 from drosophila_model.data_handling.drone_utilities import load_video_grayscale
+
+
+# AprilTag defaults shared by the drone pose / tag-extraction tools.
+DEFAULT_TAG_SIZE = 0.16          # tag side length (m)
+DEFAULT_TAG_FAMILY = 'tag36h11'
+DEFAULT_SMOOTHNESS = 0.1         # temporal smoothness weight of the batch fit
 
 
 # ── Pose helpers ─────────────────────────────────────────────────────────
@@ -76,22 +86,13 @@ class CameraCalibration:
 
 @dataclass
 class DualCameraRig:
-    """Calibration for a two-camera drone setup."""
+    """Pinhole calibration for a two-camera drone setup (0 = right, 1 = left)."""
     cameras: dict[int, CameraCalibration]
-
-    def save(self, path: str):
-        data = {}
-        for cam_id, cal in self.cameras.items():
-            data[str(cam_id)] = {
-                'camera_matrix': cal.camera_matrix.tolist(),
-                'dist_coeffs': cal.dist_coeffs.tolist(),
-                'T_body_cam': cal.T_body_cam.tolist(),
-            }
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
 
     @classmethod
     def load(cls, path: str) -> 'DualCameraRig':
+        """Load from JSON: ``{"<camera_id>": {"camera_matrix": 3x3,
+        "dist_coeffs": [...], "T_body_cam": 4x4}, ...}``."""
         with open(path) as f:
             data = json.load(f)
         cameras = {}
@@ -103,62 +104,6 @@ class DualCameraRig:
             )
         return cls(cameras=cameras)
 
-    @classmethod
-    def create_from_fov(cls, image_size: tuple[int, int],
-                        hfov_deg: float = 120.0,
-                        vfov_deg: float = 90.0,
-                        baseline_m: float = 0.05) -> 'DualCameraRig':
-        """Create rig for two side-facing cameras from FOV specs.
-
-        Conventions (see coordinate_conventions.md):
-            Body frame:  +X forward, +Y left, +Z up
-            Camera frame (OpenCV): +X right, +Y down, +Z forward
-
-        Camera 0 ("right"): optical axis along body −Y  (phi = −90°)
-            FOV spans phi ∈ [−30°, −150°], theta ∈ [45°, 135°]
-        Camera 1 ("left"):  optical axis along body +Y  (phi = +90°)
-            FOV spans phi ∈ [+30°, +150°], theta ∈ [45°, 135°]
-
-        Cameras are offset ±baseline/2 along body Y (back-to-back).
-
-        Args:
-            image_size: (height, width) in pixels
-            hfov_deg: horizontal field of view (default 120°)
-            vfov_deg: vertical field of view (default 90°)
-            baseline_m: lens-to-lens distance in metres (default 0.05)
-        """
-        h, w = image_size
-        fx = (w / 2) / np.tan(np.radians(hfov_deg / 2))
-        fy = (h / 2) / np.tan(np.radians(vfov_deg / 2))
-        K = np.array([[fx, 0, (w - 1) / 2],
-                       [0, fy, (h - 1) / 2],
-                       [0,  0,  1]], dtype=np.float64)
-        dist = np.zeros(5, dtype=np.float64)
-        half_b = baseline_m / 2
-
-        # Right camera: facing body −Y, offset toward −Y
-        #   cam_Z (forward) → body −Y
-        #   cam_Y (down)    → body −Z
-        #   cam_X (right)   → body −X
-        T_body_cam0 = np.array([[-1, 0,  0, 0],
-                                 [ 0, 0, -1, -half_b],
-                                 [ 0,-1,  0, 0],
-                                 [ 0, 0,  0, 1]], dtype=np.float64)
-
-        # Left camera: facing body +Y, offset toward +Y
-        #   cam_Z (forward) → body +Y
-        #   cam_Y (down)    → body −Z
-        #   cam_X (right)   → body +X
-        T_body_cam1 = np.array([[ 1, 0, 0, 0],
-                                 [ 0, 0, 1, half_b],
-                                 [ 0,-1, 0, 0],
-                                 [ 0, 0, 0, 1]], dtype=np.float64)
-
-        return cls(cameras={
-            0: CameraCalibration(K.copy(), dist.copy(), T_body_cam0),
-            1: CameraCalibration(K.copy(), dist.copy(), T_body_cam1),
-        })
-
 
 @dataclass
 class TagDetection:
@@ -167,51 +112,6 @@ class TagDetection:
     corners: np.ndarray    # (4, 2) pixel coords, pupil-apriltags ordering
     camera_id: int
     frame_idx: int
-
-
-@dataclass
-class TagMap:
-    """Known 3D positions of AprilTag corners in the world frame."""
-    tags: dict[int, np.ndarray] = field(default_factory=dict)
-
-    def add_tag(self, tag_id: int, center: np.ndarray, size: float,
-                R_world_tag: np.ndarray | None = None):
-        """Add a planar tag.
-
-        Corner order (matching pupil-apriltags): BL, BR, TR, TL when viewed
-        from the front.  Tag-local frame: X right, Y up, Z out-of-face.
-
-        Args:
-            tag_id: unique identifier
-            center: (3,) world position of tag centre
-            size: side length in world units (metres)
-            R_world_tag: (3, 3) tag→world rotation (default: identity)
-        """
-        if R_world_tag is None:
-            R_world_tag = np.eye(3)
-        half = size / 2.0
-        corners_local = np.array([[-half, -half, 0],
-                                   [ half, -half, 0],
-                                   [ half,  half, 0],
-                                   [-half,  half, 0]])
-        self.tags[tag_id] = (R_world_tag @ corners_local.T).T + center
-
-    def add_tag_corners(self, tag_id: int, corners_3d: np.ndarray):
-        """Add a tag with explicit 3D corner positions (4, 3)."""
-        self.tags[tag_id] = np.asarray(corners_3d, dtype=np.float64)
-
-    def save(self, path: str):
-        with open(path, 'w') as f:
-            json.dump({str(k): v.tolist() for k, v in self.tags.items()}, f, indent=2)
-
-    @classmethod
-    def load(cls, path: str) -> 'TagMap':
-        with open(path) as f:
-            data = json.load(f)
-        tm = cls()
-        for k, v in data.items():
-            tm.tags[int(k)] = np.array(v, dtype=np.float64)
-        return tm
 
 
 # ── Equirectangular camera model ──────────────────────────────────────────
@@ -281,7 +181,7 @@ def detect_tags_in_frame(frame_gray: np.ndarray, camera_id: int,
 
 
 def detect_all_tags(videos: dict[int, np.ndarray],
-                    tag_family: str = 'tag36h11',
+                    tag_family: str = DEFAULT_TAG_FAMILY,
                     nthreads: int = 4) -> list[TagDetection]:
     """Run AprilTag detection on all cameras and frames.
 
@@ -308,117 +208,14 @@ def detect_all_tags(videos: dict[int, np.ndarray],
                 print(f'    {i + 1}/{len(frames)} '
                       f'({len(all_detections)} detections so far)')
         n = sum(1 for d in all_detections if d.camera_id == cam_id)
-        print(f'    → {n} detections')
+        print(f'    -> {n} detections')
 
     all_detections.sort(key=lambda d: (d.frame_idx, d.camera_id))
     print(f'  Total: {len(all_detections)} detections')
     return all_detections
 
 
-# ── Per-frame PnP (initialization) ───────────────────────────────────────
-
-def _pnp_single_camera(
-    cam_dets: list[TagDetection],
-    tag_map: TagMap,
-    calib: CameraCalibration,
-) -> np.ndarray | None:
-    """Solve PnP for one camera's detections → T_world_body (4×4) or None."""
-    obj_pts, img_pts = [], []
-    for det in cam_dets:
-        if det.tag_id not in tag_map.tags:
-            continue
-        obj_pts.append(tag_map.tags[det.tag_id])
-        img_pts.append(det.corners)
-    if not obj_pts:
-        return None
-    obj_pts = np.vstack(obj_pts)
-    img_pts = np.vstack(img_pts)
-    if len(obj_pts) < 4:
-        return None
-
-    ok, rvec, tvec = cv2.solvePnP(
-        obj_pts, img_pts,
-        calib.camera_matrix, calib.dist_coeffs,
-        flags=cv2.SOLVEPNP_ITERATIVE,
-    )
-    if not ok:
-        return None
-
-    # solvePnP returns T_cam_world: p_cam = R @ p_world + t
-    T_cam_world = pose_to_matrix(rvec.ravel(), tvec.ravel())
-    T_world_cam = np.linalg.inv(T_cam_world)
-    # T_world_body = T_world_cam @ T_cam_body
-    return T_world_cam @ calib.T_cam_body
-
-
-def _pnp_multi_camera(
-    frame_dets: list[TagDetection],
-    tag_map: TagMap,
-    rig: DualCameraRig,
-) -> np.ndarray | None:
-    """Best per-frame body pose from whichever camera has the most points."""
-    best_pose = None
-    best_n = 0
-    for cam_id, calib in rig.cameras.items():
-        cam_dets = [d for d in frame_dets if d.camera_id == cam_id]
-        if not cam_dets:
-            continue
-        n_pts = sum(
-            4 for d in cam_dets if d.tag_id in tag_map.tags)
-        pose = _pnp_single_camera(cam_dets, tag_map, calib)
-        if pose is not None and n_pts > best_n:
-            best_pose = pose
-            best_n = n_pts
-    return best_pose
-
-
-def initialize_poses(
-    detections: list[TagDetection],
-    tag_map: TagMap,
-    rig: DualCameraRig,
-    n_frames: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Per-frame PnP → initial rvecs/tvecs; missing frames interpolated.
-
-    Returns:
-        rvecs: (n_frames, 3)
-        tvecs: (n_frames, 3)
-    """
-    by_frame: dict[int, list[TagDetection]] = {}
-    for d in detections:
-        by_frame.setdefault(d.frame_idx, []).append(d)
-
-    rvecs = np.zeros((n_frames, 3))
-    tvecs = np.zeros((n_frames, 3))
-    valid = np.zeros(n_frames, dtype=bool)
-
-    for fi in range(n_frames):
-        dets = by_frame.get(fi, [])
-        if not dets:
-            continue
-        pose = _pnp_multi_camera(dets, tag_map, rig)
-        if pose is not None:
-            rvecs[fi], tvecs[fi] = matrix_to_pose(pose)
-            valid[fi] = True
-
-    n_valid = int(valid.sum())
-    print(f'  PnP solved {n_valid}/{n_frames} frames')
-
-    if n_valid == 0:
-        print('  WARNING: no frames solved — check tag map / calibration')
-        return rvecs, tvecs
-
-    if n_valid < n_frames:
-        vi = np.where(valid)[0]
-        for dim in range(3):
-            rvecs[:, dim] = np.interp(np.arange(n_frames), vi, rvecs[vi, dim])
-            tvecs[:, dim] = np.interp(np.arange(n_frames), vi, tvecs[vi, dim])
-        print(f'  Interpolated {n_frames - n_valid} missing frames')
-
-    return rvecs, tvecs
-
-
-# ── Batch optimisation ───────────────────────────────────────────────────
+# ── Pinhole projection ───────────────────────────────────────────────────
 
 def _project_tag_corners(
     rvec_body: np.ndarray,
@@ -440,134 +237,10 @@ def _project_tag_corners(
     return projected.reshape(-1, 2)
 
 
-def _reprojection_residuals(
-    params: np.ndarray,
-    detections: list[TagDetection],
-    tag_map: TagMap,
-    rig: DualCameraRig,
-    n_frames: int,
-    smoothness_weight: float,
-) -> np.ndarray:
-    """Residuals = [reprojection errors … , smoothness penalties …]."""
-    poses = params.reshape(n_frames, 6)
-    residuals: list[np.ndarray] = []
-
-    for det in detections:
-        rvec = poses[det.frame_idx, :3]
-        tvec = poses[det.frame_idx, 3:]
-        projected = _project_tag_corners(
-            rvec, tvec, tag_map.tags[det.tag_id], rig.cameras[det.camera_id])
-        residuals.append((projected - det.corners).ravel())  # 8 values
-
-    if smoothness_weight > 0 and n_frames > 1:
-        residuals.append((np.diff(poses, axis=0) * smoothness_weight).ravel())
-
-    return np.concatenate(residuals)
-
-
-def _build_sparsity(
-    detections: list[TagDetection],
-    n_frames: int,
-    smoothness_weight: float,
-) -> sparse.lil_matrix:
-    """Jacobian sparsity: each detection depends only on its frame's 6 dof."""
-    n_reproj = len(detections) * 8
-    n_smooth = (n_frames - 1) * 6 if smoothness_weight > 0 else 0
-    n_params = n_frames * 6
-
-    A = sparse.lil_matrix((n_reproj + n_smooth, n_params), dtype=int)
-
-    for i, det in enumerate(detections):
-        r0 = i * 8
-        c0 = det.frame_idx * 6
-        A[r0:r0 + 8, c0:c0 + 6] = 1
-
-    if smoothness_weight > 0:
-        for t in range(n_frames - 1):
-            r0 = n_reproj + t * 6
-            c0 = t * 6
-            A[r0:r0 + 6, c0:c0 + 12] = 1
-
-    return A
-
-
-def estimate_trajectory(
-    detections: list[TagDetection],
-    tag_map: TagMap,
-    rig: DualCameraRig,
-    n_frames: int,
-    smoothness_weight: float = 0.1,
-    init_rvecs: np.ndarray | None = None,
-    init_tvecs: np.ndarray | None = None,
-    verbose: bool = True,
-) -> dict:
-    """Batch-optimise the full drone trajectory.
-
-    Args:
-        detections: tag detections (all cameras / frames)
-        tag_map: known tag world positions
-        rig: camera calibration
-        n_frames: number of frames in the trajectory
-        smoothness_weight: temporal smoothness regularisation (0 = off)
-        init_rvecs, init_tvecs: (n_frames, 3) initial estimates (PnP).
-            Computed automatically if not supplied.
-        verbose: print solver progress
-
-    Returns:
-        dict with 'rvecs', 'tvecs', 'poses' (4×4), 'cost', etc.
-    """
-    valid_dets = [d for d in detections if d.tag_id in tag_map.tags]
-    if not valid_dets:
-        raise ValueError('No detections match known tags')
-
-    print(f'  Optimising {n_frames} poses from {len(valid_dets)} detections '
-          f'(smoothness={smoothness_weight:.3g})')
-
-    if init_rvecs is None or init_tvecs is None:
-        r, t = initialize_poses(valid_dets, tag_map, rig, n_frames)
-        if init_rvecs is None:
-            init_rvecs = r
-        if init_tvecs is None:
-            init_tvecs = t
-
-    x0 = np.hstack([init_rvecs, init_tvecs]).ravel()
-    sparsity = _build_sparsity(valid_dets, n_frames, smoothness_weight)
-
-    result = least_squares(
-        _reprojection_residuals, x0,
-        args=(valid_dets, tag_map, rig, n_frames, smoothness_weight),
-        jac_sparsity=sparsity,
-        method='trf',
-        x_scale='jac',
-        ftol=1e-8, xtol=1e-8,
-        max_nfev=500,
-        verbose=2 if verbose else 0,
-    )
-
-    poses_flat = result.x.reshape(n_frames, 6)
-    rvecs = poses_flat[:, :3]
-    tvecs = poses_flat[:, 3:]
-    T_world_body = np.array([
-        pose_to_matrix(rvecs[i], tvecs[i]) for i in range(n_frames)])
-
-    mean_reproj = np.sqrt(2 * result.cost / max(len(valid_dets) * 8, 1))
-    print(f'  Done — cost={result.cost:.4f}  mean_reproj={mean_reproj:.2f}px  '
-          f'nfev={result.nfev}  status={result.status}')
-
-    return {
-        'rvecs': rvecs,
-        'tvecs': tvecs,
-        'poses': T_world_body,
-        'cost': result.cost,
-        'mean_reprojection_px': mean_reproj,
-        'n_detections': len(valid_dets),
-        'optimizer_result': result,
-    }
-
-
-# ── Auto-tag batch optimisation (equirectangular) ────────────────────────
+# ── Auto-tag batch optimisation ──────────────────────────────────────────
 # Solves for the relative pose of a second tag jointly with the trajectory.
-# Uses equirectangular projection matching the actual camera geometry.
+# Uses equirectangular projection (EquirectRig, matching the small_drone
+# cameras) or pinhole projection (DualCameraRig), depending on the rig.
 # Only the tag size is needed — no world-frame tag positions required.
 
 def _tag_local_corners(tag_size: float) -> np.ndarray:
@@ -864,7 +537,7 @@ def estimate_trajectory_auto(
     rig: EquirectRig | DualCameraRig,
     tag_size: float,
     n_frames: int,
-    smoothness_weight: float = 0.1,
+    smoothness_weight: float = DEFAULT_SMOOTHNESS,
     verbose: bool = True,
 ) -> dict:
     """Batch-optimise trajectory, auto-estimating relative tag positions.
@@ -929,7 +602,7 @@ def estimate_trajectory_auto(
     T_world_float = pose_to_matrix(float_rvec_opt, float_tvec_opt)
 
     mean_reproj = np.sqrt(2 * result.cost / max(n_det * 8, 1))
-    print(f'  Done — cost={result.cost:.4f}  mean_reproj={mean_reproj:.2f}px  '
+    print(f'  Done - cost={result.cost:.4f}  mean_reproj={mean_reproj:.2f}px  '
           f'nfev={result.nfev}  status={result.status}')
     print(f'  Float tag estimated pos: ({float_tvec_opt[0]:.3f}, '
           f'{float_tvec_opt[1]:.3f}, {float_tvec_opt[2]:.3f})')
@@ -952,14 +625,18 @@ def run_pipeline_auto(
     left_video_path: str,
     right_video_path: str,
     rig: EquirectRig | DualCameraRig,
-    tag_size: float = 0.16,
-    tag_family: str = 'tag36h11',
-    smoothness_weight: float = 0.1,
+    tag_size: float = DEFAULT_TAG_SIZE,
+    tag_family: str = DEFAULT_TAG_FAMILY,
+    smoothness_weight: float = DEFAULT_SMOOTHNESS,
 ) -> dict:
-    """Full pipeline with auto tag-position estimation.
+    """Full pipeline: load videos → detect → initialise → batch-optimise.
 
-    Only requires the tag side length — no TagMap needed.
-    Dispatches to equirectangular or pinhole projection based on rig type.
+    Only requires the tag side length (no known tag positions). Dispatches
+    to equirectangular or pinhole projection based on rig type.
+
+    Returns:
+        trajectory dict from :func:`estimate_trajectory_auto`, plus 'fps'
+        and 'n_frames'.
     """
     print('Step 1/3  Loading videos...')
     videos = {
@@ -988,117 +665,3 @@ def run_pipeline_auto(
     trajectory['n_frames'] = n_frames
 
     return trajectory
-
-
-# ── Full pipeline (known tag positions) ──────────────────────────────────
-
-def run_pipeline(
-    left_video_path: str,
-    right_video_path: str,
-    tag_map: TagMap,
-    rig: DualCameraRig,
-    tag_family: str = 'tag36h11',
-    smoothness_weight: float = 0.1,
-    output_path: str | None = None,
-) -> dict:
-    """Load videos → detect → initialise → batch-optimise → (save).
-
-    Args:
-        left_video_path: left camera video
-        right_video_path: right camera video
-        tag_map: known tag world positions
-        rig: dual-camera calibration
-        tag_family: AprilTag family
-        smoothness_weight: temporal smoothness weight
-        output_path: save trajectory to .npz if provided
-
-    Returns:
-        trajectory dict from estimate_trajectory, plus 'fps' and 'n_frames'
-    """
-    print('Step 1/4  Loading videos...')
-    videos = {
-        0: load_video_grayscale(right_video_path),
-        1: load_video_grayscale(left_video_path),
-    }
-    n_frames = min(len(v) for v in videos.values())
-    for cam_id in videos:
-        videos[cam_id] = videos[cam_id][:n_frames]
-    print(f'  {n_frames} frames per camera')
-
-    print('Step 2/4  Detecting AprilTags...')
-    detections = detect_all_tags(videos, tag_family=tag_family)
-
-    detected_ids = sorted(set(d.tag_id for d in detections))
-    known_ids = sorted(tag_map.tags.keys())
-    matched = sorted(set(detected_ids) & set(known_ids))
-    print(f'  Detected tag IDs: {detected_ids}')
-    print(f'  Known tag IDs:    {known_ids}')
-    print(f'  Matched:          {matched}')
-
-    print('Step 3/4  Initialising poses (per-frame PnP)...')
-    valid_dets = [d for d in detections if d.tag_id in tag_map.tags]
-    init_rvecs, init_tvecs = initialize_poses(
-        valid_dets, tag_map, rig, n_frames)
-
-    print('Step 4/4  Batch optimisation...')
-    trajectory = estimate_trajectory(
-        detections, tag_map, rig, n_frames,
-        smoothness_weight=smoothness_weight,
-        init_rvecs=init_rvecs, init_tvecs=init_tvecs,
-    )
-
-    cap = cv2.VideoCapture(str(right_video_path))
-    trajectory['fps'] = cap.get(cv2.CAP_PROP_FPS)
-    cap.release()
-    trajectory['n_frames'] = n_frames
-
-    if output_path:
-        np.savez(
-            output_path,
-            rvecs=trajectory['rvecs'],
-            tvecs=trajectory['tvecs'],
-            poses=trajectory['poses'],
-            fps=trajectory['fps'],
-        )
-        print(f'  Saved trajectory → {output_path}')
-
-    return trajectory
-
-
-# ── CLI ──────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(
-        description='Estimate drone pose from dual-camera AprilTag observations')
-    parser.add_argument('--left-video', required=True,
-                        help='Left camera video file')
-    parser.add_argument('--right-video', required=True,
-                        help='Right camera video file')
-    parser.add_argument('--calibration', required=True,
-                        help='Camera rig calibration JSON')
-    parser.add_argument('--tag-map', required=True,
-                        help='Tag world positions JSON')
-    parser.add_argument('--tag-family', default='tag36h11',
-                        help='AprilTag family (default: tag36h11)')
-    parser.add_argument('--smoothness', type=float, default=0.1,
-                        help='Temporal smoothness weight (default: 0.1)')
-    parser.add_argument('--output', default='trajectory.npz',
-                        help='Output .npz file (default: trajectory.npz)')
-    args = parser.parse_args()
-
-    rig = DualCameraRig.load(args.calibration)
-    tag_map = TagMap.load(args.tag_map)
-
-    run_pipeline(
-        left_video_path=args.left_video,
-        right_video_path=args.right_video,
-        tag_map=tag_map,
-        rig=rig,
-        tag_family=args.tag_family,
-        smoothness_weight=args.smoothness,
-        output_path=args.output,
-    )
-
-
-if __name__ == '__main__':
-    main()

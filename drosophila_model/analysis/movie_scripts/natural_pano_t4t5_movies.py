@@ -3,14 +3,15 @@ Render T4 and T5 diamond-layout movies (stimulus center + four subtypes) for
 constant-angular-velocity natural panoramas — same stimulus pipeline as
 ``natural_pano_velocity_sweep`` / ``get_constant_velocity_pano``.
 
-Example::
+The stimulus drives the optic lobe through its configured input neurons (the
+region default, L1/L2/L3, unless the model overrides it), as in training.
 
-    uv run python analysis/natural_pano_t4t5_movies.py models/hand_tuned \\
-        --velocity 60 --direction right --pano-index 0 --zero_center
+Example (from the repo root)::
+
+    python -m drosophila_model.analysis.movie_scripts.natural_pano_t4t5_movies \\
+        models/<run> --velocity 60 --direction right --pano-index 0 --zero-center
 """
 import argparse
-import shutil
-import sys
 from pathlib import Path
 
 
@@ -23,42 +24,12 @@ import torch
 
 from drosophila_model.model_definition import neural_models as nm
 
-from drosophila_model.analysis.model_analysis.analysis_utilities import interp_nan_column
+from drosophila_model.analysis.model_analysis.analysis_utilities import exponential_highpass
 from drosophila_model.analysis.movie_scripts.movie_utilities import make_movie, make_scatter_diamond_sequence_factory
 from drosophila_model.data_handling.stimulus_generators import get_constant_velocity_pano
 
-
-def _exponential_highpass(block, dt, tau):
-    """Subtract a causal exponential lowpass from each column to remove DC.
-
-    First-order IIR lowpass:  y[t] = α·y[t-1] + (1-α)·x[t],  α = exp(-dt/τ)
-    Returns:  x[t] - y[t]
-    """
-    alpha = np.exp(-dt / tau)
-    out = np.empty_like(block)
-    lp = block[:, 0, :].copy()
-    out[:, 0, :] = 0.0
-    for t in range(1, block.shape[1]):
-        lp = alpha * lp + (1.0 - alpha) * block[:, t, :]
-        out[:, t, :] = block[:, t, :] - lp
-    return out
-
-
-def _aligned_column_geometry(model: nm.BaseRnn, n_cols: int):
-    """``column_phi_theta`` rows vs ``num_columns`` can differ by one; align for scatter/interp."""
-    pt = np.asarray(model.regions['optic_lobe'].column_phi_theta)
-    if pt.shape[0] > n_cols:
-        pt = pt[:n_cols]
-    elif pt.shape[0] < n_cols:
-        pt = np.pad(pt, ((0, n_cols - pt.shape[0]), (0, 0)), mode="edge")
-    phi, theta = pt[:, 0], pt[:, 1]
-    r = 1.0
-    x = r * np.sin(theta) * np.cos(phi)
-    y = r * np.sin(theta) * np.sin(phi)
-    # Match ``make_T4T5_movie``: cell_x = -xyz[:,0], cell_z = xyz[:,1]
-    cell_x = -x
-    cell_z = y
-    return cell_x, cell_z, phi, theta
+T4_TYPES = ["T4a", "T4b", "T4c", "T4d"]
+T5_TYPES = ["T5a", "T5b", "T5c", "T5d"]
 
 
 def main() -> None:
@@ -68,7 +39,7 @@ def main() -> None:
     parser.add_argument(
         "model_folder",
         type=str,
-        help="Path to model folder (model.pt, config.toml)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--velocity",
@@ -119,7 +90,7 @@ def main() -> None:
         "--zero_center",
         action="store_true",
         dest="zero_center",
-        help="Map photoreceptor input from [0,1] to [-1,1] (2x-1).",
+        help="Map the stimulus from [0,1] to [-1,1] (2x-1).",
     )
     parser.add_argument(
         "--log-scale",
@@ -148,19 +119,14 @@ def main() -> None:
         help="Time constant (seconds) for causal exponential highpass filter "
              "applied per column before the model. Removes DC offset.",
     )
-    parser.add_argument(
-        "--keep-existing",
-        action="store_true",
-        help="Do not delete the output directory before writing.",
-    )
 
     args = parser.parse_args()
 
-    model_folder = Path(args.model_folder)
-    model = nm.BaseRnn.load(model_folder / "model.pt")
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.BaseRnn.load(model_path)
 
     dt = model.dt
-    print(f"dt: {dt}")
 
     if args.concat_directions:
         directions = ["right", "left", "up", "down"]
@@ -189,45 +155,29 @@ def main() -> None:
     if args.zero_center:
         stimulus_np = 2.0 * stimulus_np - 1.0
     if args.highpass_tau is not None:
-        print(f"Applying exponential highpass filter (τ={args.highpass_tau} s)")
-        stimulus_np = _exponential_highpass(stimulus_np, dt, args.highpass_tau)
+        print(f"Applying exponential highpass filter (tau={args.highpass_tau} s)")
+        stimulus_np = exponential_highpass(stimulus_np, dt, args.highpass_tau)
 
     stimulus = torch.tensor(stimulus_np, device=model.device, dtype=model.dtype)
 
-    input_neurons = ["R1-6"]
-    output_neurons = [
-        "L1",
-        "Mi1",
-        "Mi9",
-        "C3",
-        "L2",
-        "Tm1",
-        "Tm2",
-        "Tm4",
-        "Tm9",
-        "T4a",
-        "T4b",
-        "T4c",
-        "T4d",
-        "T5a",
-        "T5b",
-        "T5c",
-        "T5d",
-    ]
-
+    # input_neurons=None: drive the optic lobe through its configured inputs.
     with torch.no_grad():
         pred = model.predict(
             stimulus,
-            input_neurons=input_neurons,
-            output_neurons=output_neurons,
+            input_neurons=None,
+            output_neurons=T4_TYPES + T5_TYPES,
         )["outputs"]["optic_lobe"]["firing_rate"]
 
-    stim_np = stimulus.detach().cpu().numpy()
-    n_cols = model.regions['optic_lobe'].num_columns
-    cell_x, cell_z, cell_phi, cell_theta = _aligned_column_geometry(model, n_cols)
-    if stim_np.shape[2] < n_cols:
-        pad_width = n_cols - stim_np.shape[2]
-        stim_np = np.pad(stim_np, ((0, 0), (0, 0), (0, pad_width)), mode="edge")
+    # Eye view (x-z plane), as in the other movie scripts.
+    column_xyz = model.regions['optic_lobe'].get_column_xyz()
+    cell_x, cell_z = -column_xyz[:, 0], column_xyz[:, 2]
+
+    # The diamond factory colours the centre stimulus on a fixed [0, 1] scale;
+    # rescale a zero-centred or high-passed stimulus into that range.
+    stim_np = stimulus_np
+    if args.zero_center or args.highpass_tau is not None:
+        lo, hi = np.nanmin(stim_np), np.nanmax(stim_np)
+        stim_np = (stim_np - lo) / max(hi - lo, 1e-12)
     cp = args.color_percentile
 
     out_root = (
@@ -235,8 +185,6 @@ def main() -> None:
         if args.out_dir
         else model_folder / "figures" / "natural_pano_t4t5_movies"
     )
-    if not args.keep_existing:
-        shutil.rmtree(out_root, ignore_errors=True)
     out_root.mkdir(parents=True, exist_ok=True)
 
     tag = f"v{args.velocity:g}"
@@ -248,15 +196,11 @@ def main() -> None:
 
     frame_rate = max(1, int(round(1.0 / dt)))
 
-    for group_name, measured_cell_types in [
-        ("t4", ["T4a", "T4b", "T4c", "T4d"]),
-        ("t5", ["T5a", "T5b", "T5c", "T5d"]),
-    ]:
+    for group_name, measured_cell_types in [("t4", T4_TYPES), ("t5", T5_TYPES)]:
         seq_data = {}
         for mct in measured_cell_types:
             cell_resp = pred[mct].detach().cpu().numpy()
             cell_resp = cell_resp / max(np.nanpercentile(cell_resp, cp), 1e-12)
-            #cell_resp = interp_nan_column(cell_resp, cell_phi, cell_theta)
             seq_data[mct] = cell_resp
 
         seq_data["stimulus"] = stim_np

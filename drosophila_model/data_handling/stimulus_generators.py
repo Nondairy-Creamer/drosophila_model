@@ -5,13 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 import torch
 
-# All stimulus generating function should return
-# Stimulus: [examples, time, points in space]
-# Optic Flow: [examples, time, points in space, LR/UD optic flow]
+# Array conventions: the single-example make_* helpers return
+#   stimulus: [time, points in space], optic flow: [time, points in space, 2];
+# the batch create_* / get_* generators add a leading example axis:
+#   stimulus: [examples, time, points in space]
+#   optic flow: [examples, time, points in space, LR/UD optic flow]
 
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.data_handling.sampling import (
     build_ommatidium_sampling_matrix,
-    resample_time_to_length,
     interpolate_to_model_dt,
 )
 from drosophila_model.data_handling import drone_utilities as du
@@ -33,6 +35,7 @@ EXPANDING_DOT_SPEED_RANGE_CM_S = (15.0, 45.0)
 def bake_fly_view_dataset(
     data_path: str | Path | None = None,
     out_path: str | Path | None = None,
+    data_folder: str | Path | None = None,
 ):
     """Bake the raw fly-view pickle into a compact ``flyview.pt`` cache.
 
@@ -52,14 +55,17 @@ def bake_fly_view_dataset(
 
     Columns stay **block-packed**: ``[..., :n_eye]`` = right eye,
     ``[..., n_eye:]`` = left eye. Clips keep their native length and frame rate;
-    ``drop_first_frame``, segmentation, and resampling happen later in
-    :func:`load_fly_view_dataset`.
+    ``drop_first_frame``, interpolation to the model ``dt`` and segmentation
+    happen later in :func:`load_fly_view_dataset`.
 
     Args:
         data_path: Path to the raw pickle. When ``None``, resolves to
             ``<data_folder>/stimulus/raw/fib_forest_fly_view_dataset_fwd.pkl``.
         out_path: Destination ``.pt``. When ``None``, resolves to
             ``<data_folder>/stimulus/baked/flyview.pt``.
+        data_folder: Data root, also used for the column viewing directions.
+            When ``None``, uses ``[data].data_folder`` of the working-directory
+            ``config.toml``.
 
     Returns:
         The path of the written ``flyview.pt``.
@@ -69,13 +75,13 @@ def bake_fly_view_dataset(
         estimate_ego_motion_known_depth,
     )
 
-    if data_path is None or out_path is None:
-        from drosophila_model.config import load_config
-        stim_dir = Path(load_config()['data']['data_folder']) / 'stimulus'
-        if data_path is None:
-            data_path = stim_dir / 'raw' / 'fib_forest_fly_view_dataset_fwd.pkl'
-        if out_path is None:
-            out_path = stim_dir / 'baked' / 'flyview.pt'
+    if data_folder is None:
+        data_folder = get_data_folder(load_config())
+    stim_dir = Path(data_folder) / 'stimulus'
+    if data_path is None:
+        data_path = stim_dir / 'raw' / 'fib_forest_fly_view_dataset_fwd.pkl'
+    if out_path is None:
+        out_path = stim_dir / 'baked' / 'flyview.pt'
     in_path, out_path = Path(data_path), Path(out_path)
     if not in_path.exists():
         raise FileNotFoundError(f"Fly-view pickle not found: {in_path.resolve()}")
@@ -89,7 +95,7 @@ def bake_fly_view_dataset(
         raise ValueError(
             f"Expected forward_flows in radians/frame; got flow_units={flow_units!r}"
         )
-    # rad/frame -> deg/s (constant scale; temporal resampling happens at load).
+    # rad/frame -> deg/s (constant scale; temporal interpolation happens at load).
     flow_to_deg_s = fps * (180.0 / np.pi)
 
     n_cols = int(np.asarray(d['responses'][0]).shape[1])
@@ -99,7 +105,7 @@ def bake_fly_view_dataset(
 
     # Viewing directions ([right|left] block order, matching the column layout)
     # are needed to solve flow-based odometry.
-    column_phi, column_theta = load_viewing_directions()
+    column_phi, column_theta = load_viewing_directions(data_folder)
     if column_phi.shape[0] != n_cols:
         raise ValueError(
             f"Viewing directions ({column_phi.shape[0]}) != flyview columns "
@@ -174,19 +180,24 @@ def load_fly_view_dataset(
 
     The flow (deg/s) and the depth-based odometry are precomputed by
     :func:`bake_fly_view_dataset`; this loader only handles the timing-dependent
-    steps (drop first frame, segment to ``stim_time``, resample to ``model_dt``).
+    steps: drop the first frame, interpolate each whole clip to ``model_dt``,
+    then cut it into non-overlapping segments of ``round(stim_time / model_dt)``
+    steps (the length every other generator produces). Time is never
+    stretched, so the deg/s flow and rate targets match the frames.
 
     Columns are **block-packed**: ``[..., :n_eye]`` = all right-eye samples,
     ``[..., n_eye:]`` = all left-eye samples (``n_eye = N // 2``).
 
     Args:
         model_dt: Model time step (seconds).
-        stim_time: Duration of each segment (seconds). Use a value >= the native
-            clip duration to keep each clip as a single segment.
+        stim_time: Duration of each segment (seconds). Clips shorter than one
+            segment are skipped; a ``stim_time`` longer than the longest clip
+            is capped to that clip's duration (with a warning).
         two_eyes: If True, return binocular columns ``[right | left]`` plus the
             baked ego-motion rates. If False, return right-eye columns only.
         data_path: Path to the baked ``flyview.pt``. When ``None``, resolves to
-            ``<config['data']['data_folder']>/stimulus/baked/flyview.pt``.
+            ``<data_folder>/stimulus/baked/flyview.pt`` using ``[data].data_folder``
+            of the working-directory ``config.toml``.
         drop_first_frame: If True, drop the first time index.
 
     Returns:
@@ -203,97 +214,63 @@ def load_fly_view_dataset(
         on the same side of a train/test split.
     """
     if data_path is None:
-        from drosophila_model.config import load_config
-        data_path = (
-            Path(load_config()['data']['data_folder'])
-            / 'stimulus' / 'baked' / 'flyview.pt'
-        )
+        data_path = get_data_folder(load_config()) / 'stimulus' / 'baked' / 'flyview.pt'
     path = Path(data_path)
     if not path.exists():
         raise FileNotFoundError(
             f"Baked fly-view dataset not found: {path.resolve()}. "
-            "Run `python drosophila_model/data_handling/process_raw_data.py flyview` "
+            "Run `python -m drosophila_model.data_handling.process_raw_data flyview` "
             "to create it from fib_forest_fly_view_dataset_fwd.pkl.")
 
     d = torch.load(path, weights_only=False)
-    fps = float(d['fps'])
-    stimulus_dt = 1.0 / fps
+    stimulus_dt = 1.0 / float(d['fps'])
     n_eye = int(d['n_eye'])
 
-    stim_clips = d['stimulus']
-    flow_clips = d['optic_flow']
-    rot_clips = d['rotation_rate']
-    trans_clips = d['translation_rate']
-
-    # Ideal native frame count for stim_time; clips may be shorter — we upsample later.
-    n_frames_requested = max(1, int(round(stim_time / stimulus_dt)))
-
-    stim_list, flow_list = [], []
-    rot_list, trans_list = [], []
-    clip_id_list = []
-
-    for i in range(len(stim_clips)):
-        s = np.asarray(stim_clips[i])
-        f = np.asarray(flow_clips[i])
+    # Interpolate each whole clip to model_dt first, then segment, so every
+    # segment spans exactly seg_len * model_dt seconds of the clip.
+    # Per clip: [stimulus, optic_flow] (+ [rotation_rate, translation_rate]).
+    clips = []
+    for i in range(len(d['stimulus'])):
+        arrays = [np.asarray(d['stimulus'][i]), np.asarray(d['optic_flow'][i])]
         if two_eyes:
-            rot = np.asarray(rot_clips[i])
-            trans = np.asarray(trans_clips[i])
-
+            arrays += [np.asarray(d['rotation_rate'][i]),
+                       np.asarray(d['translation_rate'][i])]
+        else:
+            arrays = [arrays[0][:, :n_eye], arrays[1][:, :n_eye]]
         if drop_first_frame:
-            s, f = s[1:], f[1:]
-            if two_eyes:
-                rot, trans = rot[1:], trans[1:]
-
-        clip_len = s.shape[0]
-        if clip_len == 0:
+            arrays = [a[1:] for a in arrays]
+        if arrays[0].shape[0] < 2:
             continue
+        arrays = [interpolate_to_model_dt(a[None], stimulus_dt, model_dt)[0] for a in arrays]
+        clips.append((i, arrays))
 
-        if not two_eyes:
-            s = s[:, :n_eye]
-            f = f[:, :n_eye]
+    if not clips:
+        raise RuntimeError("No rendered fly-view clips found (empty dataset?).")
 
-        n_seg = min(clip_len, n_frames_requested)
-        num_segments = clip_len // n_seg
-
-        for seg_idx in range(num_segments):
-            sl = slice(seg_idx * n_seg, (seg_idx + 1) * n_seg)
-            stim_list.append(s[sl][None, ...])
-            flow_list.append(f[sl][None, ...])
-            clip_id_list.append(i)
-            if two_eyes:
-                rot_list.append(rot[sl][None, ...])
-                trans_list.append(trans[sl][None, ...])
-
-    if not stim_list:
-        raise RuntimeError(
-            "No rendered fly-view clips produced segments (empty dataset?)."
+    seg_len = max(1, int(round(stim_time / model_dt)))
+    max_clip_len = max(arrays[0].shape[0] for _, arrays in clips)
+    if seg_len > max_clip_len:
+        warnings.warn(
+            f"stim_time={stim_time}s ({seg_len} steps) exceeds the longest "
+            f"fly-view clip ({max_clip_len} steps = {max_clip_len * model_dt:.2f}s). "
+            f"Capping segments to {max_clip_len * model_dt:.2f}s."
         )
+        seg_len = max_clip_len
 
-    stimulus = np.concatenate(stim_list, axis=0)
-    optic_flow = np.concatenate(flow_list, axis=0)
-    clip_ids = np.asarray(clip_id_list, dtype=np.int64)
+    segments = [[] for _ in clips[0][1]]
+    clip_id_list = []
+    for i, arrays in clips:
+        num_segments = arrays[0].shape[0] // seg_len
+        if num_segments == 0:
+            continue
+        usable = num_segments * seg_len
+        for out, a in zip(segments, arrays):
+            out.append(a[:usable].reshape(num_segments, seg_len, *a.shape[1:]))
+        clip_id_list.append(np.full(num_segments, i, dtype=np.int64))
 
-    # Map native timing → model_dt, then stretch/compress time to exactly stim_time.
-    n_target = max(1, int(round(stim_time / model_dt)) + 1)
-
-    if two_eyes:
-        rotation_rate = np.concatenate(rot_list, axis=0)
-        translation_rate = np.concatenate(trans_list, axis=0)
-        stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-        optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
-        rotation_rate = interpolate_to_model_dt(rotation_rate, stimulus_dt, model_dt)
-        translation_rate = interpolate_to_model_dt(translation_rate, stimulus_dt, model_dt)
-        stimulus = resample_time_to_length(stimulus, n_target)
-        optic_flow = resample_time_to_length(optic_flow, n_target)
-        rotation_rate = resample_time_to_length(rotation_rate, n_target)
-        translation_rate = resample_time_to_length(translation_rate, n_target)
-        return stimulus, optic_flow, rotation_rate, translation_rate, clip_ids
-
-    stimulus = interpolate_to_model_dt(stimulus, stimulus_dt, model_dt)
-    optic_flow = interpolate_to_model_dt(optic_flow, stimulus_dt, model_dt)
-    stimulus = resample_time_to_length(stimulus, n_target)
-    optic_flow = resample_time_to_length(optic_flow, n_target)
-    return stimulus, optic_flow, clip_ids
+    outputs = [np.concatenate(s, axis=0) for s in segments]
+    clip_ids = np.concatenate(clip_id_list)
+    return (*outputs, clip_ids)
 
 
 def _stim_time_vector(dt, stim_time, pre_stim_time=0.0, post_stim_time=0.0):
@@ -485,12 +462,16 @@ def make_ud_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, tempo
 def make_lr_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
                         dt=0.01, stim_time=1.0, pre_stim_time=0.0,
                         post_stim_time=0.0, edge_width=2.5):
-    """Generate a left-right moving edge stimulus.
+    """Generate a left-right moving edge stimulus (a full 0 -> 1 step).
+
+    Unlike :func:`make_lr_edge` (gray -> bright/dark), every column steps
+    between 0 and 1 as the edge passes; the edge width is configurable.
 
     Args:
         sample_phi: azimuthal angles of ommatidia (radians).
         sample_theta: polar angles of ommatidia (radians).
-        velocity: edge speed in degrees/second (positive = rightward).
+        velocity: edge speed in degrees/second (positive = rightward, i.e.
+            decreasing phi, as in :func:`make_lr_edge`).
         edge_type: ``'on'`` (dark-to-light transition as edge passes each
             point, i.e. a bright leading edge) or ``'off'`` (light-to-dark,
             dark leading edge).
@@ -509,33 +490,29 @@ def make_lr_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
     velocity_rad = velocity * np.pi / 180
     filter_std_base = edge_width * np.pi / 180
 
-    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    pre_idx = int(pre_stim_time / dt)
-    post_idx = int((pre_stim_time + stim_time) / dt)
-    t_eff = t.copy()
-    t_eff[:pre_idx] = t_eff[pre_idx]
-    if post_idx < len(t_eff):
-        t_eff[post_idx:] = t_eff[post_idx - 1]
+    t_eff, pre_idx, _ = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
+    t_eff = t_eff - t_eff[pre_idx]  # time since stimulus onset
 
-    # Start edge well outside the visual field
+    # Start edge well outside the visual field. Rightward motion is decreasing
+    # phi (phi increases to the left).
     phi_span = sample_phi.max() - sample_phi.min()
     margin = 4 * filter_std_base + 0.1 * phi_span
     if velocity_rad >= 0:
-        start_pos = sample_phi.min() - margin
-    else:
         start_pos = sample_phi.max() + margin
-    edge_pos = start_pos + velocity_rad * t_eff  # (time,)
+    else:
+        start_pos = sample_phi.min() - margin
+    edge_pos = start_pos - velocity_rad * t_eff  # (time,)
 
     # Theta-dependent sigma (wider near poles, same convention as sine wave)
     sigma = filter_std_base / np.abs(np.cos(sample_theta - np.pi / 2))
 
     # Gaussian-smoothed step via error function.
     # "Has the edge passed this point?" depends on direction:
-    #   rightward (v>0): passed when edge_pos > phi  → diff = +(edge_pos - phi)
-    #   leftward  (v<0): passed when edge_pos < phi  → diff = -(edge_pos - phi)
+    #   rightward (v>0): passed when edge_pos < phi  → diff = +(phi - edge_pos)
+    #   leftward  (v<0): passed when edge_pos > phi  → diff = -(phi - edge_pos)
     # Multiplying by sign(velocity) unifies both cases.
     direction = np.sign(velocity_rad) if velocity_rad != 0 else 1.0
-    diff = direction * (edge_pos[:, None] - sample_phi[None, :])  # (time, columns)
+    diff = direction * (sample_phi[None, :] - edge_pos[:, None])  # (time, columns)
     step = 0.5 * (1.0 + erf(diff / (sigma[None, :] * np.sqrt(2))))
 
     if edge_type.lower() in ('off', 'dark'):
@@ -544,65 +521,6 @@ def make_lr_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
     return step
 
 
-def make_ud_moving_edge(sample_phi, sample_theta, velocity=30, edge_type='on',
-                        dt=0.01, stim_time=1.0, pre_stim_time=0.0,
-                        post_stim_time=0.0, edge_width=2.5):
-    """Generate an up-down moving edge stimulus.
-
-    Uses the same ``tan(theta - pi/2)`` coordinate mapping as
-    :func:`make_ud_sine_wave` so that the edge moves at constant apparent
-    speed on the virtual cylinder.
-
-    Args:
-        sample_phi: azimuthal angles of ommatidia (radians).
-        sample_theta: polar angles of ommatidia (radians).
-        velocity: edge speed in degrees/second at the equator
-            (positive = upward, negative = downward).
-        edge_type: ``'on'`` or ``'off'`` (see :func:`make_lr_moving_edge`).
-        dt: time step (seconds).
-        stim_time: stimulus duration (seconds).
-        pre_stim_time: blank time before the edge enters the field.
-        post_stim_time: blank time after stimulus ends.
-        edge_width: base Gaussian smoothing sigma in degrees.
-
-    Returns:
-        stimulus: ``(time, columns)`` array with values in [0, 1].
-    """
-    from scipy.special import erf
-
-    velocity_rad = velocity * np.pi / 180
-    filter_std_base = edge_width * np.pi / 180
-
-    t = np.arange(0, pre_stim_time + stim_time + post_stim_time, step=dt)
-    pre_idx = int(pre_stim_time / dt)
-    post_idx = int((pre_stim_time + stim_time) / dt)
-    t_eff = t.copy()
-    t_eff[:pre_idx] = t_eff[pre_idx]
-    if post_idx < len(t_eff):
-        t_eff[post_idx:] = t_eff[post_idx - 1]
-
-    # Map theta to cartesian vertical coordinate (same as UD sine wave)
-    y = np.tan(sample_theta - np.pi / 2)  # (columns,)
-
-    y_span = y.max() - y.min()
-    margin = 4 * filter_std_base + 0.1 * y_span
-    if velocity_rad >= 0:
-        start_pos = y.min() - margin
-    else:
-        start_pos = y.max() + margin
-    edge_pos = start_pos + velocity_rad * t_eff  # (time,)
-
-    # Theta-dependent sigma
-    sigma = filter_std_base / np.abs(np.cos(sample_theta - np.pi / 2))
-
-    direction = np.sign(velocity_rad) if velocity_rad != 0 else 1.0
-    diff = direction * (edge_pos[:, None] - y[None, :])  # (time, columns)
-    step = 0.5 * (1.0 + erf(diff / (sigma[None, :] * np.sqrt(2))))
-
-    if edge_type.lower() in ('off', 'dark'):
-        step = 1.0 - step
-
-    return step
 def make_counterphase_sine(sample_phi, sample_theta, contrast=1,
                            wavelength_phi=30, wavelength_theta=30,
                            temporal_frequency=4,
@@ -744,7 +662,8 @@ def make_lr_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
 
     Returns:
         stimulus: (time, N) array with values in [0, 1]
-        optic_flow: (time, N, 2) array (zeros)
+        optic_flow: (time, N, 2) array of zeros -- a placeholder, not the
+            edge's motion (edges are analysis-only probes, never baked).
     """
     from scipy.special import erf as sp_erf
 
@@ -802,7 +721,11 @@ def make_ud_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
 
     Returns:
         stimulus: (time, N) array with values in [0, 1]
-        optic_flow: (time, N, 2) array (zeros)
+        optic_flow: (time, N, 2) array of zeros -- a placeholder, not the
+            edge's motion (edges are analysis-only probes, never baked).
+
+    The sweep direction is only correct for right-eye columns (``phi < 0``);
+    see ``_gen_edge`` for how two-eye stimuli are built.
     """
     from scipy.special import erf as sp_erf
 
@@ -906,7 +829,7 @@ def create_edge_stimulus(sample_phi, sample_theta, velocities=None,
 
     Returns:
         stimulus: (examples, time, N) array with values in [0, 1]
-        optic_flow: (examples, time, N, 2) array (zeros)
+        optic_flow: (examples, time, N, 2) array of placeholder zeros
     """
     if velocities is None:
         velocities = [30, 60, 120, 240]
@@ -975,6 +898,8 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=3
             z-component for left/right examples, zero for up/down.
         translation: [examples, time, 3] observer linear velocity; nonzero
             z-component for up/down examples, zero for left/right.
+        group_id: [examples] int array; the four phase/contrast variants of
+            one (temporal frequency, direction) condition share an id.
     """
     if type(temporal_frequency) is not list:
         temporal_frequency = [temporal_frequency]
@@ -989,12 +914,14 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=3
     optic_flow_dict = {b: [] for b, _, _ in directions}
     rotation_dict = {b: [] for b, _, _ in directions}
     translation_dict = {b: [] for b, _, _ in directions}
+    group_dict = {b: [] for b, _, _ in directions}
 
     # For each temporal frequency and direction, emit four examples: phase 0,
     # phase pi/2, and their contrast inversions (1 - wave). The inverted-contrast
     # copies reuse the same optic flow and ego-motion (inversion does not change
     # the motion). LR drift is observer yaw rotation; UD drift is observer
     # vertical translation (see _drift_ego / _drift_flow).
+    condition = 0
     for tf in temporal_frequency:
         for block, axis, sign in directions:
             wave_0, flow_0 = _make_drifting_sine(
@@ -1012,19 +939,28 @@ def create_balanced_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=3
                                        flow_0[None], flow_90[None]]
             rotation_dict[block] += [rot[None]] * 4
             translation_dict[block] += [trans[None]] * 4
+            group_dict[block] += [condition] * 4
+            condition += 1
 
     stimulus, optic_flow = consolidate_stim(sine_wave_dict, optic_flow_dict)
     rotation, translation = _consolidate_ego(rotation_dict, translation_dict)
+    group_id = np.concatenate([np.asarray(group_dict[b]) for b in group_dict])
 
-    return stimulus, optic_flow, rotation, translation
+    return stimulus, optic_flow, rotation, translation, group_id
 
 def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=30, velocity_amp=150.0, velocity_time_scale=0.15, seed=None,
                                dt=0.01, stim_time=1.0, num_repeats=5):
+    """Sine gratings drifting with a smoothly varying random velocity.
+
+    Returns ``(stimulus, optic_flow, rotation, translation, group_id)``: the
+    usual ``[examples, time, ...]`` arrays plus an ``[examples]`` int array in
+    which each example and its contrast-inverted copy share an id.
+    """
     # generates what a point of light at sample_phi[i] and sample[theta_i] would look like at each time point
     # from the perspective of a spherical obsrever looking at a cylinder with a sine wave stimulus on it
-    # the velocity of this sine wave is a smoothed gaussian random walk 
+    # the velocity of this sine wave is a smoothed gaussian random walk
     # positive / negative temporal frequency is right / left and up / down sine waves
-    
+
     # Convert velocity (deg/s) to temporal frequency (Hz): degrees cancel
     tf_amp = velocity_amp / wavelength
     # Convert wavelength to radians for spatial calculations
@@ -1039,12 +975,10 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     # --- generate the space time coordinates ---
     # double the number of stim because we want to symmetrize the temporal frequnecies
     num_repeats = num_repeats * 2
-    num_time = int(round(stim_time * num_repeats / dt))
+    time_per_stim = int(round(stim_time / dt))
+    num_time = time_per_stim * num_repeats  # even, and divisible by num_repeats
     time_vect = np.arange(num_time) * dt
-    t_mesh, phi_mesh = np.meshgrid(time_vect, sample_phi, indexing='ij')
-    t_mesh, theta_mesh = np.meshgrid(time_vect, sample_theta, indexing='ij')
-    num_time, num_cell = phi_mesh.shape
-    time_per_stim = num_time // num_repeats
+    num_cell = len(sample_phi)
 
     # --- generate the shifting temporal frequency ---
     tf = rng.standard_normal(num_time // 2)
@@ -1074,7 +1008,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
 
     def make_lr_sine_wave(phase_init=0):
         phase = phase_init
-        sine_wave = np.zeros_like(t_mesh)
+        sine_wave = np.zeros((num_time, num_cell))
 
         for ti in range(time_vect.shape[0]):
             phase += tf[ti] * dt
@@ -1084,7 +1018,7 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
 
     def make_ud_sine_wave(phase_init=0):
         phase = phase_init
-        sine_wave = np.zeros_like(t_mesh)
+        sine_wave = np.zeros((num_time, num_cell))
 
         for ti in range(time_vect.shape[0]):
             phase += tf[ti] * dt
@@ -1138,7 +1072,15 @@ def create_random_tf_sine_wave(sample_phi, sample_theta, contrast=1, wavelength=
     stimulus = (stimulus + 1.0) / 2.0
     rotation, translation = _consolidate_ego(rotation_dict, translation_dict)
 
-    return stimulus, optic_flow, rotation, translation
+    # Each block holds [wave, shifted, -wave, -shifted] x num_repeats; the
+    # contrast-inverted copies (-wave, -shifted) share their original's group.
+    repeat = np.arange(num_repeats)
+    group_id = np.concatenate([
+        b * 2 * num_repeats + np.concatenate([repeat, repeat + num_repeats] * 2)
+        for b in range(len(blocks))
+    ])
+
+    return stimulus, optic_flow, rotation, translation, group_id
 
 
 def create_directional_sine_wave(sample_phi, sample_theta, direction, contrast=1, wavelength=30, temporal_frequency=4,
@@ -1186,7 +1128,7 @@ def _random_rotation_matrix(rng):
     return q
 
 
-def _load_all_panos(pt_path=None):
+def _load_all_panos(pt_path=None, *, data_folder=None):
     """Load all panoramic images from a single .pt file.
 
     The .pt file contains a (N, H, W) float32 tensor of raw panoramic images
@@ -1194,22 +1136,23 @@ def _load_all_panos(pt_path=None):
 
     Args:
         pt_path: Path to ``all_panoramic.pt``. When ``None``, resolves to
-            ``<config['data']['data_folder']>/stimulus/baked/all_panoramic.pt``.
+            ``<data_folder>/stimulus/baked/all_panoramic.pt``.
+        data_folder: Data root used when ``pt_path`` is ``None``; defaults to
+            ``[data].data_folder`` of the working-directory ``config.toml``.
 
     Returns:
         panos: (N, H, W) numpy float64 array of raw panoramic images.
     """
     if pt_path is None:
-        from drosophila_model.config import load_config
-        pt_path = (
-            Path(load_config()['data']['data_folder'])
-            / 'stimulus' / 'baked' / 'all_panoramic.pt'
-        )
+        if data_folder is None:
+            data_folder = get_data_folder(load_config())
+        pt_path = Path(data_folder) / 'stimulus' / 'baked' / 'all_panoramic.pt'
     pt_path = Path(pt_path)
     if not pt_path.exists():
         raise FileNotFoundError(
             f"Consolidated panoramic file not found at {pt_path.resolve()}. "
-            "Please run the consolidation step first."
+            "Create it with `python -m drosophila_model.data_handling.process_raw_data "
+            "random_pano`."
         )
     panos = torch.load(pt_path, weights_only=True)
     return panos.numpy().astype(np.float64)
@@ -1254,6 +1197,47 @@ def _filter_pano(pano, filter_std_rad=2.5 * np.pi / 180):
         pano_out = np.zeros_like(pano_out)
 
     return pano_out, pano_y_lim, pano_x_lim
+
+
+def _rotation_increment(omega, dt):
+    """Rotation matrix for turning at angular velocity ``omega`` ((3,), rad/s)
+    for ``dt`` seconds (Rodrigues' formula)."""
+    angle = np.linalg.norm(omega) * dt
+    if angle <= 1e-12:
+        return np.eye(3)
+    ax = omega / np.linalg.norm(omega)
+    K = np.array([[0, -ax[2], ax[1]],
+                  [ax[2], 0, -ax[0]],
+                  [-ax[1], ax[0], 0]])
+    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+
+def _sample_pano(pano_filtered, xyz, pano_y_lim, pano_x_lim):
+    """Bilinearly sample a filtered panorama along unit viewing directions.
+
+    ``xyz`` is ``(..., 3)`` in the panorama (world) frame, +x forward /
+    +y left / +z up. Returns ``(stim, out_of_bounds)``, both shaped like
+    ``xyz[..., 0]``; directions above or below the panorama are marked
+    out of bounds and get the panorama mean.
+    """
+    from scipy.ndimage import map_coordinates
+
+    pano_height, pano_width = pano_filtered.shape
+    theta = np.arccos(np.clip(xyz[..., 2], -1, 1))
+    phi = np.arctan2(xyz[..., 1], xyz[..., 0])
+    y_indices = (theta - pano_y_lim[0]) / (pano_y_lim[1] - pano_y_lim[0]) * (pano_height - 1)
+    x_indices = (pano_x_lim[0] - phi) / (pano_x_lim[0] - pano_x_lim[1]) * pano_width
+    x_indices = x_indices % pano_width  # wrap horizontally
+
+    out_of_bounds = (y_indices < 0) | (y_indices > pano_height - 1)
+    y_indices = np.clip(y_indices, 0, pano_height - 1)
+
+    stim = map_coordinates(
+        pano_filtered, [y_indices.ravel(), x_indices.ravel()],
+        order=1, mode='nearest'
+    ).reshape(y_indices.shape)
+    stim[out_of_bounds] = pano_filtered.mean()
+    return stim, out_of_bounds
 
 
 def make_expanding_dot_pano(
@@ -1317,9 +1301,6 @@ def make_expanding_dot_pano(
     Returns:
         stimulus: (T, N) in [0, 1].
         optic_flow: (T, N, 2) zeros (no self-motion).
-        readout: (T, N) subtended solid angle (steradians) at columns whose
-            direction lies inside the dot; 0 elsewhere. For binary “dot here or
-            not”, use ``readout > 0``.
     """
     if object_polarity not in ('light', 'dark'):
         raise ValueError("object_polarity must be 'light' or 'dark'")
@@ -1367,17 +1348,12 @@ def make_expanding_dot_pano(
         else:
             theta0 = float(center_theta)
 
-    num_time = int(round((pre_stim_time + stim_time + post_stim_time) / dt))
-    t = np.arange(num_time) * dt
-    pre_stim_index = int(round(pre_stim_time / dt))
-    post_stim_index = int(round((pre_stim_time + stim_time) / dt))
-    t[:pre_stim_index] = t[pre_stim_index]
-    t[post_stim_index:] = t[post_stim_index - 1]
+    t, pre_stim_index, _ = _stim_time_vector(dt, stim_time, pre_stim_time, post_stim_time)
+    num_time = len(t)
     t_stim = t - t[pre_stim_index]
 
     d = np.maximum(d0 - v * t_stim, 1e-9)
     alpha = np.arctan(R / d)
-    omega_cap = 2.0 * np.pi * (1.0 - np.cos(alpha))
 
     # Match ``build_ommatidium_sampling_matrix`` pixel axes (inclusive endpoints).
     theta_pixels = np.linspace(pano_theta_lim[0], pano_theta_lim[1], H)
@@ -1397,14 +1373,6 @@ def make_expanding_dot_pano(
 
     num_cells = len(sample_phi)
     stimulus = np.full((num_time, num_cells), 0.5, dtype=np.float64)
-    readout = np.zeros((num_time, num_cells), dtype=np.float64)
-
-    cos_gc = (
-        np.sin(sample_theta) * np.sin(theta0) * np.cos(sample_phi - phi0)
-        + np.cos(sample_theta) * np.cos(theta0)
-    )
-    cos_gc = np.clip(cos_gc, -1.0, 1.0)
-    g_col = np.arccos(cos_gc)
 
     if ommatidium_sampling_matrix is not None:
         W_eye = ommatidium_sampling_matrix
@@ -1433,11 +1401,9 @@ def make_expanding_dot_pano(
         stimulus[ti] = np.asarray(
             W_eye @ pano_frame.ravel(order="C"), dtype=np.float64
         ).ravel()
-        inside_col = g_col <= alpha[ti]
-        readout[ti, inside_col] = omega_cap[ti]
 
     optic_flow = np.zeros((num_time, num_cells, 2), dtype=np.float64)
-    return stimulus, optic_flow, readout
+    return stimulus, optic_flow
 
 
 def create_expanding_dot_stimulus(
@@ -1483,7 +1449,7 @@ def create_expanding_dot_stimulus(
     for polarity, count in (('light', num_light), ('dark', num_dark)):
         for _ in range(count):
             trial_seed = int(master_rng.integers(0, 2**31 - 1))
-            s, f, _ = make_expanding_dot_pano(
+            s, f = make_expanding_dot_pano(
                 sample_phi,
                 sample_theta,
                 polarity,
@@ -1506,7 +1472,7 @@ def trim_expanding_dot_config_for_max_index(data_config, max_index: int) -> None
     first, then dark). Mutates ``data_config['expanding_dot']`` in place.
 
     Used by movie scripts that only need a few examples (e.g. ``--stim-index 0``)
-    without paying for the full 50+50 training batch.
+    without paying for the full default 50+50 batch.
     """
     if max_index < 0:
         return
@@ -1522,7 +1488,8 @@ def trim_expanding_dot_config_for_max_index(data_config, max_index: int) -> None
 
 
 def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocity_time_scale=0.25, seed=None,
-                             dt=0.01, stim_time=1.0, num_repeats=5):
+                             dt=0.01, stim_time=1.0, num_repeats=5, data_folder=None,
+                             pano_indices=None):
     """
     Generate panoramic stimuli with smoothly varying rotational velocity AND
     smoothly varying rotation axis.
@@ -1548,6 +1515,13 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
         stim_time: duration per repeat (seconds)
         num_repeats: number of repeats *per panorama* (will be doubled for
             symmetrization)
+        data_folder: data root holding ``stimulus/baked/all_panoramic.pt``;
+            defaults to ``[data].data_folder`` of the working-directory
+            ``config.toml``.
+        pano_indices: optional 1D array of indices into ``all_panoramic.pt``;
+            default uses every panorama. The random draws are made pano by
+            pano, so ``pano_indices=range(k)`` reproduces the first ``k``
+            panoramas of the default output.
 
     Returns:
         stimulus: [examples, time, points in space] — pixel values in [0, 1]
@@ -1555,8 +1529,9 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
         rotation_vectors: [examples, time, 3] — body-frame angular velocity (rad/s)
         oob_mask: [examples, time, points in space] — True where viewing direction
             falls outside panorama bounds (above/below image).
+        Examples are panorama-major: the ``2 * num_repeats`` repeats of each
+        panorama are consecutive.
     """
-    from scipy.ndimage import map_coordinates
     from drosophila_model.model_definition.ego_motion import generate_optic_flow
 
     # Create RNG from seed
@@ -1566,7 +1541,9 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
         rng = np.random.default_rng()
 
     # --- load all panoramic images ---
-    raw_panos = _load_all_panos()
+    raw_panos = _load_all_panos(data_folder=data_folder)
+    if pano_indices is not None:
+        raw_panos = raw_panos[np.asarray(pano_indices, dtype=int)]
 
     pano_images = []
     for i in range(raw_panos.shape[0]):
@@ -1610,8 +1587,6 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
     oob_list = []
 
     for pano_filtered in pano_images:
-        pano_height, pano_width = pano_filtered.shape
-
         # --- generate 3 independent smoothed angular velocity components ---
         omega = np.zeros((3, num_time))
         for dim in range(3):
@@ -1639,35 +1614,12 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
 
             for ti in range(time_per_stim):
                 omega_world = omega_seg[:, ti]
-                angle = np.linalg.norm(omega_world) * dt
-                if angle > 1e-12:
-                    ax = omega_world / np.linalg.norm(omega_world)
-                    K = np.array([[0, -ax[2], ax[1]],
-                                  [ax[2], 0, -ax[0]],
-                                  [-ax[1], ax[0], 0]])
-                    R_inc = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
-                    R = R_inc @ R
+                R = _rotation_increment(omega_world, dt) @ R
                 rotated_xyz[ti] = (R @ sample_xyz.T).T
                 omega_body[ti] = R.T @ omega_world
 
-            # Convert back to spherical coordinates
-            rotated_theta = np.arccos(np.clip(rotated_xyz[:, :, 2], -1, 1))
-            rotated_phi = np.arctan2(rotated_xyz[:, :, 1], rotated_xyz[:, :, 0])
-
-            # --- sample the filtered panoramic image ---
-            y_indices = (rotated_theta - pano_y_lim[0]) / (pano_y_lim[1] - pano_y_lim[0]) * (pano_height - 1)
-            x_indices = (pano_x_lim[0] - rotated_phi) / (pano_x_lim[0] - pano_x_lim[1]) * pano_width
-            x_indices = x_indices % pano_width  # wrap horizontally
-
-            # Mark out-of-bounds theta (above or below panorama) — set to mean
-            out_of_bounds = (y_indices < 0) | (y_indices > pano_height - 1)
-            y_indices = np.clip(y_indices, 0, pano_height - 1)
-
-            stim = map_coordinates(
-                pano_filtered, [y_indices.ravel(), x_indices.ravel()],
-                order=1, mode='nearest'
-            ).reshape(time_per_stim, num_cells)
-            stim[out_of_bounds] = pano_filtered.mean()
+            # --- sample the filtered panoramic image (out-of-bounds -> mean) ---
+            stim, out_of_bounds = _sample_pano(pano_filtered, rotated_xyz, pano_y_lim, pano_x_lim)
             stimulus_list.append(stim)
             omega_body_list.append(omega_body)
             oob_list.append(out_of_bounds)
@@ -1693,13 +1645,14 @@ def get_random_velocity_pano(sample_phi, sample_theta, velocity_amp=180, velocit
     return stimulus, optic_flow, rotation_vectors, oob_mask
 
 
-def _omega_world_cardinal_pano(direction, velocity_deg_per_s):
-    """World-frame angular velocity (rad/s) for constant panoramic rotation.
+def _omega_body_cardinal_pano(direction, velocity_deg_per_s):
+    """Body-frame angular velocity (rad/s) for constant panoramic rotation.
 
     Coordinate convention matches ``get_random_velocity_pano`` and
     ``make_lr_sine_wave`` / ``generate_optic_flow``: +x forward, +y left, +z up.
-    Signs are chosen so horizontal motion matches LR sine (rotation about z)
-    and vertical motion matches the retinal up component from rotation about y.
+    Signs are chosen so horizontal motion matches LR sine (yaw, about body z)
+    and vertical motion matches the retinal up component from pitch (about
+    body y).
     """
     w = float(velocity_deg_per_s) * (np.pi / 180.0)
     d = direction.lower()
@@ -1725,15 +1678,18 @@ def get_constant_velocity_pano(
     seed=None,
     pano_indices=None,
     log_scale=False,
+    data_folder=None,
 ):
     """
     Panoramic natural scenes rotating at constant angular speed about a
-    cardinal axis (yaw for left/right, pitch for up/down).
+    cardinal body axis (yaw for left/right, pitch for up/down).
 
     Uses the same loading, Gaussian filtering, and spherical sampling as
-    ``get_random_velocity_pano``, but with fixed ``omega_world`` during the
-    stimulus interval. Pre-stimulus time holds the view fixed at a random
-    initial orientation (reproducible from ``seed``).
+    ``get_random_velocity_pano``, but with a fixed body-frame angular
+    velocity during the stimulus interval, so the fly always turns about its
+    own z (yaw) or y (pitch) axis whatever its random initial orientation.
+    Pre-stimulus time holds the view fixed at that random initial orientation
+    (reproducible from ``seed``).
 
     Args:
         sample_phi: (N,) azimuthal angles (radians).
@@ -1747,21 +1703,25 @@ def get_constant_velocity_pano(
         seed: RNG seed for initial orientations (one per panorama).
         pano_indices: optional 1D array of indices into ``all_panoramic.pt``;
             default uses every panorama.
+        log_scale: if True, log-compress the raw panoramas
+            (``log(x + 1) / log(max + 1)``) before filtering.
+        data_folder: data root holding ``stimulus/baked/all_panoramic.pt``;
+            defaults to ``[data].data_folder`` of the working-directory
+            ``config.toml``.
 
     Returns:
         stimulus: (P, T_total, N) with ``T_total = pre + stim`` steps, values
             in ``[0, 1]`` as in ``get_random_velocity_pano``.
     """
-    from scipy.ndimage import map_coordinates
-
     if seed is not None:
         rng = np.random.default_rng(seed)
     else:
         rng = np.random.default_rng()
 
-    omega_world = _omega_world_cardinal_pano(direction, velocity_deg_per_s)
+    omega_body = _omega_body_cardinal_pano(direction, velocity_deg_per_s)
+    R_inc = _rotation_increment(omega_body, dt)
 
-    raw_panos = _load_all_panos()
+    raw_panos = _load_all_panos(data_folder=data_folder)
     if log_scale:
         raw_panos = np.log(raw_panos+1) / np.log(raw_panos.max()+1)
     if pano_indices is not None:
@@ -1779,42 +1739,20 @@ def get_constant_velocity_pano(
     pano_list = []
     for i in range(raw_panos.shape[0]):
         pano_filtered, pano_y_lim, pano_x_lim = _filter_pano(raw_panos[i])
-        pano_height, pano_width = pano_filtered.shape
 
         R = _random_rotation_matrix(rng)
 
-        def sample_dirs(xyz_nc3):
-            rotated_theta = np.arccos(np.clip(xyz_nc3[:, 2], -1.0, 1.0))
-            rotated_phi = np.arctan2(xyz_nc3[:, 1], xyz_nc3[:, 0])
-            y_indices = (rotated_theta - pano_y_lim[0]) / (pano_y_lim[1] - pano_y_lim[0]) * (pano_height - 1)
-            x_indices = (pano_x_lim[0] - rotated_phi) / (pano_x_lim[0] - pano_x_lim[1]) * pano_width
-            x_indices = x_indices % pano_width
-            out_of_bounds = (y_indices < 0) | (y_indices > pano_height - 1)
-            y_clip = np.clip(y_indices, 0, pano_height - 1)
-            stim = map_coordinates(
-                pano_filtered, [y_clip.ravel(), x_indices.ravel()],
-                order=1, mode="nearest",
-            ).reshape(-1)
-            stim[out_of_bounds] = pano_filtered.mean()
-            return stim
-
         rows = []
-        xyz_pre = (R @ sample_xyz.T).T
-        pre_row = sample_dirs(xyz_pre)
+        pre_row, _ = _sample_pano(pano_filtered, (R @ sample_xyz.T).T, pano_y_lim, pano_x_lim)
         for _ in range(pre_steps):
             rows.append(pre_row.copy())
 
         for _ti in range(stim_steps):
-            angle = np.linalg.norm(omega_world) * dt
-            if angle > 1e-12:
-                ax = omega_world / np.linalg.norm(omega_world)
-                K = np.array([[0, -ax[2], ax[1]],
-                              [ax[2], 0, -ax[0]],
-                              [-ax[1], ax[0], 0]])
-                R_inc = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
-                R = R_inc @ R
+            # Right-multiplying applies the increment in the body frame, so the
+            # rotation axis stays the fly's own yaw/pitch axis.
+            R = R @ R_inc
             xyz = (R @ sample_xyz.T).T
-            rows.append(sample_dirs(xyz))
+            rows.append(_sample_pano(pano_filtered, xyz, pano_y_lim, pano_x_lim)[0])
 
         pano_list.append(np.stack(rows, axis=0))
 
@@ -1861,10 +1799,11 @@ class StimulusData:
 
     ``group_id`` is a ``(examples,)`` integer tensor identifying the source each
     example was derived from (e.g. the raw fly-view clip a segment was cut
-    from). Examples that share a ``group_id`` are correlated (same scene /
-    continuous trajectory) and must stay together when splitting train/test, so
-    the split happens at whole-group granularity. Generators that produce
-    independent examples give each example its own ``group_id``.
+    from, all repeats of one panorama, or the phase/contrast variants of one
+    grating condition). Examples that share a ``group_id`` are correlated and
+    must stay together when splitting train/test, so the split happens at
+    whole-group granularity. Generators that produce independent examples give
+    each example its own ``group_id``.
     """
     stimulus: torch.Tensor
     optic_flow: torch.Tensor
@@ -1889,8 +1828,6 @@ class _GenContext:
     device: torch.device
     dtype: torch.dtype
     sine_direction: str | None = None
-    sine_temporal_frequency: float | None = None
-    random_sine_duration_s: float | None = None
 
     @property
     def phi(self):
@@ -1930,28 +1867,29 @@ def _zero_ego(stim):
 # --- Per-stimulus generators -------------------------------------------------
 # Each takes a _GenContext and returns
 # ``(stimulus, optic_flow, rotation, translation, train_mask)`` tensors for the
-# requested eye count. Generators with no ego-motion return zeros for
+# requested eye count, optionally followed by a ``(examples,)`` ``group_id``
+# that keeps correlated examples on one side of the train/test split (see
+# StimulusData). Generators with no ego-motion return zeros for
 # rotation/translation (nulled to ``None`` for one-eye output by get_stimulus).
 
 def _gen_static_sine(ctx):
     ctx.require_columns('static_sine')
-    stim, flow, rot, trans = create_balanced_sine_wave(
+    stim, flow, rot, trans, group_id = create_balanced_sine_wave(
         ctx.phi, ctx.theta,
         temporal_frequency=ctx.data_config['static_sine']['temporal_frequencies'],
         dt=ctx.model_dt, stim_time=ctx.stim_time, pre_stim_time=0.0, post_stim_time=0.0,
     )
     stim, flow = ctx.tensor(stim), ctx.tensor(flow)
     rot, trans = ctx.tensor(rot), ctx.tensor(trans)
-    return stim, flow, rot, trans, _ones_mask(stim)
+    return stim, flow, rot, trans, _ones_mask(stim), torch.as_tensor(group_id)
 
 
 def _gen_directional_sine(ctx):
     ctx.require_columns('directional_sine')
     if ctx.sine_direction is None:
         raise ValueError('directional_sine requires sine_direction input')
-    tf = float(ctx.sine_temporal_frequency) if ctx.sine_temporal_frequency is not None else 4.0
     stim, flow, rot, trans = create_directional_sine_wave(
-        ctx.phi, ctx.theta, direction=ctx.sine_direction, temporal_frequency=tf,
+        ctx.phi, ctx.theta, direction=ctx.sine_direction,
         dt=ctx.model_dt, stim_time=ctx.stim_time, pre_stim_time=0.0, post_stim_time=0.0,
     )
     stim, flow = ctx.tensor(stim), ctx.tensor(flow)
@@ -1962,29 +1900,32 @@ def _gen_directional_sine(ctx):
 def _gen_random_sine(ctx):
     ctx.require_columns('random_sine')
     p = ctx.data_config['random_sine']
-    stim_time = ctx.stim_time
-    num_repeats = p['num_repeats']
-    if ctx.random_sine_duration_s is not None:
-        if ctx.random_sine_duration_s <= 0:
-            raise ValueError("random_sine_duration_s must be positive")
-        stim_time = float(ctx.random_sine_duration_s) / 2.0
-        num_repeats = 1
-    stim, flow, rot, trans = create_random_tf_sine_wave(
+    stim, flow, rot, trans, group_id = create_random_tf_sine_wave(
         ctx.phi, ctx.theta, velocity_amp=p['velocity_amp'],
-        velocity_time_scale=p['velocity_time_scale'], num_repeats=num_repeats,
-        dt=ctx.model_dt, stim_time=stim_time, seed=ctx.seed,
+        velocity_time_scale=p['velocity_time_scale'], num_repeats=p['num_repeats'],
+        dt=ctx.model_dt, stim_time=ctx.stim_time, seed=ctx.seed,
     )
     stim, flow = ctx.tensor(stim), ctx.tensor(flow)
     rot, trans = ctx.tensor(rot), ctx.tensor(trans)
-    return stim, flow, rot, trans, _ones_mask(stim)
+    return stim, flow, rot, trans, _ones_mask(stim), torch.as_tensor(group_id)
 
 
 def _gen_edge(ctx):
     ctx.require_columns('edge')
+    # make_lr_edge / make_ud_edge are built for one eye's columns: over both
+    # eyes the roll-based UD sweep starts already past the left-eye columns,
+    # and slow LR edges never reach one eye within stim_time. So generate the
+    # right eye and give the left eye its sagittal mirror image (same value at
+    # (-phi, theta)): LR edges then move front-to-back (or back-to-front) in
+    # both eyes and UD edges move the same way vertically in both.
     stim, flow = create_edge_stimulus(
-        ctx.phi, ctx.theta, velocities=ctx.data_config['edge']['edge_velocities'],
+        ctx.column_phi_theta[:, 0], ctx.column_phi_theta[:, 1],
+        velocities=ctx.data_config['edge']['edge_velocities'],
         dt=ctx.model_dt, stim_time=ctx.stim_time, pre_stim_time=0.0, post_stim_time=0.0,
     )
+    if ctx.num_eyes == 2:
+        stim = np.concatenate([stim, stim], axis=2)
+        flow = np.concatenate([flow, flow], axis=2)  # placeholder zeros
     stim, flow = ctx.tensor(stim), ctx.tensor(flow)
     rot, trans = _zero_ego(stim)
     return stim, flow, rot, trans, _ones_mask(stim)
@@ -1997,11 +1938,15 @@ def _gen_random_pano(ctx):
         ctx.phi, ctx.theta, velocity_amp=p['velocity_amp'],
         velocity_time_scale=p['velocity_time_scale'], num_repeats=p['num_repeats'],
         dt=ctx.model_dt, stim_time=ctx.stim_time, seed=ctx.seed,
+        data_folder=get_data_folder(ctx.config),
     )
     stim, flow = ctx.tensor(stim), ctx.tensor(flow)
     rot = ctx.tensor(rotation_vectors * 180.0 / np.pi)  # rad/s -> deg/s
     trans = torch.zeros_like(rot)
-    return stim, flow, rot, trans, _ones_mask(stim)
+    # Examples are panorama-major with 2 * num_repeats (symmetrised) repeats
+    # per panorama; all repeats of one panorama share a group.
+    group_id = torch.arange(stim.shape[0]) // (2 * p['num_repeats'])
+    return stim, flow, rot, trans, _ones_mask(stim), group_id
 
 
 def _gen_counterphase_sine(ctx):
@@ -2050,12 +1995,13 @@ def _gen_full_field_flicker(ctx):
 def _gen_flyview(ctx):
     ctx.require_columns('flyview')
     two = ctx.num_eyes == 2
+    data_path = get_data_folder(ctx.config) / 'stimulus' / 'baked' / 'flyview.pt'
     if two:
         stim_np, flow_np, rot_np, trans_np, clip_ids = load_fly_view_dataset(
-            ctx.model_dt, ctx.stim_time, two_eyes=True)
+            ctx.model_dt, ctx.stim_time, two_eyes=True, data_path=data_path)
     else:
         stim_np, flow_np, clip_ids = load_fly_view_dataset(
-            ctx.model_dt, ctx.stim_time, two_eyes=False)
+            ctx.model_dt, ctx.stim_time, two_eyes=False, data_path=data_path)
     if stim_np.shape[2] != ctx.n_cols:
         raise ValueError(
             f"flyview columns ({stim_np.shape[2]}) != num_eyes*N ({ctx.n_cols})")
@@ -2098,6 +2044,8 @@ def _gen_rpi_drone(ctx):
 
 # Registry: stimulus_type -> (generator, supported eye counts). The first
 # supported eye count is the type's natural default (see ``default_num_eyes``).
+# Every type defaults to two eyes, so create_training_data always bakes
+# two-eye data; training then runs the two-eye forward path for it.
 _STIMULUS_REGISTRY: dict[str, tuple] = {
     'static_sine': (_gen_static_sine, (2, 1)),
     'directional_sine': (_gen_directional_sine, (2, 1)),
@@ -2112,6 +2060,20 @@ _STIMULUS_REGISTRY: dict[str, tuple] = {
     'small_drone': (_gen_small_drone, (2,)),
     'rpi_drone': (_gen_rpi_drone, (2,)),
 }
+
+# Registered types that only analysis scripts may generate; create_training_data
+# refuses to bake them, giving the reason below.
+ANALYSIS_ONLY_STIMULUS_TYPES: dict[str, str] = {
+    'edge': "an analysis-only probe whose optic-flow targets are placeholder zeros",
+    'expanding_dot': "an analysis-only probe whose optic-flow targets are placeholder zeros",
+    'directional_sine': "generated one direction at a time (it needs a sine_direction, "
+                        "which only the analysis scripts pass); bake static_sine instead",
+}
+
+
+def bakeable_stimulus_types() -> list[str]:
+    """Stimulus types ``create_training_data`` can bake into training data."""
+    return sorted(t for t in _STIMULUS_REGISTRY if t not in ANALYSIS_ONLY_STIMULUS_TYPES)
 
 
 def default_num_eyes(stimulus_type: str) -> int:
@@ -2131,9 +2093,6 @@ def get_stimulus(
     num_eyes: int | None = None,
     data_config=None,
     sine_direction: str | None = None,
-    sine_temporal_frequency: float | None = None,
-    random_sine_duration_s: float | None = None,
-    pre_stim_time_override: float | None = None,
 ) -> StimulusData:
     """Generate a stimulus (or a list of types, concatenated) in a unified format.
 
@@ -2148,7 +2107,8 @@ def get_stimulus(
     When ``num_eyes`` is None it defaults to each type's natural eye count
     (:func:`default_num_eyes`). Stimulus-generation parameters come from
     ``data_config`` (defaults to ``config['data']``); model ``dt`` / ``device``
-    / ``dtype`` come from ``config``.
+    / ``dtype`` and the data folder (for the file-backed types) come from
+    ``config``. ``sine_direction`` is required by ``directional_sine``.
 
     Returns a :class:`StimulusData`. For one-eye output ``rotation`` /
     ``translation`` / ``eye_offset`` are ``None``.
@@ -2179,16 +2139,12 @@ def get_stimulus(
     dtype = getattr(torch, config['model']['dtype'])
     model_dt = config['model']['dt']
     pre_stim_time = shared['pre_stim_time']
-    if pre_stim_time_override is not None:
-        pre_stim_time = float(pre_stim_time_override)
 
     ctx = _GenContext(
         config=config, data_config=data_config, column_phi_theta=column_phi_theta,
         num_eyes=num_eyes, model_dt=model_dt, stim_time=shared['stim_time'],
         seed=shared['seed'], device=device, dtype=dtype,
         sine_direction=sine_direction,
-        sine_temporal_frequency=sine_temporal_frequency,
-        random_sine_duration_s=random_sine_duration_s,
     )
 
     stim_list, flow_list, rot_list, trans_list, mask_list = [], [], [], [], []
@@ -2252,9 +2208,11 @@ def get_stimulus(
     )
 
 
-# Right-eye camera offset (body frame +x forward / +y left / +z up, in the
-# dataset's translation/depth length units) per two-eye stimulus type. The
-# offset is a property of the rig that produced the flow: a single-viewpoint
+# Right-eye camera offset (body frame +x forward / +y left / +z up) per two-eye
+# stimulus type. Its length unit must match the dataset's translation targets
+# (metres for the drone rigs, whose translation is in m/s; depth units for
+# flyview), because the two-eye solver's absolute translation scales with it.
+# The offset is a property of the rig that produced the flow: a single-viewpoint
 # render has none, a real two-camera rig carries its physical half-baseline.
 # Populated by the @camera_offset decorator on each stimulus loader (keyed by
 # loader name = stimulus_type); loaders without the decorator are assumed
@@ -2302,79 +2260,31 @@ def small_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
     :func:`drone_utilities.get_drone_stimulus`.
 
     Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
-    train_mask)`` to match the other two-eye loaders.
+    train_mask, group_id)`` (see :func:`drone_utilities.drone_clips_to_two_eye`).
     """
     drone_clips = du.get_drone_stimulus(
         model_dt, dataset='small_drone',
-        data_folder=config['data']['data_folder'],
+        data_folder=get_data_folder(config),
         sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
     )
     return du.drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
 
 
-@camera_offset(50, -50, 13)
+@camera_offset(0.050, -0.050, 0.013)
 def rpi_drone(config, column_phi_theta, model_dt, device, dtype, stim_time):
     """Two-eye loader for the ``rpi_drone`` dataset.
 
     A real two-camera rig; the ``@camera_offset`` above declares its right-eye
-    half-baseline (mm). Loads the cached clips from
-    ``<data_folder>/stimulus/baked/rpi_drone.pt`` (built by
-    ``process_raw_data.py``) via :func:`drone_utilities.get_drone_stimulus`.
+    half-baseline in metres, matching the m/s ground-truth translation. Loads
+    the cached clips from ``<data_folder>/stimulus/baked/rpi_drone.pt`` (built
+    by ``process_raw_data.py``) via :func:`drone_utilities.get_drone_stimulus`.
 
     Returns ``(stimulus, optic_flow, observer_rotation, observer_translation,
-    train_mask)`` to match the other two-eye loaders.
+    train_mask, group_id)`` (see :func:`drone_utilities.drone_clips_to_two_eye`).
     """
     drone_clips = du.get_drone_stimulus(
         model_dt, dataset='rpi_drone',
-        data_folder=config['data']['data_folder'],
+        data_folder=get_data_folder(config),
         sample_phi=column_phi_theta[:, 0], sample_theta=column_phi_theta[:, 1],
     )
     return du.drone_clips_to_two_eye(drone_clips, stim_time, model_dt, device, dtype)
-
-
-def get_synthetic_data(model, stimulus, input_neurons, output_neurons, init_noise_mult=5):
-    """
-    Generate synthetic target data by running a noise-perturbed model.
-    
-    Creates a copy of the model, adds noise to its parameters, runs the stimulus
-    through it, and returns targets matching the model's training path.
-    
-    Args:
-        model: Neural model instance with add_noise_to_parameters and predict methods
-        stimulus: Input stimulus tensor [batches, time, columns]
-        input_neurons: List of input neuron types (e.g., ['L1', 'L2', 'L3'])
-        output_neurons: List of output neuron types (e.g., ['T4a', 'T4b', ...])
-        
-    Returns:
-        target: A dict. If the model has flow readouts, includes
-                'optic_flow' from the first flow readout; otherwise maps
-                output neuron types to firing rate tensors.
-    """
-    import copy
-
-    # Create a deep copy of the model to avoid modifying the original
-    perturbed_model = copy.deepcopy(model)
-    
-    # Add noise to the copied model's parameters
-    perturbed_model.add_noise_to_parameters(model.init_std * init_noise_mult)
-    
-    # Run the stimulus through the perturbed model
-    with torch.no_grad():
-        pred = perturbed_model.predict(
-            stimulus,
-            input_neurons=input_neurons,
-            output_neurons=output_neurons,
-            init_state=None
-        )['outputs']['optic_lobe']
-    
-    flow_key = next(
-        (k for k, m in perturbed_model._readout_modules.items() if m.predicts_flow and k in pred),
-        None,
-    )
-    if flow_key is not None:
-        target = {'optic_flow': pred[flow_key].clone()}
-    else:
-        target = {neuron: pred['firing_rate'][neuron].clone() for neuron in output_neurons}
-    
-    return target, perturbed_model
-

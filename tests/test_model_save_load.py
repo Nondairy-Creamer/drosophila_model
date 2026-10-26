@@ -3,11 +3,11 @@ from pathlib import Path
 import torch
 
 from drosophila_model.model_definition import neural_models as nm
-from tests.test_model_factory import build_model_from_test_config
+from tests.model_factory import build_model_from_test_config
 
 
 def test_model_save_load_roundtrip(tmp_path):
-    model, _, _, _ = build_model_from_test_config(readouts=[])
+    model, _ = build_model_from_test_config(readouts=[])
     model_path = Path(tmp_path) / "model.pt"
 
     model.save(model_path)

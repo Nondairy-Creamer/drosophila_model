@@ -1,25 +1,33 @@
 """
-Visualize raw drone CSV data (translation + rotation) alongside the video.
+Visualize the legacy small_drone AprilTag pose logs alongside the raw video.
+
+Reads the per-frame ``apriltag_pose_log_<N>_both.csv`` logs that sit next to
+the ``left_<N>.mp4`` / ``right_<N>.mp4`` clips in ``stimulus/raw/drone_videos``
+and plots the left- and right-camera rotation and translation estimates
+unprocessed (no smoothing, no differentiation). This is a raw-data sanity
+check only: the modelling pipeline uses the batch-optimised
+``drone_poses/pose_<N>.npz`` from ``drone_pose.py`` instead (see
+``visualize_drone_data.py`` for the processed equivalent).
 
 Layout (2x2):
   Row 0:  raw left camera  |  raw right camera
   Row 1:  rotation (roll, pitch, yaw)  |  translation (x, y, z)
 
-No processing — values are read directly from the apriltag_pose CSV.
-
 Usage:
-    python analysis/raw_drone_flow.py [--clip-id 32] [--fps 30]
+    python -m drosophila_model.analysis.movie_scripts.raw_drone_flow [--clip-id 32] [--fps 30]
 """
 import argparse
-import sys
+import csv
 from pathlib import Path
-
-_repo_root = str(Path(__file__).parent.parent)
 
 import numpy as np
 
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.data_handling.drone_utilities import load_video_grayscale
-from drosophila_model.config import load_config
+from drosophila_model.analysis.movie_scripts.movie_utilities import (
+    write_movie,
+    ylim_from_data,
+)
 
 
 def main() -> None:
@@ -37,11 +45,10 @@ def main() -> None:
                         help="Output directory for the movie")
     args = parser.parse_args()
 
-    import csv
     if args.data_dir:
         data_dir = Path(args.data_dir)
     else:
-        data_dir = Path(load_config()['data']['data_folder']) / 'stimulus' / 'raw' / 'drone_videos'
+        data_dir = get_data_folder(load_config()) / 'stimulus' / 'raw' / 'drone_videos'
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -52,9 +59,15 @@ def main() -> None:
             int(p.stem.split("_")[-2])
             for p in data_dir.glob("apriltag_pose_log_*_both.csv")
         )
+    if not clip_ids:
+        print(f"No apriltag_pose_log_*_both.csv files found in {data_dir}")
+        return
 
     for clip_id in clip_ids:
         csv_path = data_dir / f"apriltag_pose_log_{clip_id}_both.csv"
+        if not csv_path.exists():
+            print(f"Clip {clip_id}: no {csv_path.name} in {data_dir}, skipping")
+            continue
         with open(csv_path) as f:
             rows = list(csv.DictReader(f))
 
@@ -69,8 +82,8 @@ def main() -> None:
         L_trans = np.column_stack([col("L_x_used"), col("L_y_used"), col("L_z_used")])
         R_trans = np.column_stack([col("R_x_used"), col("R_y_used"), col("R_z_used")])
 
-        raw_left = load_video_grayscale(data_dir / f"left_{clip_id}.mp4")
-        raw_right = load_video_grayscale(data_dir / f"right_{clip_id}.mp4")
+        raw_left = load_video_grayscale(data_dir / f"left_{clip_id}.mp4", max_frames=args.max_frames)
+        raw_right = load_video_grayscale(data_dir / f"right_{clip_id}.mp4", max_frames=args.max_frames)
 
         n_frames = min(len(rows), raw_left.shape[0], raw_right.shape[0])
         if args.max_frames is not None:
@@ -96,10 +109,6 @@ def _make_raw_movie(
     import matplotlib
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
-    import imageio as iio
-
-    
-    from drosophila_model.analysis.model_analysis.analysis_utilities import fig_to_rgb
 
     n_frames = raw_left.shape[0]
     times = np.arange(n_frames) * video_dt
@@ -109,11 +118,6 @@ def _make_raw_movie(
     rot_labels = ["roll", "pitch", "yaw"]
     trans_labels = ["x", "y", "z"]
     colors = ["#e41a1c", "#377eb8", "#4daf4a"]
-
-    def _ylim(data, margin_frac=0.1, min_margin=0.01):
-        lo, hi = np.nanmin(data), np.nanmax(data)
-        margin = max(margin_frac * (hi - lo), min_margin)
-        return lo - margin, hi + margin
 
     fig, axes = plt.subplots(2, 2, figsize=(12.8, 8), dpi=100,
                              gridspec_kw={"height_ratios": [3, 2]})
@@ -129,7 +133,7 @@ def _make_raw_movie(
 
     # Rotation panel — show both L and R as solid/dashed
     rot_lines_L, rot_lines_R = [], []
-    for i, (label, color) in enumerate(zip(rot_labels, colors)):
+    for label, color in zip(rot_labels, colors):
         line_l, = ax_rot.plot([], [], color=color, linewidth=1.5, label=f"L_{label}")
         line_r, = ax_rot.plot([], [], color=color, linewidth=1.5, linestyle="--", label=f"R_{label}")
         rot_lines_L.append(line_l)
@@ -139,11 +143,11 @@ def _make_raw_movie(
     ax_rot.set_xlabel("time (s)")
     ax_rot.set_title("Rotation (raw CSV)")
     all_rot = np.concatenate([L_rot, R_rot], axis=0)
-    ax_rot.set_ylim(*_ylim(all_rot, min_margin=1.0))
+    ax_rot.set_ylim(*ylim_from_data(all_rot, min_margin=1.0))
 
     # Translation panel
     trans_lines_L, trans_lines_R = [], []
-    for i, (label, color) in enumerate(zip(trans_labels, colors)):
+    for label, color in zip(trans_labels, colors):
         line_l, = ax_trans.plot([], [], color=color, linewidth=1.5, label=f"L_{label}")
         line_r, = ax_trans.plot([], [], color=color, linewidth=1.5, linestyle="--", label=f"R_{label}")
         trans_lines_L.append(line_l)
@@ -153,40 +157,31 @@ def _make_raw_movie(
     ax_trans.set_xlabel("time (s)")
     ax_trans.set_title("Translation (raw CSV)")
     all_trans = np.concatenate([L_trans, R_trans], axis=0)
-    ax_trans.set_ylim(*_ylim(all_trans, min_margin=0.01))
+    ax_trans.set_ylim(*ylim_from_data(all_trans, min_margin=0.01))
 
     plt.tight_layout()
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    print(f"  Writing {n_frames} frames at {frame_rate} fps ...")
+    def update(t):
+        im_l.set_data(raw_left[t])
+        im_r.set_data(raw_right[t])
+        ax_raw_l.set_title(f"Left Camera (t={times[t]:.2f}s)")
+        ax_raw_r.set_title(f"Right Camera (t={times[t]:.2f}s)")
 
-    with iio.get_writer(str(output_path), codec="libx264", fps=frame_rate) as writer:
-        for t in range(n_frames):
-            im_l.set_data(raw_left[t])
-            im_r.set_data(raw_right[t])
-            ax_raw_l.set_title(f"Left Camera (t={times[t]:.2f}s)")
-            ax_raw_r.set_title(f"Right Camera (t={times[t]:.2f}s)")
+        t_start = max(0, t - trail_frames + 1)
+        t_slice = slice(t_start, t + 1)
+        t_times = times[t_slice]
 
-            t_start = max(0, t - trail_frames + 1)
-            t_slice = slice(t_start, t + 1)
-            t_times = times[t_slice]
+        for i in range(3):
+            rot_lines_L[i].set_data(t_times, L_rot[t_slice, i])
+            rot_lines_R[i].set_data(t_times, R_rot[t_slice, i])
+        ax_rot.set_xlim(t_times[0], t_times[0] + trail_sec)
 
-            for i in range(3):
-                rot_lines_L[i].set_data(t_times, L_rot[t_slice, i])
-                rot_lines_R[i].set_data(t_times, R_rot[t_slice, i])
-            ax_rot.set_xlim(t_times[0], t_times[0] + trail_sec)
+        for i in range(3):
+            trans_lines_L[i].set_data(t_times, L_trans[t_slice, i])
+            trans_lines_R[i].set_data(t_times, R_trans[t_slice, i])
+        ax_trans.set_xlim(t_times[0], t_times[0] + trail_sec)
 
-            for i in range(3):
-                trans_lines_L[i].set_data(t_times, L_trans[t_slice, i])
-                trans_lines_R[i].set_data(t_times, R_trans[t_slice, i])
-            ax_trans.set_xlim(t_times[0], t_times[0] + trail_sec)
-
-            writer.append_data(fig_to_rgb(fig))
-            if (t + 1) % 100 == 0:
-                print(f"    Frame {t+1}/{n_frames}")
-
-    plt.close(fig)
-    print(f"  Done! -> {output_path}")
+    write_movie(fig, update, n_frames, output_path, frame_rate, log_every=100)
 
 
 if __name__ == "__main__":

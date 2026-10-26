@@ -6,8 +6,8 @@ expect. After this runs the bundle is static; per-model region slicing
 happens at load time via :func:`connectome_loading.load_connectome`,
 which filters by ``{region: {neuropils, side}}``.
 
-Reads raw CSVs from
-``config['data']['data_folder'] / 'connectome_data' / 'raw'``:
+Reads raw CSVs from ``<data_folder>/connectome_data/raw`` (``data_folder``
+is ``[data].data_folder`` in ``config.toml``):
 
 - ``consolidated_cell_types.csv`` — ``root_id, primary_type,
   additional_type(s)`` for every classified neuron.
@@ -24,8 +24,7 @@ Reads raw CSVs from
   column. Those synthetic root IDs ARE present in the synapse and column
   CSVs; this is the only place we need them typed.
 
-Writes the baked bundle to
-``config['data']['data_folder'] / 'connectome_data' / 'baked'``:
+Writes the baked bundle to ``<data_folder>/connectome_data/baked``:
 
 - ``cell_info.parquet`` — universal per-neuron table.
     columns:
@@ -35,7 +34,9 @@ Writes the baked bundle to
       with photoreceptors forced to ``'HIS'``; may be NaN for cell types
       that never appear pre-synaptically),
       ``neuropils`` (``list[str]``; union of every neuropil this neuron
-      has at least one synapse in).
+      has at least one synapse in. Part of the bundle schema that
+      :mod:`connectome_loading` checks for, but never read: the loader
+      recomputes region membership from the thresholded synapse table).
 - ``synapses.parquet`` — universal directed edges (whole connectome).
     columns:
       ``pre_root_id, post_root_id, synapse_counts, nt_type, neuropil``.
@@ -48,13 +49,17 @@ NOT written here — it ships with the raw data and must already exist in
 the baked directory before models can load.
 
 To add support for another area, just declare a new ``RegionView``
-subclass with ``neuropils = [...]`` in :mod:`regions`. No change needed
-here.
+subclass with ``neuropils = [...]`` in :mod:`regions` and register it in
+``regions.REGION_REGISTRY``. No change needed here.
+
+Usage:
+    python -m drosophila_model.data_handling.format_connectome_data
 """
-from pathlib import Path
+import argparse
+
 import numpy as np
 import pandas as pd
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 
 
 _ROOT_ID_DTYPE = np.int64
@@ -120,8 +125,11 @@ def _per_cell_type_dominant_nt(
 
 
 def main() -> None:
-    config = load_config()
-    folder = Path(config['data']['data_folder'])
+    argparse.ArgumentParser(
+        description='Bake <data_folder>/connectome_data/baked from the raw CSVs in '
+                    '<data_folder>/connectome_data/raw ([data].data_folder of config.toml).'
+    ).parse_args()
+    folder = get_data_folder(load_config())
     raw_dir = folder / 'connectome_data' / 'raw'
     baked_dir = folder / 'connectome_data' / 'baked'
 

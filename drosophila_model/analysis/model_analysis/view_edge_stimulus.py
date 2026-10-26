@@ -1,79 +1,52 @@
 """
-Visualize moving-edge stimuli and the HandTunedModel responses.
+Visualize moving-edge stimuli and a model's responses.
 
 Runs all four polarity × direction conditions (ON-right, ON-left, OFF-right,
-OFF-left) through the model and produces:
+OFF-left) through the model, driving its default input cells (L1-L3), and
+produces:
   1. A stimulus heatmap (time × column) for each condition.
   2. Cell-type response traces (column-averaged and optionally per-column).
-  3. (optional) Hex mosaic animations via FlyEye for the raw stimulus
-     and/or model responses.
+  3. (optional) Hex mosaic animations via fly_eye.visualize_stimulus for the
+     raw stimulus and/or model responses.
 
-Usage:
-    python view_edge_stimulus.py
-    python view_edge_stimulus.py --model models/hand_tuned/model.pt --velocity 60
-    python view_edge_stimulus.py --columns -1 --show-voltage
+``--model`` is a trained run folder or its model.pt. Figures go to
+<model_folder>/figures/view_edge_stimulus unless ``--save-dir`` is given.
 
-    # Hex mosaic animation for ON-right stimulus, saved as mp4:
-    python view_edge_stimulus.py --hex --condition "ON right" --save-dir figures/
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.view_edge_stimulus --model models/<run>
+    python -m drosophila_model.analysis.model_analysis.view_edge_stimulus --model models/<run> --velocity 60
+    python -m drosophila_model.analysis.model_analysis.view_edge_stimulus --model models/<run> --columns -1 --show-voltage
+
+    # Hex mosaic animation for the ON-right stimulus, saved as mp4:
+    python -m drosophila_model.analysis.model_analysis.view_edge_stimulus --model models/<run> --hex --condition "ON right"
 """
 import argparse
 from pathlib import Path
-import sys
 
-import matplotlib
 from matplotlib import pyplot as plt
 import numpy as np
 import torch
 
 from drosophila_model.model_definition import neural_models as nm
-from drosophila_model.data_handling.stimulus_generators import make_lr_moving_edge, make_ud_moving_edge
+from drosophila_model.data_handling.stimulus_generators import make_lr_moving_edge
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    CELL_TYPE_GROUPS, central_column_index, exponential_highpass,
+)
 
 
 # ── Defaults ──────────────────────────────────────────────────────────
-DEFAULT_MODEL_PATH = "models/hand_tuned/model.pt"
 DEFAULT_VELOCITY = 30.0      # deg/s
 DEFAULT_STIM_TIME = 3.0
 DEFAULT_PRE_STIM_TIME = 0.5
 DEFAULT_EDGE_WIDTH = 2.5     # degrees
 
-INPUT_NEURONS = ["R1-6"]
-
-CELL_TYPE_GROUPS = {
-    "Photoreceptors":   ["R1-6"],
-    "Lamina (L1-L3)":   ["L1", "L2", "L3"],
-    "Lamina (L4-L5)":   ["L4", "L5"],
-    "C2 / C3":          ["C2", "C3"],
-    "T4 inputs":        ["Mi1", "Tm3", "Mi4", "Mi9"],
-    "T5 inputs":        ["Tm1", "Tm2", "Tm4", "Tm9"],
-    "T4":               ["T4a", "T4b", "T4c", "T4d"],
-    "T5":               ["T5a", "T5b", "T5c", "T5d"],
+# Condition name -> (sign of the velocity, edge type)
+CONDITIONS = {
+    "ON right":  (1, "on"),
+    "ON left":   (-1, "on"),
+    "OFF right": (1, "off"),
+    "OFF left":  (-1, "off"),
 }
-
-
-def _exponential_highpass(block, dt, tau):
-    """Subtract a causal exponential lowpass from each column to remove DC.
-
-    First-order IIR lowpass:  y[t] = α·y[t-1] + (1-α)·x[t],  α = exp(-dt/τ)
-    Returns:  x[t] - y[t]
-    """
-    alpha = np.exp(-dt / tau)
-    out = np.empty_like(block)
-    lp = block[:, 0, :].copy()
-    out[:, 0, :] = 0.0
-    for t in range(1, block.shape[1]):
-        lp = alpha * lp + (1.0 - alpha) * block[:, t, :]
-        out[:, t, :] = block[:, t, :] - lp
-    return out
-
-
-def _central_column_index(sample_phi, sample_theta):
-    ref = np.array([0.0, 1.0, 0.0])
-    xyz = np.stack([
-        np.sin(sample_theta) * np.cos(sample_phi),
-        np.sin(sample_theta) * np.sin(sample_phi),
-        np.cos(sample_theta),
-    ], axis=1)
-    return int(np.argmax(xyz @ ref))
 
 
 def main():
@@ -81,8 +54,8 @@ def main():
         description="Visualize moving-edge stimuli and model responses."
     )
     parser.add_argument(
-        "--model", type=str, default=DEFAULT_MODEL_PATH,
-        help="Path to saved model .pt file.",
+        "--model", type=str, required=True,
+        help="Trained run folder or its model.pt.",
     )
     parser.add_argument(
         "--velocity", type=float, default=DEFAULT_VELOCITY,
@@ -109,13 +82,9 @@ def main():
         help="Time constant (seconds) for causal exponential highpass filter "
              "applied per column before the model.  Removes DC offset.",
     )
-    readout_group = parser.add_mutually_exclusive_group()
-    readout_group.add_argument(
+    parser.add_argument(
         "--show-voltage", action="store_const", const="voltage", dest="readout",
-    )
-    readout_group.add_argument(
-        "--show-synaptic-current", action="store_const", const="synaptic_current",
-        dest="readout",
+        help="Plot raw voltage (pre-activation) instead of firing rate.",
     )
     parser.set_defaults(readout="firing_rate")
     parser.add_argument(
@@ -124,18 +93,18 @@ def main():
     )
     parser.add_argument(
         "--save-dir", type=str, default=None,
-        help="Save figures to this directory instead of showing interactively "
+        help="Directory to save figures and animations "
              "(default: <model_folder>/figures/view_edge_stimulus).",
     )
     parser.add_argument(
         "--hex", action="store_true",
         help="Render hex mosaic animations of the stimulus and model responses "
-             "using FlyEye.visualize_stimulus.",
+             "using fly_eye.visualize_stimulus.",
     )
     parser.add_argument(
         "--condition", type=str, nargs="+", default=None,
+        choices=list(CONDITIONS),
         help="Which edge condition(s) to animate with --hex.  "
-             "Choices: 'ON right', 'ON left', 'OFF right', 'OFF left'.  "
              "Defaults to all four.  Quote names with spaces.",
     )
     parser.add_argument(
@@ -143,22 +112,23 @@ def main():
         help="Playback FPS for hex animations (default 30).",
     )
     parser.add_argument(
-        "--hex-cell-type", type=str, default=None,
-        help="Also animate this cell type's firing rate on the hex grid "
-             "(e.g. 'T4a').  Requires --hex.",
+        "--hex-cell-type", type=str, nargs="+", default=None,
+        help="Cell type(s) whose response to animate on the hex grid "
+             "(e.g. --hex-cell-type T4a).  Requires --hex.",
     )
     args = parser.parse_args()
+    if not args.hex and (args.hex_cell_type or args.condition):
+        parser.error("--hex-cell-type and --condition require --hex.")
 
     # ── Load model ────────────────────────────────────────────────────
-    print(f"Loading model from {args.model} …")
+    print(f"Loading model from {args.model} ...")
     model = nm.BaseRnn.load(args.model)
-    print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types, "
-          f"omega={model.get_omega():.4f}")
+    print(f"  {model.num_neurons} neurons, {model.num_cell_types} cell types")
 
-    if args.save_dir is None:
-        model_path = Path(args.model)
-        model_folder = model_path.parent if model_path.is_file() else model_path
-        args.save_dir = str(model_folder / "figures" / "view_edge_stimulus")
+    model_path = Path(args.model)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    save_dir = (Path(args.save_dir) if args.save_dir
+                else model_folder / "figures" / "view_edge_stimulus")
 
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
@@ -169,23 +139,16 @@ def main():
     )
     output_types = [ct for ct in output_types if ct in model.unique_cell_types]
 
-    center_col = _central_column_index(
+    center_col = central_column_index(
         np.asarray(sample_phi), np.asarray(sample_theta)
     )
 
     # ── Generate edge stimuli ─────────────────────────────────────────
-    conditions = {
-        "ON right":  (make_lr_moving_edge,  args.velocity, "on"),
-        "ON left":   (make_lr_moving_edge, -args.velocity, "on"),
-        "OFF right": (make_lr_moving_edge,  args.velocity, "off"),
-        "OFF left":  (make_lr_moving_edge, -args.velocity, "off"),
-    }
-
     stim_dict = {}
-    for cond_name, (make_fn, vel, etype) in conditions.items():
-        arr = make_fn(
+    for cond_name, (sign, etype) in CONDITIONS.items():
+        arr = make_lr_moving_edge(
             sample_phi, sample_theta,
-            velocity=vel, edge_type=etype,
+            velocity=sign * args.velocity, edge_type=etype,
             dt=dt, stim_time=args.stim_time,
             pre_stim_time=args.pre_stim_time,
             edge_width=args.edge_width,
@@ -198,11 +161,12 @@ def main():
     stim_batch = np.stack([stim_dict[c] for c in cond_names], axis=0)  # (4, T, N)
 
     if args.highpass_tau is not None:
-        print(f"  Applying exponential highpass filter (τ={args.highpass_tau} s)")
-        stim_batch = _exponential_highpass(stim_batch, dt, args.highpass_tau)
+        print(f"  Applying exponential highpass filter (tau={args.highpass_tau} s)")
+        stim_batch = exponential_highpass(stim_batch, dt, args.highpass_tau)
         # Update per-condition dict so heatmaps and hex anims show the filtered stimulus
         for i, cond_name in enumerate(cond_names):
             stim_dict[cond_name] = stim_batch[i]
+    use_diverging = args.zero_center or args.highpass_tau is not None
 
     stim_tensor = torch.tensor(stim_batch, device=model.device, dtype=model.dtype)
     time_axis = np.arange(stim_batch.shape[1]) * dt - args.pre_stim_time
@@ -211,13 +175,9 @@ def main():
           f"{stim_batch.shape[2]} columns")
 
     # ── Run model ─────────────────────────────────────────────────────
-    print("Running model …")
+    print("Running model ...")
     with torch.no_grad():
-        result = model.predict(
-            stim_tensor,
-            input_neurons=INPUT_NEURONS,
-            output_neurons=output_types,
-        )
+        result = model.predict(stim_tensor, output_neurons=output_types)
     outputs = result["outputs"]["optic_lobe"]
 
     # ── Resolve column indices ────────────────────────────────────────
@@ -241,9 +201,9 @@ def main():
         ax.imshow(
             img, aspect="auto", origin="lower",
             extent=[time_axis[0], time_axis[-1], 0, img.shape[0]],
-            cmap="RdBu_r" if args.zero_center else "gray",
-            vmin=-vmax if args.zero_center else 0,
-            vmax=vmax if args.zero_center else 1,
+            cmap="RdBu_r" if use_diverging else "gray",
+            vmin=-vmax if use_diverging else 0,
+            vmax=vmax if use_diverging else 1,
         )
         ax.set_title(cond_name, fontsize=11, fontweight="bold")
         ax.set_xlabel("Time (s)")
@@ -334,31 +294,24 @@ def main():
             if row == n_groups - 1:
                 ax.set_xlabel("Time (s)")
 
-    col_tag = ""
-    if show_columns is not None:
-        col_tag = f" | cols {show_columns}"
     fig_rms.suptitle(
         f"Edge RMS responses ({readout_label}) — {args.velocity:.0f} deg/s{col_tag}",
         fontsize=13, fontweight="bold",
     )
     plt.tight_layout()
 
-    # ── Save or show static figures ──────────────────────────────────
-    if args.save_dir:
-        save_dir = Path(args.save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        stim_path = save_dir / f"edge_stimulus_{args.velocity:.0f}dps.png"
-        resp_path = save_dir / f"edge_responses_{args.velocity:.0f}dps.png"
-        rms_path = save_dir / f"edge_responses_rms_{args.velocity:.0f}dps.png"
-        fig_stim.savefig(stim_path, dpi=150)
-        fig_resp.savefig(resp_path, dpi=150)
-        fig_rms.savefig(rms_path, dpi=150)
-        plt.close("all")
-        print(f"Saved: {stim_path}")
-        print(f"Saved: {resp_path}")
-        print(f"Saved: {rms_path}")
-    else:
-        plt.show()
+    # ── Save static figures ───────────────────────────────────────────
+    save_dir.mkdir(parents=True, exist_ok=True)
+    stim_path = save_dir / f"edge_stimulus_{args.velocity:.0f}dps.png"
+    resp_path = save_dir / f"edge_responses_{args.velocity:.0f}dps.png"
+    rms_path = save_dir / f"edge_responses_rms_{args.velocity:.0f}dps.png"
+    fig_stim.savefig(stim_path, dpi=150)
+    fig_resp.savefig(resp_path, dpi=150)
+    fig_rms.savefig(rms_path, dpi=150)
+    plt.close("all")
+    print(f"Saved: {stim_path}")
+    print(f"Saved: {resp_path}")
+    print(f"Saved: {rms_path}")
 
     # ── Hex mosaic animations ─────────────────────────────────────────
     if args.hex:
@@ -377,39 +330,32 @@ def main():
         frame_idx = np.arange(0, n_total, step)
         frame_times = frame_idx * dt - args.pre_stim_time
 
-        for cond_name in hex_conds:
-            if cond_name not in stim_dict:
-                print(f"  Warning: unknown condition '{cond_name}', skipping.")
-                continue
+        stim_cmap = (mpl_cm.RdBu_r if use_diverging else mpl_cm.gray)(
+            np.linspace(0, 1, 256))
 
+        for cond_name in hex_conds:
             ci = cond_names.index(cond_name)
             safe_name = cond_name.lower().replace(" ", "_")
 
             # --- Stimulus animation ---
             stim_frames = stim_dict[cond_name][frame_idx]  # (F, N)
             titles = [f"{cond_name}  t={t:.3f}s" for t in frame_times]
+            stim_filename = str(
+                save_dir / f"edge_hex_stim_{safe_name}_{args.velocity:.0f}dps.mp4"
+            )
 
-            stim_filename = None
-            if args.save_dir:
-                stim_filename = str(save_dir / f"edge_hex_stim_{safe_name}_{args.velocity:.0f}dps.mp4")
-            
-            print(f"  Hex stimulus: {stim_filename}")
-            cmap = mpl_cm.gray(np.linspace(0, 1, 256))
-            if args.zero_center:
-                cmap = mpl_cm.RdBu_r(np.linspace(0, 1, 256))
-
-            print(f"  Hex stimulus: {cond_name} ({len(frame_idx)} frames @ {target_fps} fps)")
+            print(f"  Hex stimulus: {cond_name} ({len(frame_idx)} frames "
+                  f"@ {target_fps} fps) -> {stim_filename}")
             visualize_column_responses(
                 column_p_q, stim_frames,
-                colormap=cmap, fps=target_fps,
+                colormap=stim_cmap, fps=target_fps,
                 filename=stim_filename,
-                plot=(args.save_dir is None),
+                plot=False,
                 titles=titles,
             )
 
-            # --- Cell-type response animation ---
-            if args.hex_cell_type:
-                ct = args.hex_cell_type
+            # --- Cell-type response animations ---
+            for ct in args.hex_cell_type or []:
                 if ct not in outputs[readout_key]:
                     print(f"  Warning: cell type '{ct}' not in outputs, skipping hex response.")
                     continue
@@ -417,21 +363,18 @@ def main():
                 resp_frames = resp_full[frame_idx]
                 resp_titles = [f"{cond_name} — {ct} {readout_label}  t={t:.3f}s"
                                for t in frame_times]
+                resp_filename = str(
+                    save_dir / f"edge_hex_{ct}_{safe_name}_{args.velocity:.0f}dps.mp4"
+                )
 
-                resp_filename = None
-                if args.save_dir:
-                    resp_filename = str(
-                        save_dir / f"edge_hex_{ct}_{safe_name}_{args.velocity:.0f}dps.mp4"
-                    )
-                print(f"  Hex response: {resp_filename}")
-
-                print(f"  Hex response: {ct} / {cond_name} ({len(frame_idx)} frames)")
+                print(f"  Hex response: {ct} / {cond_name} ({len(frame_idx)} frames) "
+                      f"-> {resp_filename}")
                 visualize_column_responses(
                     column_p_q, resp_frames,
                     colormap=mpl_cm.coolwarm(np.linspace(0, 1, 256)),
                     fps=target_fps,
                     filename=resp_filename,
-                    plot=(args.save_dir is None),
+                    plot=False,
                     titles=resp_titles,
                 )
 

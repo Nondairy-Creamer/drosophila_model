@@ -1,4 +1,4 @@
-"""Extract AprilTag bearings from the ``rpi_drone`` dome-camera videos.
+"""Extract AprilTag bearings and poses from the ``rpi_drone`` dome-camera videos.
 
 The dome lens is *not* a pinhole camera, so we never form a flat
 intrinsics/PnP projection. Instead we treat each camera as a spherical
@@ -7,16 +7,27 @@ loaded and rotated into the body frame by
 :func:`drone_utilities.load_dome_calibration`) gives, for a scattered set of
 pixels, the viewing direction on the unit sphere. We interpolate that map so
 any detected tag pixel becomes a unit direction in the body frame
-(+x forward, +y left, +z up). A tag's "location" is therefore the bearing
-(``phi``, ``theta``) of its centre and corners — an angular position, not a
-metric 3D point (range is unobservable from a single uncalibrated view).
+(+x forward, +y left, +z up).
 
-This is intentionally just the detection/bearing-extraction step; pose
-estimation (e.g. :mod:`estimate_pose`) is a separate downstream problem.
+For every detection this gives:
+
+- the bearing (``phi``, ``theta``) of the tag centre and corners;
+- the full 6-DOF tag pose (range + orientation) from the four corner rays and
+  the known tag size, by spherical PnP (:func:`solve_tag_pose_spherical`).
+
+When several tags are mounted on one rigid board, :func:`autocalibrate_board`
+recovers the board layout from co-detections and
+:func:`compute_board_trajectory` solves one board pose per frame (filling
+undetected frames by interpolation). :mod:`plot_tag_location` renders these as
+a movie, including the drone egomotion derived from the board trajectory.
+
+The CLI prints a per-recording detection summary; pass ``--output-dir`` to
+also save the detections and board trajectory as CSV/NPZ.
 
 Usage:
     python -m drosophila_model.data_handling.extract_tags
-    python -m drosophila_model.data_handling.extract_tags --recording recording_20260611_234117
+    python -m drosophila_model.data_handling.extract_tags --recording recording_<timestamp>
+    python -m drosophila_model.data_handling.extract_tags --output-dir <dir>
 """
 
 import argparse
@@ -31,11 +42,13 @@ from collections import Counter, defaultdict
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
-from drosophila_model.config import load_config
+from drosophila_model.config import get_data_folder, load_config
 from drosophila_model.data_handling.drone_utilities import (
     load_dome_calibration,
 )
 from drosophila_model.data_handling.estimate_pose import (
+    DEFAULT_TAG_FAMILY,
+    DEFAULT_TAG_SIZE,
     detect_tags_in_frame,
     _tag_local_corners,
 )
@@ -46,9 +59,6 @@ CAMERA_CALIB = {
     'right': ('dome_right.csv', -80.0),
     'left': ('dome_left.csv', 80.0),
 }
-
-# Default AprilTag side length (m), matching estimate_pose's default.
-DEFAULT_TAG_SIZE = 0.16
 
 # Detector defaults. quad_decimate=1.0 (no input downsampling) roughly doubles
 # the rate of full-board detections on the fisheye dome footage vs the library
@@ -61,7 +71,7 @@ DEFAULT_DETECTOR_PARAMS = dict(
 )
 
 
-def make_detector(tag_family='tag36h11', **params):
+def make_detector(tag_family=DEFAULT_TAG_FAMILY, **params):
     """Build a pupil_apriltags Detector with our tuned defaults."""
     from pupil_apriltags import Detector
 
@@ -451,7 +461,7 @@ def _frame_times(recording_dir):
 
 
 def extract_tags_from_video(video_path, projector, camera_name,
-                            tag_family='tag36h11', frame_times=None,
+                            tag_family=DEFAULT_TAG_FAMILY, frame_times=None,
                             tag_size=DEFAULT_TAG_SIZE, detector_params=None):
     """Detect AprilTags in one video and project them to body-frame bearings.
 
@@ -517,7 +527,7 @@ def extract_tags_from_video(video_path, projector, camera_name,
     return records
 
 
-def extract_tags_from_recording(recording_dir, calib_dir, tag_family='tag36h11',
+def extract_tags_from_recording(recording_dir, calib_dir, tag_family=DEFAULT_TAG_FAMILY,
                                 tag_size=DEFAULT_TAG_SIZE, detector_params=None):
     """Extract tag bearings + pose from both cameras of one recording folder."""
     recording_dir = Path(recording_dir)
@@ -627,7 +637,8 @@ def _print_summary(records):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Extract AprilTag bearings from rpi_drone dome videos')
+        description='Extract AprilTag bearings, tag poses and the board '
+                    'trajectory from rpi_drone dome videos')
     parser.add_argument('--rpi-dir', type=str, default=None,
                         help='rpi_drone directory of recording_* folders '
                              '(default: <data_folder>/stimulus/raw/rpi_drone)')
@@ -636,10 +647,12 @@ def main():
                              'dome_left.csv (default: <rpi-dir>/dome_calib)')
     parser.add_argument('--recording', type=str, default=None,
                         help='Process only this recording_* folder (default: all)')
-    parser.add_argument('--output-dir', type=str, default='figures/extract_tags',
-                        help='Output directory for per-recording CSV/NPZ files')
-    parser.add_argument('--tag-family', type=str, default='tag36h11',
-                        help='AprilTag family (default: tag36h11)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='If given, save per-recording detection and board '
+                             'trajectory CSV/NPZ files here (default: print '
+                             'the summary only)')
+    parser.add_argument('--tag-family', type=str, default=DEFAULT_TAG_FAMILY,
+                        help=f'AprilTag family (default: {DEFAULT_TAG_FAMILY})')
     parser.add_argument('--tag-size', type=float, default=DEFAULT_TAG_SIZE,
                         help='Real AprilTag side length in metres '
                              f'(default: {DEFAULT_TAG_SIZE})')
@@ -665,13 +678,18 @@ def main():
         decode_sharpening=args.decode_sharpening,
     )
 
-    data_folder = Path(load_config()['data']['data_folder'])
-    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'raw' / 'rpi_drone'
+    if args.rpi_dir:
+        rpi_dir = Path(args.rpi_dir)
+    else:
+        rpi_dir = get_data_folder(load_config()) / 'stimulus' / 'raw' / 'rpi_drone'
     calib_dir = Path(args.calib_dir) if args.calib_dir else rpi_dir / 'dome_calib'
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else None
 
     if args.recording:
         recording_dirs = [rpi_dir / args.recording]
+        if not recording_dirs[0].is_dir():
+            print(f'Recording folder not found: {recording_dirs[0]}')
+            return
     else:
         recording_dirs = sorted(p for p in rpi_dir.glob('recording_*') if p.is_dir())
     if not recording_dirs:
@@ -684,12 +702,13 @@ def main():
             rec, calib_dir, tag_family=args.tag_family, tag_size=args.tag_size,
             detector_params=detector_params)
         _print_summary(records)
-        save_records(records, output_dir, rec.name)
+        if output_dir is not None:
+            save_records(records, output_dir, rec.name)
 
         if not args.no_board and records:
             traj, _, _ = compute_board_trajectory(
                 records, args.tag_size, interpolate=not args.no_interpolate)
-            if traj is not None:
+            if traj is not None and output_dir is not None:
                 save_board_trajectory(traj, output_dir, rec.name)
 
 

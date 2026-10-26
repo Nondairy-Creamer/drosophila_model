@@ -2,11 +2,13 @@
 Signal propagation through L1 -> Tm1 -> T5.
 
 Loads an untrained model (``model_init.pt``), presents a single rightward
-sine-wave stimulus, and saves XT (column-by-time) plots of the firing rates
-for L1, Tm1, and the four T5 subtypes (T5a-d).
+sine-wave stimulus, and saves XT (column-by-time) plots of the stimulus and
+of the firing rates of L1, Tm1 and T5a.
+
+Usage:
+    python -m drosophila_model.analysis.model_analysis.signal_propagation models/<model>/
 """
 import argparse
-import sys
 from pathlib import Path
 
 
@@ -33,7 +35,7 @@ def run_signal_propagation(
     pre_stim_time=0.5,
     contrast=1.0,
 ):
-    """Present a rightward sine wave and save XT plots for L1, Tm1, T5."""
+    """Present a rightward sine wave and save XT plots for ``CELL_TYPES``."""
     dt = model.dt
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
@@ -55,7 +57,7 @@ def run_signal_propagation(
     if missing:
         print(f"Warning: cell types not present in model, skipping: {missing}")
 
-    print(f"Running sine wave (λ={wavelength}°, tf={temporal_frequency} Hz, "
+    print(f"Running sine wave (lambda={wavelength} deg, tf={temporal_frequency} Hz, "
           f"{sine_wave.shape[0]} time steps) through model...")
     with torch.no_grad():
         pred = model.predict(
@@ -67,7 +69,6 @@ def run_signal_propagation(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pre_stim_steps = int(round(pre_stim_time / dt))
     time_axis_s = np.arange(sine_wave.shape[0]) * dt - pre_stim_time
 
     panels = [("stimulus", sine_wave)] + [
@@ -114,7 +115,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "model_folder", type=str,
-        help="Path to model folder (containing model_init.pt and config.toml).",
+        help="Path to model folder (containing model_init.pt).",
     )
     parser.add_argument("--wavelength", type=float, default=30.0,
                         help="Spatial wavelength in degrees (default: 30).")

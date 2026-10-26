@@ -5,13 +5,13 @@ Creates per decoder:
   1. Bar plot: average |weight| per neuron type across all channels and spatial positions
   2. Hex scatter heatmap: average |weight| at each spatial position in the conv kernel
   3. Per-neuron weight maps: one subplot per output channel showing spatial weights
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.analyze_decoder models/<model>/
 """
 import argparse
 import math
-import sys
 from pathlib import Path
-
-# Add parent directory to path for imports
 
 import numpy as np
 import matplotlib

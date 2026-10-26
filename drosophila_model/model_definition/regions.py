@@ -16,9 +16,11 @@ for visual things, ``self.regions['antenna_lobe']`` for olfactory things, etc.
 Adding a new area means adding a new ``RegionView`` subclass and registering
 it under its area name in :data:`REGION_REGISTRY`.
 
-``OpticLobeRegion`` covers both the single-eye case (mirror trick) and the
-two-eye case (column slicing) with the same API, chosen by the ``side``
-parameter the loader applied (``'right'`` / ``'left'`` / ``'both'``).
+``OpticLobeRegion`` supports only the right optic lobe (``side='right'``):
+the baked column geometry and column ids are right-eye only. Both eyes are
+modelled with the mirror trick: left-eye images are run through the same
+right-lobe network as a mirrored right eye (see
+:meth:`OpticLobeRegion.predict_two_eyes`).
 """
 
 from __future__ import annotations
@@ -50,7 +52,8 @@ class RegionView(nn.Module):
         cell_indices: ``(N_r,)`` int64 — neuron indices into the model's flat
             ``num_neurons`` axis.
         side: ``'right'`` / ``'left'`` / ``'both'`` — sides of this bilateral
-            region represented in the loaded slice.
+            region represented in the loaded slice (``default_side`` when the
+            config does not set one).
         num_sides: 1 if a single hemisphere was loaded, 2 if both.
 
     Predict-time hooks (override in subclasses that drive the network):
@@ -88,6 +91,9 @@ class RegionView(nn.Module):
     default_output_neurons: list[str] = []
     default_readouts: list[str] = []
     default_readout_neurons: list[str] | None = None
+    # Hemisphere(s) loaded when ``[model.regions.<area>].side`` is not set
+    # (used by :func:`build_region_specs`).
+    default_side: str = 'both'
     # Cell types to remove from this region's slice of the connectome before
     # the model preprocesses synapses. Consumed by
     # :func:`resolve_neurons_to_exclude` and applied in
@@ -115,9 +121,11 @@ class RegionView(nn.Module):
     # entry is ``(presynaptic_cell_type, postsynaptic_cell_type, factor)``;
     # ``factor=-1`` flips the sign (e.g. for connections whose bulk-NT
     # classification disagrees with their functional sign), ``factor=0``
-    # ablates. Consumed by
-    # :meth:`ConnectomeModel._apply_region_sign_overrides`, overridable
-    # per-instance via ``region_kwargs[<name>]['sign_overrides']``.
+    # ablates. Every dynamics applies them (see
+    # ``ConnectomeModel._sign_override_factors``): the signed-matrix dynamics
+    # multiply the edge weight, ConductanceDynamics moves a sign-inverted edge
+    # to an opposite-sign transmitter. Overridable per-instance via
+    # ``region_kwargs[<name>]['sign_overrides']``.
     sign_overrides: list[tuple[str, str, float]] = []
 
     def __init__(self, *, name: str, model: 'ConnectomeModel',
@@ -233,7 +241,7 @@ class RegionView(nn.Module):
 
     def initialize_recording(self, num_batches: int, num_time: int,
                              output_neurons: list[str], input_meta: dict,
-                             record_synaptic: bool):
+                             precomputed_output_mapping=None):
         """Allocate this region's per-step output buffers + readout buffers.
 
         Returns ``(region_outputs, region_mapping)`` or ``None`` (this
@@ -241,11 +249,13 @@ class RegionView(nn.Module):
         per-region dict that ends up under ``result['outputs'][name]``;
         ``region_mapping`` is an opaque per-region context passed to
         :meth:`record_step` plus surfaced under
-        ``result['mappings'][name]``.
+        ``result['mappings'][name]``. ``precomputed_output_mapping`` is the
+        ``output_mapping`` of a previous ``predict`` call; when given it is
+        reused instead of rebuilding the mapping from ``output_neurons``.
         """
         return None
 
-    def record_step(self, t: int, v, fr, syn_current,
+    def record_step(self, t: int, v, fr,
                     region_outputs: dict, region_mapping: dict) -> None:
         """Write this region's per-step values + readout outputs.
 
@@ -298,21 +308,34 @@ class OpticLobeRegion(RegionView):
     - ``input_pre_conv_size`` (default 5): hex diameter of the pre-filter conv.
     - ``num_temporal_modes`` (default 4): complex modes in the temporal LRU.
 
-    Geometry loaded from ``optic_lobe_columns.parquet`` in the baked bundle:
+    Only ``side='right'`` is supported: the baked geometry is right-eye only,
+    and left- and right-hemisphere neurons share one column-id space. The
+    left eye is modelled as a mirrored right eye (:meth:`predict_two_eyes`).
 
-    - ``column_indices``: ``(C_r,)`` int64 — unique column indices present in
-      this slice of the connectome (de-duped from the per-neuron column index).
-    - ``column_phi_theta``: ``(C_r, 2)`` float — ``(phi, theta)`` per column.
-    - ``column_p_q``: ``(C_r, 2)`` int — hex lattice coords per column.
-    - ``column_phi_theta_two_eyes``: torch tensors used by
-      :meth:`predict_two_eyes` and :meth:`estimate_ego_motion_from_image`.
+    Geometry loaded from ``optic_lobe_columns.parquet`` in the baked bundle
+    (not written by ``format_connectome_data``; it ships with the connectome
+    data and must be copied into ``connectome_data/baked/``):
+
+    - ``column_indices``: ``(C,)`` int64 — every hex column, ``0..C-1``. A
+      column's id is also its position on the stimulus, recording and readout
+      column axes, so the set is the full baked geometry (which the training
+      stimuli are baked over), not only the columns this slice's neurons
+      cover; columns without neurons simply get no input.
+    - ``column_indices_per_neuron``: ``(num_neurons,)`` float — each model
+      neuron's column id (NaN when it has none).
+    - ``column_phi_theta``: ``(C, 2)`` float — ``(phi, theta)`` per column.
+    - ``column_p_q``: ``(C, 2)`` int — hex lattice coords per column.
+    - ``column_phi_theta_two_eyes``: ``(phi, theta)`` tensors of length
+      ``2 * C`` (right-eye columns, then their sagittal mirror for the left
+      eye) used by :meth:`estimate_ego_motion_from_image`.
 
     If ``use_input_conv`` is true, also builds the input-conv submodules
     (``input_pre_conv``, ``input_spatial_conv``, ``temporal_lru``) which the
     model invokes via :meth:`apply_input_conv` from inside ``predict``.
 
-    ``num_eyes`` is an alias for ``num_sides`` since the optic lobe maps 1:1
-    onto eyes.
+    ``num_eyes`` is an alias for ``num_sides`` (always 1: one right optic
+    lobe). It is not the dataset's eye count: two-eye inputs run through this
+    one lobe via :meth:`predict_two_eyes`.
     """
 
     _DEFAULT_OPTS = {
@@ -325,18 +348,20 @@ class OpticLobeRegion(RegionView):
     # Visual input/output cell-type defaults for ConnectomeModel.predict.
     default_input_neurons = ['L1', 'L2', 'L3']
     default_output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
+    # Only the right optic lobe is supported (see the class docstring).
+    default_side = 'right'
     # Photoreceptor terminals are the model's stimulus input, not connectome
     # nodes. Stripped from the optic-lobe slice before synapse preprocessing.
     default_neurons_to_exclude = ['R1-6', 'R7', 'R8']
-    # Optic-lobe neuropils (intrinsic): medulla, lobula, lobula plate, lamina.
-    # AME (accessory medulla) is excluded to match the previous
-    # ``category == 'intrinsic'`` filter, which dropped boundary cells.
+    # Optic-lobe neuropils: medulla, lobula, lobula plate, lamina. AME
+    # (accessory medulla) is deliberately left out, so cells whose only
+    # optic-lobe synapses are in AME are not claimed.
     neuropils = ['ME', 'LO', 'LOP', 'LA']
     # Anatomy-prior sign corrections. C2 and C3 are GABAergic (so the
     # bulk-NT classifier signs them negative) but their contacts onto L1
     # and L2 in the lamina are functionally excitatory — flip them back
-    # to positive. Applied automatically after NT signing for every
-    # dynamics model; override per-instance via
+    # to excitatory (every dynamics applies them; see
+    # ``ConnectomeModel._sign_override_factors``). Override per-instance via
     # ``region_kwargs['optic_lobe']['sign_overrides']``.
     sign_overrides = [
         ('C2', 'L1', -1.0),
@@ -344,8 +369,9 @@ class OpticLobeRegion(RegionView):
         ('C3', 'L1', -1.0),
         ('C3', 'L2', -1.0),
     ]
-    # Readouts that produce column-aligned visual outputs.
-    default_readouts = ['FlowConv2Readout', 'L1Reg']
+    # Readouts that produce column-aligned visual outputs (same as
+    # config_default.toml; used when a model is built without a readouts list).
+    default_readouts = ['FlowConv2Readout']
     default_readout_neurons = [
         'T1', 'T2', 'T2a', 'T3',
         'T4a', 'T4b', 'T4c', 'T4d',
@@ -356,6 +382,15 @@ class OpticLobeRegion(RegionView):
 
     def _load_extras(self, extras_dir: Path, opts: dict) -> None:
         model = self.model
+
+        if self.side != 'right':
+            raise ValueError(
+                f"OpticLobeRegion supports only side='right', got {self.side!r}: "
+                "the baked column geometry (optic_lobe_columns.parquet) and "
+                "column ids are right-eye only, and both hemispheres share one "
+                "column-id space. The left eye is modelled by running mirrored "
+                "images through the right optic lobe (predict_two_eyes)."
+            )
 
         # Pull recognised opts; reject unknown keys with a clear error so
         # typos in [model.regions.optic_lobe] don't silently no-op.
@@ -384,57 +419,46 @@ class OpticLobeRegion(RegionView):
             dtype=np.float64,
         )
 
-        # Region-local set of unique column indices (drop NaNs from neurons
-        # without a column assignment).
-        col_per_neuron = self.column_indices_per_neuron[
-            self.cell_indices.cpu().numpy()
-        ]
-        col_vals = col_per_neuron[~np.isnan(col_per_neuron)]
-        self.column_indices = np.unique(col_vals).astype(np.int64)
-
+        # The column set is the full baked geometry, not just the columns this
+        # slice's neurons cover: training stimuli are baked over every column,
+        # and stimulus channels, recording buffers and readouts all index by
+        # global column id, so the id must equal the position.
         columns_df = pd.read_parquet(extras_dir / 'optic_lobe_columns.parquet')
-        columns_df = columns_df.set_index('column_index').loc[self.column_indices]
-
+        column_ids = columns_df['column_index'].to_numpy()
+        if not np.array_equal(column_ids, np.arange(len(columns_df))):
+            raise ValueError(
+                "optic_lobe_columns.parquet must list column_index 0..N-1 in "
+                "row order: stimuli, recording buffers and readouts index "
+                "columns by id."
+            )
+        self.column_indices = column_ids.astype(np.int64)
         self.column_phi_theta = columns_df[['phi', 'theta']].to_numpy()
         self.column_p_q = columns_df[['p', 'q']].to_numpy().astype(np.int64)
-        self.num_columns = len(self.column_indices)
+        self.num_columns = len(columns_df)
 
-        if self.num_sides == 1:
-            mirror = self.column_phi_theta.copy()
-            mirror[:, 0] = -mirror[:, 0]
-            two_eye = np.concatenate((self.column_phi_theta, mirror), axis=0)
-        else:
-            two_eye = self.column_phi_theta
-        self.column_phi_theta_two_eyes = (
-            torch.tensor(two_eye[:, 0], device=model.device),
-            torch.tensor(two_eye[:, 1], device=model.device),
+        # Two-eye viewing directions: the right-eye columns, then their
+        # sagittal mirror (-phi) for the left eye. Buffers so they follow
+        # model.to(device).
+        phi, theta = self.column_phi_theta[:, 0], self.column_phi_theta[:, 1]
+        self.register_buffer(
+            'column_phi_two_eyes',
+            torch.tensor(np.concatenate((phi, -phi)), device=model.device),
+            persistent=False,
         )
-
-        self._load_eye_geometry()
+        self.register_buffer(
+            'column_theta_two_eyes',
+            torch.tensor(np.concatenate((theta, theta)), device=model.device),
+            persistent=False,
+        )
 
         if self.use_input_conv:
             self._initialize_input_conv()
 
-    # Fixed anatomical constant (versioned with the code, not the connectome
-    # bundle): the vector from the body center of mass to each eye's camera.
-    _EYE_GEOMETRY_FILE = Path(__file__).resolve().parent / 'eye_geometry.json'
-
-    def _load_eye_geometry(self) -> None:
-        """Load the default camera offset and mirror it onto the two eyes.
-
-        The data file stores one vector (the right-eye camera, body frame
-        +x forward / +y left / +z up). This is only the *default* used when a
-        caller does not supply a dataset-specific offset; the camera offset is
-        really a property of the rig that produced the flow (0 for
-        single-viewpoint renders, the physical half-baseline for a two-camera
-        rig), so training/eval pass it in per dataset.
-        """
-        import json
-
-        with open(self._EYE_GEOMETRY_FILE) as f:
-            geom = json.load(f)
-        self.camera_offset = np.asarray(geom['camera_offset_mm'], dtype=np.float64)
-        self.eye_offsets = self.mirror_camera_offset(self.camera_offset)
+    @property
+    def column_phi_theta_two_eyes(self):
+        """``(phi, theta)`` tensors of length ``2 * num_columns``: right-eye
+        columns, then their mirror image for the left eye."""
+        return self.column_phi_two_eyes, self.column_theta_two_eyes
 
     @staticmethod
     def mirror_camera_offset(camera_offset) -> dict:
@@ -458,7 +482,7 @@ class OpticLobeRegion(RegionView):
 
     @property
     def num_eyes(self) -> int:
-        """Optic-lobe-terminology alias for :attr:`num_sides`."""
+        """Optic-lobe-terminology alias for :attr:`num_sides` (always 1)."""
         return self.num_sides
 
     # ------------------------------------------------------------------
@@ -468,8 +492,11 @@ class OpticLobeRegion(RegionView):
     def _initialize_input_conv(self) -> None:
         """HexGridConv pre-filter -> local contrast normalisation -> TemporalLRU.
 
-        Initialised with the legacy ``-10.0`` -saturating mask so the very
-        first forward pass behaves like a centred identity filter.
+        Both convs have positive (exp) weights normalised by their sum. Every
+        tap starts at log-weight ``-10`` except the centre (pre-filter) or the
+        centre plus its six neighbours (contrast conv), which start at ``0``,
+        so the pre-filter starts as a near-identity and the contrast
+        normalisation uses a 7-column local mean.
         """
         model = self.model
         if self.conv_size_x % 2 == 0:
@@ -537,10 +564,13 @@ class OpticLobeRegion(RegionView):
         """Columns where all cell types in ``neuron_list`` are present.
 
         Returns ``(neuron_indices, column_indices)`` over the parent model's
-        flat neuron axis. Used by ``ConnectomeModel.predict`` to build the
-        stimulus-to-cell mapping for visual readouts.
+        flat neuron axis (both empty when ``neuron_list`` is empty). Used by
+        ``ConnectomeModel.predict`` to build the stimulus-to-cell mapping for
+        visual readouts.
         """
         from functools import reduce
+        if len(neuron_list) == 0:
+            return np.array([], dtype=int), np.array([])
         model = self.model
         col_per_neuron = self.column_indices_per_neuron
 
@@ -565,9 +595,15 @@ class OpticLobeRegion(RegionView):
         return self.num_columns
 
     def build_input_mapping(self, input_neurons):
-        """Map visual cell types to hex-column stimulus indices."""
+        """Map visual cell types to hex-column stimulus indices.
+
+        Returns ``None`` (abstains) when no neuron of ``input_neurons`` sits
+        in a column shared by all of those types.
+        """
         model = self.model
         neuron_idx, column_idx = self.get_shared_columns(input_neurons)
+        if len(neuron_idx) == 0:
+            return None
         stim_to_cell_mapping = {
             'neuron_index': torch.tensor(
                 neuron_idx, device=model.device, dtype=torch.int64,
@@ -579,15 +615,14 @@ class OpticLobeRegion(RegionView):
         return stim_to_cell_mapping, {'stimulus_columns_np': column_idx}
 
     def initialize_recording(self, num_batches, num_time, output_neurons,
-                             input_meta, record_synaptic,
-                             precomputed_output_mapping=None):
+                             input_meta, precomputed_output_mapping=None):
         """Allocate column-aligned per-cell-type and readout buffers.
 
         ``region_outputs`` mirrors the optic-lobe contract today:
-        ``voltage`` / ``firing_rate`` (and optionally ``synaptic_current``)
-        are dicts of ``(B, T, num_columns)`` tensors with NaN padding so
-        column index 2 corresponds to the same retinotopic column across
-        cell types. Readout buffers are ``(B, T, num_columns, *extras)``.
+        ``voltage`` / ``firing_rate`` are dicts of ``(B, T, num_columns)``
+        tensors with NaN padding so column index 2 corresponds to the same
+        retinotopic column across cell types. Readout buffers are
+        ``(B, T, num_columns, *extras)``.
 
         If ``precomputed_output_mapping`` is provided (round-trip from a
         previous ``predict`` call), it's reused directly and
@@ -622,8 +657,6 @@ class OpticLobeRegion(RegionView):
 
         shape = (num_batches, num_time, self.num_columns)
         region_outputs: dict = {'voltage': {}, 'firing_rate': {}}
-        if record_synaptic:
-            region_outputs['synaptic_current'] = {}
         for nt in output_neurons:
             region_outputs['voltage'][nt] = torch.full(
                 shape, float('nan'), device=device, dtype=dtype,
@@ -631,10 +664,6 @@ class OpticLobeRegion(RegionView):
             region_outputs['firing_rate'][nt] = torch.full(
                 shape, float('nan'), device=device, dtype=dtype,
             )
-            if record_synaptic:
-                region_outputs['synaptic_current'][nt] = torch.full(
-                    shape, float('nan'), device=device, dtype=dtype,
-                )
 
         for name, mod in self._readout_modules.items():
             if getattr(mod, 'training_only', False):
@@ -648,13 +677,11 @@ class OpticLobeRegion(RegionView):
             'input_mapping': None,  # filled in by predict()
             'output_mapping': readout_dict,
             'output_neurons': list(output_neurons),
-            'record_synaptic': record_synaptic,
         }
         return region_outputs, region_mapping
 
-    def record_step(self, t, v, fr, syn_current, region_outputs, region_mapping):
+    def record_step(self, t, v, fr, region_outputs, region_mapping):
         readout_dict = region_mapping['output_mapping']
-        record_synaptic = region_mapping['record_synaptic']
 
         for name, mod in self._readout_modules.items():
             if getattr(mod, 'training_only', False):
@@ -662,16 +689,12 @@ class OpticLobeRegion(RegionView):
             region_outputs[name][:, t, ...] = mod(fr)
 
         for nt in region_mapping['output_neurons']:
+            # Only neurons with a column are in the mapping (see
+            # initialize_recording), so every column index is valid.
             ci = readout_dict[nt]['column_indices']
             ni = readout_dict[nt]['neuron_indices']
-            valid = ci >= 0
-            if torch.any(valid):
-                region_outputs['voltage'][nt][:, t, ci[valid]] = v[:, ni[valid]]
-                region_outputs['firing_rate'][nt][:, t, ci[valid]] = fr[:, ni[valid]]
-                if record_synaptic:
-                    region_outputs['synaptic_current'][nt][:, t, ci[valid]] = (
-                        syn_current[:, ni[valid]]
-                    )
+            region_outputs['voltage'][nt][:, t, ci] = v[:, ni]
+            region_outputs['firing_rate'][nt][:, t, ci] = fr[:, ni]
 
     def apply_input_pre_filter(self, u_t, filter_state):
         if self.use_input_conv:
@@ -707,8 +730,11 @@ class OpticLobeRegion(RegionView):
         )
         for name in readout_names:
             cls = getattr(readouts_mod, name, None)
-            if cls is None or not isinstance(cls, type):
-                raise ValueError(f"Unknown readout class: {name!r}")
+            if not readouts_mod.is_configurable(cls):
+                raise ValueError(
+                    f"Unknown readout class: {name!r}. Available readouts and "
+                    f"regularizers: {readouts_mod.configurable_names()}."
+                )
             mod = cls(**kwargs)
             self._readout_modules[name] = mod
 
@@ -772,27 +798,33 @@ class OpticLobeRegion(RegionView):
                          **kwargs):
         """Run ``predict`` with right and left eye inputs, return per-eye results.
 
-        Single-side host: concatenates inputs along the batch dim, runs predict
-        once, splits the batch, and flips left-eye flow into the shared frame.
-        Two-side host: TODO — slice both eye column-spaces from one forward pass
-        (not yet exercised; will be wired when whole-brain data lands).
+        The left eye is modelled as a mirrored right eye: the inputs are
+        concatenated along the batch dim, predict runs once on the right optic
+        lobe, the batch is split again and left-eye flow is flipped into the
+        shared frame. Initial states (and filter states) must be given for
+        both eyes or for neither.
         """
-        if self.num_sides != 1:
-            raise NotImplementedError(
-                "Two-side host two-eye predict not implemented yet; "
-                "current data is single-side only."
-            )
         model = self.model
+
+        if (init_state_right is None) != (init_state_left is None):
+            raise ValueError(
+                "Pass init_state_right and init_state_left together (or neither)."
+            )
+        if (init_filter_state_right is None) != (init_filter_state_left is None):
+            raise ValueError(
+                "Pass init_filter_state_right and init_filter_state_left "
+                "together (or neither)."
+            )
 
         S = inputs_right.shape[0]
         both = torch.cat([inputs_right, inputs_left], dim=0)
 
         init_state = None
-        if init_state_right is not None and init_state_left is not None:
+        if init_state_right is not None:
             init_state = torch.cat([init_state_right, init_state_left], dim=0)
 
         init_filter_state = None
-        if init_filter_state_right is not None and init_filter_state_left is not None:
+        if init_filter_state_right is not None:
             init_filter_state = torch.cat([init_filter_state_right, init_filter_state_left], dim=0)
 
         result = model.predict(
@@ -810,7 +842,7 @@ class OpticLobeRegion(RegionView):
             region = model.regions[region_name]
             right_region, left_region = {}, {}
             for key, val in region_out.items():
-                if key in ('voltage', 'firing_rate', 'synaptic_current'):
+                if key in ('voltage', 'firing_rate'):
                     right_region[key] = {k: v[:S] for k, v in val.items()}
                     left_region[key] = {k: v[S:] for k, v in val.items()}
                     continue
@@ -866,14 +898,26 @@ class OpticLobeRegion(RegionView):
         translation.
 
         ``camera_offset`` is the right-eye camera offset for the dataset that
-        produced these images (the left eye is its sagittal mirror). It is a
-        property of the rig, so pass it per dataset; when ``None`` the region's
-        default (:attr:`eye_offsets`, from ``eye_geometry.json``) is used.
+        produced these images (the left eye is its sagittal mirror), in the
+        dataset's translation length unit. It is a property of the rig, so pass
+        it per dataset (``StimulusData.eye_offset``, or ``run_info.eye_offset``
+        in a trained model's config); ``None`` means a single viewpoint
+        ``(0, 0, 0)``, which is what training uses for every dataset without a
+        registered offset.
+
+        ``oob_columns`` is an optional bool mask of columns to leave out of the
+        solve (e.g. outside the stimulus field of view): length
+        ``2 * num_columns`` (``[right | left]``) when both eyes are solved,
+        ``num_columns`` for a single eye.
+
+        Returns ``(rotations, translations, right_result, left_result)``;
+        rotations/translations are ``(S, T, 3)`` and the per-eye ``predict``
+        results are ``None`` for an eye that was not run. Rotations are in the
+        flow readout's angular units (deg/s, like the training targets).
         """
         model = self.model
-        eye_offsets = (
-            self.eye_offsets if camera_offset is None
-            else self.mirror_camera_offset(camera_offset)
+        eye_offsets = self.mirror_camera_offset(
+            (0.0, 0.0, 0.0) if camera_offset is None else camera_offset
         )
         eyes = tuple(eyes)
         if not eyes or not set(eyes).issubset({'right', 'left'}):
@@ -891,7 +935,9 @@ class OpticLobeRegion(RegionView):
         if cached_mappings is not None:
             optic_cached = cached_mappings.get(self.name, {})
             predict_kwargs['input_neurons'] = optic_cached.get('input_mapping')
-            predict_kwargs['output_neurons'] = optic_cached.get('output_mapping')
+            output_mapping = optic_cached.get('output_mapping')
+            if output_mapping is not None:
+                predict_kwargs['output_neurons'] = {self.name: output_mapping}
 
         two_eye = set(eyes) == {'right', 'left'}
 
@@ -993,7 +1039,7 @@ class OpticLobeRegion(RegionView):
 
 
 # ---------------------------------------------------------------------------
-# Antenna lobe (stub)
+# Antenna lobe
 # ---------------------------------------------------------------------------
 
 
@@ -1032,8 +1078,7 @@ class AntennaLobeRegion(RegionView):
     # The substring rule matches a long tail of singleton/doubleton
     # types from ad-hoc upstream typing (a primary type with 1 cell
     # named ``something_PN`` is rarely a real projection-neuron
-    # population). Five matches the canonical >=5-cells-per-type bar
-    # used elsewhere in the codebase to define ``common'' AL types.
+    # population), so only types with at least this many cells count.
     _MIN_CELLS_PER_TYPE = 5
 
     _DEFAULT_OPTS: dict = {}
@@ -1121,8 +1166,7 @@ class AntennaLobeRegion(RegionView):
         return stim_to_cell_mapping, {'input_neurons': list(present_types)}
 
     def initialize_recording(self, num_batches, num_time, output_neurons,
-                             input_meta, record_synaptic,
-                             precomputed_output_mapping=None):
+                             input_meta, precomputed_output_mapping=None):
         """Allocate per-cell-type ``(B, T, N_ct)`` voltage / firing-rate buffers.
 
         No NaN padding (unlike :class:`OpticLobeRegion`) since AL has no
@@ -1155,8 +1199,6 @@ class AntennaLobeRegion(RegionView):
             output_neurons = list(readout_dict.keys())
 
         region_outputs: dict = {'voltage': {}, 'firing_rate': {}}
-        if record_synaptic:
-            region_outputs['synaptic_current'] = {}
         for ct in output_neurons:
             n_ct = readout_dict[ct]['neuron_indices'].numel()
             shape = (num_batches, num_time, n_ct)
@@ -1166,30 +1208,22 @@ class AntennaLobeRegion(RegionView):
             region_outputs['firing_rate'][ct] = torch.zeros(
                 shape, device=device, dtype=dtype,
             )
-            if record_synaptic:
-                region_outputs['synaptic_current'][ct] = torch.zeros(
-                    shape, device=device, dtype=dtype,
-                )
 
         region_mapping = {
             'input_mapping': None,  # filled in by predict()
             'output_mapping': readout_dict,
             'output_neurons': list(output_neurons),
-            'record_synaptic': record_synaptic,
         }
         return region_outputs, region_mapping
 
-    def record_step(self, t, v, fr, syn_current, region_outputs, region_mapping):
+    def record_step(self, t, v, fr, region_outputs, region_mapping):
         """Per-step writer: copy each output type's neurons into its buffer."""
         readout_dict = region_mapping['output_mapping']
-        record_synaptic = region_mapping['record_synaptic']
 
         for ct in region_mapping['output_neurons']:
             ni = readout_dict[ct]['neuron_indices']
             region_outputs['voltage'][ct][:, t, :] = v[:, ni]
             region_outputs['firing_rate'][ct][:, t, :] = fr[:, ni]
-            if record_synaptic:
-                region_outputs['synaptic_current'][ct][:, t, :] = syn_current[:, ni]
 
 
 # ---------------------------------------------------------------------------
@@ -1203,31 +1237,41 @@ REGION_REGISTRY: dict[str, type[RegionView]] = {
 }
 
 
+def _region_class(name: str) -> type[RegionView]:
+    """The :data:`REGION_REGISTRY` class for ``name``; raises for unknown names."""
+    cls = REGION_REGISTRY.get(name)
+    if cls is None:
+        raise ValueError(
+            f"Unknown region {name!r} in [model.regions]; known regions: "
+            f"{sorted(REGION_REGISTRY)}."
+        )
+    return cls
+
+
 def build_region_specs(
     region_kwargs: dict[str, dict] | None,
 ) -> dict[str, dict]:
     """Translate config-style ``region_kwargs`` into loader ``region_specs``.
 
-    For each region name present in ``region_kwargs`` and registered in
-    :data:`REGION_REGISTRY`, returns ``{'neuropils': <list>, 'side': <str>,
-    'intrinsic': <bool>}`` where ``neuropils`` defaults to the class-level
-    :attr:`RegionView.neuropils` list (overridable per-instance via
-    ``region_kwargs[<name>]['neuropils']``), ``side`` defaults to ``'both'``,
-    and ``intrinsic`` defaults to the class-level :attr:`RegionView.intrinsic`
-    flag (overridable via ``region_kwargs[<name>]['intrinsic']``). Used by
-    callers to drive :func:`connectome_loading.load_connectome` straight from
-    config.
+    For each region name in ``region_kwargs`` (which must be registered in
+    :data:`REGION_REGISTRY`; unknown names raise ``ValueError``), returns
+    ``{'neuropils': <list>, 'side': <str>, 'intrinsic': <bool>}`` where
+    ``neuropils`` defaults to the class-level :attr:`RegionView.neuropils`
+    list (overridable per-instance via ``region_kwargs[<name>]['neuropils']``),
+    ``side`` defaults to the class's :attr:`RegionView.default_side`
+    (``'right'`` for the optic lobe), and ``intrinsic`` defaults to the
+    class-level :attr:`RegionView.intrinsic` flag (overridable via
+    ``region_kwargs[<name>]['intrinsic']``). Used by callers to drive
+    :func:`connectome_loading.load_connectome` straight from config.
     """
     region_kwargs = region_kwargs or {}
     specs: dict[str, dict] = {}
     for name, opts in region_kwargs.items():
-        cls = REGION_REGISTRY.get(name)
-        if cls is None:
-            continue
+        cls = _region_class(name)
         opts = opts or {}
         specs[name] = {
             'neuropils': list(opts.get('neuropils', cls.neuropils)),
-            'side': opts.get('side', 'both'),
+            'side': opts.get('side', cls.default_side),
             'intrinsic': bool(opts.get('intrinsic', cls.intrinsic)),
         }
     return specs
@@ -1238,9 +1282,10 @@ def resolve_neurons_to_exclude(
 ) -> dict[str, list[str]]:
     """Return ``{region: [cell_type, ...]}`` of neurons to exclude per region.
 
-    For each region in ``regions`` registered in :data:`REGION_REGISTRY`, uses
-    the per-instance override from ``region_kwargs[region]['neurons_to_exclude']``
-    if set, else the region class's ``default_neurons_to_exclude``. Used by
+    For each region in ``regions`` (registered in :data:`REGION_REGISTRY`),
+    uses the per-instance override from
+    ``region_kwargs[region]['neurons_to_exclude']`` if set, else the region
+    class's ``default_neurons_to_exclude``. Used by
     :meth:`ConnectomeModel._preprocess_connectome` to strip cell types that
     a region treats as non-connectome inputs (e.g. photoreceptor terminals
     for the optic lobe).
@@ -1248,9 +1293,7 @@ def resolve_neurons_to_exclude(
     region_kwargs = region_kwargs or {}
     out: dict[str, list[str]] = {}
     for name in regions:
-        cls = REGION_REGISTRY.get(name)
-        if cls is None:
-            continue
+        cls = _region_class(name)
         override = region_kwargs.get(name, {}).get('neurons_to_exclude')
         if override is not None:
             out[name] = list(override)
@@ -1279,16 +1322,15 @@ def build_regions(
     in multiple regions' ``cell_indices``.
 
     ``region_kwargs`` maps region name to its config option sub-dict (as it
-    appears under ``[model.regions.<name>]`` in the config). ``side`` and
-    ``neurons_to_exclude`` are consumed upstream; everything else is
-    forwarded verbatim to the region's ``_load_extras`` as ``region_opts``.
+    appears under ``[model.regions.<name>]`` in the config). The membership
+    keys (``side``, ``neuropils``, ``intrinsic``) and ``neurons_to_exclude``
+    are consumed upstream; everything else is forwarded verbatim to the
+    region's ``_load_extras`` as ``region_opts``.
     """
     region_kwargs = dict(region_kwargs or {})
     regions = nn.ModuleDict()
     for name, spec in region_specs.items():
-        cls = REGION_REGISTRY.get(name)
-        if cls is None:
-            continue
+        cls = _region_class(name)
 
         mask = region_membership.get(name)
         if mask is None:
@@ -1306,6 +1348,8 @@ def build_regions(
         opts.pop('neuropils', None)
         opts.pop('side', None)
         opts.pop('intrinsic', None)
+        # The side the loader applied ('both' is its default when a spec
+        # omits it).
         side = spec.get('side', 'both')
 
         regions[name] = cls(
@@ -1313,8 +1357,4 @@ def build_regions(
             cell_indices=cell_idx, side=side,
             region_opts=opts,
         )
-        # Record the resolved membership stringency used by the loader so
-        # it's introspectable on the built region (membership itself is
-        # already baked into ``cell_indices``).
-        regions[name].intrinsic = bool(spec.get('intrinsic', cls.intrinsic))
     return regions

@@ -10,23 +10,33 @@ name  = ''
 # sub-tables below cover only the regions defaulted here (optic_lobe). Configs
 # that use other areas (e.g. antenna_lobe) supply their own region sub-table.
 model_type = 'ConnectomeModel'
+# CurrentDynamics | CurrentDivisiveDynamics | ConductanceDynamics |
+# CellAnnDynamics | ArbitraryDynamics (see model_architecture.md).
 dynamics_type = 'CurrentDynamics'
+# Depth of the per-neuron network (CellAnnDynamics only).
+cell_ann_depth = 1
+# CUDA devices fall back to 'cpu' (with a warning) when CUDA is unavailable.
 device = "cuda"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "ReLU"
 dt = 0.01
+# Minimum total synapses (summed over neuropils) for a neuron pair to be
+# connected; applies to region membership and weights.
 synapse_count_threshold = 2
 use_connectome_subset = []
 
 # Per-region option sub-tables. The set of region keys here drives which
 # areas get loaded by `connectome_loading.load_connectome` and which
-# RegionView subclasses get built. Each region owns its own `side`
-# ('right' | 'left' | 'both'); all other keys are forwarded verbatim to
-# that region's RegionView._load_extras (see regions.py). Each region
-# also owns its own `readouts` / `readout_neurons` / regularizer params
-# since their structure (e.g. column alignment) is region-specific.
+# RegionView subclasses get built (names must be in regions.REGION_REGISTRY).
+# Each region owns its own `side` ('right' | 'left' | 'both'; defaults to the
+# region class's own); all other keys are forwarded verbatim to that region's
+# RegionView._load_extras (see regions.py). Each region also owns its own
+# `readouts` / `readout_neurons` / regularizer params since their structure
+# (e.g. column alignment) is region-specific. run_model trains optic-lobe-only
+# models; antenna-lobe models are built by the olfactory analysis scripts.
 [model.regions.optic_lobe]
+# Only 'right' is supported: the baked column geometry/ids are right-eye only.
 side                = 'right'
 # Membership stringency. false (default): a neuron joins this region if it
 # has >=1 above-threshold (synapse_count_threshold) connection in the
@@ -61,15 +71,17 @@ input_layer_l1 = 0.0
 # uses it directly. Both are overridden by the --base-seed / --seed CLI flags.
 base_seed = 1
 num_steps = 100000
+# Re-draw the training loss plot (models/<run>/figures/training/loss.png)
+# every `save_every` epochs. Checkpoints are written whenever the loss improves.
 save_every = 1
+# Functions in training/loss_functions.py summed into the training loss:
+# flow_loss, odometry_loss (two-eye datasets only), motion_mag.
 loss_components = ['flow_loss']
 input_noise_std = 0.0
 contrast_std = 0.0
 luminance_std = 0.0
-random_flip_input = false
 alpha = 0.01
 clip_norm = 'none'
-use_synthetic_data = false
 batch_size = 32
 
 [stimulus]
@@ -80,4 +92,8 @@ batch_size = 32
 stimulus_type = 'random_sine'
 
 [data]
+# Path to the data bundle (connectome_data/, stimulus/). Relative paths are
+# resolved against the working directory (scripts run from the repo root), so
+# the default is a folder next to the repo. Override it in your config.toml.
+# Read it with config.get_data_folder(config).
 data_folder = "../drosophila_model_data"

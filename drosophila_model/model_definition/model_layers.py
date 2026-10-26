@@ -2,7 +2,8 @@
 
 Each layer here is self-contained — no dependencies on
 :mod:`neural_models` — so they can be combined freely (e.g.
-:class:`HexGridConv` is also used by :class:`engineering_models.ConvModel`).
+:class:`HexGridConv` is used both by the optic-lobe input pipeline and by
+the flow readouts).
 
 Contents:
     - :class:`CellTypeLayerNorm` — layer norm with weight/bias shared per
@@ -98,9 +99,23 @@ class HexGridConv(torch.nn.Module):
             self.bias = None
 
     def forward(self, x):
-        squeeze_features = x.dim() >= 1 and x.shape[-1] != self.weight.shape[-1]
+        """Convolve ``x`` of shape ``(..., num_columns, in_features)``.
+
+        A ``(..., num_columns)`` input (no feature axis) is accepted when it
+        is unambiguous, i.e. its last axis isn't ``in_features`` long; the
+        added feature axis is squeezed off the output again.
+        """
+        num_columns, in_features = self.nearest_column_indices.shape[0], self.weight.shape[-1]
+        input_shape = tuple(x.shape)
+        squeeze_features = x.dim() >= 1 and x.shape[-1] != in_features
         if squeeze_features:
             x = x.unsqueeze(-1)
+        if x.dim() < 2 or x.shape[-2] != num_columns:
+            raise ValueError(
+                f"HexGridConv expects (..., {num_columns} columns, "
+                f"{in_features} features) or (..., {num_columns} columns); "
+                f"got shape {input_shape}."
+            )
 
         leading = x.shape[:-2]
         x_flat = x.reshape(-1, x.shape[-2], x.shape[-1])
@@ -115,7 +130,7 @@ class HexGridConv(torch.nn.Module):
 
         if self.positive_weights:
             w = self.weight.exp()
-            w_sum = torch.einsum('cn,knf->ck', valid_mask.float(), w).clamp(min=1e-8)
+            w_sum = torch.einsum('cn,knf->ck', valid_mask.to(w.dtype), w).clamp(min=1e-8)
             out = torch.einsum('scnf,knf->sck', gathered, w) / w_sum.unsqueeze(0)
         else:
             out = torch.einsum('scnf,knf->sck', gathered, self.weight)
@@ -125,27 +140,6 @@ class HexGridConv(torch.nn.Module):
         if squeeze_features:
             out = out.squeeze(-1)
         return out
-
-    @staticmethod
-    def hex_grid_axial_coords(conv_size: int) -> np.ndarray:
-        """Return axial (q, r) coordinates for a flat-top hex grid."""
-        if conv_size % 2 == 0:
-            raise ValueError("conv_size must be odd for centered convolution.")
-        radius = conv_size // 2
-        coords = []
-        for r in range(-radius, radius + 1):
-            q_min = max(-radius, -r - radius)
-            q_max = min(radius, -r + radius)
-            for q in range(q_min, q_max + 1):
-                coords.append((q, r))
-        return np.array(coords, dtype=np.int64)
-
-    @staticmethod
-    def hex_grid_points(conv_size: int) -> np.ndarray:
-        """Return flat-top hex grid points centered at (0,0)."""
-        axial = HexGridConv.hex_grid_axial_coords(conv_size).astype(np.float64)
-        q, r = axial[:, 0], axial[:, 1]
-        return np.stack([1.5 * q, np.sqrt(3.0) * (r + 0.5 * q)], axis=1)
 
     @staticmethod
     def hex_grid_pq_offsets(conv_size: int) -> np.ndarray:
@@ -203,7 +197,9 @@ class TemporalLRU(torch.nn.Module):
         z_k(t) = a_k * z_k(t-1) + b_k * u(t)      (complex state)
         y(t)   = sum_k Re(c_k * z_k(t))  + d * u(t) (real output)
 
-    where ``a_k = exp(-gamma_k + i*omega_k)`` with ``gamma_k > 0`` for stability.
+    where ``a_k = exp(-gamma_k * dt + i*omega_k)``: ``gamma_k > 0`` is a decay
+    rate (1/s, so stability holds for any ``dt``) and ``omega_k`` in
+    ``(0, pi)`` is the oscillation frequency in radians per step.
     """
 
     _COMPLEX_DTYPE = {torch.float32: torch.complex64, torch.float64: torch.complex128}

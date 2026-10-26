@@ -1,17 +1,16 @@
 """
 Find and save the steady state for a trained model.
 
-Usage:
-    python analysis/find_steady_state.py <model_path>
+Overwrites the model's model.pt in place (no backup is kept).
+
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.find_steady_state models/<model>/
 """
 import argparse
-import sys
 from pathlib import Path
 
-# Add parent directory to path for imports
-
-import torch
 from drosophila_model.model_definition import neural_models as nm
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -30,7 +29,10 @@ def main() -> None:
     print(f"Loading model from {model_pt} ...")
     model = nm.BaseRnn.load(model_path)
 
-    model.find_steady_state(max_iter=25)
+    if not model.find_steady_state(max_iter=25):
+        # Dynamics blew up: the steady state was left unchanged, so don't
+        # rewrite model.pt (and don't report success).
+        raise SystemExit(f"No stable steady state found; {model_pt} left unchanged.")
 
     print(f"Saving model to {model_pt} ...")
     model.save(model_pt)

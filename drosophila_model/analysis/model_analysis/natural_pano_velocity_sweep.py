@@ -8,8 +8,11 @@ up/down. By default, velocity = temporal_frequency × λ (deg/s) to match
 
 Averages model outputs over all panoramas in ``all_panoramic.pt`` (optional
 ``--max-panos`` subset).
+
+Usage:
+    python -m drosophila_model.analysis.model_analysis.natural_pano_velocity_sweep models/<model>/
+    python -m drosophila_model.analysis.model_analysis.natural_pano_velocity_sweep models/<model>/ --max-panos 10
 """
-import sys
 from pathlib import Path
 
 
@@ -24,45 +27,9 @@ from matplotlib import pyplot as plt
 
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.data_handling.stimulus_generators import get_constant_velocity_pano
-
-
-def _exponential_highpass(block, dt, tau):
-    """Subtract a causal exponential lowpass from each column to remove DC.
-
-    First-order IIR lowpass:  y[t] = α·y[t-1] + (1-α)·x[t],  α = exp(-dt/τ)
-    Returns:  x[t] - y[t]
-    """
-    alpha = np.exp(-dt / tau)
-    out = np.empty_like(block)
-    # block shape: (batch, time, columns)
-    lp = block[:, 0, :].copy()
-    out[:, 0, :] = 0.0
-    for t in range(1, block.shape[1]):
-        lp = alpha * lp + (1.0 - alpha) * block[:, t, :]
-        out[:, t, :] = block[:, t, :] - lp
-    return out
-
-
-def _central_ommatidium_index(sample_phi: np.ndarray, sample_theta: np.ndarray) -> int:
-    """Column closest to forward viewing (phi=0, theta=pi/2) on the unit sphere."""
-    phi_ref = 0.0
-    theta_ref = np.pi / 2.0
-    ref = np.array(
-        [
-            np.sin(theta_ref) * np.cos(phi_ref),
-            np.sin(theta_ref) * np.sin(phi_ref),
-            np.cos(theta_ref),
-        ]
-    )
-    xyz = np.stack(
-        [
-            np.sin(sample_theta) * np.cos(sample_phi),
-            np.sin(sample_theta) * np.sin(sample_phi),
-            np.cos(sample_theta),
-        ],
-        axis=1,
-    )
-    return int(np.argmax(xyz @ ref))
+from drosophila_model.analysis.model_analysis.analysis_utilities import (
+    central_column_index, exponential_highpass, get_flow_key,
+)
 
 
 def main():
@@ -72,7 +39,7 @@ def main():
     parser.add_argument(
         "model_folder",
         type=str,
-        help="Path to model folder (containing model.pt and config.toml)",
+        help="Path to model folder or model.pt",
     )
     parser.add_argument(
         "--seed",
@@ -91,7 +58,7 @@ def main():
         "--zero_center",
         action="store_true",
         dest="zero_center",
-        help="Map stimulus from [0, 1] to [-1, 1] via 2x - 1 (same as sine_wave_sweep --zero_center).",
+        help="Map stimulus from [0, 1] to [-1, 1] via 2x - 1 (same as sine_wave_sweep --zero-center).",
     )
     parser.add_argument(
         "--log-scale",
@@ -123,20 +90,21 @@ def main():
 
     args = parser.parse_args()
 
-    model_folder = Path(args.model_folder)
-    model = nm.BaseRnn.load(model_folder / "model.pt")
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    model = nm.BaseRnn.load(model_path)
 
     dt = model.dt
     print(f"dt: {dt}")
     sample_phi = model.regions['optic_lobe'].column_phi_theta[:, 0]
     sample_theta = model.regions['optic_lobe'].column_phi_theta[:, 1]
-    center_idx = _central_ommatidium_index(
+    center_idx = central_column_index(
         np.asarray(sample_phi), np.asarray(sample_theta)
     )
     print(
         f"Central ommatidium column index {center_idx} "
-        f"(phi={np.degrees(sample_phi[center_idx]):.2f}°, "
-        f"theta={np.degrees(sample_theta[center_idx]):.2f}°)"
+        f"(phi={np.degrees(sample_phi[center_idx]):.2f} deg, "
+        f"theta={np.degrees(sample_theta[center_idx]):.2f} deg)"
     )
 
     plot_by_velocity = args.plot_by_velocity
@@ -195,14 +163,14 @@ def main():
     if args.zero_center:
         all_stim = 2.0 * all_stim - 1.0
     if args.highpass_tau is not None:
-        print(f"Applying exponential highpass filter (τ={args.highpass_tau} s)")
-        all_stim = _exponential_highpass(all_stim, dt, args.highpass_tau)
+        print(f"Applying exponential highpass filter (tau={args.highpass_tau} s)")
+        all_stim = exponential_highpass(all_stim, dt, args.highpass_tau)
 
     all_stim_tensor = torch.tensor(all_stim, device=model.device, dtype=model.dtype)
     pre_stim_steps = int(round(pre_stim_time / dt))
 
     print(
-        "Per-panorama luminance over all sweep conditions (time × photoreceptors), "
+        "Per-panorama luminance over all sweep conditions (time x columns), "
         "before global tensor concat:"
     )
     id_list = (
@@ -225,7 +193,12 @@ def main():
     t4_types = ["T4a", "T4b", "T4c", "T4d"]
     t5_types = ["T5a", "T5b", "T5c", "T5d"]
     other_types = ["T1", "Tm1", "Tm2", "Tm20"]
-    output_neurons = t4_types + t5_types + other_types
+    # predict() silently drops cell types the model lacks (e.g. trimmed models).
+    output_neurons = [ct for ct in t4_types + t5_types + other_types
+                      if ct in model.unique_cell_types]
+    missing = [ct for ct in t4_types + t5_types + other_types if ct not in output_neurons]
+    if missing:
+        print(f"Warning: cell types not present in model, skipping: {missing}")
 
     with torch.no_grad():
         pred = model.predict(
@@ -253,8 +226,9 @@ def main():
 
     results = None
     results_center = None
-    if model.has_decoder:
-        decoder_out = pred["decoder"]
+    flow_key = get_flow_key(model)
+    if flow_key is not None:
+        decoder_out = pred[flow_key]
         decoder_stim = decoder_out[:, pre_stim_steps:, :, :]
         mean_per_stim = torch.nanmean(decoder_stim, dim=(1, 2)).cpu().numpy()
         agg, _ = _mean_over_panos(mean_per_stim)
@@ -365,13 +339,16 @@ def main():
         plt.close(fig)
         print(f"Figure saved to {save_path}")
     else:
-        print("Model has no decoder — skipping decoder figure.")
+        print("Model has no flow readout - skipping decoder figure.")
 
     for group_name, cell_types in [
         ("T4", t4_types),
         ("T5", t5_types),
         ("other", other_types),
     ]:
+        cell_types = [ct for ct in cell_types if ct in cell_results]
+        if not cell_types:
+            continue
         for wavelength in wavelengths:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
             cell_axes = {ct: ax for ct, ax in zip(cell_types, axes.flat)}

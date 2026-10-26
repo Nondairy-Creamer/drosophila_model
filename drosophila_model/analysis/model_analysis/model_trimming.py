@@ -1,203 +1,179 @@
 """
-Model trimming: binary search for maximum neurons we can silence before loss degrades.
+Model trimming: binary search for the most cell types that can be removed before loss degrades.
 
 Importance score = incoming_synapses * outgoing_synapses * input_strength * output_strength
 
-Neurons are ranked by importance. We binary search over the count of least-important
-neurons to silence, finding the maximum number removable before loss exceeds a threshold.
+Cell types are ranked by importance. We binary search over the count of
+least-important cell types to remove, finding the maximum number removable
+before the training loss exceeds ``LOSS_THRESHOLD`` x the original loss. Every
+candidate is built exactly like the saved model: the cell types are removed
+structurally (``model.remove_cell_types``), which keeps the original model's
+initial state (``steady_state``) for the retained neurons. Losses are the
+training objective evaluated on the model's own training data
+(``cell_inputs.pt`` / ``target.pt``).
+
+The trimmed model is saved, with the run's config.toml, cell_inputs.pt and
+target.pt, to ``<model_folder>_trimmed/`` (or ``--output``).
+
+Usage:
+    python -m drosophila_model.analysis.model_analysis.model_trimming models/<model>/
 """
-import sys
-import shutil
 import argparse
+import shutil
 from pathlib import Path
 
-# Add parent directory to path for imports
-
-import torch
 import numpy as np
+import torch
+
+from drosophila_model.config import load_run_config
 from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.analysis.model_analysis import analysis_utilities as au
-from drosophila_model.training import loss_functions as lf
+from drosophila_model.analysis.model_analysis.silencing import compute_loss
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('model_folder', type=str, help='Path to the model folder')
-parser.add_argument('--output', type=str, default=None,
-                    help='Output folder for the trimmed model '
-                         '(default: <model_folder>_trimmed)')
-args = parser.parse_args()
+# Stop when loss increases to 110% of starting value (10% worse)
+LOSS_THRESHOLD = 1.10
+# Cell types that are never removed.
+PROTECTED_TYPES = {'L1', 'L2', 'L3', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'}
+# Files of the run folder copied next to the trimmed model.pt.
+RUN_FILES = ('config.toml', 'cell_inputs.pt', 'target.pt')
 
-# --- Configuration ---
-model_path = args.model_folder
-loss_threshold = 1.10  # Stop when loss increases to 110% of starting value (10% worse)
 
-# --- Load the model ---
-print("Loading model...")
-model = nm.BaseRnn.load(model_path)
-device = model.device
-print('running on', device)
-dtype = model.dtype
+def importance_order(model):
+    """Cell-type indices sorted from least to most important."""
+    # Get average connections matrix (num_cell_types, num_cell_types)
+    # ave_con[post_type, pre_type] = average synapse count from pre_type to post_type
+    ave_con = au.compute_average_connections(model)
 
-# --- Load training data ---
-print("Loading training data...")
-model_data_path = Path(model_path)
-cell_inputs_data = torch.load(model_data_path / 'cell_inputs.pt', map_location=device)
-if isinstance(cell_inputs_data, dict):
+    # Get input and output strengths per cell type (already at cell type level)
+    # Dynamics without per-cell-type gains (CellAnn, Arbitrary) are ranked on
+    # connectivity alone.
+    if hasattr(model, 'input_strength_log'):
+        input_strength = model.input_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,) or (num_transmitters, num_cell_types)
+        output_strength = model.output_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,)
+    else:
+        input_strength = np.ones(model.num_cell_types)
+        output_strength = np.ones(model.num_cell_types)
+
+    # ConductanceDynamics stores input strength per (transmitter, cell type).
+    # Collapse to one value per cell type for the importance heuristic.
+    if input_strength.ndim == 2:
+        input_strength = input_strength.mean(axis=0)  # (num_cell_types,)
+
+    # Effective incoming weight to type k: input_strength[k] * Σ_i |ave_con[k,i]| * output_strength[i]
+    effective_incoming = input_strength * (np.abs(ave_con) @ output_strength)  # (num_cell_types,)
+
+    # Effective outgoing weight from type k: output_strength[k] * Σ_j |ave_con[j,k]| * input_strength[j]
+    effective_outgoing = output_strength * (np.abs(ave_con).T @ input_strength)  # (num_cell_types,)
+
+    # Calculate importance score per cell type
+    importance = effective_incoming * effective_outgoing
+    print(f"Importance range: {importance.min():.6f} to {importance.max():.6f}")
+
+    # Sort cell types by importance (ascending - least important first)
+    return np.argsort(importance)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Remove the least important cell types of a model while "
+                    f"its training loss stays below {LOSS_THRESHOLD:.2f}x the original.")
+    parser.add_argument('model_folder', type=str, help='Path to the model folder')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output folder for the trimmed model '
+                             '(default: <model_folder>_trimmed)')
+    args = parser.parse_args()
+
+    model_path = Path(args.model_folder)
+    model_folder = model_path.parent if model_path.is_file() else model_path
+    run_config = load_run_config(model_folder)
+
+    # --- Load the model ---
+    print("Loading model...")
+    model = nm.BaseRnn.load(model_path)
+    model.eval()
+    device = model.device
+    print('running on', device)
+    dtype = model.dtype
+
+    # --- Load training data ---
+    print("Loading training data...")
+    cell_inputs_data = torch.load(model_folder / 'cell_inputs.pt', map_location=device)
     stimulus = cell_inputs_data['cell_inputs'].to(device=device, dtype=dtype)
     train_mask = cell_inputs_data['train_mask'].to(device=device)
-else:
-    stimulus = cell_inputs_data.to(device=device, dtype=dtype)
-    train_mask = None
+    target = torch.load(model_folder / 'target.pt', map_location=device)
+    target = {k: v.to(device=device, dtype=dtype) for k, v in target.items()}
 
-target_loaded = torch.load(model_data_path / 'target.pt', map_location=device)
-if isinstance(target_loaded, dict):
-    target = {k: (v.to(device=device, dtype=dtype) if torch.is_tensor(v) else v)
-              for k, v in target_loaded.items()}
-else:
-    target = target_loaded.to(device=device, dtype=dtype)
+    num_eyes = run_config['run_info']['num_eyes']
+    eye_offset = au.run_eye_offset(run_config)
+    loss_components = run_config['training']['loss_components']
 
-# --- Calculate importance score for each cell type ---
-print("Calculating cell type importance scores...")
+    def loss_of(mdl):
+        return compute_loss(mdl, stimulus, target, train_mask, loss_components,
+                            num_eyes, eye_offset)
 
-# Get average connections matrix (num_cell_types, num_cell_types)
-# ave_con[post_type, pre_type] = average synapse count from pre_type to post_type
-ave_con = au.compute_average_connections(model)
+    # --- Calculate importance score for each cell type ---
+    print("Calculating cell type importance scores...")
+    print(f"Total cell types: {model.num_cell_types}")
+    sorted_indices = importance_order(model)
 
-# Get input and output strengths per cell type (already at cell type level)
-input_strength = model.input_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,) or (num_transmitters, num_cell_types)
-output_strength = model.output_strength_log.exp().detach().cpu().numpy()  # (num_cell_types,)
+    # --- Calculate initial loss ---
+    print("\nCalculating initial loss...")
+    initial_loss = loss_of(model)
+    print(f"Initial loss: {initial_loss:.6f}")
+    print(f"Target loss ({LOSS_THRESHOLD:.0%} of initial): {initial_loss * LOSS_THRESHOLD:.6f}")
 
-# ConductanceDynamics stores input strength per (transmitter, cell type).
-# Collapse to one value per cell type for the importance heuristic.
-if input_strength.ndim == 2:
-    input_strength = input_strength.mean(axis=0)  # (num_cell_types,)
+    # --- Build ordered candidate list (least important first, excluding protected types) ---
+    candidates = [model.unique_cell_types[i] for i in sorted_indices
+                  if model.unique_cell_types[i] not in PROTECTED_TYPES]
+    print(f"Eligible cell types for removal: {len(candidates)}")
 
-# Effective incoming weight to type k: input_strength[k] * Σ_i |ave_con[k,i]| * output_strength[i]
-effective_incoming = input_strength * (np.abs(ave_con) @ output_strength)  # (num_cell_types,)
+    # --- Binary search for max cell types removable within threshold ---
+    print("\nBinary search for maximum removable cell types...")
+    print("-" * 60)
 
-# Effective outgoing weight from type k: output_strength[k] * Σ_j |ave_con[j,k]| * input_strength[j]
-effective_outgoing = output_strength * (np.abs(ave_con).T @ input_strength)  # (num_cell_types,)
+    lo, hi = 0, len(candidates)
+    trimmed_model, final_ratio = model, 1.0
+    while lo < hi:
+        mid = (lo + hi + 1) // 2  # bias high so lo converges upward
+        candidate = model.remove_cell_types(candidates[:mid])
+        loss_ratio = loss_of(candidate) / initial_loss
+        passed = loss_ratio < LOSS_THRESHOLD
+        print(f"Removed {mid:4d} / {len(candidates)} | Loss ratio: {loss_ratio:.4f} | "
+              f"{'PASS' if passed else 'FAIL'}")
 
-# Calculate importance score per cell type
-importance = effective_incoming * effective_outgoing
+        if passed:
+            # lo only grows, so the last passing candidate is the final model.
+            lo = mid
+            trimmed_model, final_ratio = candidate, loss_ratio
+        else:
+            hi = mid - 1
 
-# Sort cell types by importance (ascending - least important first)
-sorted_indices = np.argsort(importance)
+    max_removable = lo
+    removed_cell_types = candidates[:max_removable]
 
-print(f"Total cell types: {model.num_cell_types}")
-print(f"Importance range: {importance.min():.6f} to {importance.max():.6f}")
+    print("-" * 60)
+    print(f"\nMax removable cell types: {max_removable} / {len(candidates)}")
+    print(f"Final loss ratio: {final_ratio:.4f}")
+    print(f"Retained cell types: {model.num_cell_types - max_removable}")
+    print(f"\nRemoved cell types: {sorted(removed_cell_types)}")
 
-# --- Calculate initial loss ---
-print("\nCalculating initial loss...")
-input_neurons = ['L1', 'L2', 'L3']
+    if max_removable == 0:
+        print("\nNo cell type can be removed within the loss threshold; nothing saved.")
+        return
 
-target_tensor = target['optic_flow'] if isinstance(target, dict) else target
+    print(f"Neurons: {model.num_neurons} -> {trimmed_model.num_neurons}")
+    print(f"Cell types: {model.num_cell_types} -> {trimmed_model.num_cell_types}")
 
-fit_odometry = target_tensor.shape[2] == 2 * model.regions['optic_lobe'].num_columns
+    # --- Save the trimmed model next to the run's config and training data ---
+    out_dir = Path(args.output) if args.output else model_folder.with_name(model_folder.name + '_trimmed')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name in RUN_FILES:
+        shutil.copy2(model_folder / name, out_dir / name)
+    trimmed_model.save(out_dir / 'model.pt')
+    print(f"\nTrimmed model saved to: {out_dir}")
 
-if train_mask is None:
-    train_mask = torch.ones(stimulus.shape[:3], dtype=torch.bool, device=device)
-
-time_mask = train_mask.any(dim=-1)
-loss_start_step = 0
-if not time_mask[:, 0].all():
-    loss_start_step = time_mask.all(dim=0).to(torch.int).argmax().item()
-
-
-def compute_loss(mdl, stim):
-    """Compute loss matching the training procedure."""
-    if fit_odometry:
-        N = stim.shape[2] // 2
-        oob = ~train_mask.any(dim=1).any(dim=0)
-        pred_rot, pred_trans, right_res, left_res = \
-            mdl.regions['optic_lobe'].estimate_ego_motion_from_image(stim[:, :, :N], stim[:, :, N:], oob_columns=oob)
-        flow_key = next(k for k, m in mdl._readout_modules.items() if m.predicts_flow)
-        outputs = {
-            flow_key: torch.cat([right_res['outputs']['optic_lobe'][flow_key],
-                                 left_res['outputs']['optic_lobe'][flow_key]], dim=2),
-            'pred_rotation': pred_rot,
-            'pred_translation': pred_trans,
-        }
-        loss_names = ['flow_loss', 'odometry_loss']
-        return sum(getattr(lf, n)(mdl, outputs, target, train_mask, loss_start_step)
-                   for n in loss_names) / len(loss_names)
-    flow_key = next(k for k, m in mdl._readout_modules.items() if m.predicts_flow)
-    pred = mdl.predict(stim, input_neurons=input_neurons)['outputs']['optic_lobe'][flow_key]
-    return lf.mse_loss(target_tensor, pred)
+    print("\nDone!")
 
 
-with torch.no_grad():
-    initial_loss = compute_loss(model, stimulus).item()
-
-print(f"Initial loss: {initial_loss:.6f}")
-print(f"Target loss (110% of initial): {initial_loss * loss_threshold:.6f}")
-
-# --- Build ordered candidate list (least important first, excluding protected types) ---
-skipped_types = {'L1', 'L2', 'L3', 'T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d'}
-candidates = [model.unique_cell_types[i] for i in sorted_indices
-              if model.unique_cell_types[i] not in skipped_types]
-
-print(f"Eligible cell types for silencing: {len(candidates)}")
-
-
-def evaluate_silencing(count):
-    """Silence the `count` least-important candidates and return the loss ratio."""
-    silenced = candidates[:count]
-    model_copy = nm.BaseRnn.load(model_path)
-    model_copy.silence_neurons(silenced, invert_silencing=False)
-    with torch.no_grad():
-        loss = compute_loss(model_copy, stimulus).item()
-    return loss / initial_loss
-
-
-# --- Binary search for max neurons removable within threshold ---
-print("\nBinary search for maximum removable neurons...")
-print("-" * 60)
-
-lo, hi = 0, len(candidates)
-
-while lo < hi:
-    mid = (lo + hi + 1) // 2  # bias high so lo converges upward
-    loss_ratio = evaluate_silencing(mid)
-    print(f"Silenced {mid:4d} / {len(candidates)} | Loss ratio: {loss_ratio:.4f} | "
-          f"{'PASS' if loss_ratio < loss_threshold else 'FAIL'}")
-
-    if loss_ratio < loss_threshold:
-        lo = mid
-    else:
-        hi = mid - 1
-
-max_removable = lo
-final_ratio = evaluate_silencing(max_removable) if max_removable > 0 else 1.0
-silenced_cell_types = candidates[:max_removable]
-
-print("-" * 60)
-print(f"\nMax removable neurons: {max_removable} / {len(candidates)}")
-print(f"Final loss ratio: {final_ratio:.4f}")
-print(f"Retained cell types: {len(candidates) - max_removable + len(skipped_types)}")
-print(f"\nSilenced cell types: {sorted(silenced_cell_types)}")
-
-# --- Build the trimmed model by fully removing the selected cell types ---
-# The binary search above used silencing to rank/measure; here we structurally
-# delete those neurons so the saved model is genuinely smaller.
-print("\nBuilding trimmed model (removing neurons)...")
-trimmed_model = model.remove_cell_types(silenced_cell_types)
-print(f"Neurons: {model.num_neurons} -> {trimmed_model.num_neurons}")
-print(f"Cell types: {model.num_cell_types} -> {trimmed_model.num_cell_types}")
-
-# Resting state shifts once neurons are gone; recompute before evaluating/saving.
-trimmed_model.find_steady_state()
-with torch.no_grad():
-    trimmed_loss = compute_loss(trimmed_model, stimulus).item()
-print(f"Trimmed model loss ratio (removal): {trimmed_loss / initial_loss:.4f}")
-
-# --- Copy the model folder (files only, no sub-folders) and save trimmed model ---
-src_dir = Path(model_path)
-out_dir = Path(args.output) if args.output else Path(str(src_dir).rstrip('/') + '_trimmed')
-out_dir.mkdir(parents=True, exist_ok=True)
-for item in src_dir.iterdir():
-    if item.is_file():
-        shutil.copy2(item, out_dir / item.name)
-trimmed_model.save(out_dir / 'model.pt')
-print(f"\nTrimmed model saved to: {out_dir}")
-
-print("\nDone!")
+if __name__ == "__main__":
+    main()

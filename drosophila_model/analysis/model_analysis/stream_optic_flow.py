@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Stream stereo optic-flow ego-motion estimates to the drone controller."""
+"""Stream optic-flow ego-motion estimates to the drone controller.
+
+Reads a left and a right camera (or video), estimates translation from the
+right eye only with the trained model (rotation is not estimated, so the
+rotation and roll/pitch/yaw fields are always zero), integrates it into a
+position and streams controller-compatible state over UDP. The left source is
+still required but only feeds the ``--display`` preview and the video frame
+rate.
+
+The network advances one model step (``model.dt``) per frame, so the frame
+interval should match the dt the model was trained at; a warning is printed
+when it does not.
+
+Usage:
+    python -m drosophila_model.analysis.model_analysis.stream_optic_flow --model models/<model>/ --left-src 0 --right-src 1
+"""
 
 from __future__ import annotations
 
@@ -17,19 +32,32 @@ from typing import Any
 DEFAULT_PHI_RIGHT_DEG = (-30.0, -150.0)
 DEFAULT_PHI_LEFT_DEG = (150.0, 30.0)
 DEFAULT_THETA_DEG = (45.0, 135.0)
+# Relative frame-interval vs model.dt mismatch above which a warning is printed.
+DT_MISMATCH_TOLERANCE = 0.1
+# Number of wall-clock frame intervals whose median is checked against model.dt.
+NUM_DT_CHECK_FRAMES = 10
 
 
 def resolve_existing_path(path_str: str) -> Path:
-    path = Path(path_str)
+    path = Path(path_str).expanduser()
     if path.exists():
         return path
-
-    here = Path(__file__).resolve().parent
-    for candidate in (here / path_str, here.parent / path_str):
-        if candidate.exists():
-            return candidate
-
     raise FileNotFoundError(f"File not found: {path_str}")
+
+
+def warn_if_dt_mismatch(frame_dt: float, model_dt: float, source: str) -> None:
+    """Warn when frames arrive at a different interval than the model's dt.
+
+    The network takes one ``model_dt`` step per frame, so the image motion per
+    step is ``frame_dt / model_dt`` times what it saw in training.
+    """
+    if abs(frame_dt - model_dt) > DT_MISMATCH_TOLERANCE * model_dt:
+        print(
+            f"Warning: frame interval {frame_dt:.4f}s ({source}) differs from the "
+            f"model dt {model_dt:.4f}s; the model sees {frame_dt / model_dt:.2f}x the "
+            "image motion per step it was trained on.",
+            file=sys.stderr,
+        )
 
 
 def robust_read(cap: cv2.VideoCapture) -> tuple[bool, np.ndarray | None]:
@@ -236,14 +264,15 @@ def build_message(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Read left/right stereo images from cameras or videos, estimate ego-motion "
-            "with the trained optic-flow model, and stream controller-compatible state over UDP."
+            "Read left/right images from cameras or videos, estimate translation from the "
+            "right eye with the trained optic-flow model, and stream controller-compatible "
+            "state over UDP."
         )
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="models/best_model/model.pt",
+        required=True,
         help="Path to a trained model folder or model.pt file.",
     )
     parser.add_argument("--left-src", type=str, default="0", help="Left camera index or video path.")
@@ -257,12 +286,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--loop-videos", action="store_true", help="Loop video files when they end.")
     parser.add_argument("--camera-width", type=int, default=None, help="Requested camera width.")
     parser.add_argument("--camera-height", type=int, default=None, help="Requested camera height.")
-    parser.add_argument("--camera-fps", type=float, default=None, help="Requested camera FPS.")
+    parser.add_argument(
+        "--camera-fps", type=float, default=None,
+        help="Requested camera FPS (should be 1 / model dt; the model takes one step per frame).",
+    )
     parser.add_argument(
         "--fixed-dt",
         type=float,
         default=None,
-        help="Override frame dt in seconds. By default videos use FPS metadata and cameras use wall-clock time.",
+        help="Override frame dt in seconds (used for pose integration; the model still takes "
+             "one model-dt step per frame). By default videos use FPS metadata and cameras "
+             "use wall-clock time.",
     )
     parser.add_argument(
         "--translation-scale",
@@ -274,7 +308,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--integration-frame",
         choices=("world", "body"),
         default="world",
-        help="Integrate translation in the world frame or directly in the body frame.",
+        help="Integrate translation in the world frame or directly in the body frame "
+             "(identical while rotation is not estimated).",
     )
     parser.add_argument(
         "--fov-right-deg",
@@ -290,7 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=2,
         default=DEFAULT_PHI_LEFT_DEG,
         metavar=("START", "END"),
-        help="Left camera phi limits in degrees.",
+        help="Left camera phi limits in degrees (unused: ego-motion is estimated from the "
+             "right eye only).",
     )
     parser.add_argument(
         "--theta-deg",
@@ -374,7 +410,6 @@ def main() -> int:
         print(f"Logging pose stream to {log_path}")
 
     phi_right_lim = deg_pair_to_rad(tuple(args.fov_right_deg))
-    phi_left_lim = deg_pair_to_rad(tuple(args.fov_left_deg))
     theta_lim = deg_pair_to_rad(tuple(args.theta_deg))
 
     left_cap, left_mode, left_label = open_source(
@@ -400,17 +435,14 @@ def main() -> int:
         if not right_ok or first_right is None:
             raise RuntimeError(f"Failed to read first frame from right source: {right_label}")
 
-        first_left_gray = cv2.cvtColor(first_left, cv2.COLOR_BGR2GRAY) if first_left.ndim == 3 else first_left
         first_right_gray = cv2.cvtColor(first_right, cv2.COLOR_BGR2GRAY) if first_right.ndim == 3 else first_right
 
         sample_phi_right = np.asarray(model.regions['optic_lobe'].column_phi_theta[:, 0], dtype=np.float64)
         sample_theta = np.asarray(model.regions['optic_lobe'].column_phi_theta[:, 1], dtype=np.float64)
-        sample_phi_left = -sample_phi_right
 
-        print(
-            f"Building ommatidium samplers: left={first_left_gray.shape[::-1]} "
-            f"right={first_right_gray.shape[::-1]}"
-        )
+        # Ego-motion is estimated from the right eye only, so only the right
+        # image is sampled onto the model's columns.
+        print(f"Building ommatidium sampler: right={first_right_gray.shape[::-1]}")
         W_right = build_ommatidium_sampling_matrix(
             first_right_gray.shape,
             phi_right_lim,
@@ -419,16 +451,7 @@ def main() -> int:
             sample_theta,
             filter_std=args.filter_std,
         )
-        W_left = build_ommatidium_sampling_matrix(
-            first_left_gray.shape,
-            phi_left_lim,
-            theta_lim,
-            sample_phi_left,
-            sample_theta,
-            filter_std=args.filter_std,
-        )
         in_fov_right = np.asarray(W_right.sum(axis=1)).ravel() > 0
-        in_fov_left = np.asarray(W_left.sum(axis=1)).ravel() > 0
         # Right-eye only: oob mask is sized for a single eye's columns.
         oob_columns = torch.tensor(~in_fov_right, device=model.device)
 
@@ -440,6 +463,10 @@ def main() -> int:
             fps_values = [fps for fps in fps_values if fps and fps > 1e-6]
             if fps_values:
                 nominal_dt = 1.0 / min(fps_values)
+        if nominal_dt is not None:
+            warn_if_dt_mismatch(nominal_dt, model.dt,
+                                "--fixed-dt" if args.fixed_dt is not None else "video FPS")
+        measured_dts = []
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -483,12 +510,16 @@ def main() -> int:
             if nominal_dt is not None:
                 dt_s = nominal_dt
             elif last_capture_t is None:
-                dt_s = float(getattr(model, "dt", 0.01))
+                dt_s = float(model.dt)
             else:
                 dt_s = max(1e-4, capture_t - last_capture_t)
+                if len(measured_dts) < NUM_DT_CHECK_FRAMES:
+                    measured_dts.append(dt_s)
+                    if len(measured_dts) == NUM_DT_CHECK_FRAMES:
+                        warn_if_dt_mismatch(float(np.median(measured_dts)), model.dt,
+                                            "measured wall-clock")
             last_capture_t = capture_t
 
-            left_gray = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY) if left_frame.ndim == 3 else left_frame
             right_gray = cv2.cvtColor(right_frame, cv2.COLOR_BGR2GRAY) if right_frame.ndim == 3 else right_frame
 
             right_stim = sample_image(right_gray, W_right, in_fov_right).to(
@@ -516,7 +547,10 @@ def main() -> int:
 
             # `eyes=('right',)` runs only the right eye; `terms=('trans',)` skips
             # rotation estimation, so ego_rotation is all-zeros by construction.
-            omega_body = ego_rotation[0, 0].detach().cpu().numpy().astype(np.float64)
+            # The solver returns rotation in the flow's units (deg/s); it is
+            # integrated below as rad/s.
+            omega_body = np.radians(
+                ego_rotation[0, 0].detach().cpu().numpy().astype(np.float64))
             translation_body_raw = ego_translation[0, 0].detach().cpu().numpy().astype(np.float64)
 
             used_hold = 0

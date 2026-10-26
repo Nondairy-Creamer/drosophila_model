@@ -8,10 +8,14 @@ id, the spherical-PnP range, and the body-frame bearing (phi, theta).
 Because the dome lens is treated as a spherical observer, the range and
 bearing come from the angular calibration + spherical PnP, not a pinhole model.
 
+Unless ``--no-egomotion`` is given, two extra panels show the drone rotation
+and translation derived from the multi-tag board trajectory, in the drone body
+frame at the first tracked frame.
+
 Usage:
-    python analysis/movie_scripts/plot_tag_location.py
-    python analysis/movie_scripts/plot_tag_location.py \\
-        --recording recording_20260611_234117 --max-frames 400
+    python -m drosophila_model.analysis.movie_scripts.plot_tag_location
+    python -m drosophila_model.analysis.movie_scripts.plot_tag_location \\
+        --recording recording_<timestamp> --max-frames 400
 """
 import argparse
 from collections import defaultdict
@@ -21,13 +25,19 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from drosophila_model.config import load_config
-from drosophila_model.data_handling.extract_tags import (
+from drosophila_model.config import get_data_folder, load_config
+from drosophila_model.data_handling.estimate_pose import (
+    DEFAULT_TAG_FAMILY,
     DEFAULT_TAG_SIZE,
+)
+from drosophila_model.data_handling.extract_tags import (
     compute_board_trajectory,
     extract_tags_from_recording,
 )
-from drosophila_model.analysis.movie_scripts.movie_utilities import write_movie
+from drosophila_model.analysis.movie_scripts.movie_utilities import (
+    write_movie,
+    ylim_from_data,
+)
 
 # World/body frame (coordinate_conventions.md): +x fwd, +y left, +z up;
 # rotations roll(x) / pitch(y) / yaw(z), CCW positive.
@@ -101,12 +111,6 @@ class FrameGrabber:
         self.cap.release()
 
 
-def _margin_lim(data, frac=0.1, min_margin=1e-3):
-    lo, hi = float(np.nanmin(data)), float(np.nanmax(data))
-    margin = max(frac * (hi - lo), min_margin)
-    return lo - margin, hi + margin
-
-
 def _setup_egomotion_axes(ax_rot, ax_trans, traj, trail_seconds):
     """Set up scrolling egomotion panels; return a state dict for updates.
 
@@ -127,17 +131,17 @@ def _setup_egomotion_axes(ax_rot, ax_trans, traj, trail_seconds):
         ln, = ax_trans.plot([], [], color=col, label=lab, linewidth=1.3)
         trans_lines.append(ln)
 
-    ax_rot.set_ylim(*_margin_lim(euler_deg, min_margin=1.0))
+    ax_rot.set_ylim(*ylim_from_data(euler_deg, min_margin=1.0))
     ax_rot.set_ylabel('rotation (deg)')
     ax_rot.set_xlabel('time (s)')
-    ax_rot.set_title('Drone rotation (world frame, rel. to start)')
+    ax_rot.set_title('Drone rotation (body frame at start)')
     ax_rot.legend(loc='upper left', fontsize=8, ncol=3)
     ax_rot.grid(True, alpha=0.3)
 
-    ax_trans.set_ylim(*_margin_lim(pos_rel, min_margin=0.05))
+    ax_trans.set_ylim(*ylim_from_data(pos_rel, min_margin=0.05))
     ax_trans.set_ylabel('translation (m)')
     ax_trans.set_xlabel('time (s)')
-    ax_trans.set_title('Drone translation (world frame, rel. to start)')
+    ax_trans.set_title('Drone translation (body frame at start)')
     ax_trans.legend(loc='upper left', fontsize=8, ncol=3)
     ax_trans.grid(True, alpha=0.3)
 
@@ -176,9 +180,10 @@ def make_tag_location_movie(recording_dir, records, output_path,
 
     If ``traj`` (a board trajectory from ``compute_board_trajectory``) is
     given, two panels are added showing the drone's estimated rotation and
-    translation (world frame, per coordinate_conventions.md), drawn as a
-    scrolling trailing window (``trail_seconds`` wide) that progresses with
-    the movie, like visualize_drone_data.py.
+    translation (in the drone body frame at the first tracked frame, axes per
+    coordinate_conventions.md), drawn as a scrolling trailing window
+    (``trail_seconds`` wide) that progresses with the movie, like
+    visualize_drone_data.py.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -219,8 +224,9 @@ def make_tag_location_movie(recording_dir, records, output_path,
 
     show_ego = traj is not None
     n_cams = len(grabbers)
+    # Pixel sizes are multiples of 16 so the H.264 writer need not resize.
     if show_ego:
-        fig = plt.figure(figsize=(6.5 * n_cams, 9), dpi=110)
+        fig = plt.figure(figsize=(6.4 * n_cams, 9.6), dpi=100)
         gs = fig.add_gridspec(2, 1, height_ratios=[3, 2])
         gs_top = gs[0].subgridspec(1, n_cams)
         gs_bot = gs[1].subgridspec(1, 2)
@@ -229,7 +235,7 @@ def make_tag_location_movie(recording_dir, records, output_path,
         ax_trans = fig.add_subplot(gs_bot[0, 1])
         ego_state = _setup_egomotion_axes(ax_rot, ax_trans, traj, trail_seconds)
     else:
-        fig, axes = plt.subplots(1, n_cams, figsize=(6.5 * n_cams, 5.2), dpi=110)
+        fig, axes = plt.subplots(1, n_cams, figsize=(6.4 * n_cams, 5.12), dpi=100)
         axes = list(np.atleast_1d(axes))
 
     images, overlay_artists = [], []
@@ -301,11 +307,13 @@ def main():
     parser.add_argument('--recording', type=str, default=None,
                         help='recording_* folder to render (default: first found)')
     parser.add_argument('--cameras', type=str, nargs='+', default=['right', 'left'],
-                        choices=['right', 'left'], help='Cameras to show')
+                        choices=['right', 'left'],
+                        help='Cameras to show (display only: tags are always '
+                             'extracted from both cameras for the egomotion)')
     parser.add_argument('--output-dir', type=str, default='figures/plot_tag_location',
                         help='Output directory for the movie')
-    parser.add_argument('--tag-family', type=str, default='tag36h11',
-                        help='AprilTag family (default: tag36h11)')
+    parser.add_argument('--tag-family', type=str, default=DEFAULT_TAG_FAMILY,
+                        help=f'AprilTag family (default: {DEFAULT_TAG_FAMILY})')
     parser.add_argument('--tag-size', type=float, default=DEFAULT_TAG_SIZE,
                         help=f'Tag side length in metres (default: {DEFAULT_TAG_SIZE})')
     parser.add_argument('--max-frames', type=int, default=None,
@@ -320,14 +328,19 @@ def main():
                         help='Width of the scrolling egomotion window (default: 6s)')
     args = parser.parse_args()
 
-    data_folder = Path(load_config()['data']['data_folder'])
-    rpi_dir = Path(args.rpi_dir) if args.rpi_dir else data_folder / 'stimulus' / 'raw' / 'rpi_drone'
+    if args.rpi_dir:
+        rpi_dir = Path(args.rpi_dir)
+    else:
+        rpi_dir = get_data_folder(load_config()) / 'stimulus' / 'raw' / 'rpi_drone'
     calib_dir = Path(args.calib_dir) if args.calib_dir else rpi_dir / 'dome_calib'
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.recording:
         rec = rpi_dir / args.recording
+        if not rec.is_dir():
+            print(f'Recording folder not found: {rec}')
+            return
     else:
         candidates = sorted(p for p in rpi_dir.glob('recording_*') if p.is_dir())
         if not candidates:

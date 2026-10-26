@@ -5,14 +5,16 @@ For each stimulus type, runs the corresponding view_*.py script with hex
 animations enabled, then uses ffmpeg to tile the hex videos (stimulus | T4a | T5a)
 into stacked composite movies.
 
-Usage:
-    python run_stimulus_battery.py models/hand_tuned/model.pt
-    python run_stimulus_battery.py models/hand_tuned_offset_omega_1_5_offset_0_05/offset_omega_1_5_offset_0_05.pt
-    python run_stimulus_battery.py models/hand_tuned/model.pt --stimuli sine edge
-    python run_stimulus_battery.py models/hand_tuned/model.pt --skip-existing
+Usage (from the repo root):
+    python -m drosophila_model.analysis.model_analysis.run_stimulus_battery models/<run>
+    python -m drosophila_model.analysis.model_analysis.run_stimulus_battery models/<run>/model.pt
+    python -m drosophila_model.analysis.model_analysis.run_stimulus_battery models/<run> --stimuli sine edge
+    python -m drosophila_model.analysis.model_analysis.run_stimulus_battery models/<run> --skip-existing
 """
 import argparse
-import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,39 +22,56 @@ from pathlib import Path
 ALL_STIMULI = ["natural_scene", "sine", "edge", "impulse"]
 
 
+def _view_cmd(name, *args):
+    """Command that runs ``view_<name>`` as a module with *args*."""
+    module = f"drosophila_model.analysis.model_analysis.view_{name}"
+    return [sys.executable, "-m", module, *(str(a) for a in args)]
+
+
 def _run(cmd, dry_run=False):
-    print(f"  $ {cmd}")
+    """Run *cmd* (an argument list); return True if it succeeded."""
+    # Flush so this log stays in order with the child's output when piped.
+    print(f"  $ {shlex.join(cmd)}", flush=True)
     if dry_run:
-        return
-    ret = os.system(cmd)
+        return True
+    try:
+        ret = subprocess.run(cmd).returncode
+    except FileNotFoundError:
+        print(f"  ERROR: '{cmd[0]}' not found.")
+        return False
     if ret != 0:
-        print(f"  WARNING: command exited with code {ret}")
+        print(f"  ERROR: command exited with code {ret}")
+        return False
+    return True
 
 
-def _ffmpeg_hstack(inputs, output, dry_run=False):
-    """Tile 2-3 videos horizontally."""
+def _ffmpeg_exe():
+    """System ffmpeg if on PATH, else the binary bundled with imageio-ffmpeg."""
+    exe = shutil.which("ffmpeg")
+    if exe is None:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    return exe
+
+
+def _ffmpeg_stack(inputs, output, how, dry_run=False):
+    """Tile videos side by side (``how='hstack'``) or vertically (``'vstack'``)."""
+    if not dry_run:
+        missing = [str(f) for f in inputs if not Path(f).exists()]
+        if missing:
+            print(f"  Skipping {how} - missing: {missing}")
+            return False
     n = len(inputs)
-    if any(not Path(f).exists() for f in inputs):
-        missing = [f for f in inputs if not Path(f).exists()]
-        print(f"  Skipping hstack — missing: {missing}")
-        return
-    inp = " ".join(f'-i {f}' for f in inputs)
-    filt = "".join(f"[{i}:v]" for i in range(n)) + f"hstack=inputs={n}[v]"
-    cmd = f'ffmpeg -y {inp} -filter_complex "{filt}" -map "[v]" {output}'
-    _run(cmd, dry_run)
-
-
-def _ffmpeg_vstack(inputs, output, dry_run=False):
-    """Tile videos vertically."""
-    n = len(inputs)
-    if any(not Path(f).exists() for f in inputs):
-        missing = [f for f in inputs if not Path(f).exists()]
-        print(f"  Skipping vstack — missing: {missing}")
-        return
-    inp = " ".join(f'-i {f}' for f in inputs)
-    filt = "".join(f"[{i}:v]" for i in range(n)) + f"vstack=inputs={n}[v]"
-    cmd = f'ffmpeg -y {inp} -filter_complex "{filt}" -map "[v]" -c:v libx264 -crf 23 {output}'
-    _run(cmd, dry_run)
+    # Only ffmpeg errors are printed; its banner and progress would bury the log.
+    cmd = [_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error"]
+    for f in inputs:
+        cmd += ["-i", str(f)]
+    filt = "".join(f"[{i}:v]" for i in range(n)) + f"{how}=inputs={n}[v]"
+    cmd += ["-filter_complex", filt, "-map", "[v]"]
+    if how == "vstack":
+        cmd += ["-c:v", "libx264", "-crf", "23"]
+    cmd.append(str(output))
+    return _run(cmd, dry_run)
 
 
 def run_natural_scene(model_path, save_dir, dry_run=False, skip_existing=False):
@@ -60,127 +79,149 @@ def run_natural_scene(model_path, save_dir, dry_run=False, skip_existing=False):
     marker = save_dir / "natural_pano_response_right.png"
     if skip_existing and marker.exists():
         print("  natural_scene: already exists, skipping.")
-        return
+        return True
 
     directions = ["right", "left"]
+    ok = True
     for d in directions:
-        cmd = (
-            f"{sys.executable} analysis/view_natural_scene.py"
-            f" --hex --hex-cell-type T4a T5a"
-            f" --highpass-tau 1 --stim-time 10 --pano-index 30"
-            f" --direction {d}"
-            f" --save {save_dir}/natural_pano_response_{d}.png"
-            f" --model {model_path}"
-        )
-        _run(cmd, dry_run)
+        ok &= _run(_view_cmd(
+            "natural_scene",
+            "--hex", "--hex-cell-type", "T4a", "T5a",
+            "--highpass-tau", 1, "--stim-time", 10, "--pano-index", 30,
+            "--direction", d,
+            "--save", save_dir / f"natural_pano_response_{d}.png",
+            "--model", model_path,
+        ), dry_run)
 
     per_dir_mp4s = []
     for d in directions:
-        stim_mp4 = f"{save_dir}/hex_stim_pano30_{d}_30dps.mp4"
-        t4a_mp4 = f"{save_dir}/hex_T4a_pano30_{d}_30dps.mp4"
-        t5a_mp4 = f"{save_dir}/hex_T5a_pano30_{d}_30dps.mp4"
-        row_mp4 = f"{save_dir}/natural_pano_{d}.mp4"
-        _ffmpeg_hstack([stim_mp4, t4a_mp4, t5a_mp4], row_mp4, dry_run)
+        row_mp4 = save_dir / f"natural_pano_{d}.mp4"
+        ok &= _ffmpeg_stack(
+            [save_dir / f"hex_{name}_pano30_{d}_30dps.mp4"
+             for name in ("stim", "T4a", "T5a")],
+            row_mp4, "hstack", dry_run)
         per_dir_mp4s.append(row_mp4)
 
-    _ffmpeg_vstack(per_dir_mp4s,
-                   f"{save_dir}/natural_pano_stacked.mp4", dry_run)
+    ok &= _ffmpeg_stack(per_dir_mp4s, save_dir / "natural_pano_stacked.mp4",
+                        "vstack", dry_run)
+    return ok
 
 
 def run_sine(model_path, save_dir, dry_run=False, skip_existing=False):
     """Sine grating: right + left, hex stim | T4a | T5a."""
     wl, tf = 30, 1.0
-    marker = save_dir / f"sine_responses_lambda{wl:.0f}_tf{tf:.1f}.png"
+    directions = ["right", "left"]
+    tag = f"lambda{wl:.0f}_tf{tf:.1f}"
+    marker = save_dir / f"sine_responses_{'_'.join(directions)}_{tag}.png"
     if skip_existing and marker.exists():
         print("  sine: already exists, skipping.")
-        return
+        return True
 
-    directions = ["right", "left"]
-    for d in directions:
-        cmd = (
-            f"{sys.executable} analysis/view_sine_stimulus.py"
-            f" --wavelength {wl} --temporal-frequency {tf}"
-            f" --hex --hex-cell-type T4a T5a"
-            f" --stim-time 10 --zero-center"
-            f" --direction {d}"
-            f" --save-dir {save_dir}"
-            f" --model {model_path}"
-        )
-        _run(cmd, dry_run)
+    # One call for both directions, so the static figures hold both.
+    ok = _run(_view_cmd(
+        "sine_stimulus",
+        "--wavelength", wl, "--temporal-frequency", tf,
+        "--hex", "--hex-cell-type", "T4a", "T5a",
+        "--stim-time", 10, "--zero-center",
+        "--direction", *directions,
+        "--save-dir", save_dir,
+        "--model", model_path,
+    ), dry_run)
 
-    tag = f"lambda{wl:.0f}_tf{tf:.1f}"
     per_dir_mp4s = []
     for d in directions:
-        stim_mp4 = f"{save_dir}/sine_hex_stim_{d}_{tag}.mp4"
-        t4a_mp4 = f"{save_dir}/sine_hex_T4a_{d}_{tag}.mp4"
-        t5a_mp4 = f"{save_dir}/sine_hex_T5a_{d}_{tag}.mp4"
-        row_mp4 = f"{save_dir}/sine_{d}_{tag}.mp4"
-        _ffmpeg_hstack([stim_mp4, t4a_mp4, t5a_mp4], row_mp4, dry_run)
+        row_mp4 = save_dir / f"sine_{d}_{tag}.mp4"
+        ok &= _ffmpeg_stack(
+            [save_dir / f"sine_hex_{name}_{d}_{tag}.mp4"
+             for name in ("stim", "T4a", "T5a")],
+            row_mp4, "hstack", dry_run)
         per_dir_mp4s.append(row_mp4)
 
-    _ffmpeg_vstack(per_dir_mp4s,
-                   f"{save_dir}/sine_stacked_{tag}.mp4", dry_run)
+    ok &= _ffmpeg_stack(per_dir_mp4s, save_dir / f"sine_stacked_{tag}.mp4",
+                        "vstack", dry_run)
+    return ok
 
 
 def run_edge(model_path, save_dir, dry_run=False, skip_existing=False):
-    """Moving edges: ON right, ON left, OFF right, OFF left."""
+    """Moving edges: ON right, ON left, OFF right, OFF left, hex stim | T4a."""
     marker = save_dir / "edge_responses_30dps.png"
     if skip_existing and marker.exists():
         print("  edge: already exists, skipping.")
-        return
+        return True
 
-    conditions = ["ON right", "ON left", "OFF right", "OFF left"]
-    for cond in conditions:
-        cmd = (
-            f'{sys.executable} analysis/view_edge_stimulus.py'
-            f' --hex --hex-cell-type T4a'
-            f' --condition "{cond}"'
-            f' --stim-time 3 --zero-center'
-            f' --save-dir {save_dir}'
-            f' --model {model_path}'
-        )
-        _run(cmd, dry_run)
+    # view_edge_stimulus runs (and with --hex animates) all four conditions.
+    ok = _run(_view_cmd(
+        "edge_stimulus",
+        "--hex", "--hex-cell-type", "T4a",
+        "--stim-time", 3, "--zero-center",
+        "--save-dir", save_dir,
+        "--model", model_path,
+    ), dry_run)
 
     per_cond_mp4s = []
-    for cond in conditions:
+    for cond in ["ON right", "ON left", "OFF right", "OFF left"]:
         safe = cond.lower().replace(" ", "_")
-        stim_mp4 = f"{save_dir}/edge_hex_stim_{safe}_30dps.mp4"
-        t4a_mp4 = f"{save_dir}/edge_hex_T4a_{safe}_30dps.mp4"
-        row_mp4 = f"{save_dir}/edge_{safe}.mp4"
-        _ffmpeg_hstack([stim_mp4, t4a_mp4], row_mp4, dry_run)
+        row_mp4 = save_dir / f"edge_{safe}.mp4"
+        ok &= _ffmpeg_stack(
+            [save_dir / f"edge_hex_{name}_{safe}_30dps.mp4"
+             for name in ("stim", "T4a")],
+            row_mp4, "hstack", dry_run)
         per_cond_mp4s.append(row_mp4)
 
-    if len(per_cond_mp4s) >= 2:
-        _ffmpeg_vstack(per_cond_mp4s,
-                       f"{save_dir}/edge_stacked.mp4", dry_run)
+    ok &= _ffmpeg_stack(per_cond_mp4s, save_dir / "edge_stacked.mp4",
+                        "vstack", dry_run)
+    return ok
+
+
+_IMPULSE_FIGURE = re.compile(r"impulse_responses_(\d+ms)\.png")
+
+
+def _impulse_tag(save_dir):
+    """Pulse tag (``'<N>ms'``) of the newest impulse figure in *save_dir*.
+
+    view_impulse_stimulus names its outputs after the pulse length, which
+    defaults to one model time step, so the tag depends on the model's dt.
+    Returns None when no impulse figure exists.
+    """
+    found = []
+    for path in save_dir.glob("impulse_responses_*ms.png"):
+        match = _IMPULSE_FIGURE.fullmatch(path.name)
+        if match:
+            found.append((path.stat().st_mtime, match.group(1)))
+    return max(found)[1] if found else None
 
 
 def run_impulse(model_path, save_dir, dry_run=False, skip_existing=False):
     """Full-field impulse: increment + decrement, hex for L1 and T4a."""
-    marker = save_dir / "impulse_responses_5ms.png"
-    if skip_existing and marker.exists():
+    if skip_existing and _impulse_tag(save_dir) is not None:
         print("  impulse: already exists, skipping.")
-        return
+        return True
 
-    cmd = (
-        f"{sys.executable} analysis/view_impulse_stimulus.py"
-        f" --hex --hex-cell-type L1 T4a"
-        f" --post-stim-time 2"
-        f" --save-dir {save_dir}"
-        f" --model {model_path}"
-    )
-    _run(cmd, dry_run)
+    ok = _run(_view_cmd(
+        "impulse_stimulus",
+        "--hex", "--hex-cell-type", "L1", "T4a",
+        "--post-stim-time", 2,
+        "--save-dir", save_dir,
+        "--model", model_path,
+    ), dry_run)
+
+    tag = "<N>ms" if dry_run else _impulse_tag(save_dir)
+    if tag is None:
+        print("  Skipping impulse stacking - no impulse figures found.")
+        return False
 
     per_cond_mp4s = []
     for cond in ["increment", "decrement"]:
-        l1_mp4 = f"{save_dir}/impulse_hex_L1_{cond}_5ms.mp4"
-        t4a_mp4 = f"{save_dir}/impulse_hex_T4a_{cond}_5ms.mp4"
-        row_mp4 = f"{save_dir}/impulse_{cond}.mp4"
-        _ffmpeg_hstack([l1_mp4, t4a_mp4], row_mp4, dry_run)
+        row_mp4 = save_dir / f"impulse_{cond}.mp4"
+        ok &= _ffmpeg_stack(
+            [save_dir / f"impulse_hex_{ct}_{cond}_{tag}.mp4"
+             for ct in ("L1", "T4a")],
+            row_mp4, "hstack", dry_run)
         per_cond_mp4s.append(row_mp4)
 
-    _ffmpeg_vstack(per_cond_mp4s,
-                   f"{save_dir}/impulse_stacked.mp4", dry_run)
+    ok &= _ffmpeg_stack(per_cond_mp4s, save_dir / "impulse_stacked.mp4",
+                        "vstack", dry_run)
+    return ok
 
 
 STIMULUS_RUNNERS = {
@@ -197,7 +238,7 @@ def main():
     )
     parser.add_argument(
         "model_path", type=str,
-        help="Path to the model .pt file.",
+        help="Path to the model .pt file or its folder.",
     )
     parser.add_argument(
         "--save-dir", type=str, default=None,
@@ -233,15 +274,20 @@ def main():
     print(f"Stimuli:  {args.stimuli}")
     print()
 
+    failed = []
     for stim_name in args.stimuli:
         print(f"{'='*60}")
         print(f"  {stim_name}")
         print(f"{'='*60}")
         runner = STIMULUS_RUNNERS[stim_name]
-        runner(model_path, save_dir,
-               dry_run=args.dry_run, skip_existing=args.skip_existing)
+        if not runner(model_path, save_dir,
+                      dry_run=args.dry_run, skip_existing=args.skip_existing):
+            failed.append(stim_name)
         print()
 
+    if failed:
+        print(f"Finished with errors in: {', '.join(failed)}")
+        sys.exit(1)
     print("Done.")
 
 
