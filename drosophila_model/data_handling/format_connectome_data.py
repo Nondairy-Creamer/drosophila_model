@@ -6,23 +6,26 @@ expect. After this runs the bundle is static; per-model region slicing
 happens at load time via :func:`connectome_loading.load_connectome`,
 which filters by ``{region: {neuropils, side}}``.
 
-Reads raw CSVs from ``<data_folder>/connectome_data/raw`` (``data_folder``
-is ``[data].data_folder`` in ``config.toml``):
+Reads the FlyWire Codex downloads (FAFB v783) in
+``<data_folder>/connectome_data/raw`` (``data_folder`` is
+``[data].data_folder`` in ``config.toml``), as downloaded:
 
-- ``consolidated_cell_types.csv`` — ``root_id, primary_type,
+- ``consolidated_cell_types.csv.gz`` — ``root_id, primary_type,
   additional_type(s)`` for every classified neuron.
-- ``connections_no_threshold.csv`` — ``pre_root_id, post_root_id, neuropil,
-  syn_count, nt_type`` for every synapse in the whole connectome.
-- ``column_assignments_no_threshold.csv`` — optic-lobe-only per-neuron
-  hex-column assignments. Consumed only for the optic-lobe-private bundle
-  files.
-- ``visual_neuron_types_no_threshold.csv`` — read solely to recover the
-  ``CT1_L`` / ``CT1_M`` per-column synthetic neuron IDs that aren't in
-  ``consolidated_cell_types.csv``. CT1 is too large to treat as two
-  whole-neuron entities for optic-lobe modelling, so an upstream split
-  assigns one synthetic ``CT1_L`` and one synthetic ``CT1_M`` neuron per
-  column. Those synthetic root IDs ARE present in the synapse and column
-  CSVs; this is the only place we need them typed.
+- ``connections_princeton_no_threshold.csv.gz`` — ``pre_root_id,
+  post_root_id, neuropil, syn_count, nt_type`` for every connected pair and
+  neuropil in the whole connectome.
+- ``column_assignment.csv.gz`` — optic-lobe per-neuron hex-column
+  assignments. Consumed only for the optic-lobe-private bundle files.
+- Optional extras merged into ``cell_info`` when present:
+  ``cell_stats.csv.gz`` (``length_nm, area_nm, size_nm``) and
+  ``classification.csv.gz`` (``flow, super_class, class, sub_class, side``).
+
+CT1 is too large to model as one neuron per optic lobe, so it is replaced by
+per-column ``CT1_M`` / ``CT1_L`` pieces from
+:mod:`drosophila_model.data_handling.split_ct1` (``ct1_pieces.parquet`` and
+``ct1_connections.parquet`` in the baked directory). When those are missing
+the split runs first, which needs the raw synapse table.
 
 Writes the baked bundle to ``<data_folder>/connectome_data/baked``:
 
@@ -36,7 +39,8 @@ Writes the baked bundle to ``<data_folder>/connectome_data/baked``:
       ``neuropils`` (``list[str]``; union of every neuropil this neuron
       has at least one synapse in. Part of the bundle schema that
       :mod:`connectome_loading` checks for, but never read: the loader
-      recomputes region membership from the thresholded synapse table).
+      recomputes region membership from the thresholded synapse table),
+      plus the optional extras above (NaN for the CT1 pieces).
 - ``synapses.parquet`` — universal directed edges (whole connectome).
     columns:
       ``pre_root_id, post_root_id, synapse_counts, nt_type, neuropil``.
@@ -44,9 +48,11 @@ Writes the baked bundle to ``<data_folder>/connectome_data/baked``:
     assignment (loaded by :class:`regions.OpticLobeRegion`).
     columns: ``root_id, column_index`` (0-indexed).
 
-The empirical per-column geometry file ``optic_lobe_columns.parquet`` is
-NOT written here — it ships with the raw data and must already exist in
-the baked directory before models can load.
+The empirical per-column geometry file ``optic_lobe_columns.parquet`` (the
+right-eye viewing direction of each column, from the Reiser lab eye map of
+Zhao et al. 2025, keyed by the Codex column ``p, q``) is NOT written here —
+it ships with the data bundle and must already exist in the baked directory
+before models can load.
 
 To add support for another area, just declare a new ``RegionView``
 subclass with ``neuropils = [...]`` in :mod:`regions` and register it in
@@ -60,17 +66,16 @@ import argparse
 import numpy as np
 import pandas as pd
 from drosophila_model.config import get_data_folder, load_config
+from drosophila_model.data_handling import split_ct1
 
 
 _ROOT_ID_DTYPE = np.int64
 _PHOTORECEPTOR_TYPES = ('R1-6', 'R7', 'R8')
-# CT1 per-column synthetic split: these primary types live only in the
-# optic-lobe-specific visual_neuron_types CSV. The synthetic root IDs are
-# referenced in connections + column_assignments as if they were normal
-# neurons, but consolidated_cell_types.csv only has 2 orphan "real CT1"
-# rows (no synapses). We import the split rows here so the universal
-# cell_info has them typed.
-_CT1_SPLIT_TYPES = ('CT1_L', 'CT1_M')
+# Optional per-neuron extras: raw file -> columns merged into cell_info.
+_EXTRA_CELL_INFO = {
+    'cell_stats.csv.gz': ['length_nm', 'area_nm', 'size_nm'],
+    'classification.csv.gz': ['flow', 'super_class', 'class', 'sub_class', 'side'],
+}
 
 
 def _per_neuron_neuropils(connections_df: pd.DataFrame) -> pd.DataFrame:
@@ -133,13 +138,20 @@ def main() -> None:
     raw_dir = folder / 'connectome_data' / 'raw'
     baked_dir = folder / 'connectome_data' / 'baked'
 
+    if not ((baked_dir / 'ct1_pieces.parquet').exists()
+            and (baked_dir / 'ct1_connections.parquet').exists()):
+        print("CT1 split not found; running split_ct1 ...")
+        split_ct1.split_ct1(folder)
+    ct1_pieces = pd.read_parquet(baked_dir / 'ct1_pieces.parquet')
+    ct1_connections = pd.read_parquet(baked_dir / 'ct1_connections.parquet')
+
     print(f"Reading raw CSVs from {raw_dir} ...")
     cell_types_df = pd.read_csv(
-        raw_dir / 'consolidated_cell_types.csv',
+        raw_dir / 'consolidated_cell_types.csv.gz',
         dtype={'root_id': _ROOT_ID_DTYPE},
     )
     connections_df = pd.read_csv(
-        raw_dir / 'connections_no_threshold.csv',
+        raw_dir / 'connections_princeton_no_threshold.csv.gz',
         dtype={
             'pre_root_id': _ROOT_ID_DTYPE,
             'post_root_id': _ROOT_ID_DTYPE,
@@ -147,28 +159,29 @@ def main() -> None:
         },
     )
     columns_df = pd.read_csv(
-        raw_dir / 'column_assignments_no_threshold.csv',
-        dtype={'root_id': _ROOT_ID_DTYPE},
-    )
-    visual_neurons_df = pd.read_csv(
-        raw_dir / 'visual_neuron_types_no_threshold.csv',
+        raw_dir / 'column_assignment.csv.gz',
         dtype={'root_id': _ROOT_ID_DTYPE},
     )
 
-    # Append CT1_L / CT1_M per-column synthetic neurons from the visual
-    # CSV; they're real first-class IDs in connections + column_assignments
-    # but only typed in this file.
-    ct1_split = visual_neurons_df[
-        visual_neurons_df['type'].isin(_CT1_SPLIT_TYPES)
-    ][['root_id', 'type']].rename(columns={'type': 'primary_type'})
-    ct1_split['additional_type(s)'] = np.nan
-    n_before = len(cell_types_df)
-    cell_types_df = pd.concat(
-        [cell_types_df, ct1_split[cell_types_df.columns.tolist()]],
+    # Swap each CT1 for its per-column CT1_M / CT1_L pieces: their rows
+    # replace CT1's connections, and they are typed and given a column here.
+    ct1_ids = set(ct1_pieces['parent_root_id'])
+    is_ct1 = (connections_df['pre_root_id'].isin(ct1_ids)
+              | connections_df['post_root_id'].isin(ct1_ids))
+    connections_df = pd.concat(
+        [connections_df[~is_ct1], ct1_connections[connections_df.columns]],
         ignore_index=True,
     )
-    print(f"Appended {len(cell_types_df) - n_before:,} CT1_L/CT1_M synthetic "
-          f"per-column neurons from visual_neuron_types_no_threshold.csv.")
+    cell_types_df = pd.concat([
+        cell_types_df[~cell_types_df['root_id'].isin(ct1_ids)],
+        ct1_pieces[['root_id', 'primary_type']].assign(**{'additional_type(s)': np.nan}),
+    ], ignore_index=True)
+    columns_df = pd.concat(
+        [columns_df, ct1_pieces[['root_id', 'hemisphere', 'primary_type', 'column_id', 'p', 'q']]
+         .rename(columns={'primary_type': 'type'})],
+        ignore_index=True,
+    )
+    print(f"Replaced {len(ct1_ids)} CT1 neurons with {len(ct1_pieces):,} per-column pieces.")
 
     print(f"Loaded {len(cell_types_df):,} typed neurons "
           f"and {len(connections_df):,} synapses.")
@@ -191,6 +204,10 @@ def main() -> None:
     cell_info = cell_info[
         ['root_id', 'primary_type', 'neurotransmitter', 'neuropils']
     ].reset_index(drop=True)
+    for file_name, extra_cols in _EXTRA_CELL_INFO.items():
+        if (raw_dir / file_name).exists():
+            extra = pd.read_csv(raw_dir / file_name, dtype={'root_id': _ROOT_ID_DTYPE})
+            cell_info = cell_info.merge(extra[['root_id'] + extra_cols], on='root_id', how='left')
 
     # Synapses table: keep neuropil column so the loader can filter edges
     # by region neuropil sets without re-deriving from cell_info.
