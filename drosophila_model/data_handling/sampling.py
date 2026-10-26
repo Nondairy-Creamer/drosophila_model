@@ -1,4 +1,4 @@
-"""Low-level spatial/temporal sampling primitives for stimuli.
+"""Low-level spatial sampling primitives for stimuli.
 
 These helpers are intentionally dependency-free with respect to the rest of
 ``data_handling``: ``stimulus_generators.py`` and ``create_training_data.py``
@@ -11,14 +11,12 @@ Contents:
       every stimulus is sampled at.
     * ``build_ommatidium_sampling_matrix`` -- sparse (image pixel -> ommatidium)
       sampler.
-    * ``interpolate_to_model_dt`` -- temporal resampling along the time axis.
 """
 
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 from scipy.sparse import csr_matrix
 
 
@@ -120,76 +118,3 @@ def build_ommatidium_sampling_matrix(image_shape, image_phi_lim, image_theta_lim
         vals.extend(weights[nz_mask].tolist())
 
     return csr_matrix((vals, (rows, cols)), shape=(N, H * W_img))
-
-
-def interpolate_to_model_dt(data, stimulus_dt, model_dt):
-    """
-    Linearly interpolate movie data from stimulus_dt to model_dt.
-
-    Args:
-        data: Tensor of shape (batch, time, ...) - can be numpy array or torch tensor
-        stimulus_dt: Original time step of the data
-        model_dt: Target time step for the model
-
-    Returns:
-        Interpolated data with new time dimension matching model_dt
-
-    Raises:
-        ValueError: If model_dt is meaningfully larger than stimulus_dt: that
-            would down-sample the data by linear interpolation, which aliases
-            without an anti-aliasing filter. Up-sampling to a finer model_dt is
-            allowed. A small relative tolerance accepts datasets recorded at
-            ~the model rate (e.g. 30.303 Hz data vs a 30 Hz model).
-    """
-    # Treat rates within rel_tol as the same sampling rate, so negligible rate
-    # mismatches do not hard-fail while genuine down-sampling is still blocked.
-    rel_tol = 0.05
-    if model_dt > stimulus_dt * (1.0 + rel_tol):
-        raise ValueError(
-            f"model_dt ({model_dt}) cannot be larger than stimulus_dt ({stimulus_dt}): "
-            "down-sampling by linear interpolation would alias. Use a model dt no "
-            "larger than the stimulus frame interval."
-        )
-
-    # Convert to torch if numpy
-    was_numpy = isinstance(data, np.ndarray)
-    if was_numpy:
-        data = torch.from_numpy(data)
-
-    # Store original dtype to preserve it
-    original_dtype = data.dtype
-
-    original_shape = data.shape
-    batch_size, original_time = original_shape[0], original_shape[1]
-    remaining_dims = original_shape[2:]
-
-    # Calculate new time dimension
-    total_duration = (original_time - 1) * stimulus_dt
-    new_time = int(round(total_duration / model_dt)) + 1
-
-    # Flatten all dimensions after time for interpolation
-    # Shape: (batch, time, *remaining) -> (batch, -1, time) for F.interpolate
-    data_flat = data.reshape(batch_size, original_time, -1)  # (batch, time, features)
-    data_flat = data_flat.permute(0, 2, 1)  # (batch, features, time)
-
-    # Interpolate along time dimension (F.interpolate requires float)
-    data_interp = torch.nn.functional.interpolate(
-        data_flat.float(),
-        size=new_time,
-        mode='linear',
-        align_corners=True
-    )
-
-    # Convert back to original dtype
-    data_interp = data_interp.to(dtype=original_dtype)
-
-    # Reshape back: (batch, features, new_time) -> (batch, new_time, *remaining)
-    data_interp = data_interp.permute(0, 2, 1)  # (batch, new_time, features)
-    new_shape = (batch_size, new_time) + remaining_dims
-    data_interp = data_interp.reshape(new_shape)
-
-    # Convert back to numpy if input was numpy
-    if was_numpy:
-        data_interp = data_interp.numpy()
-
-    return data_interp

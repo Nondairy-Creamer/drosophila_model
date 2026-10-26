@@ -1,6 +1,4 @@
-import warnings
 import numpy as np
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 import torch
@@ -12,10 +10,7 @@ import torch
 #   optic flow: [examples, time, points in space, LR/UD optic flow]
 
 from drosophila_model.config import get_data_folder, load_config
-from drosophila_model.data_handling.sampling import (
-    build_ommatidium_sampling_matrix,
-    interpolate_to_model_dt,
-)
+from drosophila_model.data_handling.sampling import build_ommatidium_sampling_matrix
 
 # Full-sphere equirectangular panorama for expanding-dot: observer in uniform middle gray;
 # every direction is a pixel.  φ ∈ [−π, π] (360° azimuth), θ ∈ [0, π] colatitude from +z
@@ -29,247 +24,6 @@ EXPANDING_DOT_PANO_THETA_LIM = np.array([0.0, np.pi])
 EXPANDING_DOT_RADIUS_CM = 5.0
 EXPANDING_DOT_D0_RANGE_CM = (30.0, 90.0)
 EXPANDING_DOT_SPEED_RANGE_CM_S = (15.0, 45.0)
-
-
-def bake_fly_view_dataset(
-    data_path: str | Path | None = None,
-    out_path: str | Path | None = None,
-    data_folder: str | Path | None = None,
-):
-    """Bake the raw fly-view pickle into a compact ``flyview.pt`` cache.
-
-    Reads the raw fly-view pickle once and applies the two expensive,
-    timing-independent transforms so the on-the-fly loader never has to touch
-    the (multi-GB, ``float64``, depth-carrying) pickle again:
-
-    * **Unit conversion**: both optic-flow components are converted from
-      rad/frame to deg/s.
-    * **Recalculated odometry**: per-clip rotation (deg/s) and translation
-      (depth-units/s) are solved from the flow plus the rendered per-column
-      ``depths`` via :func:`ego_motion.estimate_ego_motion_known_depth`.
-
-    ``depths`` are consumed here and **not** stored. Invalid columns (NaN flow
-    or |flow| > 1 rad/frame) are excluded from the odometry solve and then
-    zeroed in the stored stimulus/flow. Everything is saved as ``float32``.
-
-    Columns stay **block-packed**: ``[..., :n_eye]`` = right eye,
-    ``[..., n_eye:]`` = left eye. Clips keep their native length and frame rate;
-    ``drop_first_frame``, interpolation to the model ``dt`` and segmentation
-    happen later in :func:`load_fly_view_dataset`.
-
-    Args:
-        data_path: Path to the raw pickle. When ``None``, resolves to
-            ``<data_folder>/stimulus/raw/fib_forest_fly_view_dataset_fwd.pkl``.
-        out_path: Destination ``.pt``. When ``None``, resolves to
-            ``<data_folder>/stimulus/baked/flyview.pt``.
-        data_folder: Data root, also used for the column viewing directions.
-            When ``None``, uses ``[data].data_folder`` of the working-directory
-            ``config.toml``.
-
-    Returns:
-        The path of the written ``flyview.pt``.
-    """
-    from drosophila_model.model_definition.ego_motion import (
-        load_viewing_directions,
-        estimate_ego_motion_known_depth,
-    )
-
-    if data_folder is None:
-        data_folder = get_data_folder(load_config())
-    stim_dir = Path(data_folder) / 'stimulus'
-    if data_path is None:
-        data_path = stim_dir / 'raw' / 'fib_forest_fly_view_dataset_fwd.pkl'
-    if out_path is None:
-        out_path = stim_dir / 'baked' / 'flyview.pt'
-    in_path, out_path = Path(data_path), Path(out_path)
-    if not in_path.exists():
-        raise FileNotFoundError(f"Fly-view pickle not found: {in_path.resolve()}")
-
-    with open(in_path, 'rb') as f:
-        d = pickle.load(f)
-
-    fps = float(d['fps'])
-    flow_units = d.get('flow_units', 'radians/frame')
-    if flow_units != 'radians/frame':
-        raise ValueError(
-            f"Expected forward_flows in radians/frame; got flow_units={flow_units!r}"
-        )
-    # rad/frame -> deg/s (constant scale; temporal interpolation happens at load).
-    flow_to_deg_s = fps * (180.0 / np.pi)
-
-    n_cols = int(np.asarray(d['responses'][0]).shape[1])
-    if n_cols % 2 != 0:
-        raise ValueError(f"Expected an even column count (R|L); got {n_cols}")
-    n_eye = n_cols // 2
-
-    # Viewing directions ([right|left] block order, matching the column layout)
-    # are needed to solve flow-based odometry.
-    column_phi, column_theta = load_viewing_directions(data_folder)
-    if column_phi.shape[0] != n_cols:
-        raise ValueError(
-            f"Viewing directions ({column_phi.shape[0]}) != flyview columns "
-            f"({n_cols}); cannot solve flow-based odometry.")
-
-    stim_clips, flow_clips, rot_clips, trans_clips = [], [], [], []
-    for i in range(len(d['responses'])):
-        resp = np.asarray(d['responses'][i], dtype=np.float64)
-        flow = np.asarray(d['forward_flows'][i], dtype=np.float64)
-        depth = np.asarray(d['depths'][i], dtype=np.float64)
-        if resp.shape[0] != flow.shape[0]:
-            raise ValueError(
-                f"Clip {i}: response time {resp.shape[0]} != flow time {flow.shape[0]}")
-        if resp.shape[0] == 0:
-            continue
-
-        bad = np.isnan(flow).any(axis=-1) | (np.hypot(flow[..., 0], flow[..., 1]) > 1.0)
-        resp = np.nan_to_num(resp, nan=0.0)
-        flow_deg_s = np.nan_to_num(flow, nan=0.0) * flow_to_deg_s
-
-        # Ground-truth ego motion is derived from the flow itself plus the
-        # rendered per-column depth, so the odometry targets are exactly
-        # consistent with the flow the model sees. Solve in rad/s, then store
-        # rotation in deg/s (matching the other odometry targets) and translation
-        # in depth-units/s.
-        flow_rad_s = flow_deg_s * (np.pi / 180.0)
-        omega_rad, trans_units = estimate_ego_motion_known_depth(
-            column_phi, column_theta,
-            torch.from_numpy(flow_rad_s[..., 0]),
-            torch.from_numpy(flow_rad_s[..., 1]),
-            torch.from_numpy(depth),
-            valid=torch.from_numpy(~bad),
-        )
-        omega = omega_rad.numpy() * (180.0 / np.pi)
-        trans_rate = trans_units.numpy()
-
-        # Zero invalid columns now (odometry already excluded them via ``valid``).
-        resp[bad] = 0.0
-        flow_deg_s = np.where(bad[..., np.newaxis], 0.0, flow_deg_s)
-
-        stim_clips.append(torch.from_numpy(resp.astype(np.float32)))
-        flow_clips.append(torch.from_numpy(flow_deg_s.astype(np.float32)))
-        rot_clips.append(torch.from_numpy(omega.astype(np.float32)))
-        trans_clips.append(torch.from_numpy(trans_rate.astype(np.float32)))
-
-    if not stim_clips:
-        raise RuntimeError("No fly-view clips produced (empty dataset?).")
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        'fps': fps,
-        'n_eye': n_eye,
-        'stimulus': stim_clips,
-        'optic_flow': flow_clips,
-        'rotation_rate': rot_clips,
-        'translation_rate': trans_clips,
-    }, out_path)
-    print(f"Baked 'flyview' ({len(stim_clips)} clips, n_eye={n_eye}) -> {out_path}")
-    return out_path
-
-
-def load_fly_view_dataset(
-    model_dt: float,
-    stim_time: float,
-    *,
-    two_eyes: bool,
-    data_path: str | Path | None = None,
-    drop_first_frame: bool = True,
-):
-    """
-    Load the baked fly-view dataset (``<data_folder>/stimulus/baked/flyview.pt``).
-
-    The flow (deg/s) and the depth-based odometry are precomputed by
-    :func:`bake_fly_view_dataset`; this loader only handles the timing-dependent
-    steps: drop the first frame, interpolate each whole clip to ``model_dt``,
-    then cut it into non-overlapping segments of ``round(stim_time / model_dt)``
-    steps (the length every other generator produces). Time is never
-    stretched, so the deg/s flow and rate targets match the frames.
-
-    Columns are **block-packed**: ``[..., :n_eye]`` = all right-eye samples,
-    ``[..., n_eye:]`` = all left-eye samples (``n_eye = N // 2``).
-
-    Args:
-        model_dt: Model time step (seconds).
-        stim_time: Duration of each segment (seconds). Clips shorter than one
-            segment are skipped; a ``stim_time`` longer than the longest clip
-            is capped to that clip's duration (with a warning).
-        two_eyes: If True, return binocular columns ``[right | left]`` plus the
-            baked ego-motion rates. If False, return right-eye columns only.
-        data_path: Path to the baked ``flyview.pt``. When ``None``, resolves to
-            ``<data_folder>/stimulus/baked/flyview.pt`` using ``[data].data_folder``
-            of the working-directory ``config.toml``.
-        drop_first_frame: If True, drop the first time index.
-
-    Returns:
-        If ``two_eyes`` is False:
-            ``(stimulus, optic_flow, clip_ids)`` with stimulus/flow numpy
-            arrays of shapes ``(batch, T, n_eye)`` and ``(batch, T, n_eye, 2)``.
-        If ``two_eyes`` is True:
-            ``(stimulus, optic_flow, rotation_rate, translation_rate, clip_ids)``
-            with stimulus/flow ``(batch, T, 2*n_eye)`` / ``(batch, T, 2*n_eye, 2)``,
-            ``rotation_rate`` ``(batch, T, 3)`` in deg/s and
-            ``translation_rate`` ``(batch, T, 3)`` in depth-units per second.
-        ``clip_ids`` is a ``(batch,)`` int array giving the source-clip index
-        each segment was cut from, so callers can keep all segments of a clip
-        on the same side of a train/test split.
-    """
-    if data_path is None:
-        data_path = get_data_folder(load_config()) / 'stimulus' / 'baked' / 'flyview.pt'
-    path = Path(data_path)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Baked fly-view dataset not found: {path.resolve()}. "
-            "Run `python -m drosophila_model.data_handling.process_raw_data flyview` "
-            "to create it from fib_forest_fly_view_dataset_fwd.pkl.")
-
-    d = torch.load(path, weights_only=False)
-    stimulus_dt = 1.0 / float(d['fps'])
-    n_eye = int(d['n_eye'])
-
-    # Interpolate each whole clip to model_dt first, then segment, so every
-    # segment spans exactly seg_len * model_dt seconds of the clip.
-    # Per clip: [stimulus, optic_flow] (+ [rotation_rate, translation_rate]).
-    clips = []
-    for i in range(len(d['stimulus'])):
-        arrays = [np.asarray(d['stimulus'][i]), np.asarray(d['optic_flow'][i])]
-        if two_eyes:
-            arrays += [np.asarray(d['rotation_rate'][i]),
-                       np.asarray(d['translation_rate'][i])]
-        else:
-            arrays = [arrays[0][:, :n_eye], arrays[1][:, :n_eye]]
-        if drop_first_frame:
-            arrays = [a[1:] for a in arrays]
-        if arrays[0].shape[0] < 2:
-            continue
-        arrays = [interpolate_to_model_dt(a[None], stimulus_dt, model_dt)[0] for a in arrays]
-        clips.append((i, arrays))
-
-    if not clips:
-        raise RuntimeError("No rendered fly-view clips found (empty dataset?).")
-
-    seg_len = max(1, int(round(stim_time / model_dt)))
-    max_clip_len = max(arrays[0].shape[0] for _, arrays in clips)
-    if seg_len > max_clip_len:
-        warnings.warn(
-            f"stim_time={stim_time}s ({seg_len} steps) exceeds the longest "
-            f"fly-view clip ({max_clip_len} steps = {max_clip_len * model_dt:.2f}s). "
-            f"Capping segments to {max_clip_len * model_dt:.2f}s."
-        )
-        seg_len = max_clip_len
-
-    segments = [[] for _ in clips[0][1]]
-    clip_id_list = []
-    for i, arrays in clips:
-        num_segments = arrays[0].shape[0] // seg_len
-        if num_segments == 0:
-            continue
-        usable = num_segments * seg_len
-        for out, a in zip(segments, arrays):
-            out.append(a[:usable].reshape(num_segments, seg_len, *a.shape[1:]))
-        clip_id_list.append(np.full(num_segments, i, dtype=np.int64))
-
-    outputs = [np.concatenate(s, axis=0) for s in segments]
-    clip_ids = np.concatenate(clip_id_list)
-    return (*outputs, clip_ids)
 
 
 def _stim_time_vector(dt, stim_time, pre_stim_time=0.0, post_stim_time=0.0):
@@ -1797,9 +1551,8 @@ class StimulusData:
     that produced the flow (``None`` for one eye).
 
     ``group_id`` is a ``(examples,)`` integer tensor identifying the source each
-    example was derived from (e.g. the raw fly-view clip a segment was cut
-    from, all repeats of one panorama, or the phase/contrast variants of one
-    grating condition). Examples that share a ``group_id`` are correlated and
+    example was derived from (e.g. all repeats of one panorama, or the
+    phase/contrast variants of one grating condition). Examples that share a ``group_id`` are correlated and
     must stay together when splitting train/test, so the split happens at
     whole-group granularity. Generators that produce independent examples give
     each example its own ``group_id``.
@@ -1991,30 +1744,6 @@ def _gen_full_field_flicker(ctx):
     return stim, flow, rot, trans, _ones_mask(stim)
 
 
-def _gen_flyview(ctx):
-    ctx.require_columns('flyview')
-    two = ctx.num_eyes == 2
-    data_path = get_data_folder(ctx.config) / 'stimulus' / 'baked' / 'flyview.pt'
-    if two:
-        stim_np, flow_np, rot_np, trans_np, clip_ids = load_fly_view_dataset(
-            ctx.model_dt, ctx.stim_time, two_eyes=True, data_path=data_path)
-    else:
-        stim_np, flow_np, clip_ids = load_fly_view_dataset(
-            ctx.model_dt, ctx.stim_time, two_eyes=False, data_path=data_path)
-    if stim_np.shape[2] != ctx.n_cols:
-        raise ValueError(
-            f"flyview columns ({stim_np.shape[2]}) != num_eyes*N ({ctx.n_cols})")
-    stim, flow = ctx.tensor(stim_np), ctx.tensor(flow_np)
-    if two:
-        rot, trans = ctx.tensor(rot_np), ctx.tensor(trans_np)
-    else:
-        rot, trans = _zero_ego(stim)
-    # Segments cut from the same raw clip share a group id so they cannot be
-    # split across train/test (avoids leaking correlated frames).
-    group_id = torch.as_tensor(clip_ids, device=stim.device, dtype=torch.long)
-    return stim, flow, rot, trans, _ones_mask(stim), group_id
-
-
 def _gen_expanding_dot(ctx):
     ctx.require_columns('expanding_dot')
     p = ctx.data_config['expanding_dot']
@@ -2042,7 +1771,6 @@ _STIMULUS_REGISTRY: dict[str, tuple] = {
     'counterphase_sine': (_gen_counterphase_sine, (2, 1)),
     'full_field_step': (_gen_full_field_step, (2, 1)),
     'full_field_flicker': (_gen_full_field_flicker, (2, 1)),
-    'flyview': (_gen_flyview, (2, 1)),
     'expanding_dot': (_gen_expanding_dot, (2, 1)),
 }
 
@@ -2194,9 +1922,8 @@ def get_stimulus(
 
 
 # Right-eye camera offset (body frame +x forward / +y left / +z up) per two-eye
-# stimulus type. Its length unit must match the dataset's translation targets
-# (depth units for flyview), because the two-eye solver's absolute translation
-# scales with it.
+# stimulus type. Its length unit must match the dataset's translation targets,
+# because the two-eye solver's absolute translation scales with it.
 # The offset is a property of the rig that produced the flow: a single-viewpoint
 # render has none, a real two-camera rig carries its physical half-baseline.
 # Populated by the @camera_offset decorator on each stimulus loader (keyed by

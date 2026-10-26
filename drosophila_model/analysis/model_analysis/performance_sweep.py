@@ -1,12 +1,11 @@
 """
 Quantitative performance sweep.
 
-Reports the model's accuracy on three stimulus families with a single
+Reports the model's accuracy on two stimulus families with a single
 comparable cosine-similarity number each:
 
   * sine waves   (``random_sine``)
   * random pano  (``random_pano``)
-  * flyview      (``flyview``)
 
 Each family is read from its baked dataset
 (``<data_folder>/stimulus/training/<type>_<split>.pt``, made by
@@ -22,12 +21,11 @@ Two complementary metrics are computed where applicable:
 
   * flow cosine  — predicted optic flow vs. ground-truth optic flow
                    (the model's primary training objective). Available for
-                   all three stimulus families.
+                   both stimulus families.
   * ego cosine   — rotation (and translation) recovered by the two-eye
                    ego-motion solver vs. ground truth. Available for the
                    two-eye families with odometry (random pano has no
-                   translation, so only rotation is reported; flyview has
-                   both).
+                   translation, so only rotation is reported).
 
 No figures are produced — use ``pano_sweep`` for those.
 
@@ -52,13 +50,11 @@ from drosophila_model.analysis.model_analysis.analysis_utilities import cos_sim,
 FLOW_STIMULI = [
     ("sine_wave", "random_sine"),
     ("random_pano", "random_pano"),
-    ("flyview", "flyview"),
 ]
 # Families with ego-motion ground truth. ``has_translation`` flags whether the
 # translation cosine is meaningful (random pano is pure rotation).
 EGO_STIMULI = {
     "random_pano": False,
-    "flyview": True,
 }
 
 
@@ -173,7 +169,7 @@ def _print_summary(flow_cos: dict, ego_cos: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Report model performance (cosine similarity) on "
-                    "sine waves, random pano, and flyview."
+                    "sine waves and random pano."
     )
     parser.add_argument("model_folder", type=str,
                         help="Path to model folder or model.pt")

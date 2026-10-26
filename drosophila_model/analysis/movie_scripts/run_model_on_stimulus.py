@@ -22,7 +22,7 @@ shown with rotation/translation rate trailing-window plots:
   Row 2: Rotation rate        | Translation rate
 
 For a two-eye stimulus that carries ground-truth odometry (e.g. --stim-type
-flyview), the model's estimated rotation/translation rates are overlaid against
+random_pano), the model's estimated rotation/translation rates are overlaid against
 the ground truth. Ego-motion is solved with the dataset's registered camera
 offset, as in training (two-eye ``get_stimulus`` data goes through
 ``training_utilities.model_outputs``).
@@ -33,7 +33,6 @@ Usage (from the repo root):
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --no-two-eyes --stim-type random_sine
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --stim-type random_pano
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --ego-motion --stim-type random_pano
-    python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --ego-motion --stim-type flyview
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --ego-motion --translation
 
 ``--duration <seconds>`` overrides the generated stimulus length
@@ -579,14 +578,14 @@ def _run_ego_motion_pano(args, model, data_config, data_folder, output_dir,
 
 
 # ---------------------------------------------------------------------------
-# Ego-motion path for two-eye stimuli with ground-truth odometry (e.g. flyview)
+# Ego-motion path for two-eye stimuli with ground-truth odometry (e.g. random_pano)
 # ---------------------------------------------------------------------------
 
 def _run_ego_motion_two_eyes(args, model, config, data_config, output_dir,
                              device, dtype, model_dt, column_phi_theta, N,
                              cell_x, cell_y, cell_z, frame_rate, flow_key):
     """Run ego-motion estimation on a generated two-eye stimulus that carries
-    ground-truth odometry (e.g. ``flyview``) and compare true vs predicted rates.
+    ground-truth odometry (e.g. ``random_pano``) and compare true vs predicted rates.
 
     Generates the stimulus with :func:`get_stimulus` (num_eyes=2), estimates
     ego-motion as training does (:func:`_two_eye_outputs`), and renders a

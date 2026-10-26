@@ -1,13 +1,11 @@
 """Bake the large raw inputs into cached ``.pt`` files under ``stimulus/baked``.
 
-This is the first stage of the data pipeline. The truly raw inputs (panorama
-``.mat`` files, the rendered fly-view pickle) are large and slow to decode, so
-this script reads them once from ``<data_folder>/stimulus/raw`` and writes a
-compact ``.pt`` cache to ``<data_folder>/stimulus/baked``:
+This is the first stage of the data pipeline. The raw panorama ``.mat`` files
+are large and slow to decode, so this script reads them once from
+``<data_folder>/stimulus/raw`` and writes a compact ``.pt`` cache to
+``<data_folder>/stimulus/baked``:
 
 * ``random_pano`` -> ``all_panoramic.pt`` ((N, H, W) raw panorama images)
-* ``flyview``     -> ``flyview.pt``     (flow + depth-based odometry,
-  baked from ``fib_forest_fly_view_dataset_fwd.pkl``)
 
 The panorama cache stores the unfiltered images; the Gaussian ommatidial
 filtering is applied at generation time in ``stimulus_generators._filter_pano``.
@@ -21,7 +19,6 @@ Usage::
 
     python -m drosophila_model.data_handling.process_raw_data            # all
     python -m drosophila_model.data_handling.process_raw_data random_pano
-    python -m drosophila_model.data_handling.process_raw_data flyview
 """
 import argparse
 from pathlib import Path
@@ -31,7 +28,7 @@ import torch
 
 from drosophila_model.config import get_data_folder, load_config
 
-RAW_TYPES = ('random_pano', 'flyview')
+RAW_TYPES = ('random_pano',)
 
 
 def loadmat_v73(path):
@@ -116,9 +113,6 @@ def process_raw_data(raw_type, config=None, config_path=None):
 
     if raw_type == 'random_pano':
         return process_random_pano(data_folder)
-    if raw_type == 'flyview':
-        from drosophila_model.data_handling import stimulus_generators as sg
-        return sg.bake_fly_view_dataset(data_folder=data_folder)
     raise ValueError(
         f"Unknown raw_type '{raw_type}'; expected one of {RAW_TYPES}.")
 

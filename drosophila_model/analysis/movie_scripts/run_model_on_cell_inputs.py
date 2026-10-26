@@ -18,9 +18,9 @@ Two-eye layout (2x2):
 
 Columns outside the field of view are drawn yellow.
 
-To run a model on a freshly generated stimulus (random pano/sine, edges,
-flyview, ...) — including the fly-view ego-motion comparison — use
-``run_model_on_stimulus`` instead.
+To run a model on a freshly generated stimulus (random pano/sine, edges, ...)
+— including the ego-motion comparison — use ``run_model_on_stimulus``
+instead.
 
 Usage (from the repo root):
     python -m drosophila_model.analysis.movie_scripts.run_model_on_cell_inputs models/my_model/

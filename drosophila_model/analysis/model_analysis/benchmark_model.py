@@ -8,9 +8,9 @@ Runs these analyses on a trained model, in this order (each can be skipped):
   3. white_noise_silencing  — STA filter recovery + silencing comparison
   4. sine_wave_silencing    — tuning curves + silencing comparison
   5. performance_sweep      — flow + ego-motion cosine on the held-out baked
-                              test split (``<type>_test.pt``) of random_sine,
-                              random_pano and flyview; families with no baked
-                              test file are skipped
+                              test split (``<type>_test.pt``) of random_sine
+                              and random_pano; families with no baked test
+                              file are skipped
 
 All figures are saved under <model_folder>/figures/ (the white-noise STA data
 under <model_folder>/analysis_data/white_noise_silencing/).
