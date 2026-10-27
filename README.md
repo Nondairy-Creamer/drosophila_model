@@ -35,10 +35,10 @@ translation) from natural and synthetic visual input.
    a server whose system Python already has a working torch (e.g. RunPod),
    skip the venv and use that Python.
 
-3. Run the setup script from the repo root (on Windows, from Git Bash):
+3. Run the setup script from the repo root:
 
    ```bash
-   bash setup.sh
+   bash setup.sh   # Windows (PowerShell): & "C:\Program Files\Git\bin\bash.exe" setup.sh
    ```
 
    It installs the dependencies and this package, writes `config.toml` with
