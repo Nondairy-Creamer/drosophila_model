@@ -1,24 +1,33 @@
 #!/bin/bash
 # Set up the code base from a fresh clone: install the dependencies, download
-# the raw data from Zenodo and bake it into the files the code reads. Run from
-# the repo root, inside the Python environment you want to use (on Windows,
-# from Git Bash):
+# the data from Zenodo and bake the training sets. Run from the repo root,
+# inside the Python environment you want to use (on Windows, from Git Bash):
 #
-#     bash setup.sh [DATA_FOLDER [DATA_ZIP]]
+#     bash setup.sh [--raw] [DATA_FOLDER [DATA_ZIP]]
 #
 # DATA_FOLDER (or the $DATA_FOLDER environment variable) is where the data
 # go. Without it, the [data].data_folder of an existing config.toml is used,
 # else ../drosophila_model_data, the packaged default. config.toml is created
 # or updated so [data].data_folder points there.
 #
-# DATA_ZIP (or $DATA_ZIP) is a local copy of drosophila_model_data_v1.zip to
-# use instead of downloading it.
+# By default the connectome tables and panorama cache are downloaded
+# ready-made (drosophila_model_baked_v1.zip, about 250 MB). --raw downloads
+# the raw data instead (drosophila_model_raw_v1.zip, about 3.2 GB) and bakes
+# them from it.
+#
+# DATA_ZIP (or $DATA_ZIP) is a local copy of either zip to use instead of
+# downloading it.
 #
 # Re-running is safe: data already in place are not downloaded or baked again.
 set -e
 
-DATA_FOLDER="${1:-${DATA_FOLDER:-}}"
-DATA_ZIP="${2:-${DATA_ZIP:-}}"
+RAW=
+ARGS=()
+for arg in "$@"; do
+    if [ "$arg" = "--raw" ]; then RAW=1; else ARGS+=("$arg"); fi
+done
+DATA_FOLDER="${ARGS[0]:-${DATA_FOLDER:-}}"
+DATA_ZIP="${ARGS[1]:-${DATA_ZIP:-}}"
 
 # We intentionally do NOT create a venv -- on RunPod, the system Python ships
 # with a torch build matched to the pod's GPU (e.g. Blackwell / sm_120 needs a
@@ -76,12 +85,11 @@ path.write_text(text, encoding='utf-8')
 print(f"config.toml: set [data].data_folder = {folder}")
 PYEOF
 
-# Download the raw data and bake the connectome tables, the panorama cache and
-# the training sets for [stimulus].stimulus_type.
-if [ -n "$DATA_ZIP" ]; then
-    python -m drosophila_model.data_handling.prepare_data --zip "$DATA_ZIP"
-else
-    python -m drosophila_model.data_handling.prepare_data
-fi
+# Download the connectome tables and the panorama cache (or the raw data, and
+# bake those from it), then bake the training sets for [stimulus].stimulus_type.
+PREPARE_ARGS=()
+if [ -n "$RAW" ]; then PREPARE_ARGS+=(--raw); fi
+if [ -n "$DATA_ZIP" ]; then PREPARE_ARGS+=(--zip "$DATA_ZIP"); fi
+python -m drosophila_model.data_handling.prepare_data "${PREPARE_ARGS[@]}"
 
 echo "Setup complete. Train with: python -m drosophila_model.training.run_model"

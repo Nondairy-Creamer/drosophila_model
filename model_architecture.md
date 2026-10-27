@@ -158,10 +158,12 @@ antenna-lobe models are built by `antenna_lobe_decoding.py` and
 
 ## Data layout
 
-The raw inputs come from the Zenodo data bundle, and the connectome bundle is
-baked once by `python -m drosophila_model.data_handling.format_connectome_data`
-(`setup.sh`, through `data_handling.prepare_data`, downloads the bundle and
-runs every bake step). Everything lives,
+The raw inputs come from the Zenodo raw bundle, and the connectome bundle is
+baked once by `python -m drosophila_model.data_handling.format_connectome_data`.
+`setup.sh`, through `data_handling.prepare_data`, downloads the baked
+connectome and panorama cache ready-made from the Zenodo baked bundle and
+bakes the training sets (with `--raw`, it downloads the raw bundle and runs
+every bake step). Everything lives,
 with the stimulus data, under `config['data']['data_folder']` (read it with
 `config.get_data_folder(config)`; default `../drosophila_model_data`):
 

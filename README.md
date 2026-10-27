@@ -42,18 +42,22 @@ translation) from natural and synthetic visual input.
    ```
 
    It installs the dependencies and this package, writes `config.toml` with
-   `[data].data_folder`, downloads the raw data from Zenodo
+   `[data].data_folder`, downloads the processed connectome and panorama data
+   from Zenodo
    ([doi:10.5281/zenodo.XXXXXXX](https://doi.org/10.5281/zenodo.XXXXXXX),
-   about 3 GB), and bakes them into the files the code reads (a few
-   minutes). The data go to `../drosophila_model_data`, next to the repo,
-   unless you pass another folder: `bash setup.sh /path/to/data`. It bakes
-   the training sets listed in `[stimulus].stimulus_type`, so set that in
-   `config.toml` first if you want other ones (or bake them later, see
-   [Data](#data)). Re-running it skips whatever is already done.
+   about 250 MB), and bakes the training sets (a few minutes). The data go
+   to `../drosophila_model_data`, next to the repo, unless you pass another
+   folder: `bash setup.sh /path/to/data`. It bakes the training sets listed
+   in `[stimulus].stimulus_type`, so set that in `config.toml` first if you
+   want other ones (or bake them later, see [Data](#data)). Re-running it
+   skips whatever is already done.
+
+   To rebuild the processed data from the raw data instead (about 3.2 GB to
+   download), run `bash setup.sh --raw`.
 
 The data steps alone are `python -m drosophila_model.data_handling.prepare_data`
-(add `--zip path/to/drosophila_model_data_v1.zip` to use a copy of the bundle
-you already downloaded).
+(with `--raw` as above, and `--zip path/to/drosophila_model_baked_v1.zip` or
+`drosophila_model_raw_v1.zip` to use a copy you already downloaded).
 
 All commands below are run **from the repo root**, as
 `python -m drosophila_model.<subpackage>.<module>`. Relative paths such as
@@ -96,15 +100,19 @@ In code, use `config.load_config()` for the live config,
 
 ## Data
 
-`[data].data_folder` holds the raw inputs from the Zenodo data bundle and the
-files baked from them. `setup.sh` (through `data_handling.prepare_data`)
-downloads the bundle and runs every step in the "Produced by" column.
+`[data].data_folder` holds the raw inputs and the files baked from them. The
+Zenodo record has both, as two zips. `setup.sh` (through
+`data_handling.prepare_data`) downloads the baked `connectome_data/baked/`
+and `stimulus/baked/` (`drosophila_model_baked_v1.zip`) and bakes the
+training sets; `setup.sh --raw` downloads the raw inputs instead
+(`drosophila_model_raw_v1.zip`) and runs every step in the "Produced by"
+column.
 
 | Folder | Contents | Produced by |
 |---|---|---|
-| `connectome_data/raw/` | FlyWire Codex downloads (FAFB v783), as `.csv.gz`: `consolidated_cell_types`, `connections_princeton_no_threshold`, `column_assignment`, `fafb_v783_princeton_synapse_table`, and optionally `cell_stats` / `classification`; the Reiser lab eye map, `eyemap_T4/data/eyemap.RData` | the Zenodo data bundle (files as downloaded from [Codex](https://codex.flywire.ai) and [eyemap_T4](https://github.com/reiserlab/eyemap_T4)) |
+| `connectome_data/raw/` | FlyWire Codex downloads (FAFB v783), as `.csv.gz`: `consolidated_cell_types`, `connections_princeton_no_threshold`, `column_assignment`, `fafb_v783_princeton_synapse_table`, and optionally `cell_stats` / `classification`; the Reiser lab eye map, `eyemap_T4/data/eyemap.RData` | the Zenodo raw bundle (files as downloaded from [Codex](https://codex.flywire.ai) and [eyemap_T4](https://github.com/reiserlab/eyemap_T4)) |
 | `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet`, and the CT1 split (`ct1_pieces.parquet`, `ct1_connections.parquet`) | `data_handling.format_connectome_data`, which first runs `data_handling.split_ct1` (each CT1 split into per-column `CT1_M` / `CT1_L` pieces by synapse position) and `data_handling.build_column_geometry` (column viewing directions from the Reiser lab eye map, Zhao et al. 2025, in `connectome_data/raw/eyemap_T4/`) if their outputs are missing |
-| `stimulus/raw/` | `panorama_001-100.rar` (panorama `.mat` files, read from the archive without extracting it) | the Zenodo data bundle (Meyer et al. 2014's `data_001-100.rar`, renamed) |
+| `stimulus/raw/` | `panorama_001-100.rar` (panorama `.mat` files, read from the archive without extracting it) | the Zenodo raw bundle (Meyer et al. 2014's `data_001-100.rar`, renamed) |
 | `stimulus/baked/` | `all_panoramic.pt` | `data_handling.process_raw_data random_pano` |
 | `stimulus/training/` | `<type>_train.pt` and `<type>_test.pt` | `data_handling.create_training_data <type>` |
 
