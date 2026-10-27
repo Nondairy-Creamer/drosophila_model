@@ -5,7 +5,7 @@ from drosophila_model.training import training_utilities as tu
 from tests.model_factory import build_model_from_test_config
 
 
-def test_train_model_plateau_reload(capsys, tmp_path):
+def test_fit_plateau_reload(capsys, tmp_path):
     model, _ = build_model_from_test_config(readouts=['L1Reg'])
     model_save_folder = tmp_path / "model_run"
     initial_state = {k: v.clone() for k, v in model.state_dict().items()}
@@ -13,7 +13,7 @@ def test_train_model_plateau_reload(capsys, tmp_path):
     inputs = torch.zeros((1, 1, model.regions['optic_lobe'].num_columns), dtype=model.dtype, device=model.device)
     target = {'optic_flow': torch.zeros((1, 1, model.regions['optic_lobe'].num_columns, 2), dtype=model.dtype, device=model.device)}
 
-    trained_model, loss_history, opt_state, info = tu.train_model(
+    trained_model, loss_history, opt_state, info = tu.fit(
         model,
         inputs,
         target,

@@ -123,7 +123,7 @@ def _run_one_eye(model, cell_inputs_all, train_mask_all, stim_index,
 
     stim_input = cell_inputs_all[stim_index:stim_index + 1]
 
-    # run_model saves the training targets next to cell_inputs.pt.
+    # training.train saves the training targets next to cell_inputs.pt.
     target_path = model_folder / 'target.pt'
     if not target_path.exists():
         raise SystemExit(f"{target_path} not found; the one-eye movie compares "

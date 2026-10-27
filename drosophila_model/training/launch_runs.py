@@ -6,14 +6,14 @@ This script detects available GPUs and distributes multiple training runs across
 each with a different random seed. All runs are executed in parallel.
 
 Usage (from the repo root):
-    python -m drosophila_model.training.submit_runs --runs-per-gpu 4
-    python -m drosophila_model.training.submit_runs --runs-per-gpu 10 --base-seed 100
-    python -m drosophila_model.training.submit_runs --runs-per-gpu 4 --tag my_experiment
+    python -m drosophila_model.training.launch_runs --runs-per-gpu 4
+    python -m drosophila_model.training.launch_runs --runs-per-gpu 10 --base-seed 100
+    python -m drosophila_model.training.launch_runs --runs-per-gpu 4 --tag my_experiment
 
 Runs are written to models/<tag>_gpuN_runM/ and their output to
 logs/<tag>_gpuN_runM.log. By default the launcher detaches and logs to
-logs/submit_runs_<tag>.log; stop it (and its runs) with ``kill <pid>`` or
-``python -m drosophila_model.training.kill_submit_runs``.
+logs/launch_runs_<tag>.log; stop it (and its runs) with ``kill <pid>`` or
+``python -m drosophila_model.training.stop_runs``.
 """
 
 import torch
@@ -79,17 +79,17 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
         device: Device to run on (e.g., 'cuda:0')
         run_id: Identifier for this run
         timestamp: Timestamp string to use for all runs in this batch
-        script_path: Optional path to a run_model.py script. If None, runs the
-            installed module ``drosophila_model.training.run_model``.
+        script_path: Optional path to a train.py script. If None, runs the
+            installed module ``drosophila_model.training.train``.
         log_dir: Directory to store log files
         model_path: Optional path to existing model folder to load
-        config_path: Optional path to a config TOML passed through to run_model.
+        config_path: Optional path to a config TOML passed through to training.train.
     
     Returns:
         tuple of (subprocess.Popen object, log file handle)
     """
     if script_path is None:
-        cmd = [sys.executable, '-u', '-m', 'drosophila_model.training.run_model']
+        cmd = [sys.executable, '-u', '-m', 'drosophila_model.training.train']
     else:
         cmd = [sys.executable, '-u', str(script_path)]
     cmd.extend([
@@ -133,7 +133,7 @@ def run_training_job(seed, device, run_id, timestamp=None, script_path=None, log
 def exit_if_tag_used(tag):
     """Exit if run folders for ``tag`` already exist.
 
-    Fails fast instead of letting every run_model child die on an existing
+    Fails fast instead of letting every training subprocess die on an existing
     run folder.
     """
     existing = sorted(Path('models').glob(f'{tag}_gpu*_run*'))
@@ -144,7 +144,7 @@ def exit_if_tag_used(tag):
         sys.exit(1)
 
 
-def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None, config_path=None):
+def launch_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None, config_path=None):
     """
     Submit multiple training runs across available GPUs.
     
@@ -152,12 +152,12 @@ def submit_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=Non
         runs_per_gpu: Number of runs to execute per GPU
         base_seed: Base seed value (each run gets base_seed + run_index). If
             None, falls back to config['training']['base_seed'].
-        script_path: Optional path to a run_model.py script. If None, runs the
-            installed module ``drosophila_model.training.run_model``.
+        script_path: Optional path to a train.py script. If None, runs the
+            installed module ``drosophila_model.training.train``.
         model_path: Optional path to existing model folder to load
         tag: Optional tag to use instead of the auto-generated timestamp
         config_path: Optional path to a config TOML. Used to resolve the base
-            seed and passed through to each run_model subprocess.
+            seed and passed through to each training subprocess.
     """
     # Fall back to the config's base_seed when none was passed on the CLI.
     if base_seed is None:
@@ -245,10 +245,10 @@ def main():
         epilog="""
     Examples:
     # Run 4 jobs per GPU using the base seed from config
-    python -m drosophila_model.training.submit_runs --runs-per-gpu 4
+    python -m drosophila_model.training.launch_runs --runs-per-gpu 4
 
     # Run 10 jobs per GPU with custom base seed
-    python -m drosophila_model.training.submit_runs --runs-per-gpu 10 --base-seed 100
+    python -m drosophila_model.training.launch_runs --runs-per-gpu 10 --base-seed 100
                 """
     )
     
@@ -271,8 +271,8 @@ def main():
         '--script-path',
         type=str,
         default=None,
-        help='Optional path to a run_model.py script. If omitted, runs the '
-             'installed module drosophila_model.training.run_model.'
+        help='Optional path to a train.py script. If omitted, runs the '
+             'installed module drosophila_model.training.train.'
     )
     
     parser.add_argument(
@@ -294,7 +294,7 @@ def main():
         type=str,
         default=None,
         help='Path to config TOML to use for all runs (default: config.toml). '
-             'Passed through to each run_model subprocess and used to resolve '
+             'Passed through to each training subprocess and used to resolve '
              'the base seed.'
     )
     
@@ -310,7 +310,7 @@ def main():
     # Validate paths before (possibly) detaching, so a bad path is reported
     # here rather than only in the background launcher's log.
     # Validate script path if explicitly provided; otherwise we invoke the
-    # installed module drosophila_model.training.run_model.
+    # installed module drosophila_model.training.train.
     script_path = None
     if args.script_path is not None:
         script_path = Path(args.script_path)
@@ -339,7 +339,7 @@ def main():
         config_path = str(config_path)
 
     # By default, re-launch ourselves detached with output to
-    # logs/submit_runs_<tag>.log (replicates: nohup python -u -m ... > log 2>&1 &).
+    # logs/launch_runs_<tag>.log (replicates: nohup python -u -m ... > log 2>&1 &).
     # The tag is fixed here so the launcher log and the run folders share it.
     if not args.foreground and os.environ.get('_SUBMIT_RUNS_FG') != '1':
         tag = args.tag if args.tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -347,13 +347,13 @@ def main():
         env = os.environ.copy()
         env['_SUBMIT_RUNS_FG'] = '1'
         Path('logs').mkdir(exist_ok=True)
-        launcher_log = Path('logs') / f'submit_runs_{tag}.log'
+        launcher_log = Path('logs') / f'launch_runs_{tag}.log'
         log_file = open(launcher_log, 'w')
         relaunch_args = sys.argv[1:] + ['--foreground']
         if args.tag is None:
             relaunch_args += ['--tag', tag]
         proc = subprocess.Popen(
-            [sys.executable, '-u', '-m', 'drosophila_model.training.submit_runs'] + relaunch_args,
+            [sys.executable, '-u', '-m', 'drosophila_model.training.launch_runs'] + relaunch_args,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # detach from terminal (POSIX setsid)
@@ -365,7 +365,7 @@ def main():
         sys.exit(0)
 
     # Submit runs
-    submit_runs(
+    launch_runs(
         runs_per_gpu=args.runs_per_gpu,
         base_seed=args.base_seed,
         script_path=script_path,

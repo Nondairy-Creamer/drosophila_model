@@ -304,7 +304,7 @@ def compute_loss_components(model, outputs, target, train_mask, loss_components)
     return component_vals
 
 
-def train_model(model, inputs, target, output_neurons, input_neurons,
+def fit(model, inputs, target, output_neurons, input_neurons,
                 loss_components,
                 rng=None, model_save_folder=None,
                 num_steps=100, save_every=100, alpha=1e-4,

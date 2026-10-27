@@ -94,4 +94,4 @@ if [ -n "$RAW" ]; then PREPARE_ARGS+=(--raw); fi
 if [ -n "$DATA_ZIP" ]; then PREPARE_ARGS+=(--zip "$DATA_ZIP"); fi
 python -m drosophila_model.data_handling.prepare_data "${PREPARE_ARGS[@]}"
 
-echo "Setup complete. Train with: python -m drosophila_model.training.run_model"
+echo "Setup complete. Train with: python -m drosophila_model.training.train"

@@ -1,4 +1,4 @@
-"""Training-path tests: baked-dataset loading, and one-step ``train_model``
+"""Training-path tests: baked-dataset loading, and one-step ``fit``
 runs on the small test model with one- and two-eye data."""
 import math
 
@@ -33,7 +33,7 @@ def _dataset(model, num_eyes, num_stimuli=2, num_time=4):
 def _train_one_step(model, num_eyes, loss_components, **kwargs):
     inputs, target, train_mask = _dataset(model, num_eyes)
     initial = {k: v.detach().clone() for k, v in model.named_parameters()}
-    _, loss_history, _, info = tu.train_model(
+    _, loss_history, _, info = tu.fit(
         model, inputs, target,
         output_neurons=None, input_neurons=None,
         loss_components=loss_components,
@@ -123,10 +123,10 @@ def test_train_two_eye_odometry_loss():
     (['odometry_loss'], 1, "requires a two-eye dataset"),
     (['flow_loss'], 3, "num_eyes must be 1 or 2"),
 ])
-def test_train_model_rejects_bad_settings(loss_components, num_eyes, match):
+def test_fit_rejects_bad_settings(loss_components, num_eyes, match):
     # Settings are validated before the model or data are touched.
     with pytest.raises(ValueError, match=match):
-        tu.train_model(None, None, None, None, None, loss_components, num_eyes=num_eyes)
+        tu.fit(None, None, None, None, None, loss_components, num_eyes=num_eyes)
 
 
 def _write_baked(folder, name, num_eyes, eye_offset, model_dt=0.01, num_stimuli=2,

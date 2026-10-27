@@ -2,12 +2,12 @@
 
 Usage (from the repo root):
 
-    python -m drosophila_model.training.continue_training --model-folder models/<run>
-    python -m drosophila_model.training.continue_training --model-folder models/<run> --new-session
+    python -m drosophila_model.training.resume_runs --model-folder models/<run>
+    python -m drosophila_model.training.resume_runs --model-folder models/<run> --new-session
 
 Reloads the run's ``model.pt``, its saved training data (``cell_inputs.pt``,
 ``target.pt``) and its config, then keeps training with the same settings as
-``run_model``. By default the optimizer state and loss history in
+``train``. By default the optimizer state and loss history in
 ``model_opt.pt`` are restored and the run folder is updated in place.
 ``--new-session`` instead copies the folder to ``<run>_cont`` and starts a fresh
 optimizer and loss history at the run config's ``[training].alpha``.
@@ -23,7 +23,7 @@ from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.training import training_utilities as tu
 
 
-def continue_training(model_folder, new_session=False, num_steps=None):
+def resume_runs(model_folder, new_session=False, num_steps=None):
     """Resume training the run in ``model_folder`` (see module docstring)."""
     model_folder = Path(model_folder)
     if new_session:
@@ -44,7 +44,7 @@ def continue_training(model_folder, new_session=False, num_steps=None):
     target = torch.load(model_folder / 'target.pt', map_location='cpu', weights_only=False)
     target = {k: v.to(device=model.device, dtype=model.dtype) for k, v in target.items()}
 
-    # Eye geometry of the training data, recorded in [run_info] by run_model.
+    # Eye geometry of the training data, recorded in [run_info] by training.train.
     run_info = config['run_info']
     num_eyes = run_info['num_eyes']
     eye_offset = (tuple(float(x) for x in run_info['eye_offset'])
@@ -60,7 +60,7 @@ def continue_training(model_folder, new_session=False, num_steps=None):
         loss_history = opt_state['loss']
         alpha = opt_state_dict['param_groups'][0]['lr']
 
-    tu.train_model(model, stimulus, target, output_neurons=None, input_neurons=None,
+    tu.fit(model, stimulus, target, output_neurons=None, input_neurons=None,
         loss_components=training['loss_components'],
         model_save_folder=model_folder,
         rng=model.rng,
@@ -90,7 +90,7 @@ def main():
     parser.add_argument('--num-steps', type=int, default=None,
                         help="Training steps for this session (default: [training].num_steps)")
     args = parser.parse_args()
-    continue_training(args.model_folder, new_session=args.new_session, num_steps=args.num_steps)
+    resume_runs(args.model_folder, new_session=args.new_session, num_steps=args.num_steps)
 
 
 if __name__ == '__main__':

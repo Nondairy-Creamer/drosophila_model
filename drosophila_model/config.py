@@ -41,7 +41,7 @@ import tomli_w
 #       sub-table by the corresponding ``RegionView._load_extras`` (see
 #       model_definition/regions.py), so we stop validating at this depth.
 #
-#   ('run_info',) -- added programmatically by ``run_model.py`` to record
+#   ('run_info',) -- added programmatically by ``train.py`` to record
 #       per-run provenance (seed, device, run_id, eye geometry) and persisted
 #       into saved configs. Not part of the user-editable schema.
 #

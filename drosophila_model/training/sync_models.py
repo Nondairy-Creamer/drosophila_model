@@ -3,16 +3,16 @@ Rsync utility for transferring model files to/from a remote server.
 
 Usage (from the repo root):
 
-    python -m drosophila_model.training.download_models <server>
-    python -m drosophila_model.training.download_models <server> --model-folder <run>
-    python -m drosophila_model.training.download_models <server> --push --model-folder <run>
+    python -m drosophila_model.training.sync_models <server>
+    python -m drosophila_model.training.sync_models <server> --model-folder <run>
+    python -m drosophila_model.training.sync_models <server> --push --model-folder <run>
 
 Uses rsync over ssh for resumable, high-throughput transfers. Requires
 rsync on both ends (preinstalled on macOS and most Linux containers; it is
 installed on the remote with apt-get if missing).
 
 Pulling everything groups runs locally by tag/timestamp:
-``models/<tag>/<tag>_gpuN_runM/`` (``find_best_model`` scans that layout);
+``models/<tag>/<tag>_gpuN_runM/`` (``rank_runs`` scans that layout);
 folders without a ``_gpuN_runM`` suffix land flat in ``models/<name>/``.
 '''
 

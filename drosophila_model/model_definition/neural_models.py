@@ -319,7 +319,7 @@ class BaseRnn(SerializableModel, torch.nn.Module, ABC):
     (synapse matrix, cell types, regions) live on :class:`ConnectomeModel`.
 
     The ``nonlinearity`` / ``use_layer_norm`` defaults here apply only to
-    direct construction; config-driven builds (``run_model``) pass
+    direct construction; config-driven builds (``training.train``) pass
     ``[model].nonlinearity`` and ``[model].use_layer_norm`` explicitly.
 
     Concrete subclasses (via the dynamics mixins) supply:

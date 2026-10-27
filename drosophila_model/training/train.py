@@ -2,7 +2,7 @@
 
 Usage (from the repo root):
 
-    python -m drosophila_model.training.run_model --seed 42 --device cuda:0
+    python -m drosophila_model.training.train --seed 42 --device cuda:0
 
 The model, its config, the training stimulus/targets and checkpoints are
 written to ``models/<timestamp>[_<run_id>]/``. The training data must be
@@ -52,7 +52,7 @@ def build_connectome(config):
     )
 
 
-def run_single_model(seed=None, device_override=None, run_id=None, timestamp=None, model_path=None, config_path=None):
+def train(seed=None, device_override=None, run_id=None, timestamp=None, model_path=None, config_path=None):
     """
     Run a single model training with specified seed and device.
 
@@ -92,7 +92,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     other_regions = sorted(set(config['model'].get('regions', {})) - {'optic_lobe'})
     if other_regions:
         raise ValueError(
-            f"run_model trains optic-lobe models only, but [model.regions] also "
+            f"training.train builds optic-lobe models only, but [model.regions] also "
             f"configures {other_regions}. Antenna-lobe models are built by "
             "analysis/model_analysis/antenna_lobe_decoding.py and olf_decoding_mimic.py."
         )
@@ -198,7 +198,7 @@ def run_single_model(seed=None, device_override=None, run_id=None, timestamp=Non
     # --- train the model ---
     # input/output neurons come from each region's defaults or its
     # [model.regions.<name>] input_neurons / output_neurons overrides.
-    tu.train_model(model, stimulus, target, output_neurons=None, input_neurons=None,
+    tu.fit(model, stimulus, target, output_neurons=None, input_neurons=None,
         loss_components=loss_components,
         model_save_folder=model_save_folder,
         rng=model.rng,
@@ -227,7 +227,7 @@ def main():
 
     args = parser.parse_args()
 
-    run_single_model(
+    train(
         seed=args.seed,
         device_override=args.device,
         run_id=args.run_id,

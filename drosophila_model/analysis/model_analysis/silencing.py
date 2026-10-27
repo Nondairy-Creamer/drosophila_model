@@ -33,7 +33,7 @@ def compute_loss(model, cell_inputs, target, train_mask, loss_components,
                  num_eyes, eye_offset):
     """Training loss of ``model`` on saved training data.
 
-    Runs the model exactly as ``train_model`` does (the two-eye ego-motion
+    Runs the model exactly as ``fit`` does (the two-eye ego-motion
     path, solved with the run's ``eye_offset``, for two-eye data) and sums the
     ``loss_components``. The model is in eval mode, so training-only
     regularizers are not included.

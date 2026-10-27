@@ -2,12 +2,12 @@
 
 Usage (from the repo root):
 
-    python -m drosophila_model.training.find_best_model
+    python -m drosophila_model.training.rank_runs
 
 Scans ``models/`` (and one level down, for the group folders that
-``download_models`` pulls runs into), groups runs by tag/timestamp, prints the
+``sync_models`` pulls runs into), groups runs by tag/timestamp, prints the
 best run per group and saves a loss comparison plot per group to
-``figures/find_best_model/``.
+``figures/rank_runs/``.
 """
 import argparse
 import torch
@@ -29,14 +29,14 @@ def _visible_subdirs(folder):
     return sorted(f for f in folder.iterdir() if f.is_dir() and not f.name.startswith('.'))
 
 
-def find_best_models(models_dir=MODELS_DIR):
+def rank_runs(models_dir=MODELS_DIR):
     """
     Scan the models directory, group model folders by their tag/timestamp prefix
     (stripping any _gpuN_runN suffix), and for each group find the folder with
     the lowest valid loss.
 
     A top-level folder without ``model_opt.pt`` is treated as a group folder
-    (the ``models/<tag>/<tag>_gpuN_runM/`` layout ``download_models`` pulls
+    (the ``models/<tag>/<tag>_gpuN_runM/`` layout ``sync_models`` pulls
     into) and its subfolders are scanned instead.
 
     Losses that are NaN, inf, or within 1e-6 of zero are ignored.
@@ -138,7 +138,7 @@ def find_best_models(models_dir=MODELS_DIR):
         plt.xlim(-0.5, 0.5)
         plt.legend()
 
-        fig_dir = Path('figures') / 'find_best_model'
+        fig_dir = Path('figures') / 'rank_runs'
         fig_dir.mkdir(parents=True, exist_ok=True)
         fig_path = fig_dir / f'{prefix}_loss_comparison.png'
         plt.savefig(fig_path, dpi=150, bbox_inches='tight')
@@ -151,9 +151,9 @@ def find_best_models(models_dir=MODELS_DIR):
 def main():
     argparse.ArgumentParser(
         description='Rank the runs in models/ by best training loss and plot each '
-                    'group to figures/find_best_model/.'
+                    'group to figures/rank_runs/.'
     ).parse_args()
-    results = find_best_models()
+    results = rank_runs()
 
     if not results:
         print("\nNo valid models found.")

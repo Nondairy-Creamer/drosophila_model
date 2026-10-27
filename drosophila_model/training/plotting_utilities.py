@@ -1,4 +1,4 @@
-"""Training-time plots (the loss curve drawn by ``train_model``)."""
+"""Training-time plots (the loss curve drawn by ``fit``)."""
 from matplotlib import pyplot as plt
 from pathlib import Path
 import numpy as np

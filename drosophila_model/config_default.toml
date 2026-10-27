@@ -33,7 +33,7 @@ use_connectome_subset = []
 # region class's own); all other keys are forwarded verbatim to that region's
 # RegionView._load_extras (see regions.py). Each region also owns its own
 # `readouts` / `readout_neurons` / regularizer params since their structure
-# (e.g. column alignment) is region-specific. run_model trains optic-lobe-only
+# (e.g. column alignment) is region-specific. training.train builds optic-lobe-only
 # models; antenna-lobe models are built by the olfactory analysis scripts.
 [model.regions.optic_lobe]
 # Only 'right' is supported: the baked column geometry/ids are right-eye only.
@@ -66,9 +66,10 @@ input_layer_l1 = 0.0
 
 [training]
 # Master seed for the run: seeds model parameter init, training noise, and
-# DataLoader shuffling (all routed through the model's rng). submit_runs uses
-# this as the base and assigns seed = base_seed + run_index per run; run_model
-# uses it directly. Both are overridden by the --base-seed / --seed CLI flags.
+# DataLoader shuffling (all routed through the model's rng). launch_runs uses
+# this as the base and assigns seed = base_seed + run_index per run;
+# training.train uses it directly. Both are overridden by the --base-seed /
+# --seed CLI flags.
 base_seed = 1
 num_steps = 100000
 # Re-draw the training loss plot (models/<run>/figures/training/loss.png)

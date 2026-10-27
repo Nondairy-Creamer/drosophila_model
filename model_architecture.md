@@ -63,7 +63,7 @@ torch.nn.Module
 │   │                          an alias for num_sides (always 1).
 │   └── AntennaLobeRegion     Olfactory area: one input channel per ORN type,
 │                             per-type recording of PN types. Built by the
-│                             olfactory analysis scripts, not by run_model.
+│                             olfactory analysis scripts, not by `train`.
 │
 ├── Readouts (readouts.py, built per region from [model.regions.<area>].readouts)
 │   ├── HexGridReadout        Base: stacked HexGridConv layers over per-column
@@ -143,7 +143,7 @@ not have are dropped.
 `regions.build_region_specs(...)`: that pulls the region class's default
 `neuropils` list, `default_side` (`'right'` for the optic lobe, `'both'`
 otherwise) and `intrinsic` flag, each overridable per-instance via
-`config['model']['regions'][<name>]`. `run_model.build_connectome(config)`
+`config['model']['regions'][<name>]`. `train.build_connectome(config)`
 also applies `[model].use_connectome_subset` (a cell-type allow-list, via
 `connectome_loading.get_connectome_subset` +
 `load_connectome_from_dataframes`) when it is non-empty.
@@ -152,7 +152,7 @@ also applies `[model].use_connectome_subset` (a cell-type allow-list, via
 `region_kwargs={...}` and stored on the model so it round-trips through
 save/load. `config_default.toml` only ships defaults for `optic_lobe`; configs
 that introduce new areas (e.g. antenna lobe) supply their own region sub-table.
-`run_model` trains optic-lobe models only (it rejects other regions); the
+`train` builds optic-lobe models only (it rejects other regions); the
 antenna-lobe models are built by `antenna_lobe_decoding.py` and
 `olf_decoding_mimic.py`.
 
@@ -304,7 +304,7 @@ Key model-level constructor arguments (keyword-only):
 
 The `BaseRnn` class defaults (`nonlinearity='Softplus'`,
 `use_layer_norm=True`) apply only to direct construction. Config-driven builds
-(`run_model`) pass `[model].nonlinearity` and `[model].use_layer_norm`
+(`train`) pass `[model].nonlinearity` and `[model].use_layer_norm`
 explicitly — `config_default.toml` sets `'ReLU'` and `false` — along with
 `count_threshold = [model].synapse_count_threshold`, `[model].dt`, the
 `[model.regions]` table and the run's seed.
@@ -408,7 +408,7 @@ channel per hex column):
 
 ### Training path
 
-`training/run_model.py` builds a model from config and trains it on a baked
+`training/train.py` builds a model from config and trains it on a baked
 dataset:
 
 1. `compose_model_class(dynamics_type, model_type)` gives the class;
@@ -419,7 +419,7 @@ dataset:
    `[stimulus].stimulus_type` and returns the stimulus, `optic_flow`,
    `train_mask`, `rotation` / `translation` targets, `num_eyes` and
    `eye_offset` of the dataset.
-3. `training_utilities.train_model` runs Adam over batches. Each batch goes
+3. `training_utilities.fit` runs Adam over batches. Each batch goes
    through `training_utilities.model_outputs(model, inputs, train_mask,
    num_eyes, eye_offset)`, which picks the path from the dataset's `num_eyes`:
    - `num_eyes == 2` (every baked dataset; columns `[right | left]`):
@@ -433,7 +433,7 @@ dataset:
    in `[training].loss_components` from `training/loss_functions.py`
    (`flow_loss`, `odometry_loss` (two-eye data only), `motion_mag`) and adds
    the training-only regularizer outputs; the training loss is their sum.
-4. `run_model` records `[run_info]` (seed, device, run id, `num_eyes`,
+4. `train` records `[run_info]` (seed, device, run id, `num_eyes`,
    `eye_offset`) in the run's `config.toml`; `model.pt` is overwritten
    whenever the epoch loss improves.
 
@@ -454,7 +454,7 @@ is a property of the rig that recorded the dataset, not of the model:
   up (`(0, 0, 0)` when none is declared);
 - `get_stimulus` returns it as `StimulusData.eye_offset`, `create_training_data`
   bakes it into the `.pt` files, `load_processed_stimulus` returns it, and
-  `run_model` records it as `[run_info].eye_offset`
+  `train` records it as `[run_info].eye_offset`
   (`analysis_utilities.run_eye_offset(run_config)` reads it back);
 - `estimate_ego_motion_from_image(camera_offset=...)` uses it for the right eye
   and its sagittal mirror (`OpticLobeRegion.mirror_camera_offset`: `y` flips)

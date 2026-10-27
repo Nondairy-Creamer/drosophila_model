@@ -158,21 +158,21 @@ the generation parameters; loading checks the baked `dt`.
 ## Training
 
 ```bash
-python -m drosophila_model.training.run_model --seed 42 --device cuda:0
+python -m drosophila_model.training.train --seed 42 --device cuda:0
 ```
 
 ```bash
-python -m drosophila_model.training.submit_runs --runs-per-gpu 4
+python -m drosophila_model.training.launch_runs --runs-per-gpu 4
 ```
 
 | Module (`drosophila_model.training.…`) | What it does |
 |---|---|
-| `run_model` | Train one model from `config.toml` (`--seed`, `--device`, `--run-id`, `--timestamp`, `--config-path`; `--model-folder` warm-starts from an existing run with fresh noise, optimizer and folder). |
-| `submit_runs` | Launch `runs_per_gpu` × GPUs runs with seeds `base_seed + i` as `models/<tag>_gpuN_runM/`. Detaches by default; launcher log in `logs/submit_runs_<tag>.log`, per-run logs in `logs/`. |
-| `continue_training` | Resume a run in place from its best checkpoint, optimizer state and loss history (`--model-folder`, `--num-steps`); `--new-session` copies it to `<run>_cont` and restarts the optimizer. |
-| `find_best_model` | Rank runs under `models/` by best training loss and plot loss curves per group (`figures/find_best_model/`). |
-| `download_models` | rsync runs to/from a remote server (`<server>`, `--push`, `--model-folder`, `--remote-dir`). |
-| `kill_submit_runs` | Stop all launcher and training processes (POSIX). |
+| `train` | Train one model from `config.toml` (`--seed`, `--device`, `--run-id`, `--timestamp`, `--config-path`; `--model-folder` warm-starts from an existing run with fresh noise, optimizer and folder). |
+| `launch_runs` | Launch `runs_per_gpu` × GPUs runs with seeds `base_seed + i` as `models/<tag>_gpuN_runM/`. Detaches by default; launcher log in `logs/launch_runs_<tag>.log`, per-run logs in `logs/`. |
+| `resume_runs` | Resume a run in place from its best checkpoint, optimizer state and loss history (`--model-folder`, `--num-steps`); `--new-session` copies it to `<run>_cont` and restarts the optimizer. |
+| `rank_runs` | Rank runs under `models/` by best training loss and plot loss curves per group (`figures/rank_runs/`). |
+| `sync_models` | rsync runs to/from a remote server (`<server>`, `--push`, `--model-folder`, `--remote-dir`). |
+| `stop_runs` | Stop all launcher and training processes (POSIX). |
 
 A run folder `models/<timestamp>[_<run_id>]/` contains:
 
@@ -205,7 +205,7 @@ How a run is shaped:
   - `[model].use_connectome_subset` keeps only the listed cell types.
   - `analysis.model_analysis.model_trimming` removes the least important cell
     types from a trained model while its training loss stays within 10%.
-- **Region:** `run_model` trains optic-lobe models (right eye). Antenna-lobe
+- **Region:** `train` builds optic-lobe models only (right eye). Antenna-lobe
   models are built by the olfactory analysis scripts.
 
 ## Analysis
@@ -262,9 +262,9 @@ drosophila_model/
   model_definition/         ConnectomeModel (neural_models), dynamics mixins (dynamics),
                             regions (optic / antenna lobe), readouts, model_layers,
                             ego_motion (flow <-> 6-DOF), connectome_loading
-  training/                 run_model, submit_runs, continue_training, training_utilities
+  training/                 train, launch_runs, resume_runs, training_utilities
                             (load_processed_stimulus, model_outputs, compute_loss_components,
-                            train_model), loss_functions, model management tools
+                            fit), loss_functions, model management tools
   data_handling/            raw-data and training-data baking, stimulus_generators, sampling,
                             prepare_data, build_data_release, format_connectome_data,
                             split_ct1, build_column_geometry

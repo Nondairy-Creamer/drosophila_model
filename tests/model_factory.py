@@ -61,7 +61,7 @@ def build_model_from_test_config(readouts=None, use_input_conv=True, dynamics_ty
                                  side=None):
     """Build the small test model described by tests/config_test.toml.
 
-    Constructed with the same arguments as ``training/run_model.py``; input
+    Constructed with the same arguments as ``training/train.py``; input
     and output neurons are left to the optic-lobe region defaults. ``side``
     overrides ``[model.regions.optic_lobe].side``. Returns ``(model, config)``.
     """
