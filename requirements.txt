@@ -1,5 +1,5 @@
 # Keep in sync with the [project] dependencies in pyproject.toml
-# (setup_server.sh installs this file, then the package with --no-deps).
+# (setup.sh installs this file, then the package with --no-deps).
 #
 # torch is listed UNPINNED and WITHOUT a custom index on purpose. With no
 # version pin, pip's default "only-if-needed" upgrade strategy makes
@@ -10,13 +10,12 @@
 #
 # On a fresh machine without torch, pip will install the default CPU build
 # from PyPI. GPU users on non-RunPod machines should install their preferred
-# torch wheel BEFORE running setup_server.sh -- pip will then leave it alone.
+# torch wheel BEFORE running setup.sh -- pip will then leave it alone.
 torch
 numpy
 matplotlib
 pandas
 pyarrow
-gdown
 tomli-w
 imageio
 imageio-ffmpeg

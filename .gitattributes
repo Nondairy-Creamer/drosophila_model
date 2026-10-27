@@ -1,0 +1,2 @@
+# Shell scripts keep LF endings on every platform, so Git Bash can run them.
+*.sh text eol=lf

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Drosophila connectome-based recurrent neural models."
 readme = "README.md"
 requires-python = ">=3.11"
-# Keep in sync with requirements.txt (setup_server.sh installs that file and
+# Keep in sync with requirements.txt (setup.sh installs that file and
 # then this package with --no-deps).
 dependencies = [
     "h5py>=3.16.0",
@@ -24,10 +24,8 @@ dependencies = [
     "tomli-w>=1.2.0",
     "torch>=2.11.0",
     "unrar2-cffi>=0.5",  # reads the panorama .rar in process_raw_data (bundles UnRAR)
-    # Tooling: gdown (setup_server.sh downloads), pytest (tests/),
-    # debugpy (.vscode/launch.json attach config).
+    # Tooling: pytest (tests/), debugpy (.vscode/launch.json attach config).
     "debugpy>=1.8.20",
-    "gdown>=5.2.1",
     "pytest>=9.0.2",
 ]
 

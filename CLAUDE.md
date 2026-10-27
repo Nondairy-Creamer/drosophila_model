@@ -25,9 +25,11 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
 
 ### Layout
 
-- `<data_folder>/config.toml`, `<data_folder>/config_data.toml` — copies of
- the per-machine config overlays live here too (`setup_server.sh` installs
- them at the repo root)
+- `bash setup.sh` installs the dependencies, points `config.toml` at the data
+ folder and runs `python -m drosophila_model.data_handling.prepare_data`,
+ which downloads the raw inputs (the Zenodo bundle
+ `drosophila_model_data_v1.zip`) when missing and runs every bake step below
+ whose outputs are missing.
 - `<data_folder>/connectome_data/raw/` — FlyWire Codex downloads (FAFB v783)
  kept as downloaded (`.csv.gz`): `consolidated_cell_types`,
  `connections_princeton_no_threshold`, `column_assignment`,

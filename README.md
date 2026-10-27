@@ -15,19 +15,45 @@ translation) from natural and synthetic visual input.
 
 ## Setup
 
-Requires Python 3.11 or newer.
+1. Download the code:
 
-```bash
-pip install -r requirements.txt
-```
+   ```bash
+   git clone https://github.com/Nondairy-Creamer/drosophila_model.git
+   cd drosophila_model
+   ```
 
-```bash
-pip install -e . --no-deps
-```
+2. Set up a Python environment (Python 3.11 or newer) and activate it, for
+   example:
 
-On a fresh GPU server, `setup_server.sh [DATA_FOLDER]` does both. It also
-downloads the data bundle and installs the per-machine `config.toml` with
-`[data].data_folder` set. Finally it bakes any missing training sets.
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate   # Windows (Git Bash): source .venv/Scripts/activate
+   ```
+
+   To train on a GPU, install the [PyTorch](https://pytorch.org) build for
+   your CUDA version now. Otherwise the next step installs the CPU build. On
+   a server whose system Python already has a working torch (e.g. RunPod),
+   skip the venv and use that Python.
+
+3. Run the setup script from the repo root (on Windows, from Git Bash):
+
+   ```bash
+   bash setup.sh
+   ```
+
+   It installs the dependencies and this package, writes `config.toml` with
+   `[data].data_folder`, downloads the raw data from Zenodo
+   ([doi:10.5281/zenodo.XXXXXXX](https://doi.org/10.5281/zenodo.XXXXXXX),
+   about 3 GB), and bakes them into the files the code reads (a few
+   minutes). The data go to `../drosophila_model_data`, next to the repo,
+   unless you pass another folder: `bash setup.sh /path/to/data`. It bakes
+   the training sets listed in `[stimulus].stimulus_type`, so set that in
+   `config.toml` first if you want other ones (or bake them later, see
+   [Data](#data)). Re-running it skips whatever is already done.
+
+The data steps alone are `python -m drosophila_model.data_handling.prepare_data`
+(add `--zip path/to/drosophila_model_data_v1.zip` to use a copy of the bundle
+you already downloaded).
 
 All commands below are run **from the repo root**, as
 `python -m drosophila_model.<subpackage>.<module>`. Relative paths such as
@@ -70,18 +96,21 @@ In code, use `config.load_config()` for the live config,
 
 ## Data
 
-`[data].data_folder` holds:
+`[data].data_folder` holds the raw inputs from the Zenodo data bundle and the
+files baked from them. `setup.sh` (through `data_handling.prepare_data`)
+downloads the bundle and runs every step in the "Produced by" column.
 
 | Folder | Contents | Produced by |
 |---|---|---|
-| `connectome_data/raw/` | FlyWire Codex downloads (FAFB v783), as `.csv.gz`: `consolidated_cell_types`, `connections_princeton_no_threshold`, `column_assignment`, `fafb_v783_princeton_synapse_table`, and optionally `cell_stats` / `classification` | downloaded from Codex |
+| `connectome_data/raw/` | FlyWire Codex downloads (FAFB v783), as `.csv.gz`: `consolidated_cell_types`, `connections_princeton_no_threshold`, `column_assignment`, `fafb_v783_princeton_synapse_table`, and optionally `cell_stats` / `classification`; the Reiser lab eye map, `eyemap_T4/data/eyemap.RData` | the Zenodo data bundle (files as downloaded from [Codex](https://codex.flywire.ai) and [eyemap_T4](https://github.com/reiserlab/eyemap_T4)) |
 | `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet`, and the CT1 split (`ct1_pieces.parquet`, `ct1_connections.parquet`) | `data_handling.format_connectome_data`, which first runs `data_handling.split_ct1` (each CT1 split into per-column `CT1_M` / `CT1_L` pieces by synapse position) and `data_handling.build_column_geometry` (column viewing directions from the Reiser lab eye map, Zhao et al. 2025, in `connectome_data/raw/eyemap_T4/`) if their outputs are missing |
-| `stimulus/raw/` | `panorama_001-100.rar` (panorama `.mat` files, read from the archive without extracting it) | Meyer et al. 2014 panoramas (`data_001-100.rar`, renamed) |
+| `stimulus/raw/` | `panorama_001-100.rar` (panorama `.mat` files, read from the archive without extracting it) | the Zenodo data bundle (Meyer et al. 2014's `data_001-100.rar`, renamed) |
 | `stimulus/baked/` | `all_panoramic.pt` | `data_handling.process_raw_data random_pano` |
 | `stimulus/training/` | `<type>_train.pt` and `<type>_test.pt` | `data_handling.create_training_data <type>` |
 
-Training never generates stimuli on the fly; it loads `<type>_train.pt`. Bake
-one dataset per stimulus type you train on:
+Training never generates stimuli on the fly; it loads `<type>_train.pt`.
+`setup.sh` bakes the types in `[stimulus].stimulus_type`; bake any other type
+you train on with:
 
 ```bash
 python -m drosophila_model.data_handling.create_training_data random_pano
@@ -214,7 +243,8 @@ drosophila_model/
                             (load_processed_stimulus, model_outputs, compute_loss_components,
                             train_model), loss_functions, model management tools
   data_handling/            raw-data and training-data baking, stimulus_generators, sampling,
-                            format_connectome_data, split_ct1, build_column_geometry
+                            prepare_data, format_connectome_data, split_ct1,
+                            build_column_geometry
   analysis/model_analysis/  analysis scripts + analysis_utilities
   analysis/movie_scripts/   movie scripts + movie_utilities
   fly_eye/                  hex-mosaic rendering of per-column activity
