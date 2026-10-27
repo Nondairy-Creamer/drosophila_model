@@ -118,9 +118,10 @@ column. If the repository is private, the download uses your GitHub CLI login
 
 To publish changed baked files (e.g. after splitting another cell type like
 CT1), bump `DATA_VERSION` in `data_handling/prepare_data.py` and run
-`python -m drosophila_model.data_handling.build_data_release <out_dir> --upload`,
-which zips the data folder into a new `data-<version>` release with the
-GitHub CLI. Code at older commits keeps downloading the release it names.
+`python -m drosophila_model.data_handling.build_data_release`, which zips the
+data folder (in a temporary folder, removed afterwards) and uploads it as a
+new `data-<version>` release with the GitHub CLI. Code at older commits keeps
+downloading the release it names.
 
 | Folder | Contents | Produced by |
 |---|---|---|

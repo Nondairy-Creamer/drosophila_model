@@ -1,29 +1,32 @@
-"""Build the data release that ``prepare_data`` downloads, and optionally upload it.
+"""Build the data release that ``prepare_data`` downloads, and upload it.
 
 Zips the baked files and the raw inputs in ``[data].data_folder``
 (``config.get_data_folder``) into ``drosophila_model_baked_<version>.zip`` and
-``drosophila_model_raw_<version>.zip`` in OUT_DIR, with
-``data_release_README.md`` inside each as ``README.md``, and writes that
-README to OUT_DIR too. <version> is ``prepare_data.DATA_VERSION``. GitHub
-caps a release file at 2 GiB, so a larger zip is split into equal parts
+``drosophila_model_raw_<version>.zip``, with ``data_release_README.md`` inside
+each as ``README.md``. <version> is ``prepare_data.DATA_VERSION``. GitHub caps
+a release file at 2 GiB, so a larger zip is split into equal parts
 ``<zip>.001``, ``<zip>.002``, ..., which ``prepare_data`` joins again.
 
-With ``--upload``, the files are then uploaded to the release
+The zips and the README are written to a temporary folder (about 3.5 GB in
+the system's temp folder), uploaded to the release
 ``prepare_data.DATA_RELEASE`` with the GitHub CLI (``gh``, logged in with write
-access to the repository), creating it if needed. Files of the same name are
-replaced, so code already pointing at that release gets the new data; bump
-``DATA_VERSION`` first to publish a new release instead.
+access to the repository), creating it if needed, and the folder is removed.
+Files of the same name are replaced, so code already pointing at that release
+gets the new data; bump ``DATA_VERSION`` first to publish a new release
+instead. ``--out-dir`` writes the files to a folder of your choice and stops
+there, without uploading.
 
 Usage:
-    python -m drosophila_model.data_handling.build_data_release OUT_DIR
-    python -m drosophila_model.data_handling.build_data_release OUT_DIR --upload
-    python -m drosophila_model.data_handling.build_data_release OUT_DIR --only baked --upload
+    python -m drosophila_model.data_handling.build_data_release
+    python -m drosophila_model.data_handling.build_data_release --only baked
+    python -m drosophila_model.data_handling.build_data_release --out-dir path/to/folder
 """
 import argparse
 import hashlib
 import json
 import re
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -135,29 +138,42 @@ def upload(files, sha256s, bundles, readme_path):
     print("Uploaded; GitHub's SHA-256 of every file matches.")
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Build (and upload) the data release.')
-    parser.add_argument('out_dir', type=Path, help='Folder to write the zips and README to.')
-    parser.add_argument('--only', choices=['baked', 'raw'], default=None, help='Build only one bundle.')
-    parser.add_argument('--upload', action='store_true',
-                        help=f'Upload the files to release {DATA_RELEASE} with the GitHub CLI.')
-    args = parser.parse_args()
+def build(out_dir, only=None):
+    """Write the README and the bundles (all, or just ``only``) to ``out_dir``.
 
+    Returns ``(files, sha256s, bundles)``; the README is ``files[0]``.
+    """
     data_folder = get_data_folder(load_config())
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     readme = README.read_text(encoding='utf-8').replace('{version}', DATA_VERSION)
-    readme_path = args.out_dir / 'README.md'
+    readme_path = out_dir / 'README.md'
     readme_path.write_text(readme, encoding='utf-8')
 
-    bundles = {'baked': [BAKED_BUNDLE], 'raw': [RAW_BUNDLE], None: [BAKED_BUNDLE, RAW_BUNDLE]}[args.only]
+    bundles = {'baked': [BAKED_BUNDLE], 'raw': [RAW_BUNDLE], None: [BAKED_BUNDLE, RAW_BUNDLE]}[only]
     files = [readme_path]
     for name in bundles:
-        files += build_bundle(name, data_folder, args.out_dir, readme)
+        files += build_bundle(name, data_folder, out_dir, readme)
     sha256s = [_sha256(f) for f in files]
     for f, sha256 in zip(files, sha256s):
         print(f"{f.name}: {f.stat().st_size / 1e6:,.1f} MB, sha256 {sha256}", flush=True)
-    if args.upload:
-        upload(files, sha256s, bundles, readme_path)
+    return files, sha256s, bundles
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=f'Build the data release and upload it to release {DATA_RELEASE} with the GitHub CLI.'
+    )
+    parser.add_argument('--only', choices=['baked', 'raw'], default=None, help='Build only one bundle.')
+    parser.add_argument('--out-dir', type=Path, default=None,
+                        help='Write the files to this folder and stop, without uploading.')
+    args = parser.parse_args()
+
+    if args.out_dir is not None:
+        build(args.out_dir, args.only)
+        return
+    with tempfile.TemporaryDirectory(prefix='drosophila_model_release_') as tmp:
+        files, sha256s, bundles = build(Path(tmp), args.only)
+        upload(files, sha256s, bundles, files[0])
 
 
 if __name__ == '__main__':
