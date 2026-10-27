@@ -55,6 +55,11 @@ translation) from natural and synthetic visual input.
    To rebuild the processed data from the raw data instead (about 3.2 GB to
    download), run `bash setup.sh --raw`.
 
+   If the download is very slow on Windows, check that TCP auto-tuning is on:
+   `netsh interface tcp show global` should show "Receive Window Auto-Tuning
+   Level: normal". To turn it on, run
+   `netsh interface tcp set global autotuninglevel=normal` as administrator.
+
 The data steps alone are `python -m drosophila_model.data_handling.prepare_data`
 (with `--raw` as above, and `--zip path/to/drosophila_model_baked_v1.zip` or
 `drosophila_model_raw_v1.zip` to use a copy you already downloaded).
