@@ -76,7 +76,7 @@ In code, use `config.load_config()` for the live config,
 |---|---|---|
 | `connectome_data/raw/` | FlyWire Codex downloads (FAFB v783), as `.csv.gz`: `consolidated_cell_types`, `connections_princeton_no_threshold`, `column_assignment`, `fafb_v783_princeton_synapse_table`, and optionally `cell_stats` / `classification` | downloaded from Codex |
 | `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet`, and the CT1 split (`ct1_pieces.parquet`, `ct1_connections.parquet`) | `data_handling.format_connectome_data`, which first runs `data_handling.split_ct1` (each CT1 split into per-column `CT1_M` / `CT1_L` pieces by synapse position) and `data_handling.build_column_geometry` (column viewing directions from the Reiser lab eye map, Zhao et al. 2025, in `connectome_data/raw/eyemap_T4/`) if their outputs are missing |
-| `stimulus/raw/` | panorama `.mat` files | Meyer et al. 2014 panoramas |
+| `stimulus/raw/` | `panorama_001-100.rar` (panorama `.mat` files, read from the archive without extracting it) | Meyer et al. 2014 panoramas (`data_001-100.rar`, renamed) |
 | `stimulus/baked/` | `all_panoramic.pt` | `data_handling.process_raw_data random_pano` |
 | `stimulus/training/` | `<type>_train.pt` and `<type>_test.pt` | `data_handling.create_training_data <type>` |
 

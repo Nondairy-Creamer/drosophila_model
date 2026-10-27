@@ -26,3 +26,4 @@ pytest
 h5py
 scikit-learn
 rdata
+unrar2-cffi

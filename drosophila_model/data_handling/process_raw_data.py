@@ -1,8 +1,9 @@
 """Bake the large raw inputs into cached ``.pt`` files under ``stimulus/baked``.
 
 This is the first stage of the data pipeline. The raw panorama ``.mat`` files
-are large and slow to decode, so this script reads them once from
-``<data_folder>/stimulus/raw`` and writes a compact ``.pt`` cache to
+are large and slow to decode, so this script reads them once, straight out of
+the ``panorama_001-100.rar`` archive in ``<data_folder>/stimulus/raw`` (no
+extraction step), and writes a compact ``.pt`` cache to
 ``<data_folder>/stimulus/baked``:
 
 * ``random_pano`` -> ``all_panoramic.pt`` ((N, H, W) raw panorama images)
@@ -21,6 +22,7 @@ Usage::
     python -m drosophila_model.data_handling.process_raw_data random_pano
 """
 import argparse
+import io
 from pathlib import Path
 
 import numpy as np
@@ -29,52 +31,32 @@ import torch
 from drosophila_model.config import get_data_folder, load_config
 
 RAW_TYPES = ('random_pano',)
+# data_001-100.rar from Meyer et al. 2014 (doi:10.4119/unibi/2689637), renamed.
+PANORAMA_ARCHIVE = 'panorama_001-100.rar'
 
 
-def loadmat_v73(path):
-    """Read a MATLAB v7.3 ``.mat`` file into a dict of numpy arrays."""
+def loadmat_v73(source):
+    """Read a MATLAB v7.3 ``.mat`` file (path or file object) into a dict of numpy arrays."""
     import h5py
     out = {}
-    with h5py.File(path, "r") as f:
+    with h5py.File(source, "r") as f:
         for k in f.keys():
             out[k] = np.array(f[k])
     return out
 
 
-def _find_pano_mat_files(raw_dir):
-    """Locate the panorama ``.mat`` files, raising a clear error if missing.
-
-    Looks in the dedicated ``panoramic/`` subfolder first (where the archive is
-    meant to be extracted), then falls back to ``raw_dir`` itself.
-    """
-    search_dirs = [raw_dir / 'panoramic', raw_dir]
-    for d in search_dirs:
-        mats = sorted(d.glob('*.mat'))
-        if mats:
-            return mats
-
-    rar_files = sorted(raw_dir.glob('panorama_*.rar'))
-    if rar_files:
-        raise FileNotFoundError(
-            f"Found {rar_files[0].name} but no extracted .mat files. "
-            f"Extract the archive into {raw_dir / 'panoramic'} and re-run."
-        )
-    raise FileNotFoundError(
-        f"No panorama .mat files found in {raw_dir / 'panoramic'} or {raw_dir}."
-    )
-
-
-def _extract_pano_image(mat_path):
+def _extract_pano_image(mat_file, name):
     """Extract the raw panorama image array from a single ``.mat`` file.
 
     Mirrors the historical loader: take the 2D arrays in the file (dropping the
     first, which is MATLAB metadata), pick the largest, and transpose it.
+    ``mat_file`` is a path or file object; ``name`` is used in errors.
     """
-    pano_data = loadmat_v73(str(mat_path))
+    pano_data = loadmat_v73(mat_file)
     pano_candidates = [np.asarray(v) for v in pano_data.values() if np.ndim(v) == 2][1:]
     if not pano_candidates:
         raise ValueError(
-            f"Panoramic .mat file {mat_path} did not contain a 2D array. "
+            f"Panoramic .mat file {name} did not contain a 2D array. "
             "Keys: " + ", ".join(pano_data.keys())
         )
     return max(pano_candidates, key=lambda a: a.size).T
@@ -83,18 +65,27 @@ def _extract_pano_image(mat_path):
 def process_random_pano(data_folder):
     """Consolidate the raw panorama ``.mat`` images into a single ``.pt``.
 
-    Returns the path of the written ``all_panoramic.pt`` file.
+    The ``.mat`` files are read in memory from :data:`PANORAMA_ARCHIVE`, in
+    file-name order. Returns the path of the written ``all_panoramic.pt`` file.
     """
+    from unrar.cffi import rarfile
+
     data_folder = Path(data_folder)
-    raw_dir = data_folder / 'stimulus' / 'raw'
+    archive = data_folder / 'stimulus' / 'raw' / PANORAMA_ARCHIVE
     baked_dir = data_folder / 'stimulus' / 'baked'
-    mat_files = _find_pano_mat_files(raw_dir)
-    print(f"[random_pano] Found {len(mat_files)} panorama .mat files.")
+    if not archive.exists():
+        raise FileNotFoundError(
+            f"Panorama archive not found: {archive}. It is data_001-100.rar from "
+            "Meyer et al. 2014 (doi:10.4119/unibi/2689637), renamed."
+        )
+    rar = rarfile.RarFile(str(archive))
+    mat_names = sorted(n for n in rar.namelist() if n.endswith('.mat'))
+    print(f"[random_pano] Found {len(mat_names)} panorama .mat files in {archive.name}.")
 
     panos = []
-    for mat_path in mat_files:
-        print(f"[random_pano] Loading {mat_path.name}...")
-        panos.append(_extract_pano_image(mat_path))
+    for name in mat_names:
+        print(f"[random_pano] Loading {name}...")
+        panos.append(_extract_pano_image(io.BytesIO(rar.read(name)), name))
 
     panos = np.stack(panos).astype(np.float32)
     baked_dir.mkdir(parents=True, exist_ok=True)

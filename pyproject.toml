@@ -23,6 +23,7 @@ dependencies = [
     "scipy>=1.17.1",
     "tomli-w>=1.2.0",
     "torch>=2.11.0",
+    "unrar2-cffi>=0.5",  # reads the panorama .rar in process_raw_data (bundles UnRAR)
     # Tooling: gdown (setup_server.sh downloads), pytest (tests/),
     # debugpy (.vscode/launch.json attach config).
     "debugpy>=1.8.20",

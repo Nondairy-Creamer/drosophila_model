@@ -45,7 +45,9 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
  direction, from the eye map matched to FlyWire columns; rim columns the eye
  map misses are interpolated, `source == 'interpolated'`).
 - `<data_folder>/stimulus/raw/` — raw stimulus source files, read once by
- `process_raw_data.py`: the raw `panoramic/*.mat` panoramas.
+ `process_raw_data.py`: `panorama_001-100.rar`, the raw panoramas (Meyer et
+ al. 2014's `data_001-100.rar`, renamed). Its `.mat` files are read straight
+ from the archive; it is never extracted.
 - `<data_folder>/stimulus/baked/` — caches produced by
  `python -m drosophila_model.data_handling.process_raw_data random_pano` and
  consumed by the on-the-fly generators in `stimulus_generators.py`:

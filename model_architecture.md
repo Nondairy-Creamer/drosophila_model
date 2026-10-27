@@ -207,7 +207,8 @@ with the stimulus data, under `config['data']['data_folder']` (read it with
 │             # right-eye geometry, loaded by OpticLobeRegion._load_extras
 └── stimulus/
     ├── raw/                          # raw sources, read once by process_raw_data.py
-    │   └── panoramic/                # raw panorama .mat source images (random_pano)
+    │   └── panorama_001-100.rar      # raw panorama .mat source images (random_pano),
+    │                                 # read from the archive without extracting it
     ├── baked/                        # cache from process_raw_data.py random_pano,
     │   │                             # read by the generators in stimulus_generators.py
     │   └── all_panoramic.pt          # consolidated raw panorama images (random_pano)
