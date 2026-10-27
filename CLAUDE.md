@@ -28,7 +28,10 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
 - `bash setup.sh` installs the dependencies, points `config.toml` at the data
  folder and runs `python -m drosophila_model.data_handling.prepare_data`.
  When `connectome_data/baked/` or `stimulus/baked/` is missing, that
- downloads them ready-made from Zenodo (`drosophila_model_baked_v1.zip`);
+ downloads them ready-made from the repo's GitHub release `data-v1`
+ (`drosophila_model_baked_v1.zip`; the tag is `data-` +
+ `prepare_data.DATA_VERSION`, and `build_data_release` builds and uploads a
+ release);
  with `--raw`, or when the raw inputs are already there, it bakes them from
  the raw inputs instead (downloading `drosophila_model_raw_v1.zip` if they
  are missing). It then bakes the missing training sets.

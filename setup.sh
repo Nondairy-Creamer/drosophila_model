@@ -1,7 +1,8 @@
 #!/bin/bash
 # Set up the code base from a fresh clone: install the dependencies, download
-# the data from Zenodo and bake the training sets. Run from the repo root,
-# inside the Python environment you want to use (on Windows, from Git Bash):
+# the data from the repo's GitHub data release and bake the training sets.
+# Run from the repo root, inside the Python environment you want to use (on
+# Windows, from Git Bash):
 #
 #     bash setup.sh [--raw] [DATA_FOLDER [DATA_ZIP]]
 #
@@ -13,7 +14,8 @@
 # By default the connectome tables and panorama cache are downloaded
 # ready-made (drosophila_model_baked_v1.zip, about 250 MB). --raw downloads
 # the raw data instead (drosophila_model_raw_v1.zip, about 3.2 GB) and bakes
-# them from it.
+# them from it. If the repo is private, the download uses your GitHub CLI
+# login (gh auth login) or a token in $GITHUB_TOKEN.
 #
 # DATA_ZIP (or $DATA_ZIP) is a local copy of either zip to use instead of
 # downloading it.

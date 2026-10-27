@@ -1,4 +1,4 @@
-"""Download the data from Zenodo and bake everything the code reads.
+"""Download the data from the GitHub data release and bake everything the code reads.
 
 Fills ``[data].data_folder`` (``config.get_data_folder``) in two steps,
 skipping any whose outputs already exist:
@@ -6,21 +6,25 @@ skipping any whose outputs already exist:
 1. Baked files: the connectome tables in ``connectome_data/baked/`` and the
    panorama cache ``stimulus/baked/all_panoramic.pt``. By default they are
    downloaded ready-made, as ``drosophila_model_baked_v1.zip`` (about
-   250 MB) from Zenodo record :data:`ZENODO_RECORD`. With ``--raw``, or when
-   the raw inputs are already in the data folder, they are baked from the raw
-   inputs instead, by ``format_connectome_data`` (connectome tables, CT1
-   split, column geometry) and ``process_raw_data`` (panorama cache). Missing
-   raw inputs are downloaded as ``drosophila_model_raw_v1.zip`` (about
-   3.2 GB): the FlyWire Codex downloads and the Reiser lab eye map in
-   ``connectome_data/raw/``, and the panorama archive in ``stimulus/raw/``.
+   250 MB) from the release :data:`DATA_RELEASE` of :data:`DATA_REPO`. With
+   ``--raw``, or when the raw inputs are already in the data folder, they are
+   baked from the raw inputs instead, by ``format_connectome_data``
+   (connectome tables, CT1 split, column geometry) and ``process_raw_data``
+   (panorama cache). Missing raw inputs are downloaded as
+   ``drosophila_model_raw_v1.zip`` (about 3.2 GB, in parts under GitHub's
+   2 GiB file limit): the FlyWire Codex downloads and the Reiser lab eye map
+   in ``connectome_data/raw/``, and the panorama archive in ``stimulus/raw/``.
 2. Training sets: ``create_training_data`` for every type in
    ``[stimulus].stimulus_type``.
 
-A downloaded bundle is checked against the MD5 Zenodo lists, unpacked and
-deleted. ``--zip`` unpacks a local copy of either bundle first instead. Files
-already in the data folder are never overwritten.
+A downloaded bundle is checked against the SHA-256 GitHub lists, unpacked and
+deleted. If the repository is private, the download uses the ``GH_TOKEN`` or
+``GITHUB_TOKEN`` environment variable, else the GitHub CLI's login
+(``gh auth login``). ``--zip`` unpacks a local copy of either bundle first
+instead. Files already in the data folder are never overwritten.
 
-``setup.sh`` runs this after installing the dependencies.
+``setup.sh`` runs this after installing the dependencies. The bundles are
+built and uploaded by ``build_data_release``.
 
 Usage:
     python -m drosophila_model.data_handling.prepare_data
@@ -30,9 +34,12 @@ Usage:
 import argparse
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -40,9 +47,13 @@ from pathlib import Path
 from drosophila_model.config import get_data_folder, load_config
 
 
-ZENODO_RECORD = ''  # TODO: the record number, once the Zenodo record is reserved
-BAKED_BUNDLE = 'drosophila_model_baked_v1.zip'
-RAW_BUNDLE = 'drosophila_model_raw_v1.zip'
+DATA_REPO = 'Nondairy-Creamer/drosophila_model'
+# The data the code downloads: the release tagged data-<DATA_VERSION>. Bump it
+# (and publish that release with build_data_release) when the data change.
+DATA_VERSION = 'v1'
+DATA_RELEASE = f'data-{DATA_VERSION}'
+BAKED_BUNDLE = f'drosophila_model_baked_{DATA_VERSION}.zip'
+RAW_BUNDLE = f'drosophila_model_raw_{DATA_VERSION}.zip'
 # The raw inputs in the raw bundle, relative to the data folder.
 RAW_FILES = (
     'connectome_data/raw/consolidated_cell_types.csv.gz',
@@ -69,38 +80,98 @@ def _missing(data_folder, files):
     return [f for f in files if not (data_folder / f).exists()]
 
 
-def _zenodo_file(name):
-    """Return ``(url, md5, size)`` of file ``name`` in :data:`ZENODO_RECORD`."""
-    if not ZENODO_RECORD:
+def _github_token():
+    """A GitHub token from ``GH_TOKEN`` / ``GITHUB_TOKEN`` or the GitHub CLI's login, else None."""
+    for variable in ('GH_TOKEN', 'GITHUB_TOKEN'):
+        if os.environ.get(variable):
+            return os.environ[variable]
+    try:
+        result = subprocess.run(['gh', 'auth', 'token'], capture_output=True, text=True)
+    except OSError:  # no GitHub CLI
+        return None
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def _open(url, token=None, accept='application/vnd.github+json'):
+    """Open ``url``, authenticated with ``token`` if given."""
+    request = urllib.request.Request(url, headers={'Accept': accept, 'User-Agent': 'drosophila_model'})
+    if token:
+        # Unredirected: not passed on to the storage host GitHub redirects downloads to.
+        request.add_unredirected_header('Authorization', f'Bearer {token}')
+    return urllib.request.urlopen(request)
+
+
+def _release_assets():
+    """Return ``(assets, token)`` for :data:`DATA_RELEASE`.
+
+    Tries without a login first; ``token`` is the one needed to download the
+    assets (None for a public repository).
+    """
+    url = f'https://api.github.com/repos/{DATA_REPO}/releases/tags/{DATA_RELEASE}'
+    try:
+        with _open(url) as response:
+            return json.load(response)['assets'], None
+    except urllib.error.HTTPError as error:
+        if error.code != 404:  # a private repository looks missing without a login
+            raise
+    where = f"release {DATA_RELEASE} of github.com/{DATA_REPO}"
+    token = _github_token()
+    if token is None:
         raise RuntimeError(
-            "The Zenodo record for the data is not set yet "
-            "(ZENODO_RECORD in drosophila_model/data_handling/prepare_data.py). "
-            f"Pass a local copy of {name} with --zip."
+            f"Could not find {where}. If the repository is private, log in with "
+            f"`gh auth login` or set GITHUB_TOKEN to a token that can read it, "
+            f"then re-run. Or pass a local copy of the bundle with --zip."
         )
-    with urllib.request.urlopen(f'https://zenodo.org/api/records/{ZENODO_RECORD}') as response:
-        files = json.load(response)['files']
-    entry = next((f for f in files if f['key'] == name), None)
-    if entry is None:
-        raise RuntimeError(f"Zenodo record {ZENODO_RECORD} has no file {name}.")
-    return entry['links']['self'], entry['checksum'].removeprefix('md5:'), entry['size']
+    try:
+        with _open(url, token) as response:
+            return json.load(response)['assets'], token
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403, 404):
+            raise RuntimeError(
+                f"Could not read {where} with your GitHub login ({error}). Check that "
+                f"the release exists and that the login can read the repository "
+                f"(`gh auth status`), or that GH_TOKEN / GITHUB_TOKEN is a valid "
+                f"token for it."
+            ) from None
+        raise
 
 
-def _download(url, out_path, md5, size):
-    """Stream ``url`` to ``out_path``, checking its MD5."""
+def _bundle_assets(name, assets):
+    """The release assets that make up bundle ``name``, in order.
+
+    That is the asset ``name`` itself or, for a bundle over GitHub's 2 GiB
+    file limit, its parts ``name.001``, ``name.002``, ...
+    """
+    if whole := [a for a in assets if a['name'] == name]:
+        return whole
+    pattern = re.escape(name) + r'\.\d{3}'
+    if parts := sorted((a for a in assets if re.fullmatch(pattern, a['name'])), key=lambda a: a['name']):
+        return parts
+    raise RuntimeError(f"Release {DATA_RELEASE} of github.com/{DATA_REPO} has no {name}.")
+
+
+def _download(assets, out_path, token):
+    """Stream ``assets`` to ``out_path``, joined in order, checking each one's SHA-256."""
     part_path = out_path.with_name(out_path.name + '.part')
-    digest = hashlib.md5()
+    size = sum(a['size'] for a in assets)
     done, next_report = 0, 0
-    with urllib.request.urlopen(url) as response, open(part_path, 'wb') as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-            digest.update(chunk)
-            done += len(chunk)
-            if done >= next_report:
-                print(f"  {done / 1e6:,.0f} / {size / 1e6:,.0f} MB", flush=True)
-                next_report += size // 20
-    if digest.hexdigest() != md5:
-        part_path.unlink()
-        raise RuntimeError(f"MD5 mismatch for {url}; the download is corrupt, re-run to retry.")
+    with open(part_path, 'wb') as out:
+        for asset in assets:
+            # The API URL takes a login (for a private repository); the browser one does not.
+            url = asset['url'] if token else asset['browser_download_url']
+            digest = hashlib.sha256()
+            with _open(url, token, accept='application/octet-stream') as response:
+                while chunk := response.read(1 << 20):
+                    out.write(chunk)
+                    digest.update(chunk)
+                    done += len(chunk)
+                    if done >= next_report:
+                        print(f"  {done / 1e6:,.0f} / {size / 1e6:,.0f} MB", flush=True)
+                        next_report += size // 20
+            if asset.get('digest') not in (None, f'sha256:{digest.hexdigest()}'):
+                out.close()
+                part_path.unlink()
+                raise RuntimeError(f"SHA-256 mismatch for {asset['name']}; the download is corrupt, re-run to retry.")
     part_path.replace(out_path)
 
 
@@ -129,14 +200,16 @@ def _unpack(zip_path, data_folder):
 
 
 def get_bundle(name, data_folder, expected):
-    """Download bundle ``name`` from Zenodo and unpack it into ``data_folder``.
+    """Download bundle ``name`` from :data:`DATA_RELEASE` and unpack it into ``data_folder``.
 
     Raises unless every file in ``expected`` is in ``data_folder`` afterwards.
     """
-    url, md5, size = _zenodo_file(name)
+    assets, token = _release_assets()
+    assets = _bundle_assets(name, assets)
+    size = sum(a['size'] for a in assets)
     downloaded = data_folder / name
-    print(f"Downloading {name} ({size / 1e6:,.0f} MB) from Zenodo record {ZENODO_RECORD} ...")
-    _download(url, downloaded, md5, size)
+    print(f"Downloading {name} ({size / 1e6:,.0f} MB) from release {DATA_RELEASE} of github.com/{DATA_REPO} ...")
+    _download(assets, downloaded, token)
     print(f"Unpacking {name} into {data_folder} ...")
     _unpack(downloaded, data_folder)
     downloaded.unlink()
@@ -194,8 +267,9 @@ def prepare_data(raw=False, zip_path=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Download the data from Zenodo and bake everything the code '
-                    'reads into [data].data_folder, skipping finished steps.'
+        description='Download the data from the GitHub data release and bake '
+                    'everything the code reads into [data].data_folder, '
+                    'skipping finished steps.'
     )
     parser.add_argument(
         '--raw', action='store_true',

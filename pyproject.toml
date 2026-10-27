@@ -34,7 +34,7 @@ include = ["drosophila_model*"]
 exclude = ["tests*", "models*", "logs*", "figures*", "math*"]
 
 [tool.setuptools.package-data]
-drosophila_model = ["config_default.toml", "config_default_data.toml"]
+drosophila_model = ["config_default.toml", "config_default_data.toml", "data_handling/data_release_README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
