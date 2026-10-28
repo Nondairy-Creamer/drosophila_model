@@ -114,6 +114,7 @@ class RegionView(nn.Module):
     #   True: a neuron is in this region only if EVERY one of its
     #       above-threshold connections lies within this region's neuropils
     #       (much more restrictive — keeps only neurons intrinsic to the area).
+    #       Unassigned (UNASGD) synapses don't count as outside.
     # "Above-threshold" uses the model's ``synapse_count_threshold`` so the
     # same thresholded matrix that drives the dynamics drives membership.
     intrinsic: bool = False

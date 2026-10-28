@@ -40,7 +40,8 @@ torch.nn.Module
 │      Region membership is union-by-neuropil: a neuron belongs to the region
 │      if it has an above-threshold connection (pair total) with synapses
 │      in any of the region's resolved neuropils (with intrinsic = true: only
-│      if all its above-threshold connections lie inside them).
+│      if all its above-threshold connections lie inside them, ignoring
+│      unassigned UNASGD synapses).
 │
 ├── Regions (regions.py, all nn.Module so submodules land in state_dict)
 │   ├── RegionView            Base: name + cell_indices + side; weakref to model;
@@ -129,7 +130,10 @@ above-threshold connection in every neuropil where it has synapses. With
 `intrinsic = false` (default) a neuron is claimed if it has at least one
 above-threshold connection (as pre or post) in any of the region's resolved
 neuropils; with `intrinsic = true` only if all of its above-threshold
-connections lie inside them.
+connections lie inside them. Synapses FlyWire assigns to no neuropil
+(`UNASGD`, mostly in the gaps between neighbouring neuropils) don't count as
+outside: otherwise a single stray one drops a cell, which removed 15-35% of
+the L1, Mi1 and T1 cells.
 The model's neurons are the union over regions, and every synapse between two
 kept neurons is kept, whichever neuropil it sits in. Each region carries its
 own side, so different regions can come from different hemispheres in the

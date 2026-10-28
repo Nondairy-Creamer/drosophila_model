@@ -25,7 +25,8 @@ to the total synapse count of a neuron pair, summed over neuropils. Membership
 uses the above-threshold connections: with ``intrinsic=False`` (default) a
 neuron is claimed if it has at least one above-threshold connection with
 synapses in any of a region's resolved neuropils; with ``intrinsic=True`` only
-if *every* one of its above-threshold connections lies within them. Membership is **union** across regions — the same
+if *every* one of its above-threshold connections lies within them (synapses
+in no neuropil, ``UNASGD``, are ignored). Membership is **union** across regions — the same
 neuron can belong to multiple regions, but only contributes one row to
 the model's neuron axis.
 
@@ -51,6 +52,9 @@ from drosophila_model.config import get_data_folder, load_config
 # computed from the synapse table).
 _CORE_CELL_INFO_COLS = ('root_id', 'primary_type', 'neurotransmitter', 'neuropils')
 _VALID_SIDES = ('right', 'left', 'both')
+# FlyWire's neuropil label for synapses outside every neuropil mesh, mostly in
+# the gaps between neighbouring neuropils. The intrinsic rule ignores them.
+_UNASSIGNED_NEUROPIL = 'UNASGD'
 
 
 @dataclass
@@ -245,7 +249,9 @@ def load_connectome_from_dataframes(
     - ``intrinsic=True``: a neuron is in region R only if it has an
       above-threshold connection in R AND *every* one of its above-threshold
       connections lies within R's resolved neuropils (drops neurons that also
-      project/receive strongly outside the area).
+      project/receive strongly outside the area). Unassigned synapses
+      (neuropil ``UNASGD``, mostly at neuropil boundaries) are not counted as
+      outside.
 
     ``count_threshold`` should match the model's ``synapse_count_threshold``
     so membership and dynamics see the same matrix. The returned
@@ -324,7 +330,11 @@ def load_connectome_from_dataframes(
         in_region = endpoints['neuropil'].isin(region_set)
         any_in = np.isin(root_ids, endpoints.loc[in_region, 'root_id'].to_numpy())
         if intrinsic_flags[name]:
-            any_out = np.isin(root_ids, endpoints.loc[~in_region, 'root_id'].to_numpy())
+            # Unassigned synapses don't count as outside: they are mostly
+            # boundary synapses of cells inside the region (one stray one,
+            # e.g. 1 of an L1's 97 synapses onto a C3, would drop the cell).
+            outside = ~in_region & (endpoints['neuropil'] != _UNASSIGNED_NEUROPIL)
+            any_out = np.isin(root_ids, endpoints.loc[outside, 'root_id'].to_numpy())
             mask = any_in & ~any_out
         else:
             mask = any_in
