@@ -809,6 +809,17 @@ class ConnectomeModel(BaseRnn):
         self._sign_synapses()
         self._apply_region_sign_overrides()
 
+    def zero_init_readouts(self):
+        """Start each ``zero_init`` readout at zero output (new models only).
+
+        Called by the dynamics ``__init__`` methods after the parameter-init
+        noise, so the noise draws (and every other parameter) are unchanged.
+        """
+        for region in self.regions.values():
+            for readout in region._readout_modules.values():
+                if getattr(readout, 'zero_init', False):
+                    readout.zero_output()
+
     def _silencing_mask(self, neurons_to_silence, invert_silencing=False):
         """Return a boolean mask over cell types for neurons to silence."""
         if not neurons_to_silence:

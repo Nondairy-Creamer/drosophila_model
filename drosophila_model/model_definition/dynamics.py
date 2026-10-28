@@ -36,7 +36,7 @@ From ``ConnectomeModel``:
     ``unique_cell_types``, ``cell_types``, ``transmitters``,
     ``unique_transmitters``, ``num_transmitters``, ``steady_state`` buffer,
     ``_csr_abs_row_col_sums(csr)``, ``_initialize_synapse_signs()``,
-    ``_silencing_mask(neurons, invert)``.
+    ``_silencing_mask(neurons, invert)``, ``zero_init_readouts()``.
 
 Connectome-layout contract
 ==========================
@@ -206,6 +206,7 @@ class CurrentDynamics:
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
+                self.zero_init_readouts()
 
     def _apply_sigma_scale(self, scale_factor):
         """Shift ``output_strength_log`` by ``log(scale_factor)``."""
@@ -359,6 +360,7 @@ class CurrentDivisiveDynamics:
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
+                self.zero_init_readouts()
 
     def _build_signed_split(self):
         """Split signed ``synapse_counts`` into ``W+`` and ``|W-|`` CSRs.
@@ -592,6 +594,7 @@ class ConductanceDynamics:
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
+                self.zero_init_readouts()
 
     def _override_edge_transmitters(self):
         """Edges and their effective transmitter after the region sign overrides.
@@ -909,6 +912,7 @@ class CellAnnDynamics:
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
+                self.zero_init_readouts()
 
     def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
         """Silence cell types' outputs (and optionally inputs).
@@ -1047,6 +1051,7 @@ class ArbitraryDynamics:
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
+                self.zero_init_readouts()
 
     def silence_neurons(self, neurons_to_silence, invert_silencing=False, silence_inputs=False):
         """Zero the chosen cell types' outgoing (and optionally incoming) weights."""

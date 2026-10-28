@@ -308,7 +308,7 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                 loss_components,
                 rng=None, model_save_folder=None,
                 num_steps=100, save_every=100, alpha=1e-4,
-                clip_grad_norm=None,
+                clip_grad_norm=None, adam_beta2=0.99,
                 reload_best_on_loss_jump=True,
                 patience=10, alpha_factor=0.5,
                 opt_state_dict=None, loss_history=None,
@@ -330,6 +330,14 @@ def fit(model, inputs, target, output_neurons, input_neurons,
     ``opt_state_dict`` / ``loss_history`` to resume a run (a resumed run only
     overwrites ``model.pt`` once it beats the best epoch of ``loss_history``).
     ``clip_grad_norm=None`` disables gradient clipping.
+
+    ``adam_beta2`` is Adam's second-moment decay. Training starts on a flat
+    stretch (flow_loss ~1) where almost no gradient reaches the network, and
+    rare large gradients (the first step, or a spiking batch) land in the
+    second-moment estimate. With PyTorch's default 0.999 (~1000-step memory)
+    one spike shrinks every step for hundreds of steps and can stall the
+    start of learning; 0.99 (~100 steps) lets it recover. A resumed
+    ``opt_state_dict`` keeps the betas it was saved with.
     """
 
     if rng is None:
@@ -345,7 +353,7 @@ def fit(model, inputs, target, output_neurons, input_neurons,
     if train_mask is None:
         train_mask = torch.ones(inputs.shape[:3], dtype=torch.bool, device=inputs.device)
 
-    opt = torch.optim.Adam(model.parameters(), lr=alpha)
+    opt = torch.optim.Adam(model.parameters(), lr=alpha, betas=(0.9, adam_beta2))
 
     # Region-agnostic mapping round-trip. The first iteration passes the
     # caller-provided cell-type-name lists (None = region defaults); predict()

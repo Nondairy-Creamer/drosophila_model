@@ -11,6 +11,8 @@ attributes:
   by the ``flow_loss`` loss and the ego-motion solver).
 * ``predicts_motion_mag`` – ``True`` for scalar motion-magnitude readouts
   (used by the ``motion_mag`` loss).
+* ``zero_init`` – ``True`` when a newly built model should start the readout
+  at zero output (:meth:`HexGridReadout.zero_output`).
 
 **Regularizers** are ``torch.nn.Module`` subclasses with ``training_only = True``.
 They are called once per ``predict()`` (after the time loop) with the model as
@@ -54,6 +56,7 @@ class HexGridReadout(torch.nn.Module):
     eye_asymmetric: bool = False
     predicts_flow: bool = False
     predicts_motion_mag: bool = False
+    zero_init: bool = False
 
     def __init__(self, *, neurons_to_decode=None, column_p_q, cell_types,
                  column_indices, num_neurons, num_columns,
@@ -135,6 +138,27 @@ class HexGridReadout(torch.nn.Module):
         safe = self.column_to_decoder_neurons.clamp(min=0)
         features = v[:, safe]
         return features.masked_fill(~valid.unsqueeze(0), float('nan'))
+
+    def zero_output(self):
+        """Start at zero output: zero the last layer, with a denominator of 1.
+
+        Called on new models after the parameter-init noise. A random readout
+        reading tonically active cells gives first predictions far larger than
+        the targets (the denominator can sit near ``denom_eps``, amplifying
+        them up to 100x). The resulting first-step gradient spike stays in
+        Adam's second-moment estimate and shrinks the steps that follow, which
+        can keep training on the flat start (flow_loss ~1) for a long time.
+        Not for ``positive_weights`` layers, whose zero is exp(0).
+        """
+        last = self.conv_layers[-1]
+        if last.positive_weights:
+            raise ValueError("zero_output() needs a last layer without positive_weights.")
+        with torch.no_grad():
+            last.weight.zero_()
+            if last.bias is not None:
+                last.bias.zero_()
+                if self.use_denominator:
+                    last.bias[-1] = np.log(np.expm1(1.0))  # softplus(bias) = 1
 
     def flip_for_left_eye(self, x):
         """Transform readout output for left-eye convention.
@@ -242,6 +266,7 @@ class FlowLinearReadout(HexGridReadout):
     output_extra_dims = (2,)
     eye_asymmetric = True
     predicts_flow = True
+    zero_init = True
 
     def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
@@ -257,6 +282,7 @@ class FlowConv2Readout(HexGridReadout):
     output_extra_dims = (2,)
     eye_asymmetric = True
     predicts_flow = True
+    zero_init = True
 
     def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(
@@ -272,6 +298,7 @@ class FlowConv3Readout(HexGridReadout):
     output_extra_dims = (2,)
     eye_asymmetric = True
     predicts_flow = True
+    zero_init = True
 
     def __init__(self, *, readout_neurons=None, **kwargs):
         super().__init__(

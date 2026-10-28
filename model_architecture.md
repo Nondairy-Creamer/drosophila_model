@@ -423,7 +423,13 @@ dataset:
    `[stimulus].stimulus_type` and returns the stimulus, `optic_flow`,
    `train_mask`, `rotation` / `translation` targets, `num_eyes` and
    `eye_offset` of the dataset.
-3. `training_utilities.fit` runs Adam over batches. Each batch goes
+3. `training_utilities.fit` runs Adam over batches, with betas (0.9, 0.99)
+   rather than PyTorch's (0.9, 0.999). Training starts on a flat stretch
+   (flow_loss ~1, odometry_loss ~0.5) where almost no gradient reaches the
+   network; a rare large gradient (a spiking batch) stays in Adam's
+   second-moment estimate for ~1/(1 - beta2) steps and shrinks every step in
+   that time, which with 0.999 could hold learning off for hundreds of steps.
+   Each batch goes
    through `training_utilities.model_outputs(model, inputs, train_mask,
    num_eyes, eye_offset)`, which picks the path from the dataset's `num_eyes`:
    - `num_eyes == 2` (every baked dataset; columns `[right | left]`):
@@ -665,6 +671,11 @@ through `HexGridConv` layers with softplus between them. Flow readouts set
 `predicts_flow` (used by `flow_loss` and the ego-motion solver) and
 `eye_asymmetric` (their `flip_for_left_eye` negates the horizontal channel);
 motion-magnitude readouts set `predicts_motion_mag` (used by `motion_mag`).
+The hex-grid flow readouts also set `zero_init`: a newly built model zeroes
+their last layer after the parameter-init noise (`zero_init_readouts`, with
+the denominator channel's bias set so softplus gives 1), so training starts
+from zero predicted flow (`flow_loss` = 1) instead of a large first-step
+gradient that would otherwise sit in Adam's second-moment estimate.
 
 Regularizers (`training_only = True`) go in the same `readouts` list. They are
 evaluated once per `predict` (after the time loop, in training mode only) on
