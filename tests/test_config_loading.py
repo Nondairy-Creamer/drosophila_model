@@ -40,7 +40,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
     assert config["model"]["regions"]["optic_lobe"]["readouts"] == ['FlowConv2Readout', 'L1Reg']
     assert config["training"]["num_steps"] == 123
     assert config["training"]["alpha"] == 0.123
-    assert config["training"]["loss_components"] == ['flow_loss']
+    assert config["training"]["loss_components"] == ['flow_loss', 'odometry_loss']
     assert config["training"]["clip_norm"] is None
     assert config["stimulus"]["stimulus_type"] == 'edge'
     assert config["data"]["data_folder"] == "../drosophila_model_data"
@@ -73,7 +73,7 @@ def test_load_config_merges_data_config_under_data(tmp_path):
     assert config["data"]["shared"]["seed"] is None
     assert config["data"]["random_pano"]["velocity_amp"] == 250.0
     # Untouched data defaults preserved.
-    assert config["data"]["shared"]["pre_stim_time"] == 0.5
+    assert config["data"]["shared"]["pre_stim_time"] == 0.25
     assert config["data"]["random_pano"]["num_repeats"] == 1
     assert config["data"]["edge"]["edge_velocities"] == [30, 60, 120, 240]
     # The configured data_folder survives the merge with the data tables.
@@ -164,7 +164,7 @@ def test_load_run_config_keeps_saved_tables(tmp_path, monkeypatch):
     # keys added since the run get their default.
     assert config["data"]["shared"]["stim_time"] == 2.5
     assert config["data"]["random_pano"]["velocity_amp"] == 99.0
-    assert config["data"]["shared"]["pre_stim_time"] == 0.5
+    assert config["data"]["shared"]["pre_stim_time"] == 0.25
     # The data location is a property of this machine.
     assert config["data"]["data_folder"] == local_data
     # The config.toml path itself is accepted too.

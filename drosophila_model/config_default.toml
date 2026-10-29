@@ -12,15 +12,15 @@ name  = ''
 model_type = 'ConnectomeModel'
 # CurrentDynamics | CurrentDivisiveDynamics | ConductanceDynamics |
 # CellAnnDynamics | ArbitraryDynamics (see model_architecture.md).
-dynamics_type = 'CurrentDynamics'
+dynamics_type = 'ConductanceDynamics'
 # Depth of the per-neuron network (CellAnnDynamics only).
 cell_ann_depth = 1
 # CUDA devices fall back to 'cpu' (with a warning) when CUDA is unavailable.
-device = "cuda"
+device = "cuda:0"
 dtype = "float32"
 use_layer_norm = false
 nonlinearity = "ReLU"
-dt = 0.01
+dt = 0.033333
 # Minimum total synapses (summed over neuropils) for a neuron pair to be
 # connected; applies to region membership and weights.
 synapse_count_threshold = 2
@@ -55,11 +55,6 @@ readout_neurons     = [
     'Tm1', 'Tm2', 'Tm3', 'Tm4',
     'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
 ]
-# Optional per-region overrides for ConnectomeModel.predict defaults. If
-# unset, the region's class-level defaults are used
-# (OpticLobeRegion: L1/L2/L3 inputs, T4/T5 outputs).
-# input_neurons  = ['L1', 'L2', 'L3']
-# output_neurons = ['T4a', 'T4b', 'T4c', 'T4d', 'T5a', 'T5b', 'T5c', 'T5d']
 
 [model.regions.optic_lobe.regularizer_parameters]
 input_layer_l1 = 0.0
@@ -71,16 +66,20 @@ input_layer_l1 = 0.0
 # training.train uses it directly. Both are overridden by the --base-seed /
 # --seed CLI flags.
 base_seed = 1
-num_steps = 100000
+# Optimizer steps. 2500 is ~500 epochs of the default datasets (162 training
+# examples at batch_size 32 -> 5 steps per epoch). Expect the loss to sit at
+# flow_loss ~1 / odometry_loss ~0.5 for the first ~50-250 steps (seed
+# dependent) before it starts to fall.
+num_steps = 2500
 # Re-draw the training loss plot (models/<run>/figures/training/loss.png)
 # every `save_every` epochs. Checkpoints are written whenever the loss improves.
 save_every = 1
 # Functions in training/loss_functions.py summed into the training loss:
 # flow_loss, odometry_loss (two-eye datasets only), motion_mag.
-loss_components = ['flow_loss']
-input_noise_std = 0.0
-contrast_std = 0.0
-luminance_std = 0.0
+loss_components = ['flow_loss', 'odometry_loss']
+input_noise_std = 0.01
+contrast_std = 0.2
+luminance_std = 0.1
 alpha = 0.01
 clip_norm = 'none'
 batch_size = 32
@@ -90,7 +89,7 @@ batch_size = 32
 # parameters (stim_time, velocities, temporal_frequencies, ...) live in the
 # data config: config_default_data.toml + config_data.toml, merged under
 # config['data'] by drosophila_model.config.load_config().
-stimulus_type = 'random_sine'
+stimulus_type = ['random_pano', 'counterphase_sine', 'full_field_step']
 
 [data]
 # Path to the data bundle (connectome_data/, stimulus/). Relative paths are

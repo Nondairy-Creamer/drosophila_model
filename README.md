@@ -81,19 +81,14 @@ Each is overlaid by an optional, gitignored file at the repo root:
 `config.toml` and `config_data.toml`. Overlay keys must already exist in the
 defaults, so typos fail loudly. The data bundle is read from
 `[data].data_folder`, which defaults to `../drosophila_model_data` (a folder
-next to the repo); set it in `config.toml` if your data lives elsewhere. A
-minimal `config.toml`:
+next to the repo); set it in `config.toml` if your data lives elsewhere. The
+defaults are a setup that trains (conductance dynamics, flow + odometry loss
+on `random_pano`, `counterphase_sine` and `full_field_step`, 2500 steps), so a
+minimal `config.toml` only needs what differs on your machine:
 
 ```toml
 [model]
 device = "cuda:0"          # falls back to CPU automatically when CUDA is unavailable
-dynamics_type = "ConductanceDynamics"
-
-[training]
-loss_components = ["flow_loss", "odometry_loss"]
-
-[stimulus]
-stimulus_type = ["full_field_step", "random_pano", "counterphase_sine"]
 
 [data]
 data_folder = "/path/to/drosophila_model_data"

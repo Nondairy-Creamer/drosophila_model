@@ -19,9 +19,9 @@
 # so add new generator parameters to this file first.
 
 [shared]
-stim_time = 1.0
-pre_stim_time = 0.5
-seed = 0
+stim_time = 0.5
+pre_stim_time = 0.25
+seed = 1
 # Fraction (0, 1] of each baked dataset to use for training. At bake time
 # create_training_data splits each dataset by source group (correlated
 # examples -- segments of one clip, repeats of one panorama, phase/contrast
