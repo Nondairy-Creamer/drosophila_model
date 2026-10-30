@@ -11,10 +11,8 @@ extraction step), and writes a compact ``.pt`` cache to
 The panorama cache stores the unfiltered images; the Gaussian ommatidial
 filtering is applied at generation time in ``stimulus_generators._filter_pano``.
 
-The second stage, ``drosophila_model.data_handling.create_training_data``,
-reads these caches (via the on-the-fly generators) and writes the fixed,
-training-ready datasets to ``stimulus/training/<stimulus_type>_train.pt`` and
-``<stimulus_type>_test.pt``.
+The generators in ``stimulus_generators.py`` read these caches when training
+and analysis scripts generate their stimuli.
 
 Usage::
 

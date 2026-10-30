@@ -416,7 +416,7 @@ def make_lr_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     Returns:
         stimulus: (time, N) array with values in [0, 1]
         optic_flow: (time, N, 2) array of zeros -- a placeholder, not the
-            edge's motion (edges are analysis-only probes, never baked).
+            edge's motion (edges are analysis-only probes, never trained on).
     """
     from scipy.special import erf as sp_erf
 
@@ -475,7 +475,7 @@ def make_ud_edge(sample_phi, sample_theta, velocity, edge_polarity='light',
     Returns:
         stimulus: (time, N) array with values in [0, 1]
         optic_flow: (time, N, 2) array of zeros -- a placeholder, not the
-            edge's motion (edges are analysis-only probes, never baked).
+            edge's motion (edges are analysis-only probes, never trained on).
 
     The sweep direction is only correct for right-eye columns (``phi < 0``);
     see ``_gen_edge`` for how two-eye stimuli are built.
@@ -1760,8 +1760,8 @@ def _gen_expanding_dot(ctx):
 
 # Registry: stimulus_type -> (generator, supported eye counts). The first
 # supported eye count is the type's natural default (see ``default_num_eyes``).
-# Every type defaults to two eyes, so create_training_data always bakes
-# two-eye data; training then runs the two-eye forward path for it.
+# Every type defaults to two eyes, so training data are always two-eye and
+# training runs the two-eye forward path.
 _STIMULUS_REGISTRY: dict[str, tuple] = {
     'static_sine': (_gen_static_sine, (2, 1)),
     'directional_sine': (_gen_directional_sine, (2, 1)),
@@ -1774,19 +1774,34 @@ _STIMULUS_REGISTRY: dict[str, tuple] = {
     'expanding_dot': (_gen_expanding_dot, (2, 1)),
 }
 
-# Registered types that only analysis scripts may generate; create_training_data
-# refuses to bake them, giving the reason below.
+# Registered types that only analysis scripts may generate; check_trainable
+# refuses them for training, giving the reason below.
 ANALYSIS_ONLY_STIMULUS_TYPES: dict[str, str] = {
     'edge': "an analysis-only probe whose optic-flow targets are placeholder zeros",
     'expanding_dot': "an analysis-only probe whose optic-flow targets are placeholder zeros",
     'directional_sine': "generated one direction at a time (it needs a sine_direction, "
-                        "which only the analysis scripts pass); bake static_sine instead",
+                        "which only the analysis scripts pass); use static_sine instead",
 }
 
 
-def bakeable_stimulus_types() -> list[str]:
-    """Stimulus types ``create_training_data`` can bake into training data."""
+def trainable_stimulus_types() -> list[str]:
+    """Stimulus types models can be trained on."""
     return sorted(t for t in _STIMULUS_REGISTRY if t not in ANALYSIS_ONLY_STIMULUS_TYPES)
+
+
+def check_trainable(stimulus_type: str) -> None:
+    """Raise ``ValueError`` unless models can be trained on ``stimulus_type``."""
+    if stimulus_type in ANALYSIS_ONLY_STIMULUS_TYPES:
+        raise ValueError(
+            f"'{stimulus_type}' cannot be used for training: it is "
+            f"{ANALYSIS_ONLY_STIMULUS_TYPES[stimulus_type]}. Trainable types: "
+            f"{', '.join(trainable_stimulus_types())}."
+        )
+    if stimulus_type not in _STIMULUS_REGISTRY:
+        raise ValueError(
+            f"Unknown stimulus_type '{stimulus_type}'. Trainable types: "
+            f"{', '.join(trainable_stimulus_types())}."
+        )
 
 
 def default_num_eyes(stimulus_type: str) -> int:

@@ -1,21 +1,17 @@
-"""Download the data from the GitHub data release and bake everything the code reads.
+"""Download the data from the GitHub data release into ``[data].data_folder``.
 
-Fills ``[data].data_folder`` (``config.get_data_folder``) in two steps,
-skipping any whose outputs already exist:
-
-1. Baked files: the connectome tables in ``connectome_data/baked/`` and the
-   panorama cache ``stimulus/baked/all_panoramic.pt``. By default they are
-   downloaded ready-made, as ``drosophila_model_baked_v1.zip`` (about
-   250 MB) from the release :data:`DATA_RELEASE` of :data:`DATA_REPO`. With
-   ``--raw``, or when the raw inputs are already in the data folder, they are
-   baked from the raw inputs instead, by ``format_connectome_data``
-   (connectome tables, CT1 split, column geometry) and ``process_raw_data``
-   (panorama cache). Missing raw inputs are downloaded as
-   ``drosophila_model_raw_v1.zip`` (about 3.2 GB, in parts under GitHub's
-   2 GiB file limit): the FlyWire Codex downloads and the Reiser lab eye map
-   in ``connectome_data/raw/``, and the panorama archive in ``stimulus/raw/``.
-2. Training sets: ``create_training_data`` for every type in
-   ``[stimulus].stimulus_type``.
+Fills ``[data].data_folder`` (``config.get_data_folder``), skipping anything
+already there, with the baked files: the connectome tables in ``connectome_data/baked/`` and the
+panorama cache ``stimulus/baked/all_panoramic.pt``. By default they are
+downloaded ready-made, as ``drosophila_model_baked_v1.zip`` (about 250 MB)
+from the release :data:`DATA_RELEASE` of :data:`DATA_REPO`. With ``--raw``, or
+when the raw inputs are already in the data folder, they are baked from the
+raw inputs instead, by ``format_connectome_data`` (connectome tables, CT1
+split, column geometry) and ``process_raw_data`` (panorama cache). Missing raw
+inputs are downloaded as ``drosophila_model_raw_v1.zip`` (about 3.2 GB, in
+parts under GitHub's 2 GiB file limit): the FlyWire Codex downloads and the
+Reiser lab eye map in ``connectome_data/raw/``, and the panorama archive in
+``stimulus/raw/``.
 
 A downloaded bundle is checked against the SHA-256 GitHub lists, unpacked and
 deleted. If the repository is private, the download uses the ``GH_TOKEN`` or
@@ -240,7 +236,7 @@ def bake_from_raw(data_folder):
 
 
 def prepare_data(raw=False, zip_path=None):
-    """Get the baked files (downloaded, or baked from raw), then bake the training sets."""
+    """Get the baked files (downloaded, or baked from raw)."""
     config = load_config()
     data_folder = get_data_folder(config)
     print(f"Data folder: {data_folder}")
@@ -255,21 +251,11 @@ def prepare_data(raw=False, zip_path=None):
     else:
         get_bundle(BAKED_BUNDLE, data_folder, BAKED_FILES)
 
-    stimulus_type = config['stimulus']['stimulus_type']
-    training_dir = data_folder / 'stimulus' / 'training'
-    for name in [stimulus_type] if isinstance(stimulus_type, str) else stimulus_type:
-        if (training_dir / f'{name}_train.pt').exists():
-            print(f"Training set {name}: present")
-        else:
-            print(f"Training set {name}: baking ...")
-            _run('create_training_data', name)
-
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Download the data from the GitHub data release and bake '
-                    'everything the code reads into [data].data_folder, '
-                    'skipping finished steps.'
+        description='Download the data from the GitHub data release into '
+                    '[data].data_folder, skipping finished steps.'
     )
     parser.add_argument(
         '--raw', action='store_true',

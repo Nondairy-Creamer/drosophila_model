@@ -7,12 +7,10 @@ comparable cosine-similarity number each:
   * sine waves   (``random_sine``)
   * random pano  (``random_pano``)
 
-Each family is read from its baked dataset
-(``<data_folder>/stimulus/training/<type>_<split>.pt``, made by
-``create_training_data``). By default the held-out ``test`` split is used;
-``--split train`` evaluates on training examples instead. Families whose
-baked file is missing (or was baked at a different dt than the model) are
-skipped. The model is run exactly as in training (two-eye data through the
+Each family is generated with the run's saved data config
+(``training_utilities.generate_dataset``). By default the held-out ``test``
+split is used; ``--split train`` evaluates on training examples instead. The
+model is run exactly as in training (two-eye data through the
 two-eye ego-motion path, solved with the dataset's camera offset), and only
 the time steps and columns that training scores (the dataset's
 ``train_mask``, after any pre-stimulus period) enter the metrics.
@@ -58,19 +56,15 @@ EGO_STIMULI = {
 }
 
 
-def _load_family(run_config: dict, model: nm.BaseRnn, stim_type: str,
-                 split: str, max_examples: int) -> dict | None:
-    """Baked ``split`` of ``stim_type`` (first ``max_examples``), or None if unavailable."""
+def _generate_family(run_config: dict, model: nm.BaseRnn, stim_type: str,
+                     split: str, max_examples: int) -> dict:
+    """The ``split`` of ``stim_type`` (first ``max_examples``), at the model's dt."""
     config = copy.deepcopy(run_config)
     config["stimulus"]["stimulus_type"] = stim_type
     config["model"]["dt"] = model.dt
-    try:
-        # Load on the CPU and move only the evaluated examples to the model's device.
-        data = tu.load_processed_stimulus(
-            config, device=torch.device("cpu"), dtype=model.dtype, split=split)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"  Skipping {stim_type}: {exc}")
-        return None
+    # Keep it on the CPU and move only the evaluated examples to the model's device.
+    data = tu.generate_dataset(
+        config, device=torch.device("cpu"), dtype=model.dtype, split=split)
     for key in ("stimulus", "optic_flow", "train_mask", "rotation", "translation"):
         if data[key] is not None:
             data[key] = data[key][:max_examples].to(model.device)
@@ -85,13 +79,12 @@ def run_performance_sweep(model_path: str | Path,
     Args:
         max_examples: number of stimulus examples to evaluate per family
             (default 1 — keep the benchmark short).
-        split: baked split to evaluate on, ``'test'`` (held out, default) or
+        split: split to evaluate on, ``'test'`` (held out, default) or
             ``'train'``.
 
     Returns:
         dict with keys 'flow_cos' (name -> float) and 'ego_cos'
-        (name -> {'rot': float, 'trans': float | None}). Skipped families are
-        absent.
+        (name -> {'rot': float, 'trans': float | None}).
     """
     model_path = Path(model_path)
     model_folder = model_path.parent if model_path.is_file() else model_path
@@ -108,9 +101,7 @@ def run_performance_sweep(model_path: str | Path,
     ego_cos: dict[str, dict] = {}
     for name, stim_type in FLOW_STIMULI:
         print(f"\n--- {name} ({stim_type}, {split} split) ---")
-        data = _load_family(run_config, model, stim_type, split, max_examples)
-        if data is None:
-            continue
+        data = _generate_family(run_config, model, stim_type, split, max_examples)
         stimulus, train_mask = data["stimulus"], data["train_mask"]
         print(f"  {stimulus.shape[0]} examples, {stimulus.shape[1]} frames, "
               f"{data['num_eyes']} eye(s)")
@@ -176,7 +167,7 @@ def main() -> None:
     parser.add_argument("--max-examples", type=int, default=1,
                         help="Examples to evaluate per stimulus family (default: 1)")
     parser.add_argument("--split", choices=("test", "train"), default="test",
-                        help="Baked split to evaluate on (default: test, held out)")
+                        help="Split to evaluate on (default: test, held out)")
     args = parser.parse_args()
     run_performance_sweep(args.model_folder, max_examples=args.max_examples,
                           split=args.split)

@@ -1,8 +1,8 @@
 """Low-level spatial sampling primitives for stimuli.
 
 These helpers are intentionally dependency-free with respect to the rest of
-``data_handling``: ``stimulus_generators.py`` and ``create_training_data.py``
-import from here, so this module must not import from either of them.
+``data_handling``: ``stimulus_generators.py`` imports from here, so this
+module must not import from it.
 Keeping the shared primitives in one neutral place lets the dependency flow
 one way (generators -> sampling) without import cycles.
 

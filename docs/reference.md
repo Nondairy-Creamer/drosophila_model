@@ -16,7 +16,7 @@ managed, run `PIP_BREAK_SYSTEM_PACKAGES=1 bash setup.sh`.
 has both, as two zips (the raw one split into parts under GitHub's 2 GiB file
 limit). `setup.sh` (through `data_handling.prepare_data`) downloads the baked
 `connectome_data/baked/` and `stimulus/baked/`
-(`drosophila_model_baked_v1.zip`) and bakes the training sets;
+(`drosophila_model_baked_v1.zip`);
 `setup.sh --raw` downloads the raw inputs instead
 (`drosophila_model_raw_v1.zip`) and runs every step in the "Produced by"
 column. If the repository is private, the download uses your GitHub CLI login
@@ -35,31 +35,24 @@ downloading the release it names.
 | `connectome_data/baked/` | `cell_info.parquet`, `synapses.parquet` (one row per pre, post, neuropil), `optic_lobe_column_index.parquet`, `optic_lobe_columns.parquet`, and the CT1 split (`ct1_pieces.parquet`, `ct1_connections.parquet`) | `data_handling.format_connectome_data`, which first runs `data_handling.split_ct1` (each CT1 split into per-column `CT1_M` / `CT1_L` pieces by synapse position) and `data_handling.build_column_geometry` (column viewing directions from the Reiser lab eye map, Zhao et al. 2025, in `connectome_data/raw/eyemap_T4/`) if their outputs are missing |
 | `stimulus/raw/` | `panorama_001-100.rar` (panorama `.mat` files, read from the archive without extracting it) | the raw bundle (Meyer et al. 2014's `data_001-100.rar`, renamed) |
 | `stimulus/baked/` | `all_panoramic.pt` | `data_handling.process_raw_data random_pano` |
-| `stimulus/training/` | `<type>_train.pt` and `<type>_test.pt` | `data_handling.create_training_data <type>` |
 
-Training never generates stimuli on the fly; it loads `<type>_train.pt`.
-`setup.sh` bakes the types in `[stimulus].stimulus_type`; bake any other type
-you train on with:
-
-```bash
-python -m drosophila_model.data_handling.create_training_data random_pano
-```
-
-Bakeable types are `static_sine`, `random_sine`, `counterphase_sine`,
-`random_pano`, `full_field_step` and `full_field_flicker`, all computed on the
-fly (`random_pano` from the raw panorama images). All of them bake two-eye
-data (`[right | left]` on the column axis).
+Training and test data are not stored in the data folder.
+`training_utilities.generate_dataset` generates them when a run starts (about
+3 s for the defaults), from the seeded generators in `stimulus_generators.py`,
+so changing `[model].dt` or the generation parameters takes effect immediately.
+Each run saves its exact training data in its own folder. Set the types in
+`[stimulus].stimulus_type`: `static_sine`, `random_sine`, `counterphase_sine`,
+`random_pano`, `full_field_step` or `full_field_flicker`. All of them are
+two-eye data (`[right | left]` on the column axis).
 
 The split is a seeded shuffle of whole source groups, so correlated examples
 never straddle train/test. Examples share a group when they are segments of
 one clip, repeats of one panorama, or phase/contrast variants of one grating.
-The first `train_fraction` of the groups go to `_train.pt` and the rest to
-`_test.pt`. `full_field_step` and `full_field_flicker` are train-only (no
-`_test.pt`).
+The first `train_fraction` of the groups are for training and the rest are held
+out for evaluation. `full_field_step` and `full_field_flicker` are train-only.
 
 `edge`, `expanding_dot` and `directional_sine` are analysis-only probes and
-are refused by `create_training_data`. Re-bake after changing `[model].dt` or
-the generation parameters; loading checks the baked `dt`.
+cannot be used for training.
 
 ## Training
 
@@ -125,14 +118,14 @@ convention:
 `<model_folder>/analysis_data/<analysis_name>/`, and caches go to `cache/`.
 
 Scripts that replay a model's own `cell_inputs.pt` evaluate on its training
-split. `performance_sweep` evaluates on the held-out `_test.pt` files.
+split. `performance_sweep` evaluates on the held-out test split.
 
 ### `drosophila_model.analysis.model_analysis`
 
 | Script | What it does |
 |---|---|
 | `benchmark_model` | Standard battery on one model: edge sweep, pano odometry, white-noise and sine silencing, performance sweep (each skippable). |
-| `performance_sweep` | Flow and ego-motion cosine similarity on baked `random_sine`, `random_pano` (`--split test` by default). |
+| `performance_sweep` | Flow and ego-motion cosine similarity on `random_sine`, `random_pano` (`--split test` by default). |
 | `pano_sweep` | Odometry (rotation and translation) on random-velocity panoramas. |
 | `plot_odometry` | Predicted vs. true odometry on the run's training stimuli. |
 | `edge_sweep` / `sine_wave_sweep` / `natural_pano_velocity_sweep` | Velocity / temporal-frequency tuning of readouts and cells. |
@@ -169,9 +162,9 @@ drosophila_model/
                             regions (optic / antenna lobe), readouts, model_layers,
                             ego_motion (flow <-> 6-DOF), connectome_loading
   training/                 train, launch_runs, resume_runs, training_utilities
-                            (load_processed_stimulus, model_outputs, compute_loss_components,
+                            (generate_dataset, model_outputs, compute_loss_components,
                             fit), loss_functions, model management tools
-  data_handling/            raw-data and training-data baking, stimulus_generators, sampling,
+  data_handling/            raw-data baking, stimulus_generators, sampling,
                             prepare_data, build_data_release, format_connectome_data,
                             split_ct1, build_column_geometry
   analysis/model_analysis/  analysis scripts + analysis_utilities

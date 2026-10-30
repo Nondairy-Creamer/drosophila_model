@@ -577,7 +577,7 @@ def load_viewing_directions(data_folder: str | Path | None = None):
 
     Reads every right-eye column of ``optic_lobe_columns.parquet`` in
     ``column_index`` order, the same column set and order as
-    ``OpticLobeRegion`` and the baked stimuli.
+    ``OpticLobeRegion`` and the generated stimuli.
 
     Args:
         data_folder: Path to the data root containing ``connectome_data/``.

@@ -44,9 +44,9 @@ scales with `[training].batch_size` (32 by default).
     bash setup.sh   # Windows (PowerShell): & "C:\Program Files\Git\bin\bash.exe" setup.sh
    ```
 
-    It installs the dependencies, downloads the data (about 250 MB) and prepares
-    the training sets (a few minutes). The data go to `../drosophila_model_data`,
-    next to the repo, unless you pass another folder: `bash setup.sh /path/to/data`.
+    It installs the dependencies and downloads the data (about 250 MB). The data
+    go to `../drosophila_model_data`, next to the repo, unless you pass another
+    folder: `bash setup.sh /path/to/data`.
 
 ## Train a model
 

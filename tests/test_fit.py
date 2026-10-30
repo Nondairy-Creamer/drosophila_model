@@ -1,4 +1,4 @@
-"""Training-path tests: baked-dataset loading, and one-step ``fit``
+"""Training-path tests: dataset generation, and one-step ``fit``
 runs on the small test model with one- and two-eye data."""
 import math
 
@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import torch
 
+from drosophila_model.config import load_config
+from drosophila_model.data_handling import stimulus_generators as sg
 from drosophila_model.training import training_utilities as tu
 from tests.model_factory import build_model_from_test_config
 
@@ -14,7 +16,7 @@ EYE_OFFSET = (0.05, -0.05, 0.013)
 
 
 def _dataset(model, num_eyes, num_stimuli=2, num_time=4):
-    """Random inputs and targets laid out like a baked training dataset."""
+    """Random inputs and targets laid out like a training dataset."""
     gen = torch.Generator().manual_seed(0)
     num_cols = num_eyes * model.regions['optic_lobe'].num_columns
 
@@ -129,77 +131,102 @@ def test_fit_rejects_bad_settings(loss_components, num_eyes, match):
         tu.fit(None, None, None, None, None, loss_components, num_eyes=num_eyes)
 
 
-def _write_baked(folder, name, num_eyes, eye_offset, model_dt=0.01, num_stimuli=2,
-                 train_fraction=None):
-    """A tiny ``<type>_<split>.pt`` in the layout create_training_data writes."""
-    num_time, num_cols = 3, 5 * num_eyes
+def _fake_stimulus(stim_type, config, column_phi_theta, num_eyes=None):
+    """A tiny ``StimulusData``: each example's stimulus holds its ``group_id``.
+
+    ``random_pano`` has 4 groups of 2 examples and the other types 4 groups of
+    1, so types concatenate; ``random_sine`` is one-eye.
+    """
+    group_id = torch.arange(4).repeat_interleave(2 if stim_type == 'random_pano' else 1)
+    num_eyes = 1 if stim_type == 'random_sine' else 2
+    num_examples, num_time, num_cols = len(group_id), 3, 5 * num_eyes
+    stimulus = group_id[:, None, None].expand(num_examples, num_time, num_cols).to(torch.float64)
     two_eye = num_eyes == 2
-    folder.mkdir(parents=True, exist_ok=True)
-    payload = {
-        'stimulus': torch.rand(num_stimuli, num_time, num_cols, dtype=torch.float64),
-        'optic_flow': torch.rand(num_stimuli, num_time, num_cols, 2),
-        'train_mask': torch.ones(num_stimuli, num_time, num_cols, dtype=torch.bool),
-        'rotation': torch.rand(num_stimuli, num_time, 3) if two_eye else None,
-        'translation': torch.rand(num_stimuli, num_time, 3) if two_eye else None,
-        'num_eyes': num_eyes,
-        'eye_offset': eye_offset,
-        'model_dt': model_dt,
-    }
-    if train_fraction is not None:
-        payload['train_fraction'] = train_fraction
-    torch.save(payload, folder / name)
+    return sg.StimulusData(
+        stimulus=stimulus,
+        optic_flow=torch.rand(num_examples, num_time, num_cols, 2),
+        train_mask=torch.ones(num_examples, num_time, num_cols, dtype=torch.bool),
+        rotation=torch.rand(num_examples, num_time, 3) if two_eye else None,
+        translation=torch.rand(num_examples, num_time, 3) if two_eye else None,
+        num_eyes=num_eyes,
+        eye_offset=EYE_OFFSET if two_eye else None,
+        group_id=group_id,
+    )
 
 
-def test_load_processed_stimulus(tmp_path):
-    training = tmp_path / "stimulus" / "training"
-    _write_baked(training, "a_train.pt", 2, EYE_OFFSET)
-    _write_baked(training, "b_train.pt", 2, EYE_OFFSET, num_stimuli=3)
-    _write_baked(training, "a_test.pt", 2, EYE_OFFSET, num_stimuli=1)
-    _write_baked(training, "one_eye_train.pt", 1, None)
-    _write_baked(training, "slow_train.pt", 2, EYE_OFFSET, model_dt=0.02)
-    # Baked train-only (create_training_data writes no _test.pt).
-    _write_baked(training, "full_train.pt", 2, EYE_OFFSET, train_fraction=1.0)
+def test_generate_dataset(tmp_path, monkeypatch):
+    monkeypatch.setattr(tu.sg, 'get_stimulus', _fake_stimulus)
+    monkeypatch.setattr(tu, 'load_column_phi_theta', lambda folder: None)
     config = {
-        'model': {'device': 'cpu', 'dtype': 'float32', 'dt': 0.01},
-        'stimulus': {'stimulus_type': ['a', 'b']},
-        'data': {'data_folder': str(tmp_path)},
+        'model': {'device': 'cpu', 'dtype': 'float32'},
+        'stimulus': {'stimulus_type': ['random_pano', 'static_sine']},
+        'data': {
+            'data_folder': str(tmp_path),
+            'shared': {'seed': 1, 'train_fraction': 0.75},
+            'full_field_step': {'train_fraction': 1.0},
+        },
     }
 
-    data = tu.load_processed_stimulus(config)
-    assert data['stimulus'].shape == (5, 3, 10)
+    data = tu.generate_dataset(config)
+    assert data['stimulus'].shape == (9, 3, 10)
     assert data['stimulus'].dtype == torch.float32
-    assert data['optic_flow'].shape == (5, 3, 10, 2)
-    assert data['rotation'].shape == data['translation'].shape == (5, 3, 3)
+    assert data['optic_flow'].shape == (9, 3, 10, 2)
+    assert data['rotation'].shape == data['translation'].shape == (9, 3, 3)
     assert data['num_eyes'] == 2
     assert data['eye_offset'] == EYE_OFFSET
 
-    config['stimulus']['stimulus_type'] = 'a'
-    assert tu.load_processed_stimulus(config, split='test')['stimulus'].shape[0] == 1
+    # The split is by whole group: 3 of 4 groups train, and none straddles.
+    config['stimulus']['stimulus_type'] = 'random_pano'
+    train = tu.generate_dataset(config)['stimulus'][:, 0, 0]
+    test = tu.generate_dataset(config, split='test')['stimulus'][:, 0, 0]
+    assert len(train) == 6 and len(test) == 2
+    assert not set(train.tolist()) & set(test.tolist())
+    assert torch.equal(train, tu.generate_dataset(config)['stimulus'][:, 0, 0])
 
-    config['stimulus']['stimulus_type'] = 'one_eye'
-    data = tu.load_processed_stimulus(config)
+    config['stimulus']['stimulus_type'] = 'random_sine'
+    data = tu.generate_dataset(config)
     assert data['num_eyes'] == 1 and data['eye_offset'] is None
     assert data['rotation'] is None and data['translation'] is None
 
-    config['stimulus']['stimulus_type'] = ['a', 'one_eye']
+    config['stimulus']['stimulus_type'] = ['random_pano', 'random_sine']
     with pytest.raises(ValueError, match="Mixed eye counts"):
-        tu.load_processed_stimulus(config)
-    config['stimulus']['stimulus_type'] = 'slow'
-    with pytest.raises(ValueError, match="baked at dt"):
-        tu.load_processed_stimulus(config)
-    config['stimulus']['stimulus_type'] = 'b'
-    with pytest.raises(FileNotFoundError, match="create_training_data"):
-        tu.load_processed_stimulus(config, split='test')
+        tu.generate_dataset(config)
     with pytest.raises(ValueError, match="split"):
-        tu.load_processed_stimulus(config, split='validation')
+        tu.generate_dataset(config, split='validation')
+
+    # Analysis-only and unknown types are refused.
+    config['stimulus']['stimulus_type'] = 'edge'
+    with pytest.raises(ValueError, match="cannot be used for training"):
+        tu.generate_dataset(config)
+    config['stimulus']['stimulus_type'] = 'not_a_stimulus'
+    with pytest.raises(ValueError, match="Unknown stimulus_type"):
+        tu.generate_dataset(config)
 
     # A train-only type is skipped in the test split, unless it is the only one.
-    config['stimulus']['stimulus_type'] = ['a', 'full']
-    assert tu.load_processed_stimulus(config, split='test')['stimulus'].shape[0] == 1
-    assert tu.load_processed_stimulus(config)['stimulus'].shape[0] == 4
-    config['stimulus']['stimulus_type'] = 'full'
-    with pytest.raises(FileNotFoundError, match="train-only"):
-        tu.load_processed_stimulus(config, split='test')
+    config['stimulus']['stimulus_type'] = ['random_pano', 'full_field_step']
+    assert tu.generate_dataset(config, split='test')['stimulus'].shape[0] == 2
+    assert tu.generate_dataset(config)['stimulus'].shape[0] == 10
+    config['stimulus']['stimulus_type'] = 'full_field_step'
+    with pytest.raises(ValueError, match="training split"):
+        tu.generate_dataset(config, split='test')
+
+
+def test_generate_dataset_real_generator(tmp_path, monkeypatch):
+    """The real generators are deterministic, and the split keeps their groups apart."""
+    empty = tmp_path / "empty.toml"
+    empty.write_text("")
+    config = load_config(str(empty), str(empty))
+    config['model']['device'] = 'cpu'
+    config['data']['data_folder'] = str(tmp_path)
+    config['stimulus']['stimulus_type'] = 'counterphase_sine'
+    columns = np.column_stack([np.linspace(-1.0, 1.0, 5), np.full(5, np.pi / 2)])
+    monkeypatch.setattr(tu, 'load_column_phi_theta', lambda folder: columns)
+
+    train = tu.generate_dataset(config)
+    test = tu.generate_dataset(config, split='test')
+    assert train['stimulus'].shape[2] == 10 and train['num_eyes'] == 2
+    assert train['stimulus'].shape[0] == 9 and test['stimulus'].shape[0] == 3
+    assert torch.equal(train['stimulus'], tu.generate_dataset(config)['stimulus'])
 
 
 @pytest.mark.parametrize("dynamics_type", [

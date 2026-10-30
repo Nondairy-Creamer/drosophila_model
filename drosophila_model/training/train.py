@@ -5,10 +5,9 @@ Usage (from the repo root):
     python -m drosophila_model.training.train --seed 42 --device cuda:0
 
 The model, its config, the training stimulus/targets and checkpoints are
-written to ``models/<timestamp>[_<run_id>]/``. The training data must be
-baked first with ``drosophila_model.data_handling.create_training_data``.
-Only optic-lobe models are trained here; antenna-lobe models are built by the
-olfactory analysis scripts.
+written to ``models/<timestamp>[_<run_id>]/``. The training data are generated
+at the start of the run. Only optic-lobe models are trained here; antenna-lobe
+models are built by the olfactory analysis scripts.
 """
 import argparse
 from datetime import datetime
@@ -133,17 +132,16 @@ def train(seed=None, device_override=None, run_id=None, timestamp=None, model_pa
             config['model']['dt'] = model.dt
     dt = config['model']['dt']
 
-    # --- Load the pre-baked stimulus dataset (no on-the-fly generation) ---
-    # Bake with: python -m drosophila_model.data_handling.create_training_data <type>
-    baked = tu.load_processed_stimulus(
+    # --- Generate the training data ---
+    dataset = tu.generate_dataset(
         config, device=device, dtype=getattr(torch, config['model']['dtype']))
-    stimulus = baked['stimulus']
-    train_mask = baked['train_mask']
-    num_eyes = baked['num_eyes']
+    stimulus = dataset['stimulus']
+    train_mask = dataset['train_mask']
+    num_eyes = dataset['num_eyes']
     # Camera offset is a property of the rig that generated this dataset
     # (0 for single-viewpoint renders, the physical half-baseline for a
     # two-camera rig). Feed it to the two-eye ego-motion solver.
-    eye_offset = baked['eye_offset']
+    eye_offset = dataset['eye_offset']
     tu.check_loss_components(loss_components, num_eyes)
 
     if model is None:
@@ -169,15 +167,14 @@ def train(seed=None, device_override=None, run_id=None, timestamp=None, model_pa
     num_columns = model.regions['optic_lobe'].num_columns
     if stimulus.shape[2] != num_eyes * num_columns:
         raise ValueError(
-            f"Baked stimulus has {stimulus.shape[2]} columns but the model expects "
-            f"{num_eyes} eye(s) x {num_columns} optic-lobe columns. Re-bake the "
-            "training data with the current connectome."
+            f"The stimulus has {stimulus.shape[2]} columns but the model expects "
+            f"{num_eyes} eye(s) x {num_columns} optic-lobe columns."
         )
 
-    target = {'optic_flow': baked['optic_flow']}
+    target = {'optic_flow': dataset['optic_flow']}
     if num_eyes == 2:
-        target['rotation'] = baked['rotation']
-        target['translation'] = baked['translation']
+        target['rotation'] = dataset['rotation']
+        target['translation'] = dataset['translation']
 
     # Record run provenance (TOML has no null, so drop None values). The eye
     # geometry is saved so analysis can replay ego-motion with the same rig.

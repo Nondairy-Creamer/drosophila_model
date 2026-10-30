@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set up the code base from a fresh clone: install the dependencies, download
-# the data from the repo's GitHub data release and bake the training sets.
+# the data from the repo's GitHub data release.
 # Run from the repo root, inside the Python environment you want to use (on
 # Windows, from Git Bash):
 #
@@ -88,7 +88,7 @@ print(f"config.toml: set [data].data_folder = {folder}")
 PYEOF
 
 # Download the connectome tables and the panorama cache (or the raw data, and
-# bake those from it), then bake the training sets for [stimulus].stimulus_type.
+# bake those from it).
 PREPARE_ARGS=()
 if [ -n "$RAW" ]; then PREPARE_ARGS+=(--raw); fi
 if [ -n "$DATA_ZIP" ]; then PREPARE_ARGS+=(--zip "$DATA_ZIP"); fi

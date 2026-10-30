@@ -320,7 +320,7 @@ class OpticLobeRegion(RegionView):
     - ``column_indices``: ``(C,)`` int64 — every hex column, ``0..C-1``. A
       column's id is also its position on the stimulus, recording and readout
       column axes, so the set is the full baked geometry (which the training
-      stimuli are baked over), not only the columns this slice's neurons
+      stimuli are generated over), not only the columns this slice's neurons
       cover; columns without neurons simply get no input.
     - ``column_indices_per_neuron``: ``(num_neurons,)`` float — each model
       neuron's column id (NaN when it has none).
@@ -421,7 +421,7 @@ class OpticLobeRegion(RegionView):
         )
 
         # The column set is the full baked geometry, not just the columns this
-        # slice's neurons cover: training stimuli are baked over every column,
+        # slice's neurons cover: training stimuli are generated over every column,
         # and stimulus channels, recording buffers and readouts all index by
         # global column id, so the id must equal the position.
         columns_df = pd.read_parquet(extras_dir / 'optic_lobe_columns.parquet')

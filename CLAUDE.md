@@ -34,7 +34,7 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
  release);
  with `--raw`, or when the raw inputs are already there, it bakes them from
  the raw inputs instead (downloading `drosophila_model_raw_v1.zip` if they
- are missing). It then bakes the missing training sets.
+ are missing).
 - `<data_folder>/connectome_data/raw/` — FlyWire Codex downloads (FAFB v783)
  kept as downloaded (`.csv.gz`): `consolidated_cell_types`,
  `connections_princeton_no_threshold`, `column_assignment`,
@@ -60,17 +60,15 @@ packaged default is `../drosophila_model_data` (relative to the repo root);
  consumed by the on-the-fly generators in `stimulus_generators.py`:
  `all_panoramic.pt` (consolidated raw panorama images). Every other stimulus
  is computed on the fly; there are no pre-rendered stimuli.
-- `<data_folder>/stimulus/training/` — fixed datasets produced by
- `python -m drosophila_model.data_handling.create_training_data <stimulus_type>`,
- split into a `<stimulus_type>_train.pt` and `<stimulus_type>_test.pt` pair
- per type (e.g. `random_pano_train.pt` + `random_pano_test.pt`). The split is
- a seeded shuffle (`[data].shared.seed`) of whole source groups (correlated
- variants — repeats of one panorama, phase/contrast variants of one grating —
- share a group); the first `train_fraction` of the
- groups go to `_train.pt`. `train_fraction` is `[data].shared.train_fraction`
- unless the type's own table in `config_default_data.toml` overrides it:
- `full_field_step` / `full_field_flicker` use 1.0, so they are train-only (no
- `_test.pt`). Training loads the `_train.pt` via
- `training_utilities.load_processed_stimulus` (no on-the-fly generation); the
- `_test.pt` is held out for analysis only (e.g. `performance_sweep` evaluates
- on it).
+- Training and test data are not stored in the data folder:
+ `training_utilities.generate_dataset` generates them when a run starts, from
+ the seeded generators. The split is a seeded shuffle (`[data].shared.seed`) of
+ whole source groups (correlated variants — repeats of one panorama,
+ phase/contrast variants of one grating — share a group); the first
+ `train_fraction` of the groups are for training. `train_fraction` is
+ `[data].shared.train_fraction` unless the type's own table in
+ `config_default_data.toml` overrides it: `full_field_step` /
+ `full_field_flicker` use 1.0, so they are train-only. The test split is held
+ out for analysis only (e.g. `performance_sweep` evaluates on it). Each run
+ saves its exact training data in its model folder (`cell_inputs.pt`,
+ `target.pt`).

@@ -27,8 +27,8 @@ bash setup.sh
 
 This installs the dependencies, downloads
 `drosophila_model_baked_{version}.zip` into the data folder
-(`../drosophila_model_data` by default), checks its SHA-256, unpacks it and
-builds the training stimulus sets (a few minutes). `bash setup.sh --raw`
+(`../drosophila_model_data` by default), checks its SHA-256 and unpacks it.
+`bash setup.sh --raw`
 downloads the raw zip instead and rebuilds the processed files from it.
 
 With a copy of either zip you downloaded yourself, run

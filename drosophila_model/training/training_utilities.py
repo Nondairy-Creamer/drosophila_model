@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from drosophila_model.training import plotting_utilities as pu
 import numpy as np
+import copy
 import inspect
 import time
 import tempfile
@@ -10,6 +11,8 @@ import subprocess
 from pathlib import Path
 
 from drosophila_model.config import get_data_folder
+from drosophila_model.data_handling import stimulus_generators as sg
+from drosophila_model.data_handling.sampling import load_column_phi_theta
 from drosophila_model.training import loss_functions as lf
 
 # Call signature shared by every loss component in loss_functions.py.
@@ -33,30 +36,37 @@ def get_git_commit_hash():
     return None
 
 
-def load_processed_stimulus(config, device=None, dtype=None, split='train'):
-    """Load pre-baked stimulus dataset(s).
+def _is_training_example(group_id, train_fraction, seed):
+    """Boolean mask of the examples in the training split.
 
-    Reads ``config['stimulus']['stimulus_type']`` (a string or list of
-    strings), loads each file from
-    ``<data_folder>/stimulus/training/<type>_<split>.pt`` (produced by
-    ``create_training_data.py``), validates that all share the same eye
-    count, camera offset and time step, and concatenates them along the
-    example axis. Stimuli are not generated on the fly during training.
+    The split is by whole source group, never within one, so correlated
+    examples can't leak across train/test. The groups are shuffled (seeded)
+    first so the test set is not one systematic slice of the generation order
+    (e.g. a single direction or temporal frequency).
+    """
+    group_id = group_id.cpu().numpy()
+    groups = np.random.default_rng(seed).permutation(np.unique(group_id))
+    num_train_groups = max(1, int(np.round(len(groups) * train_fraction)))
+    return torch.from_numpy(np.isin(group_id, groups[:num_train_groups]))
 
-    The train/test split is baked into separate ``_train.pt`` / ``_test.pt``
-    files by ``create_training_data.py``: a seeded shuffle of whole source
-    groups, the first ``train_fraction`` of which go to training
+
+def generate_dataset(config, device=None, dtype=None, split='train'):
+    """Generate the ``split`` of the ``[stimulus].stimulus_type`` dataset(s).
+
+    Given a type name or a list of them, generates each on the CPU with
+    ``stimulus_generators.get_stimulus`` (seeded by ``[data].shared.seed``, so
+    the same config always gives the same data), validates that all share the
+    same eye count, camera offset and example shape (time steps x columns), and
+    concatenates them along the example axis.
+
+    Each type's examples are split by whole source group: a seeded shuffle of
+    the groups, the first ``train_fraction`` of which go to training
     (``[data].shared.train_fraction``, which a type's own ``[data.<type>]``
-    table may override). Training loads ``split='train'``; evaluation scripts
-    load ``split='test'``. Types baked train-only (``train_fraction = 1.0``,
-    e.g. ``full_field_step``) have no ``_test.pt`` and are skipped, with a
-    note, when loading the test split; it is an error only if none of the
-    requested types has one.
-
-    Each file must have been baked at ``config['model']['dt']`` and the
-    ``[data].shared`` ``stim_time`` / ``pre_stim_time``, and a list of
-    types must share one example shape (time steps x columns); a clear error
-    asking for a re-bake is raised otherwise.
+    table may override). Training uses ``split='train'``; evaluation scripts
+    use ``split='test'``. Types with every group in training
+    (``train_fraction = 1.0``, e.g. ``full_field_step``) are skipped, with a
+    note, in the test split; it is an error only if none of the requested
+    types has test examples.
 
     Returns a dict with keys ``stimulus``, ``optic_flow``, ``train_mask``,
     ``rotation``, ``translation``, ``num_eyes``, ``eye_offset``.
@@ -69,64 +79,48 @@ def load_processed_stimulus(config, device=None, dtype=None, split='train'):
     if dtype is None:
         dtype = getattr(torch, config['model']['dtype'])
 
-    training_dir = get_data_folder(config) / 'stimulus' / 'training'
-
     stimulus_type = config['stimulus']['stimulus_type']
     stimulus_types = [stimulus_type] if isinstance(stimulus_type, str) else list(stimulus_type)
+    for stim_type in stimulus_types:
+        sg.check_trainable(stim_type)
+
+    # Generate on the CPU: generation should not need (or fill) a GPU, and
+    # callers may move only part of the dataset to the model's device.
+    gen_config = copy.deepcopy(config)
+    gen_config['model']['device'] = 'cpu'
+    column_phi_theta = load_column_phi_theta(get_data_folder(config))
+    shared = config['data']['shared']
 
     stim_list, flow_list, mask_list, rot_list, trans_list = [], [], [], [], []
     num_eyes_set, eye_offsets = set(), set()
-    loaded_types = []
+    used_types = []
     for stim_type in stimulus_types:
-        training_path = training_dir / f'{stim_type}_{split}.pt'
-        if not training_path.exists():
-            train_path = training_dir / f'{stim_type}_train.pt'
-            if split == 'test' and train_path.exists():
-                if _is_train_only_bake(train_path):
-                    print(f"Skipping '{stim_type}': it was baked train-only "
-                          f"(train_fraction = 1.0), so it has no test split.")
-                    continue
-                raise FileNotFoundError(
-                    f"'{stim_type}' has {train_path.name} but no {training_path.name}: "
-                    "either every source group went to training (too few groups for "
-                    "its train_fraction) or the test file was not copied. Re-bake it "
-                    "with: python -m drosophila_model.data_handling.create_training_data "
-                    f"{stim_type}"
-                )
-            raise FileNotFoundError(
-                f"Baked stimulus not found: {training_path}. Generate it first with: "
-                f"python -m drosophila_model.data_handling.create_training_data {stim_type}"
-            )
-        data = torch.load(training_path, map_location='cpu', weights_only=False)
-        baked_dt = data.get('model_dt')
-        if baked_dt is not None and not np.isclose(baked_dt, config['model']['dt']):
-            raise ValueError(
-                f"{training_path} was baked at dt={baked_dt} but [model].dt is "
-                f"{config['model']['dt']}. Re-bake it with the current config."
-            )
-        baked_config = data.get('stimulus_config') or {}
-        shared = config.get('data', {}).get('shared', {})
-        for key in ('stim_time', 'pre_stim_time'):
-            if key in baked_config and key in shared and not np.isclose(baked_config[key], shared[key]):
-                raise ValueError(
-                    f"{training_path} was baked with {key}={baked_config[key]} but "
-                    f"[data].shared.{key} is {shared[key]}. Re-bake it with: "
-                    f"python -m drosophila_model.data_handling.create_training_data {stim_type}"
-                )
-        num_eyes_set.add(data['num_eyes'])
-        eye_offsets.add(tuple(data['eye_offset']) if data['eye_offset'] is not None else None)
-        stim_list.append(data['stimulus'].to(device=device, dtype=dtype))
-        flow_list.append(data['optic_flow'].to(device=device, dtype=dtype))
-        mask_list.append(data['train_mask'].to(device=device))
-        if data['rotation'] is not None:
-            rot_list.append(data['rotation'].to(device=device, dtype=dtype))
-            trans_list.append(data['translation'].to(device=device, dtype=dtype))
-        loaded_types.append(stim_type)
+        data = sg.get_stimulus(stim_type, gen_config, column_phi_theta,
+                               num_eyes=sg.default_num_eyes(stim_type))
+        train_fraction = config['data'].get(stim_type, {}).get(
+            'train_fraction', shared['train_fraction'])
+        if not 0 < train_fraction <= 1:
+            raise ValueError(f"train_fraction must be in (0, 1], got {train_fraction}.")
+        selected = _is_training_example(data.group_id, train_fraction, shared['seed'])
+        if split == 'test':
+            selected = ~selected
+            if not selected.any():
+                print(f"Skipping '{stim_type}': all of its examples are in the training split.")
+                continue
+        num_eyes_set.add(data.num_eyes)
+        eye_offsets.add(tuple(data.eye_offset) if data.eye_offset is not None else None)
+        stim_list.append(data.stimulus[selected].to(device=device, dtype=dtype))
+        flow_list.append(data.optic_flow[selected].to(device=device, dtype=dtype))
+        mask_list.append(data.train_mask[selected].to(device=device))
+        if data.rotation is not None:
+            rot_list.append(data.rotation[selected].to(device=device, dtype=dtype))
+            trans_list.append(data.translation[selected].to(device=device, dtype=dtype))
+        used_types.append(stim_type)
 
-    if not loaded_types:
-        raise FileNotFoundError(
-            f"None of the stimulus types {stimulus_types} has a baked '{split}' "
-            f"split in {training_dir} (they were all baked train-only)."
+    if not used_types:
+        raise ValueError(
+            f"None of the stimulus types {stimulus_types} has '{split}' examples "
+            "(all of their examples are in the training split)."
         )
     if len(num_eyes_set) > 1:
         raise ValueError(
@@ -139,11 +133,10 @@ def load_processed_stimulus(config, device=None, dtype=None, split='train'):
             f"{sorted(o for o in eye_offsets if o is not None)}. "
             "Train one rig geometry at a time."
         )
-    shapes = {stim_type: tuple(s.shape[1:]) for stim_type, s in zip(loaded_types, stim_list)}
+    shapes = {stim_type: tuple(s.shape[1:]) for stim_type, s in zip(used_types, stim_list)}
     if len(set(shapes.values())) > 1:
         raise ValueError(
-            f"Training stimulus types have different (time, column) shapes: {shapes}. "
-            "Bake them with the same [data].shared stim_time / pre_stim_time."
+            f"Training stimulus types have different (time, column) shapes: {shapes}."
         )
 
     return {
@@ -155,16 +148,6 @@ def load_processed_stimulus(config, device=None, dtype=None, split='train'):
         'num_eyes': num_eyes_set.pop(),
         'eye_offset': eye_offsets.pop(),
     }
-
-
-def _is_train_only_bake(train_path):
-    """Whether ``train_path`` exists and was baked with ``train_fraction = 1.0``
-    (``create_training_data`` then writes no ``_test.pt``)."""
-    if not train_path.exists():
-        return False
-    # mmap: only the small header entries are read, not the stimulus tensors.
-    payload = torch.load(train_path, map_location='cpu', weights_only=False, mmap=True)
-    return payload.get('train_fraction') == 1.0
 
 
 class StimulusDataset(Dataset):
@@ -330,7 +313,7 @@ def fit(model, inputs, target, output_neurons, input_neurons,
     ``batch_size`` (a final partial batch is dropped). ``save_every`` and
     ``patience`` count epochs too.
 
-    ``num_eyes`` is the eye count of the dataset (``load_processed_stimulus``
+    ``num_eyes`` is the eye count of the dataset (``generate_dataset``
     returns it). Two-eye inputs are laid out ``[right | left]`` on the column
     axis and are run through the optic-lobe region's two-eye ego-motion path,
     with ``eye_offset`` as the rig's right-eye camera offset; the readouts of

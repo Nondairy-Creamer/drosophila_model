@@ -98,7 +98,8 @@ clip_norm = 'none'
 batch_size = 32
 
 [stimulus]
-# Which baked dataset(s) to train on (string or list). Stimulus *generation*
+# Which dataset(s) to train on (string or list), generated at the start of
+# each run. Stimulus *generation*
 # parameters (stim_time, velocities, temporal_frequencies, ...) live in the
 # data config: config_default_data.toml + config_data.toml, merged under
 # config['data'] by drosophila_model.config.load_config().

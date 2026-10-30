@@ -166,9 +166,9 @@ The raw inputs come from the raw bundle of the repo's GitHub data release
 (`data-v1`), and the connectome bundle is
 baked once by `python -m drosophila_model.data_handling.format_connectome_data`.
 `setup.sh`, through `data_handling.prepare_data`, downloads the baked
-connectome and panorama cache ready-made from the release's baked bundle and
-bakes the training sets (with `--raw`, it downloads the raw bundle and runs
-every bake step). Everything lives,
+connectome and panorama cache ready-made from the release's baked bundle
+(with `--raw`, it downloads the raw bundle and runs every bake step).
+Everything lives,
 with the stimulus data, under `config['data']['data_folder']` (read it with
 `config.get_data_folder(config)`; default `../drosophila_model_data`):
 
@@ -216,22 +216,20 @@ with the stimulus data, under `config['data']['data_folder']` (read it with
     ├── raw/                          # raw sources, read once by process_raw_data.py
     │   └── panorama_001-100.rar      # raw panorama .mat source images (random_pano),
     │                                 # read from the archive without extracting it
-    ├── baked/                        # cache from process_raw_data.py random_pano,
-    │   │                             # read by the generators in stimulus_generators.py
-    │   └── all_panoramic.pt          # consolidated raw panorama images (random_pano)
-    └── training/                     # fixed datasets from create_training_data.py <stimulus_type>
-        ├── <stimulus_type>_train.pt  # loaded for training by training_utilities.load_processed_stimulus
-        └── <stimulus_type>_test.pt   # held-out split for evaluation (not written for
-                                      # train-only types, e.g. full_field_step)
+    └── baked/                        # cache from process_raw_data.py random_pano,
+        │                             # read by the generators in stimulus_generators.py
+        └── all_panoramic.pt          # consolidated raw panorama images (random_pano)
 ```
 
-`create_training_data` splits each dataset by whole source group (correlated
-examples, e.g. the segments of one clip or the phase/contrast variants of one
-grating, share a group): the groups are shuffled with `[data].shared.seed` and
-the first `train_fraction` of them go to `_train.pt`. `train_fraction` comes
-from `[data].shared` unless the type's own `[data.<stimulus_type>]` table
-sets one (in `config_default_data.toml`, `full_field_step` and
-`full_field_flicker` use 1.0, so they have no `_test.pt`).
+Training and test data are not stored: `training_utilities.generate_dataset`
+generates them when a run starts and splits each dataset by whole source group
+(correlated examples, e.g. the segments of one clip or the phase/contrast
+variants of one grating, share a group): the groups are shuffled with
+`[data].shared.seed` and the first `train_fraction` of them are for training.
+`train_fraction` comes from `[data].shared` unless the type's own
+`[data.<stimulus_type>]` table sets one (in `config_default_data.toml`,
+`full_field_step` and `full_field_flicker` use 1.0, so they have no test
+examples).
 
 Universal fields land on `ConnectomeData`; per-region union-membership masks
 land in `region_membership` (one bool array per region, aligned with
@@ -412,15 +410,14 @@ channel per hex column):
 
 ### Training path
 
-`training/train.py` builds a model from config and trains it on a baked
+`training/train.py` builds a model from config and trains it on a generated
 dataset:
 
 1. `compose_model_class(dynamics_type, model_type)` gives the class;
    `build_connectome(config)` gives the `ConnectomeData`; the model is
    constructed with the config-driven arguments above.
-2. `training_utilities.load_processed_stimulus(config)` loads
-   `<data_folder>/stimulus/training/<type>_train.pt` for each
-   `[stimulus].stimulus_type` and returns the stimulus, `optic_flow`,
+2. `training_utilities.generate_dataset(config)` generates the training split
+   of each `[stimulus].stimulus_type` and returns the stimulus, `optic_flow`,
    `train_mask`, `rotation` / `translation` targets, `num_eyes` and
    `eye_offset` of the dataset.
 3. `training_utilities.fit` runs Adam over batches, with betas (0.9, 0.99)
@@ -432,7 +429,7 @@ dataset:
    Each batch goes
    through `training_utilities.model_outputs(model, inputs, train_mask,
    num_eyes, eye_offset)`, which picks the path from the dataset's `num_eyes`:
-   - `num_eyes == 2` (every baked dataset; columns `[right | left]`):
+   - `num_eyes == 2` (every training dataset; columns `[right | left]`):
      `regions['optic_lobe'].estimate_ego_motion_from_image(...)` with
      `camera_offset=eye_offset`; both eyes' readouts are concatenated on the
      column axis and `pred_rotation` / `pred_translation` are added.
@@ -448,7 +445,7 @@ dataset:
    whenever the epoch loss improves.
 
 Analysis scripts that score a model the way training does (e.g.
-`performance_sweep`, on the `_test.pt` split) reuse `model_outputs`.
+`performance_sweep`, on the test split) reuse `model_outputs`.
 
 ### Two eyes and camera offsets
 
@@ -462,8 +459,8 @@ is a property of the rig that recorded the dataset, not of the model:
   `@stimulus_generators.camera_offset(x, y, z)` decorator (no current stimulus
   declares one), and `stimulus_generators.camera_offset_for_stimulus` looks it
   up (`(0, 0, 0)` when none is declared);
-- `get_stimulus` returns it as `StimulusData.eye_offset`, `create_training_data`
-  bakes it into the `.pt` files, `load_processed_stimulus` returns it, and
+- `get_stimulus` returns it as `StimulusData.eye_offset`, `generate_dataset`
+  returns it, and
   `train` records it as `[run_info].eye_offset`
   (`analysis_utilities.run_eye_offset(run_config)` reads it back);
 - `estimate_ego_motion_from_image(camera_offset=...)` uses it for the right eye
