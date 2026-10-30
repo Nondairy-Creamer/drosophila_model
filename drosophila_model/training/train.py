@@ -202,7 +202,7 @@ def train(seed=None, device_override=None, run_id=None, timestamp=None, model_pa
         loss_components=loss_components,
         model_save_folder=model_save_folder,
         rng=model.rng,
-        num_steps=config['training']['num_steps'],
+        num_epochs=config['training']['num_epochs'],
         save_every=config['training']['save_every'],
         alpha=config['training']['alpha'],
         clip_grad_norm=config['training']['clip_norm'],

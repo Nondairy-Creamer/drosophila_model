@@ -55,6 +55,7 @@ from drosophila_model.model_definition import dynamics
 from drosophila_model.config import get_data_folder, load_config, resolve_device
 from drosophila_model.model_definition.connectome_loading import ConnectomeData
 from drosophila_model.model_definition.model_layers import CellTypeLayerNorm
+from drosophila_model.model_definition import readouts as readouts_mod
 from drosophila_model.model_definition import regions as regions_mod
 
 
@@ -226,6 +227,7 @@ class SerializableModel:
         with _quiet_sparse_warnings():
             data = torch.load(path, map_location='cpu', weights_only=False)
         inputs = dict(data['inputs'])
+        readouts_mod.rename_saved_readouts(inputs.get('region_kwargs'), data['state_dict'])
 
         # The device comes from the argument, else this machine's config.toml
         # (falling back to CPU when CUDA is unavailable); config.toml also

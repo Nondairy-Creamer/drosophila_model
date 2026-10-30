@@ -56,9 +56,9 @@ use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
-# FlowConv2Readout (with the divisive denominator) left 2 of 5 seeds stuck at
-# flow_loss 1; the no-denominator version trained on every seed.
-readouts            = ['FlowConv2NoDenomReadout']
+# FlowConv2DenomReadout (the same with a divisive denominator) left 2 of 5
+# seeds stuck at flow_loss 1; FlowConv2Readout trained on every seed.
+readouts            = ['FlowConv2Readout']
 readout_neurons     = [
     'T1', 'T2', 'T2a', 'T3',
     'T4a', 'T4b', 'T4c', 'T4d',
@@ -75,13 +75,14 @@ input_layer_l1 = 0.0
 # DataLoader shuffling (all routed through the model's rng). launch_runs uses
 # this as the base and assigns seed = base_seed + run_index per run;
 # training.train uses it directly. Both are overridden by the --base-seed /
-# --seed CLI flags.
-base_seed = 1
-# Optimizer steps. 2500 is ~500 epochs of the default datasets (162 training
-# examples at batch_size 32 -> 5 steps per epoch). Expect the loss to sit at
-# flow_loss ~1 / odometry_loss ~0.5 for the first ~50-250 steps (seed
-# dependent) before it starts to fall.
-num_steps = 2500
+# --seed CLI flags. 7 reproduces the reference run trained on these defaults
+# (base_fit_seed7).
+base_seed = 7
+# Passes over the training set (162 examples of the default datasets at
+# batch_size 32 -> 5 optimizer steps per epoch). Expect the loss to sit at
+# flow_loss ~1 / odometry_loss ~0.5 for the first ~5-45 epochs (seed
+# dependent) before it starts to fall; it levels off by ~300.
+num_epochs = 500
 # Re-draw the training loss plot (models/<run>/figures/training/loss.png)
 # every `save_every` epochs. Checkpoints are written whenever the loss improves.
 save_every = 1

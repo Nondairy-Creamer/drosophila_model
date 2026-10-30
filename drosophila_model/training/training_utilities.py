@@ -317,7 +317,7 @@ def compute_loss_components(model, outputs, target, train_mask, loss_components)
 def fit(model, inputs, target, output_neurons, input_neurons,
                 loss_components,
                 rng=None, model_save_folder=None,
-                num_steps=100, save_every=100, alpha=1e-4,
+                num_epochs=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, adam_beta2=0.99,
                 reload_best_on_loss_jump=True,
                 patience=10, alpha_factor=0.5, takeoff_fraction=0.01,
@@ -325,6 +325,10 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0,
                 batch_size=None, train_mask=None, num_eyes=1, eye_offset=None):
     """Train ``model`` on ``inputs`` -> ``target`` with Adam.
+
+    Runs ``num_epochs`` passes over the shuffled examples in batches of
+    ``batch_size`` (a final partial batch is dropped). ``save_every`` and
+    ``patience`` count epochs too.
 
     ``num_eyes`` is the eye count of the dataset (``load_processed_stimulus``
     returns it). Two-eye inputs are laid out ``[right | left]`` on the column
@@ -440,15 +444,12 @@ def fit(model, inputs, target, output_neurons, input_neurons,
 
     step = 0
     epoch = 0
-    while step < num_steps:
+    while epoch < num_epochs:
         epoch_start = time.time()
         epoch_losses = []
         epoch_component_losses = {name: [] for name in all_component_names}
 
         for inputs_batch, target_batch, train_mask_batch in dataloader:
-            if step >= num_steps:
-                break
-
             inputs_batch = inputs_batch.clone()
 
             if luminance_std > 0:
@@ -580,7 +581,7 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                           f'Learning rate reduced to {alpha:.2e}.')
                     print(' -------------------------------- ')
 
-        if model_save_folder is not None and ((epoch % save_every == 0) or (step >= num_steps)):
+        if model_save_folder is not None and ((epoch % save_every == 0) or (epoch == num_epochs)):
             pu.plot_loss(loss_plot, save_folder=model_save_folder / 'figures' / 'training')
 
         epoch_loss_str = f'{epoch_avg.item():.4f}' if epoch_losses else 'NaN'
@@ -593,7 +594,7 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                     avg = torch.stack(vals).mean().item()
                     comp_parts.append(f'{name}={avg:.4f}')
             comp_str = ' (' + ', '.join(comp_parts) + ')'
-        print(f'epoch {epoch} | steps {step}/{num_steps} | loss = {epoch_loss_str}{comp_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
+        print(f'epoch {epoch}/{num_epochs} | steps {step} | loss = {epoch_loss_str}{comp_str} | dt = {time.time()-epoch_start:.3g}s | lr = {alpha:.2e} | path = {model_save_folder}')
 
     return model, loss_plot, opt.state_dict(), {
         "best_loss": float(best_loss.item()),

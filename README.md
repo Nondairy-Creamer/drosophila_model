@@ -83,7 +83,7 @@ defaults, so typos fail loudly. The data bundle is read from
 `[data].data_folder`, which defaults to `../drosophila_model_data` (a folder
 next to the repo); set it in `config.toml` if your data lives elsewhere. The
 defaults are a setup that trains (conductance dynamics, flow + odometry loss
-on `random_pano`, `counterphase_sine` and `full_field_step`, 2500 steps), so a
+on `random_pano`, `counterphase_sine` and `full_field_step`, 500 epochs), so a
 minimal `config.toml` only needs what differs on your machine:
 
 ```toml
@@ -164,7 +164,7 @@ python -m drosophila_model.training.launch_runs --runs-per-gpu 4
 |---|---|
 | `train` | Train one model from `config.toml` (`--seed`, `--device`, `--run-id`, `--timestamp`, `--config-path`; `--model-folder` warm-starts from an existing run with fresh noise, optimizer and folder). |
 | `launch_runs` | Launch `runs_per_gpu` × GPUs runs with seeds `base_seed + i` as `models/<tag>_gpuN_runM/`. Detaches by default; launcher log in `logs/launch_runs_<tag>.log`, per-run logs in `logs/`. |
-| `resume_runs` | Resume a run in place from its best checkpoint, optimizer state and loss history (`--model-folder`, `--num-steps`); `--new-session` copies it to `<run>_cont` and restarts the optimizer. |
+| `resume_runs` | Resume a run in place from its best checkpoint, optimizer state and loss history (`--model-folder`, `--num-epochs`); `--new-session` copies it to `<run>_cont` and restarts the optimizer. |
 | `rank_runs` | Rank runs under `models/` by best training loss and plot loss curves per group (`figures/rank_runs/`). |
 | `sync_models` | rsync runs to/from a remote server (`<server>`, `--push`, `--model-folder`, `--remote-dir`). |
 | `stop_runs` | Stop all launcher and training processes (POSIX). |
@@ -191,7 +191,7 @@ How a run is shaped:
   (per-neuron ANN on the connectome; depth `[model].cell_ann_depth`) or
   `ArbitraryDynamics` (connectome-free all-to-all cell-type baseline).
 - **Readouts** (`[model.regions.optic_lobe].readouts`):
-  `FlowConv2NoDenomReadout` (default), `FlowConv2Readout`, `FlowConv3Readout`,
+  `FlowConv2Readout` (default), `FlowConv2DenomReadout`, `FlowConv3Readout`,
   `FlowLinearReadout`, `FlowNeuronReadout`, `MotionMagReadout`,
   `MotionMagConv2Readout`. Regularizers: `L1Reg`, `L2Reg`, `SigmaReg`.
 - **Sparsity / size:**

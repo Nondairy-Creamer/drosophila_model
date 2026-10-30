@@ -23,7 +23,7 @@ from drosophila_model.model_definition import neural_models as nm
 from drosophila_model.training import training_utilities as tu
 
 
-def resume_runs(model_folder, new_session=False, num_steps=None):
+def resume_runs(model_folder, new_session=False, num_epochs=None):
     """Resume training the run in ``model_folder`` (see module docstring)."""
     model_folder = Path(model_folder)
     if new_session:
@@ -64,7 +64,7 @@ def resume_runs(model_folder, new_session=False, num_steps=None):
         loss_components=training['loss_components'],
         model_save_folder=model_folder,
         rng=model.rng,
-        num_steps=num_steps if num_steps is not None else training['num_steps'],
+        num_epochs=num_epochs if num_epochs is not None else training['num_epochs'],
         save_every=training['save_every'],
         alpha=alpha,
         clip_grad_norm=training['clip_norm'],
@@ -87,10 +87,10 @@ def main():
     parser.add_argument('--new-session', action='store_true', default=False,
                         help='Copy the folder to <name>_cont and start a fresh optimizer '
                              'and loss history at the config alpha')
-    parser.add_argument('--num-steps', type=int, default=None,
-                        help="Training steps for this session (default: [training].num_steps)")
+    parser.add_argument('--num-epochs', type=int, default=None,
+                        help="Training epochs for this session (default: [training].num_epochs)")
     args = parser.parse_args()
-    resume_runs(args.model_folder, new_session=args.new_session, num_steps=args.num_steps)
+    resume_runs(args.model_folder, new_session=args.new_session, num_epochs=args.num_epochs)
 
 
 if __name__ == '__main__':

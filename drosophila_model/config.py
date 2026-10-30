@@ -312,11 +312,23 @@ def _validate_user_keys(user: dict, default: dict, *, source: str,
     _collect_unknown_keys(user, default, path, unknown)
     if unknown:
         joined = ', '.join(unknown)
+        replaced = [f"{key} was replaced by {_REPLACED_KEYS[key]}"
+                    for key in unknown if key in _REPLACED_KEYS]
         raise ValueError(
             f"Unknown config key(s) in {source} not present in "
-            f"{default_name}: {joined}. Add them to "
-            f"drosophila_model/{default_name} first if intentional."
+            f"{default_name}: {joined}. "
+            + (f"{'; '.join(replaced)}." if replaced else
+               f"Add them to drosophila_model/{default_name} first if intentional.")
         )
+
+
+# Keys renamed in config_default.toml, with what replaced them, for the
+# unknown-key error.
+_REPLACED_KEYS = {
+    'training.num_steps': ('training.num_epochs (run length now counts passes over '
+                           'the training set: epochs = steps / steps per epoch, 5 for '
+                           'the default datasets at batch_size 32)'),
+}
 
 
 def _collect_unknown_keys(user: dict, default: dict, path: tuple[str, ...],

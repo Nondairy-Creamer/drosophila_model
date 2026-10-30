@@ -38,7 +38,7 @@ def _train_one_step(model, num_eyes, loss_components, **kwargs):
         output_neurons=None, input_neurons=None,
         loss_components=loss_components,
         rng=np.random.default_rng(0),
-        num_steps=1, save_every=1, alpha=1e-3,
+        num_epochs=1, save_every=1, alpha=1e-3,
         train_mask=train_mask, num_eyes=num_eyes,
         **kwargs,
     )

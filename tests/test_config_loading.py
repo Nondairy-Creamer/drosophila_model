@@ -23,7 +23,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
                 "readouts = ['FlowConv2Readout', 'L1Reg']",
                 "",
                 "[training]",
-                "num_steps = 123",
+                "num_epochs = 123",
                 "alpha = 0.123",
                 'clip_norm = "none"',
                 "",
@@ -38,7 +38,7 @@ def test_load_config_merges_and_converts_none(tmp_path, monkeypatch):
 
     assert config["model"]["device"] == "cpu"
     assert config["model"]["regions"]["optic_lobe"]["readouts"] == ['FlowConv2Readout', 'L1Reg']
-    assert config["training"]["num_steps"] == 123
+    assert config["training"]["num_epochs"] == 123
     assert config["training"]["alpha"] == 0.123
     assert config["training"]["loss_components"] == ['flow_loss', 'odometry_loss']
     assert config["training"]["clip_norm"] is None
@@ -91,6 +91,14 @@ def test_load_config_rejects_unknown_data_keys(tmp_path):
         load_config(str(main_config), str(bad_data_config))
 
 
+def test_load_config_names_the_replacement_of_num_steps(tmp_path):
+    old_config = tmp_path / "config_old.toml"
+    old_config.write_text("[training]\nnum_steps = 2500\n")
+
+    with pytest.raises(ValueError, match="training.num_steps was replaced by training.num_epochs"):
+        load_config(str(old_config))
+
+
 def test_test_config_matches_schema(tmp_path, monkeypatch):
     """tests/config_test.toml passes strict validation (catches schema drift
     without needing the connectome data)."""
@@ -125,7 +133,7 @@ def _write_saved_run(run_dir):
                 "dt = 0.02",
                 "",
                 "[training]",
-                "num_steps = 7",
+                "num_epochs = 7",
                 "",
                 "[run_info]",
                 "seed = 3",
@@ -157,7 +165,7 @@ def test_load_run_config_keeps_saved_tables(tmp_path, monkeypatch):
     config = load_run_config(run_dir)
 
     # Saved values win over the defaults.
-    assert config["training"]["num_steps"] == 7
+    assert config["training"]["num_epochs"] == 7
     assert config["model"]["dt"] == 0.02
     assert config["run_info"]["seed"] == 3
     # Saved data tables are kept (not replaced by the local config_data.toml);

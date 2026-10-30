@@ -21,7 +21,7 @@ num_temporal_modes  = 4
 readouts            = ['FlowConv2Readout']
 
 [training]
-num_steps = 100
+num_epochs = 100
 save_every = 10
 input_noise_std = 0.16
 contrast_std = 0.2

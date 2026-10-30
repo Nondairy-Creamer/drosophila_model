@@ -22,7 +22,7 @@ def test_fit_plateau_reload(capsys, tmp_path):
         loss_components=[],
         rng=np.random.default_rng(0),
         model_save_folder=model_save_folder,
-        num_steps=2,
+        num_epochs=2,
         save_every=1,
         alpha=0.0,
         patience=0,

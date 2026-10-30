@@ -277,29 +277,7 @@ class FlowLinearReadout(HexGridReadout):
 
 
 class FlowConv2Readout(HexGridReadout):
-    """Two-layer hex-grid conv decoder producing 2-D optic flow."""
-
-    output_extra_dims = (2,)
-    eye_asymmetric = True
-    predicts_flow = True
-    zero_init = True
-
-    def __init__(self, *, readout_neurons=None, **kwargs):
-        super().__init__(
-            neurons_to_decode=readout_neurons,
-            num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
-            **kwargs,
-        )
-
-
-class FlowConv2NoDenomReadout(HexGridReadout):
-    """``FlowConv2Readout`` without the denominator: the last layer's two
-    channels are the flow.
-
-    The default. With the denominator, numerator and denominator can grow
-    together without changing the prediction; in some seeds both grew while
-    the prediction stayed near zero, and training never left flow_loss 1.
-    """
+    """Two-layer hex-grid conv decoder producing 2-D optic flow (the default)."""
 
     output_extra_dims = (2,)
     eye_asymmetric = True
@@ -310,6 +288,28 @@ class FlowConv2NoDenomReadout(HexGridReadout):
         super().__init__(
             neurons_to_decode=readout_neurons,
             num_channels=[8, 2], conv_sizes=[5, 5], use_denominator=False,
+            **kwargs,
+        )
+
+
+class FlowConv2DenomReadout(HexGridReadout):
+    """``FlowConv2Readout`` with a denominator: the last layer's first two
+    channels are divided by softplus of the third.
+
+    Numerator and denominator can grow together without changing the
+    prediction; in some seeds both grew while the prediction stayed near zero,
+    and training never left flow_loss 1.
+    """
+
+    output_extra_dims = (2,)
+    eye_asymmetric = True
+    predicts_flow = True
+    zero_init = True
+
+    def __init__(self, *, readout_neurons=None, **kwargs):
+        super().__init__(
+            neurons_to_decode=readout_neurons,
+            num_channels=[8, 3], conv_sizes=[5, 5], use_denominator=True,
             **kwargs,
         )
 
@@ -456,3 +456,36 @@ def configurable_names() -> list[str]:
     """Sorted names of the classes :func:`is_configurable` accepts."""
     return sorted(name for name, obj in globals().items()
                   if not name.startswith('_') and is_configurable(obj))
+
+
+def rename_saved_readouts(region_kwargs, state_dict):
+    """Map the readout names of a saved model onto the current classes, in place.
+
+    Two readouts were renamed after models had been saved under the old names:
+    ``FlowConv2Readout`` with a denominator (a 3-channel last layer) is now
+    ``FlowConv2DenomReadout``, and ``FlowConv2NoDenomReadout`` is now
+    ``FlowConv2Readout``. Called by ``BaseRnn.load`` on the saved
+    ``inputs['region_kwargs']`` and ``state_dict``.
+    """
+    for region, opts in (region_kwargs or {}).items():
+        names = (opts or {}).get('readouts') or []
+        prefix = f'regions.{region}._readout_modules.'
+        renames = {}
+        for name in names:
+            if name == 'FlowConv2NoDenomReadout':
+                renames[name] = 'FlowConv2Readout'
+            elif name == 'FlowConv2Readout':
+                last = state_dict.get(f'{prefix}{name}.conv_layers.1.weight')
+                if last is not None and last.shape[0] == 3:
+                    renames[name] = 'FlowConv2DenomReadout'
+        if not renames:
+            continue
+        opts['readouts'] = [renames.get(name, name) for name in names]
+        for key in list(state_dict):
+            if not key.startswith(prefix):
+                continue
+            module, dot, rest = key[len(prefix):].partition('.')
+            # A readout's auto-built regularizer is named '<readout>_<class>'.
+            readout, underscore, suffix = module.partition('_')
+            if readout in renames:
+                state_dict[f'{prefix}{renames[readout]}{underscore}{suffix}{dot}{rest}'] = state_dict.pop(key)
