@@ -27,13 +27,19 @@ the ground truth. Ego-motion is solved with the dataset's registered camera
 offset, as in training (two-eye ``get_stimulus`` data goes through
 ``training_utilities.model_outputs``).
 
-Columns outside the field of view are drawn yellow.
+With --input-conv (two-eye random_pano only), the movie shows what the network
+receives and what it reports:
+  Row 0: Left image after the input conv | Right image after the input conv
+  Row 1: Left predicted flow             | Right predicted flow
+
+Columns outside the field of view are drawn yellow (left blank with --input-conv).
 
 Usage (from the repo root):
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --no-two-eyes --stim-type random_sine
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --stim-type random_pano
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --ego-motion --stim-type random_pano
     python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --ego-motion --translation
+    python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/my_model/ --input-conv --duration 10
 
 ``--duration <seconds>`` overrides the generated stimulus length
 (``[shared].stim_time`` in the data config); ``--max-frames`` is a separate hard
@@ -55,6 +61,8 @@ from drosophila_model.analysis.model_analysis.analysis_utilities import (
 )
 
 from drosophila_model.analysis.movie_scripts.movie_utilities import (
+    BLANK_MASK_COLOR,
+    compute_filtered,
     masked_rgba,
     write_movie,
     ylim_from_data,
@@ -118,6 +126,9 @@ def main() -> None:
                         help="Subtract rotation-induced flow (requires --ego-motion)")
     parser.add_argument("--save-figures", action="store_true",
                         help="Save rate and integrated pose PNG figures (requires --ego-motion)")
+    parser.add_argument("--input-conv", action="store_true",
+                        help="Show the image after the model's input conv above the predicted "
+                             "flow, with no true flow (two-eye random_pano only)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Stimulus-generation seed (overrides [shared].seed "
                              "from the data config)")
@@ -133,6 +144,8 @@ def main() -> None:
                      "pass --no-two-eyes")
     if (args.translation or args.save_figures) and not args.ego_motion:
         parser.error("--translation and --save-figures require --ego-motion")
+    if args.input_conv and (args.ego_motion or not args.two_eyes or args.stim_type != "random_pano"):
+        parser.error("--input-conv needs a two-eye random_pano stimulus and no --ego-motion")
 
     model_path = Path(args.model_folder)
     model_folder = model_path.parent if model_path.is_file() else model_path
@@ -180,7 +193,7 @@ def main() -> None:
                   else model_folder / "figures" / "run_model_on_stimulus")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.two_eyes and args.ego_motion and args.stim_type == "random_pano":
+    if args.two_eyes and (args.ego_motion or args.input_conv) and args.stim_type == "random_pano":
         _run_ego_motion_pano(args, model, data_config, get_data_folder(config), output_dir,
                              device, dtype, model_dt, column_phi_theta, N,
                              cell_x, cell_y, cell_z, frame_rate, flow_key)
@@ -431,7 +444,8 @@ def _run_ego_motion_pano(args, model, data_config, data_folder, output_dir,
     Generates the panoramas directly (rather than through ``get_stimulus``) to
     keep the per-frame out-of-panorama mask, which drives the field-of-view
     display, the excluded solver columns and the true flow magnitude.
-    ``data_folder`` holds ``stimulus/baked/all_panoramic.pt``.
+    ``data_folder`` holds ``stimulus/baked/all_panoramic.pt``. With
+    ``--input-conv``, renders the input-conv movie instead.
     """
     both_phi = np.concatenate([column_phi_theta[:, 0], -column_phi_theta[:, 0]])
     both_theta = np.concatenate([column_phi_theta[:, 1], column_phi_theta[:, 1]])
@@ -552,6 +566,22 @@ def _run_ego_motion_pano(args, model, data_config, data_folder, output_dir,
 
         in_fov_right = ~oob_right
         in_fov_left = ~oob_left
+
+        if args.input_conv:
+            with torch.no_grad():
+                filtered_right = compute_filtered(model, right_input)
+                filtered_left = compute_filtered(model, left_input)
+            out_path = output_dir / f"{args.stim_type}_input_conv_stim_{stim_index}.mp4"
+            print(f"  Creating movie -> {out_path}")
+            _make_input_conv_flow_movie(
+                filtered_left=filtered_left, filtered_right=filtered_right,
+                pred_flow_left=pred_flow_left[:num_frames],
+                pred_flow_right=pred_flow_right[:num_frames],
+                cell_x=cell_x, cell_y=cell_y, cell_z=cell_z,
+                in_fov_left=in_fov_left, in_fov_right=in_fov_right,
+                output_path=out_path, frame_rate=frame_rate,
+            )
+            continue
 
         flow_label = "translation flow" if args.translation else "predicted flow"
         out_path = output_dir / f"{args.stim_type}_ego_motion_stim_{stim_index}.mp4"
@@ -892,6 +922,80 @@ def _make_two_eye_flow_movie(
         update_eye_quiver(q_pred_r, pred_vx_r[t], pred_vz_r[t], max_mag, "right")
         ax_stim_l.set_title(f"Left Eye ({stim_type}) — frame {t + 1}/{num_frames}")
         ax_stim_r.set_title(f"Right Eye ({stim_type}) — frame {t + 1}/{num_frames}")
+
+    write_movie(fig, update, num_frames, output_path, frame_rate)
+
+
+def _make_input_conv_flow_movie(
+    filtered_left, filtered_right,
+    pred_flow_left, pred_flow_right,
+    cell_x, cell_y, cell_z,
+    in_fov_left, in_fov_right,
+    output_path, frame_rate,
+):
+    """Render a 2x2 movie: image after the input conv / predicted flow for both eyes."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    import matplotlib.colors as mcolors
+
+    num_frames = filtered_left.shape[0]
+    gray_cmap = plt.cm.gray
+    # The output is contrast-normalised around 0. Clip at a high percentile so
+    # a few extreme columns don't wash out the rest of the image.
+    filtered_abs = np.abs(np.concatenate([filtered_left[in_fov_left], filtered_right[in_fov_right]]))
+    vmax = float(np.nanpercentile(filtered_abs, 99))
+    filtered_norm = mcolors.Normalize(vmin=-vmax, vmax=vmax)
+
+    flow_vx_r, flow_vz_r, _, _, _ = prepare_eye_quiver(pred_flow_right, cell_x, cell_y, cell_z, "right")
+    flow_vx_l, flow_vz_l, _, _, _ = prepare_eye_quiver(pred_flow_left, cell_x, cell_y, cell_z, "left")
+
+    all_mag = np.hypot(
+        np.concatenate([flow_vx_r.ravel(), flow_vx_l.ravel()]),
+        np.concatenate([flow_vz_r.ravel(), flow_vz_l.ravel()]),
+    )
+    finite_mag = all_mag[np.isfinite(all_mag)]
+    max_mag = (float(np.percentile(finite_mag, 99))
+               if finite_mag.size > 0 and finite_mag.max() > 0 else 1.0)
+    arrow_scale = 0.2 / max_mag if max_mag > 0 else 1.0
+
+    fig, axes = plt.subplots(2, 2, figsize=(12.8, 10.7), dpi=100)
+    ax_image_l, ax_image_r = axes[0]
+    ax_flow_l, ax_flow_r = axes[1]
+
+    for ax in (ax_image_l, ax_flow_l):
+        setup_eye_axis(ax, cell_x, cell_z, "left")
+    for ax in (ax_image_r, ax_flow_r):
+        setup_eye_axis(ax, cell_x, cell_z, "right")
+
+    sc_image_l = ax_image_l.scatter(cell_x, cell_z,
+        c=masked_rgba(filtered_left[0], in_fov_left[0], gray_cmap, filtered_norm, BLANK_MASK_COLOR),
+        s=90, edgecolors="none")
+    sc_image_r = ax_image_r.scatter(cell_x, cell_z,
+        c=masked_rgba(filtered_right[0], in_fov_right[0], gray_cmap, filtered_norm, BLANK_MASK_COLOR),
+        s=90, edgecolors="none")
+    ax_image_l.set_title("Left Eye — After Input Conv")
+    ax_image_r.set_title("Right Eye — After Input Conv")
+
+    quiver_kw = dict(angles="xy", scale_units="xy", scale=1 / arrow_scale, width=0.003)
+    q_left = init_eye_quiver(ax_flow_l, cell_x, cell_z, flow_vx_l[0], flow_vz_l[0], max_mag, "left", **quiver_kw)
+    q_right = init_eye_quiver(ax_flow_r, cell_x, cell_z, flow_vx_r[0], flow_vz_r[0], max_mag, "right", **quiver_kw)
+    ax_flow_l.set_title("Left Eye — Predicted Flow")
+    ax_flow_r.set_title("Right Eye — Predicted Flow")
+
+    plt.tight_layout()
+    # After tight_layout: the polar wheel is not a subplot. It goes in the empty
+    # corner of the flow panel, outside the circle of columns.
+    flow_pos = ax_flow_l.get_position()
+    wheel_w = 0.055
+    wheel_h = wheel_w * fig.get_figwidth() / fig.get_figheight()
+    add_eye_colorwheel(fig, rect=[flow_pos.x0 + 0.019, flow_pos.y1 - wheel_h - 0.022, wheel_w, wheel_h])
+
+    def update(t):
+        sc_image_l.set_facecolors(masked_rgba(filtered_left[t], in_fov_left[t], gray_cmap, filtered_norm, BLANK_MASK_COLOR))
+        sc_image_r.set_facecolors(masked_rgba(filtered_right[t], in_fov_right[t], gray_cmap, filtered_norm, BLANK_MASK_COLOR))
+        update_eye_quiver(q_left, flow_vx_l[t], flow_vz_l[t], max_mag, "left")
+        update_eye_quiver(q_right, flow_vx_r[t], flow_vz_r[t], max_mag, "right")
 
     write_movie(fig, update, num_frames, output_path, frame_rate)
 

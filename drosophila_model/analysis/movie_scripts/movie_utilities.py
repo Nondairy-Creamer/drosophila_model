@@ -35,6 +35,7 @@ from drosophila_model.fly_eye.utils import column_hex_centers, hex_vertices
 
 __all__ = [
     # defined here
+    "BLANK_MASK_COLOR",
     "masked_rgba",
     "synthesize_two_eye_flow_from_odometry",
     "write_movie",
@@ -57,6 +58,8 @@ __all__ = [
 ]
 
 _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
+# Fully transparent, so masked columns don't cover their neighbours' dots.
+BLANK_MASK_COLOR = np.array([1.0, 1.0, 1.0, 0.0])
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +67,8 @@ _MASK_COLOR = np.array([1.0, 1.0, 0.0, 1.0])
 # ---------------------------------------------------------------------------
 
 
-def masked_rgba(values, mask, cmap=None, norm=None):
-    """Convert scalar values to RGBA, painting masked columns yellow.
+def masked_rgba(values, mask, cmap=None, norm=None, mask_color=_MASK_COLOR):
+    """Convert scalar values to RGBA, painting masked columns ``mask_color`` (yellow).
 
     Parameters
     ----------
@@ -73,6 +76,7 @@ def masked_rgba(values, mask, cmap=None, norm=None):
     mask : (N,) bool array or None — True = valid, False = masked
     cmap : matplotlib Colormap (default: gray)
     norm : matplotlib Normalize
+    mask_color : RGBA of the masked columns
     """
     if cmap is None:
         cmap = plt.cm.gray
@@ -80,7 +84,7 @@ def masked_rgba(values, mask, cmap=None, norm=None):
         norm = mcolors.Normalize(vmin=np.nanmin(values), vmax=np.nanmax(values))
     rgba = cmap(norm(values))
     if mask is not None:
-        rgba[~mask] = _MASK_COLOR
+        rgba[~mask] = mask_color
     return rgba
 
 

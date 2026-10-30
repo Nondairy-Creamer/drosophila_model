@@ -3,7 +3,13 @@
 <p align="center">
   <img src="docs/media/drone_flight.webp" alt="A small drone hovering in front of a textured panel" width="704">
   <br>
-  <em>Synthetic drosophila brain doing visual stabilization in a drone</em>
+  <em>Synthetic drosophila brain doing visual stabilization using dense optic flow in a drone</em>
+</p>
+
+<p align="center">
+  <img src="docs/media/predicted_flow.webp" alt="The image after the input conv and the predicted optic flow for each eye" width="704">
+  <br>
+  <em>Predicted optic flow to a randomly rotating filtered natural scene</em>
 </p>
 
 Sparse, efficient recurrent models of the *Drosophila* nervous system whose
@@ -248,7 +254,7 @@ split. `performance_sweep` evaluates on the held-out `_test.pt` files.
 
 | Script | What it does |
 |---|---|
-| `run_model_on_stimulus` | Model flow (and `--ego-motion` odometry) on a freshly generated stimulus. |
+| `run_model_on_stimulus` | Model flow (and `--ego-motion` odometry, or `--input-conv` for the image after the input conv) on a freshly generated stimulus. |
 | `run_model_on_stimulus_cells` | Diamond-layout movie of four cell types around the stimulus. |
 | `run_model_on_cell_inputs` | Replay the run's training inputs and show predicted vs. true flow. |
 | `natural_pano_t4t5_movies` | T4/T5 diamond movies for rotating natural panoramas. |
