@@ -17,7 +17,8 @@ nervous system in PyTorch. Each model is a recurrent network whose neurons and
 signed synapses come from the FlyWire connectome; only per-cell-type parameters,
 such as gains, time constants and input filters, are learned. The default
 configuration trains the right optic lobe to report optic flow and ego-motion
-from visual input.
+from visual input. The default model includes 42,825 neurons, 726 cell types
+and 12,311 trainable parameters.
 
 ## Setup
 
