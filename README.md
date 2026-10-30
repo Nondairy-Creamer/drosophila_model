@@ -16,49 +16,44 @@ translation) from natural and synthetic visual input.
 ## Setup
 
 1. Download the code:
-
    ```bash
-   git clone https://github.com/Nondairy-Creamer/drosophila_model.git
-   cd drosophila_model
+    git clone https://github.com/Nondairy-Creamer/drosophila_model.git
+    cd drosophila_model
    ```
-
 2. Set up a Python environment (Python 3.11 or newer) and activate it, for
    example:
-
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # Windows (Git Bash): source .venv/Scripts/activate
+    python -m venv .venv
+    source .venv/bin/activate   # Windows (Git Bash): source .venv/Scripts/activate
    ```
 
-   To train on a GPU, install the [PyTorch](https://pytorch.org) build for
-   your CUDA version now. Otherwise the next step installs the CPU build. On
-   a server whose system Python already has a working torch (e.g. RunPod),
-   skip the venv and use that Python.
-
+    To train on a GPU, install the [PyTorch](https://pytorch.org) build for
+    your CUDA version now. Otherwise the next step installs the CPU build. On
+    a server whose system Python already has a working torch (e.g. RunPod),
+    skip the venv and use that Python.
 3. Run the setup script from the repo root:
-
    ```bash
-   bash setup.sh   # Windows (PowerShell): & "C:\Program Files\Git\bin\bash.exe" setup.sh
+    bash setup.sh   # Windows (PowerShell): & "C:\Program Files\Git\bin\bash.exe" setup.sh
    ```
 
-   It installs the dependencies and this package, writes `config.toml` with
-   `[data].data_folder`, downloads the processed connectome and panorama data
-   from the repository's
-   [`data-v1` release](https://github.com/Nondairy-Creamer/drosophila_model/releases/tag/data-v1)
-   (about 250 MB), and bakes the training sets (a few minutes). The data go
-   to `../drosophila_model_data`, next to the repo, unless you pass another
-   folder: `bash setup.sh /path/to/data`. It bakes the training sets listed
-   in `[stimulus].stimulus_type`, so set that in `config.toml` first if you
-   want other ones (or bake them later, see [Data](#data)). Re-running it
-   skips whatever is already done.
+    It installs the dependencies and this package, writes `config.toml` with
+    `[data].data_folder`, downloads the processed connectome and panorama data
+    from the repository's
+    `data-v1` [release](https://github.com/Nondairy-Creamer/drosophila_model/releases/tag/data-v1)
+    (about 250 MB), and bakes the training sets (a few minutes). The data go
+    to `../drosophila_model_data`, next to the repo, unless you pass another
+    folder: `bash setup.sh /path/to/data`. It bakes the training sets listed
+    in `[stimulus].stimulus_type`, so set that in `config.toml` first if you
+    want other ones (or bake them later, see [Data](#data)). Re-running it
+    skips whatever is already done.
 
-   To rebuild the processed data from the raw data instead (about 3.2 GB to
-   download), run `bash setup.sh --raw`.
+    To rebuild the processed data from the raw data instead (about 3.2 GB to
+    download), run `bash setup.sh --raw`.
 
-   If the download is very slow on Windows, check that TCP auto-tuning is on:
-   `netsh interface tcp show global` should show "Receive Window Auto-Tuning
-   Level: normal". To turn it on, run
-   `netsh interface tcp set global autotuninglevel=normal` as administrator.
+    If the download is very slow on Windows, check that TCP auto-tuning is on:
+    `netsh interface tcp show global` should show "Receive Window Auto-Tuning
+    Level: normal". To turn it on, run
+    `netsh interface tcp set global autotuninglevel=normal` as administrator.
 
 The data steps alone are `python -m drosophila_model.data_handling.prepare_data`
 (with `--raw` as above, and `--zip path/to/drosophila_model_baked_v1.zip` or
@@ -73,9 +68,9 @@ All commands below are run **from the repo root**, as
 Settings come from two packaged defaults:
 
 - [`drosophila_model/config_default.toml`](drosophila_model/config_default.toml):
-  model, training, which datasets to train on.
+model, training, which datasets to train on.
 - [`drosophila_model/config_default_data.toml`](drosophila_model/config_default_data.toml):
-  stimulus-generation parameters, merged under `config['data']`.
+stimulus-generation parameters, merged under `config['data']`.
 
 Each is overlaid by an optional, gitignored file at the repo root:
 `config.toml` and `config_data.toml`. Overlay keys must already exist in the
@@ -101,7 +96,7 @@ In code, use `config.load_config()` for the live config,
 ## Data
 
 `[data].data_folder` holds the raw inputs and the files baked from them. The
-[`data-v1` release](https://github.com/Nondairy-Creamer/drosophila_model/releases/tag/data-v1)
+`data-v1` [release](https://github.com/Nondairy-Creamer/drosophila_model/releases/tag/data-v1)
 has both, as two zips (the raw one split into parts under GitHub's 2 GiB file
 limit). `setup.sh` (through `data_handling.prepare_data`) downloads the baked
 `connectome_data/baked/` and `stimulus/baked/`
@@ -172,7 +167,7 @@ python -m drosophila_model.training.launch_runs --runs-per-gpu 4
 A run folder `models/<timestamp>[_<run_id>]/` contains:
 
 - `config.toml`: the full merged config, plus `[run_info]` with seed, device,
-  run id, eye count and the rig's camera offset.
+run id, eye count and the rig's camera offset.
 - `model_init.pt` and `model.pt` (the best checkpoint so far).
 - `model_opt.pt`: optimizer state and loss history.
 - `cell_inputs.pt` and `target.pt`: the exact training data.
@@ -181,27 +176,27 @@ A run folder `models/<timestamp>[_<run_id>]/` contains:
 How a run is shaped:
 
 - **Eyes:** the eye count comes from the dataset. Two-eye data is trained
-  through the optic lobe's two-eye ego-motion solver, using the camera offset
-  registered for that stimulus type. `odometry_loss` needs two-eye data.
+through the optic lobe's two-eye ego-motion solver, using the camera offset
+registered for that stimulus type. `odometry_loss` needs two-eye data.
 - **Loss components** (`[training].loss_components`): `flow_loss`,
-  `odometry_loss` and `motion_mag`. Regularizers listed among the readouts
-  add their penalty to the loss.
+`odometry_loss` and `motion_mag`. Regularizers listed among the readouts
+add their penalty to the loss.
 - **Dynamics** (`[model].dynamics_type`): `CurrentDynamics`,
-  `CurrentDivisiveDynamics`, `ConductanceDynamics`, `CellAnnDynamics`
-  (per-neuron ANN on the connectome; depth `[model].cell_ann_depth`) or
-  `ArbitraryDynamics` (connectome-free all-to-all cell-type baseline).
+`CurrentDivisiveDynamics`, `ConductanceDynamics`, `CellAnnDynamics`
+(per-neuron ANN on the connectome; depth `[model].cell_ann_depth`) or
+`ArbitraryDynamics` (connectome-free all-to-all cell-type baseline).
 - **Readouts** (`[model.regions.optic_lobe].readouts`):
-  `FlowConv2Readout` (default), `FlowConv2DenomReadout`, `FlowConv3Readout`,
-  `FlowLinearReadout`, `FlowNeuronReadout`, `MotionMagReadout`,
-  `MotionMagConv2Readout`. Regularizers: `L1Reg`, `L2Reg`, `SigmaReg`.
+`FlowConv2Readout` (default), `FlowConv2DenomReadout`, `FlowConv3Readout`,
+`FlowLinearReadout`, `FlowNeuronReadout`, `MotionMagReadout`,
+`MotionMagConv2Readout`. Regularizers: `L1Reg`, `L2Reg`, `SigmaReg`.
 - **Sparsity / size:**
   - `[model].synapse_count_threshold` drops weak connections: neuron pairs
-    whose total synapse count (summed over neuropils) is below it.
+  whose total synapse count (summed over neuropils) is below it.
   - `[model].use_connectome_subset` keeps only the listed cell types.
   - `analysis.model_analysis.model_trimming` removes the least important cell
-    types from a trained model while its training loss stays within 10%.
+  types from a trained model while its training loss stays within 10%.
 - **Region:** `train` builds optic-lobe models only (right eye). Antenna-lobe
-  models are built by the olfactory analysis scripts.
+models are built by the olfactory analysis scripts.
 
 ## Analysis
 
@@ -211,7 +206,7 @@ convention:
 - Model-specific figures go to `<model_folder>/figures/<analysis_name>/`.
 - General figures go to `figures/<analysis_name>/`.
 - Non-figure data (STA arrays, dumps) goes to
-  `<model_folder>/analysis_data/<analysis_name>/`, and caches go to `cache/`.
+`<model_folder>/analysis_data/<analysis_name>/`, and caches go to `cache/`.
 
 Scripts that replay a model's own `cell_inputs.pt` evaluate on its training
 split. `performance_sweep` evaluates on the held-out `_test.pt` files.
