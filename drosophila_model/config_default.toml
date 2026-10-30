@@ -5,10 +5,6 @@ email = ''
 name  = ''
 
 [model]
-# Default model: visual-system only, single right eye, current-based dynamics.
-# This is a boilerplate that user configs override per-key. The [model.regions.*]
-# sub-tables below cover only the regions defaulted here (optic_lobe). Configs
-# that use other areas (e.g. antenna_lobe) supply their own region sub-table.
 model_type = 'ConnectomeModel'
 # CurrentDynamics | CurrentDivisiveDynamics | ConductanceDynamics |
 # CellAnnDynamics | ArbitraryDynamics (see model_architecture.md).
@@ -21,8 +17,7 @@ cell_ann_depth = 1
 threshold_init = -50.0
 # Multiplies every cell type's output strength after the spectral-norm
 # rescale (set_sigma_max, target 0.95), at init only (ConductanceDynamics
-# only). That rescale leaves each synaptic step passing on ~0.1-0.25 of its
-# input; 3 makes every synapse start 3x stronger.
+# only).
 synapse_gain_init = 1.0
 # CUDA devices fall back to 'cpu' (with a warning) when CUDA is unavailable.
 device = "cuda:0"
@@ -56,9 +51,7 @@ use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
-# FlowConv2DenomReadout (the same with a divisive denominator) left 2 of 5
-# seeds stuck at flow_loss 1; FlowConv2Readout trained on every seed.
-readouts            = ['FlowConv2Readout']
+readouts           = ['FlowConv2Readout']
 readout_neurons     = [
     'T1', 'T2', 'T2a', 'T3',
     'T4a', 'T4b', 'T4c', 'T4d',
@@ -75,14 +68,9 @@ input_layer_l1 = 0.0
 # DataLoader shuffling (all routed through the model's rng). start_runs uses
 # this as the base and assigns seed = base_seed + run_index per run;
 # training.train uses it directly. Both are overridden by the --base-seed /
-# --seed CLI flags. 7 reproduces the first 250 epochs of the reference run
-# trained on these defaults (base_fit_seed7, which ran for 500).
+# --seed CLI flags.
 base_seed = 7
-# Passes over the training set (162 examples of the default datasets at
-# batch_size 32 -> 5 optimizer steps per epoch). Expect the loss to sit at
-# flow_loss ~1 / odometry_loss ~0.5 for the first ~5-45 epochs (seed
-# dependent) before it starts to fall. Over 10 seeds, the best flow_loss by
-# epoch 250 was within 0.015 (0.005 on average) of the best by epoch 500.
+# Passes over the training set.
 num_epochs = 250
 # Re-draw the training loss plot (models/<run>/figures/training/loss.png)
 # every `save_every` epochs. Checkpoints are written whenever the loss improves.
