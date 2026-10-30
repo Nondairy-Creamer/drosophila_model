@@ -65,7 +65,7 @@ def _resolve_server(server: str) -> tuple[str, str, str, str]:
     Resolve a server argument to (hostname, port, user, identity_file).
 
     *server* can be:
-      - An IP:port string, e.g. "194.68.245.60:22050"
+      - An IP:port string, e.g. "203.0.113.10:22050"
       - A Host name from ~/.ssh/config, e.g. "RunPodServer1"
     '''
     # Try IP:port format first
@@ -197,7 +197,7 @@ def rsync_transfer(
     Rsync files to or from a remote server.
 
     Args:
-        server: Either an IP:port string (e.g. "194.68.245.60:22050") or an
+        server: Either an IP:port string (e.g. "203.0.113.10:22050") or an
                 SSH config host name (e.g. "RunPodServer1").
         transfer_type: "pull" to download from remote, "push" to upload.
         folder: Optional name of a specific model folder. If omitted,
@@ -326,7 +326,7 @@ def main() -> None:
     parser.add_argument(
         'server',
         help=(
-            'Server to connect to. Either IP:port (e.g. 194.68.245.60:22050) '
+            'Server to connect to. Either IP:port (e.g. 203.0.113.10:22050) '
             'or an SSH config host name (e.g. RunPodServer1).'
         ),
     )
