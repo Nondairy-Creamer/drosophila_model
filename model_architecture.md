@@ -7,7 +7,7 @@ Overview of the neural model classes (all in `drosophila_model/model_definition/
 | Module | Contents |
 |---|---|
 | `neural_models.py` | `SerializableModel`, `BaseRnn`, `ConnectomeModel`, `compose_model_class` |
-| `dynamics.py` | Dynamics mixins: `CurrentDynamics`, `CurrentDivisiveDynamics`, `ConductanceDynamics`, `CellAnnDynamics`, `ArbitraryDynamics` |
+| `dynamics.py` | Dynamics mixins: `CurrentDynamics`, `ConductanceDynamics` |
 | `regions.py` | `RegionView` base + per-area subclasses (`OpticLobeRegion`, `AntennaLobeRegion`), the area-name → region-class `REGION_REGISTRY`, and `build_region_specs` / `build_regions` |
 | `readouts.py` | Optic-lobe readouts (`FlowConv2Readout`, …) and training-only regularizers (`L1Reg`, …) |
 | `model_layers.py` | Reusable `nn.Module` building blocks: `HexGridConv`, `TemporalLRU`, `CellTypeLayerNorm` |
@@ -27,9 +27,7 @@ torch.nn.Module
 │  Concrete models are composed at runtime by
 │      compose_model_class(dynamics_type)
 │  e.g. CurrentDynamics + ConnectomeModel → ConnectomeModel_CurrentDynamics
-│  (dynamics_type: CurrentDynamics | CurrentDivisiveDynamics |
-│                  ConductanceDynamics | CellAnnDynamics |
-│                  ArbitraryDynamics)
+│  (dynamics_type: CurrentDynamics | ConductanceDynamics)
 │
 │  Anatomical scope is data-driven, not class-driven:
 │      ConnectomeData built with
@@ -373,7 +371,7 @@ The dynamics mixins must implement:
 
 - **`forward(v_prev, u_t, stim_to_cell_mapping=None)`** — one-step RNN update. Takes the previous voltage state `v_prev` `(B, N)` and external input `u_t`, returns the next voltage `v_next` `(B, N)`.
 - **`firing_rate(v)`** — maps voltage to a firing rate.
-- **`calc_sigma_max()`** / **`_apply_sigma_scale(scale_factor)`** — only needed by `set_sigma_max` (all three mixins implement them).
+- **`calc_sigma_max()`** / **`_apply_sigma_scale(scale_factor)`** — only needed by `set_sigma_max` (both mixins implement them).
 
 ### Key methods
 
@@ -517,28 +515,6 @@ then each region's `sign_overrides` are applied (optic lobe: the GABAergic
 
 ---
 
-## CurrentDivisiveDynamics
-
-Current-based dynamics with divisive (Carandini-Heeger-style) normalization by
-inhibition:
-
-```
-v_next = α * v_prev + (1 - α) * ((W+ @ g + b * u) / (W- @ g + σ) + offset)
-```
-
-where `g = D_out @ f(v_prev)`, both terms are scaled by `D_in`, and `W+` / `W-`
-are the positive part and the magnitude of the negative part of the signed
-synapse matrix (signed and overridden exactly as in `CurrentDynamics`). The
-stimulus enters the numerator, so the feedforward drive is normalized by
-inhibition too; `offset` is added outside the ratio.
-
-Parameters and initialization are those of `CurrentDynamics` plus `sigma_log`
-`(T,)` (exp → positive semi-saturation constant, initialized to 1).
-`calc_sigma_max` linearizes at `v = 0` with slope 1, where the denominator is
-just `σ`, so the spectral target bounds the worst-case excitatory gain.
-
----
-
 ## ConductanceDynamics
 
 Conductance-based synapse model. Synaptic input is modeled as a conductance change that drives the membrane potential toward a reversal potential.
@@ -583,44 +559,6 @@ where `R` = number of unique neurotransmitters, `T` = number of unique cell type
 - `input_strength` and `output_strength` are initialized from fan-in/fan-out as in `CurrentDynamics` (totals across all transmitters), then Gaussian noise of std `init_std` is added to every parameter.
 - Steady state is initialized to the leak reversal potential (rather than zero).
 - `set_sigma_max` linearizes around rest (`g_tot = g_leak`, slope-1 nonlinearity) and rescales `output_strength` as in `CurrentDynamics`. `output_strength` is then multiplied by `[model].synapse_gain_init` (default 1).
-
-## CellAnnDynamics
-
-Each neuron is a small feed-forward network constrained by the connectome:
-
-```
-v_{t+1} = p * v_t + (1 - p) * (cell_ann(v_t) + b + c * u_t)
-```
-
-- The first layer is the signed connectome (NT sign plus region
-  `sign_overrides`) with one learned positive weight per (post, pre)
-  cell-type pair and hidden unit; later layers are dense per-neuron layers
-  shared per cell type, of sizes `N, N-1, ..., 1` for `N =
-  [model].cell_ann_depth` (default 1).
-- Learned: per-type-pair `cell_ann.sparse_weights_log`, per-type
-  `sparse_bias`, dense weights/biases, `persistence`, `stimulus_strength`,
-  `offset`. First-layer weights start at the `CurrentDynamics` per-edge
-  magnitude.
-- Silencing sets the weights of type pairs from (and, with `silence_inputs`,
-  into) the silenced types to `silence_val`. Trimming remaps type-pair rows by
-  cell-type names.
-- The sparse first layer is rebuilt every step, so it is several times slower
-  than `CurrentDynamics`.
-
-## ArbitraryDynamics
-
-Connectome-free baseline that keeps only cell-type identities: an all-to-all
-learned per-cell-type weight matrix `W`, applied to the mean rate of each
-presynaptic type (`A[i, j] = W[type(i), type(j)] / n[type(j)]`, `n` = neurons
-per type, so `W` stays O(1)),
-
-```
-v_{t+1} = p * v_t + (1 - p) * (A @ f(v_t) + b + c * u_t)
-```
-
-with learned `persistence`, `stimulus_strength` and `offset`. No sparsity or
-sign constraints, so region `sign_overrides` do not apply. Silencing zeroes the
-silenced types' columns of `W` (and rows, with `silence_inputs`).
 
 ---
 
