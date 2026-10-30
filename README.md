@@ -95,6 +95,29 @@ To make the flow movie shown above:
 python -m drosophila_model.analysis.movie_scripts.run_model_on_stimulus models/<run> --stim-type random_pano --input-conv --duration 10
 ```
 
+## Data sources
+
+If you use these data, please cite the original sources:
+
+- Dorkenwald S. et al. (2024). Neuronal wiring diagram of an adult brain.
+  *Nature* 634, 124-138. https://doi.org/10.1038/s41586-024-07558-y
+- Schlegel P. et al. (2024). Whole-brain annotation and multi-connectome cell
+  typing of *Drosophila*. *Nature* 634, 139-152.
+  https://doi.org/10.1038/s41586-024-07686-5
+- Matsliah A. et al. (2024). Neuronal parts list and wiring diagram for a
+  visual system. *Nature* 634, 166-180.
+  https://doi.org/10.1038/s41586-024-07981-1
+- Zhao A. et al. (2025). Eye structure shapes neuron function in *Drosophila*
+  motion vision. *Nature* 646, 135-142.
+  https://doi.org/10.1038/s41586-025-09276-5
+- Meyer H.G., Schwegmann A., Lindemann J.P., Egelhaaf M. (2014). Panoramic
+  high dynamic range images in diverse environments. Bielefeld University.
+  https://doi.org/10.4119/unibi/2689637
+
+The FlyWire connectome data are licensed under CC BY-NC 4.0 (non-commercial use
+only). The eye map and data derived from it are licensed under GPL-3.0, and the
+panoramas under the Open Data Commons Attribution License (ODC-By 1.0).
+
 ## More detail
 
 - [Reference](docs/reference.md): the data pipeline, every training tool and
