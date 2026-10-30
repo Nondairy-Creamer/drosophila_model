@@ -1,5 +1,11 @@
 # Drosophila connectome models
 
+<p align="center">
+  <img src="docs/media/drone_flight.webp" alt="A small drone hovering in front of a textured panel" width="704">
+  <br>
+  <em>Synthetic drosophila brain doing visual stabilization in a drone</em>
+</p>
+
 Sparse, efficient recurrent models of the *Drosophila* nervous system whose
 architecture comes from the FlyWire connectome. Each model is a
 `ConnectomeModel`: neurons and signed synapses are taken from the connectome
