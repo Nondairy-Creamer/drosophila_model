@@ -61,13 +61,13 @@ python -m drosophila_model.training.train --seed 42 --device cuda:0
 ```
 
 ```bash
-python -m drosophila_model.training.launch_runs --runs-per-gpu 4
+python -m drosophila_model.training.start_runs --runs-per-gpu 4
 ```
 
 | Module (`drosophila_model.training.…`) | What it does |
 |---|---|
 | `train` | Train one model from `config.toml` (`--seed`, `--device`, `--run-id`, `--timestamp`, `--config-path`; `--model-folder` warm-starts from an existing run with fresh noise, optimizer and folder). |
-| `launch_runs` | Launch `runs_per_gpu` × GPUs runs with seeds `base_seed + i` as `models/<tag>_gpuN_runM/`. Detaches by default; launcher log in `logs/launch_runs_<tag>.log`, per-run logs in `logs/`. |
+| `start_runs` | Start `runs_per_gpu` × GPUs runs with seeds `base_seed + i` as `models/<tag>_gpuN_runM/`. Detaches by default; launcher log in `logs/start_runs_<tag>.log`, per-run logs in `logs/`. |
 | `resume_runs` | Resume a run in place from its best checkpoint, optimizer state and loss history (`--model-folder`, `--num-epochs`); `--new-session` copies it to `<run>_cont` and restarts the optimizer. |
 | `rank_runs` | Rank runs under `models/` by best training loss and plot loss curves per group (`figures/rank_runs/`). |
 | `sync_models` | rsync runs to/from a remote server (`<server>`, `--push`, `--model-folder`, `--remote-dir`). |
@@ -161,7 +161,7 @@ drosophila_model/
   model_definition/         ConnectomeModel (neural_models), dynamics mixins (dynamics),
                             regions (optic / antenna lobe), readouts, model_layers,
                             ego_motion (flow <-> 6-DOF), connectome_loading
-  training/                 train, launch_runs, resume_runs, training_utilities
+  training/                 train, start_runs, resume_runs, training_utilities
                             (generate_dataset, model_outputs, compute_loss_components,
                             fit), loss_functions, model management tools
   data_handling/            raw-data baking, stimulus_generators, sampling,

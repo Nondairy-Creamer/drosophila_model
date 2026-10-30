@@ -6,13 +6,13 @@ This script detects available GPUs and distributes multiple training runs across
 each with a different random seed. All runs are executed in parallel.
 
 Usage (from the repo root):
-    python -m drosophila_model.training.launch_runs --runs-per-gpu 4
-    python -m drosophila_model.training.launch_runs --runs-per-gpu 10 --base-seed 100
-    python -m drosophila_model.training.launch_runs --runs-per-gpu 4 --tag my_experiment
+    python -m drosophila_model.training.start_runs --runs-per-gpu 4
+    python -m drosophila_model.training.start_runs --runs-per-gpu 10 --base-seed 100
+    python -m drosophila_model.training.start_runs --runs-per-gpu 4 --tag my_experiment
 
 Runs are written to models/<tag>_gpuN_runM/ and their output to
 logs/<tag>_gpuN_runM.log. By default the launcher detaches and logs to
-logs/launch_runs_<tag>.log; stop it (and its runs) with ``kill <pid>`` or
+logs/start_runs_<tag>.log; stop it (and its runs) with ``kill <pid>`` or
 ``python -m drosophila_model.training.stop_runs``.
 """
 
@@ -144,7 +144,7 @@ def exit_if_tag_used(tag):
         sys.exit(1)
 
 
-def launch_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None, config_path=None):
+def start_runs(runs_per_gpu=1, base_seed=None, script_path=None, model_path=None, tag=None, config_path=None):
     """
     Submit multiple training runs across available GPUs.
     
@@ -245,10 +245,10 @@ def main():
         epilog="""
     Examples:
     # Run 4 jobs per GPU using the base seed from config
-    python -m drosophila_model.training.launch_runs --runs-per-gpu 4
+    python -m drosophila_model.training.start_runs --runs-per-gpu 4
 
     # Run 10 jobs per GPU with custom base seed
-    python -m drosophila_model.training.launch_runs --runs-per-gpu 10 --base-seed 100
+    python -m drosophila_model.training.start_runs --runs-per-gpu 10 --base-seed 100
                 """
     )
     
@@ -339,7 +339,7 @@ def main():
         config_path = str(config_path)
 
     # By default, re-launch ourselves detached with output to
-    # logs/launch_runs_<tag>.log (replicates: nohup python -u -m ... > log 2>&1 &).
+    # logs/start_runs_<tag>.log (replicates: nohup python -u -m ... > log 2>&1 &).
     # The tag is fixed here so the launcher log and the run folders share it.
     if not args.foreground and os.environ.get('_SUBMIT_RUNS_FG') != '1':
         tag = args.tag if args.tag is not None else datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -347,13 +347,13 @@ def main():
         env = os.environ.copy()
         env['_SUBMIT_RUNS_FG'] = '1'
         Path('logs').mkdir(exist_ok=True)
-        launcher_log = Path('logs') / f'launch_runs_{tag}.log'
+        launcher_log = Path('logs') / f'start_runs_{tag}.log'
         log_file = open(launcher_log, 'w')
         relaunch_args = sys.argv[1:] + ['--foreground']
         if args.tag is None:
             relaunch_args += ['--tag', tag]
         proc = subprocess.Popen(
-            [sys.executable, '-u', '-m', 'drosophila_model.training.launch_runs'] + relaunch_args,
+            [sys.executable, '-u', '-m', 'drosophila_model.training.start_runs'] + relaunch_args,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # detach from terminal (POSIX setsid)
@@ -365,7 +365,7 @@ def main():
         sys.exit(0)
 
     # Submit runs
-    launch_runs(
+    start_runs(
         runs_per_gpu=args.runs_per_gpu,
         base_seed=args.base_seed,
         script_path=script_path,

@@ -63,7 +63,7 @@ including the best model (`model.pt`) and a loss plot
 To train several models on different seeds, across all your GPUs:
 
 ```bash
-python -m drosophila_model.training.launch_runs --runs-per-gpu 2
+python -m drosophila_model.training.start_runs --runs-per-gpu 2
 ```
 
 ## Change the settings

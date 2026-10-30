@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Stop every launch_runs launcher and training process (POSIX).
+"""Stop every start_runs launcher and training process (POSIX).
 
 Usage (from the repo root):
 
     python -m drosophila_model.training.stop_runs
 
-Matches both the module form (``-m drosophila_model.training.launch_runs`` /
-``...training.train``) and the script form (``launch_runs.py`` /
+Matches both the module form (``-m drosophila_model.training.start_runs`` /
+``...training.train``) and the script form (``start_runs.py`` /
 ``training/train.py``; a bare ``train.py`` is too common a name to match).
-launch_runs launchers are signalled first, so their handler can stop their
+start_runs launchers are signalled first, so their handler can stop their
 children; any training process still alive is then signalled directly.
 """
 import argparse
@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 PATTERNS = (
-    r'drosophila_model\.training\.launch_runs|launch_runs\.py',
+    r'drosophila_model\.training\.start_runs|start_runs\.py',
     r'drosophila_model\.training\.train( |$)|training/train\.py',
 )
 
@@ -32,7 +32,7 @@ def matching_pids(pattern):
 
 def main():
     argparse.ArgumentParser(
-        description='Send SIGTERM to every launch_runs launcher and training '
+        description='Send SIGTERM to every start_runs launcher and training '
                     'process (POSIX only).'
     ).parse_args()
     try:
