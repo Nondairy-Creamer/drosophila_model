@@ -21,6 +21,10 @@ translation) from natural and synthetic visual input.
 
 ## Setup
 
+**Recommended hardware:** with default settings, a training run takes about
+an hour on an NVIDIA A40 GPU and uses about 17 GB of GPU memory. Memory
+scales with `[training].batch_size` (32 by default).
+
 1. Download the code:
    ```bash
     git clone https://github.com/Nondairy-Creamer/drosophila_model.git
@@ -84,7 +88,7 @@ defaults, so typos fail loudly. The data bundle is read from
 `[data].data_folder`, which defaults to `../drosophila_model_data` (a folder
 next to the repo); set it in `config.toml` if your data lives elsewhere. The
 defaults are a setup that trains (conductance dynamics, flow + odometry loss
-on `random_pano`, `counterphase_sine` and `full_field_step`, 500 epochs), so a
+on `random_pano`, `counterphase_sine` and `full_field_step`, 250 epochs), so a
 minimal `config.toml` only needs what differs on your machine:
 
 ```toml

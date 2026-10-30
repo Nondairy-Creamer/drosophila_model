@@ -75,14 +75,15 @@ input_layer_l1 = 0.0
 # DataLoader shuffling (all routed through the model's rng). launch_runs uses
 # this as the base and assigns seed = base_seed + run_index per run;
 # training.train uses it directly. Both are overridden by the --base-seed /
-# --seed CLI flags. 7 reproduces the reference run trained on these defaults
-# (base_fit_seed7).
+# --seed CLI flags. 7 reproduces the first 250 epochs of the reference run
+# trained on these defaults (base_fit_seed7, which ran for 500).
 base_seed = 7
 # Passes over the training set (162 examples of the default datasets at
 # batch_size 32 -> 5 optimizer steps per epoch). Expect the loss to sit at
 # flow_loss ~1 / odometry_loss ~0.5 for the first ~5-45 epochs (seed
-# dependent) before it starts to fall; it levels off by ~300.
-num_epochs = 500
+# dependent) before it starts to fall. Over 10 seeds, the best flow_loss by
+# epoch 250 was within 0.015 (0.005 on average) of the best by epoch 500.
+num_epochs = 250
 # Re-draw the training loss plot (models/<run>/figures/training/loss.png)
 # every `save_every` epochs. Checkpoints are written whenever the loss improves.
 save_every = 1
