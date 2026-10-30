@@ -474,9 +474,17 @@ class ConductanceDynamics:
     are applied per edge: a sign-inverted edge is moved into the matrix of an
     opposite-sign transmitter (inhibitory -> the first excitatory one, e.g.
     GABA -> ACH, and vice versa), scaled by ``|factor|``; ``factor=0`` drops it.
+
+    ``threshold_init`` (``[model].threshold_init``) is every cell type's
+    initial firing threshold in mV. Neurons rest at the leak reversal
+    potential (-50 mV), so a threshold below that gives baseline firing.
+    ``synapse_gain_init`` (``[model].synapse_gain_init``) multiplies every cell
+    type's output strength after ``set_sigma_max`` (new models only), so 1
+    keeps the spectral-norm target and 3 starts each synapse 3x stronger.
     """
 
-    def __init__(self, *, init_new_model=True, **kwargs):
+    def __init__(self, *, init_new_model=True, threshold_init=-50.0, synapse_gain_init=1.0,
+                 **kwargs):
         super().__init__(**kwargs)
 
         self._save_init_inputs()
@@ -511,7 +519,7 @@ class ConductanceDynamics:
         # Membrane time constant tau = C / g_leak. With g_leak=1 and dt in
         # seconds, picking C = 0.04 s gives tau = 40 ms at rest.
         capacitance_inv_log_default = np.log(1.0 / 0.04)
-        threshold_default = -50
+        threshold_default = threshold_init
 
         unknown_transmitters = set(self.unique_transmitters) - set(rp_default.keys())
         if unknown_transmitters:
@@ -594,6 +602,7 @@ class ConductanceDynamics:
         if init_new_model:
             with torch.no_grad():
                 self.set_sigma_max()
+                self.output_strength_log.add_(np.log(synapse_gain_init))
                 self.zero_init_readouts()
 
     def _override_edge_transmitters(self):

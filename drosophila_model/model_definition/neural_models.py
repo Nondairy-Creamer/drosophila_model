@@ -1291,10 +1291,15 @@ class ConnectomeModel(BaseRnn):
 def dynamics_kwargs(model_config: dict) -> dict:
     """Constructor kwargs specific to ``model_config['dynamics_type']``.
 
-    Only ``CellAnnDynamics`` takes one (``[model].cell_ann_depth``).
+    ``CellAnnDynamics`` takes ``[model].cell_ann_depth`` and
+    ``ConductanceDynamics`` takes ``[model].threshold_init`` and
+    ``[model].synapse_gain_init``.
     """
     if model_config['dynamics_type'] == 'CellAnnDynamics':
         return {'cell_ann_depth': model_config['cell_ann_depth']}
+    if model_config['dynamics_type'] == 'ConductanceDynamics':
+        return {'threshold_init': model_config['threshold_init'],
+                'synapse_gain_init': model_config['synapse_gain_init']}
     return {}
 
 

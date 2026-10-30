@@ -15,6 +15,15 @@ model_type = 'ConnectomeModel'
 dynamics_type = 'ConductanceDynamics'
 # Depth of the per-neuron network (CellAnnDynamics only).
 cell_ann_depth = 1
+# Initial firing threshold of every cell type, in mV (ConductanceDynamics
+# only). Neurons rest at the leak reversal potential, -50 mV, so a threshold
+# below -50 gives them baseline firing at rest.
+threshold_init = -50.0
+# Multiplies every cell type's output strength after the spectral-norm
+# rescale (set_sigma_max, target 0.95), at init only (ConductanceDynamics
+# only). That rescale leaves each synaptic step passing on ~0.1-0.25 of its
+# input; 3 makes every synapse start 3x stronger.
+synapse_gain_init = 1.0
 # CUDA devices fall back to 'cpu' (with a warning) when CUDA is unavailable.
 device = "cuda:0"
 dtype = "float32"

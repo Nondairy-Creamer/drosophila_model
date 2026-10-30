@@ -582,10 +582,10 @@ where `R` = number of unique neurotransmitters, `T` = number of unique cell type
 ### Initialization
 
 - Reversal potentials default to biologically motivated values: ACH → +10 mV, GLUT/GABA → -70 mV, leak → -50 mV. Any other neurotransmitter raises.
-- `g_leak` = 1 and `C` = 0.04 (τ = 40 ms at rest), `threshold` = -50, `stimulus_strength` = 30.
+- `g_leak` = 1 and `C` = 0.04 (τ = 40 ms at rest), `threshold` = `[model].threshold_init` (default -50, the resting potential, so neurons start with no baseline firing), `stimulus_strength` = 30.
 - `input_strength` and `output_strength` are initialized from fan-in/fan-out as in `CurrentDynamics` (totals across all transmitters), then Gaussian noise of std `init_std` is added to every parameter.
 - Steady state is initialized to the leak reversal potential (rather than zero).
-- `set_sigma_max` linearizes around rest (`g_tot = g_leak`, slope-1 nonlinearity) and rescales `output_strength` as in `CurrentDynamics`.
+- `set_sigma_max` linearizes around rest (`g_tot = g_leak`, slope-1 nonlinearity) and rescales `output_strength` as in `CurrentDynamics`. `output_strength` is then multiplied by `[model].synapse_gain_init` (default 1).
 
 ## CellAnnDynamics
 
