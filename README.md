@@ -119,6 +119,12 @@ The FlyWire connectome data are licensed under CC BY-NC 4.0 (non-commercial use
 only). The eye map and data derived from it are licensed under GPL-3.0, and the
 panoramas under the Open Data Commons Attribution License (ODC-By 1.0).
 
+## License
+
+The code is released under the MIT License (see [LICENSE](LICENSE)).
+The license does not cover the data, which keep the licenses listed above,
+or the images in `docs/media/`.
+
 ## More detail
 
 - [Reference](docs/reference.md): the data pipeline, every training tool and
