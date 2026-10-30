@@ -27,6 +27,7 @@ def test_fit_plateau_reload(capsys, tmp_path):
         alpha=0.0,
         patience=0,
         alpha_factor=0.5,
+        takeoff_fraction=0.0,  # the loss never moves here, so count patience from the start
         input_noise_std=0.0,
         contrast_std=0.0,
     )

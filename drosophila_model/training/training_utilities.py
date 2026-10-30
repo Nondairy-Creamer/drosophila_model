@@ -310,7 +310,7 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                 num_steps=100, save_every=100, alpha=1e-4,
                 clip_grad_norm=None, adam_beta2=0.99,
                 reload_best_on_loss_jump=True,
-                patience=10, alpha_factor=0.5,
+                patience=10, alpha_factor=0.5, takeoff_fraction=0.01,
                 opt_state_dict=None, loss_history=None,
                 input_noise_std=0.0, contrast_std=0.0, luminance_std=0.0,
                 batch_size=None, train_mask=None, num_eyes=1, eye_offset=None):
@@ -338,6 +338,13 @@ def fit(model, inputs, target, output_neurons, input_neurons,
     one spike shrinks every step for hundreds of steps and can stall the
     start of learning; 0.99 (~100 steps) lets it recover. A resumed
     ``opt_state_dict`` keeps the betas it was saved with.
+
+    After ``patience`` epochs without a new best epoch loss, the best
+    checkpoint is reloaded and the learning rate multiplied by
+    ``alpha_factor``. That patience only counts once the best epoch loss has
+    fallen ``takeoff_fraction`` below the first epoch's: on the flat start it
+    would only shrink the learning rate before learning begins (0 counts from
+    the first epoch).
     """
 
     if rng is None:
@@ -389,6 +396,19 @@ def fit(model, inputs, target, output_neurons, input_neurons,
             best_loss = torch.tensor(float(finite_total.min()),
                                      device=model.device, dtype=model.dtype)
     time_since_best = 0
+    # Training starts on a flat stretch that can last hundreds of steps before
+    # the loss starts to fall; halving the learning rate there only delays it.
+    # So patience only counts once the best epoch loss is takeoff_fraction
+    # below the first epoch's.
+    start_loss = None
+    if loss_history and len(history_lengths) == 1 and history_lengths != {0}:
+        finite_history = history_total[np.isfinite(history_total)]
+        if finite_history.size:
+            start_loss = float(finite_history[0])
+
+    def took_off(best):
+        return start_loss is not None and float(best) <= (1 - takeoff_fraction) * start_loss
+
     last_reload_state = None
     last_reload_opt_state = None
 
@@ -475,6 +495,8 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                 if vals:
                     loss_plot[name].append(torch.stack(vals).mean().item())
             epoch_avg = torch.stack(epoch_losses).mean()
+            if start_loss is None:
+                start_loss = float(epoch_avg)
             if epoch_avg < best_loss:
                 best_loss = epoch_avg.detach()
                 time_since_best = 0
@@ -501,9 +523,9 @@ def fit(model, inputs, target, output_neurons, input_neurons,
                         except Exception:
                             pass
                         raise
-            else:
+            elif took_off(best_loss):
                 time_since_best += 1
-        else:
+        elif took_off(best_loss):
             time_since_best += 1
 
         if reload_best_on_loss_jump and (model_save_folder is not None):
