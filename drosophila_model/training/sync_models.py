@@ -9,7 +9,9 @@ Usage (from the repo root):
 
 Uses rsync over ssh for resumable, high-throughput transfers. Requires
 rsync on both ends (preinstalled on macOS and most Linux containers; it is
-installed on the remote with apt-get if missing).
+installed on the remote with apt-get if missing). On Windows it works with
+cwRsync (``choco install rsync``) from PowerShell, using the ssh.exe that
+ships with it (see :func:`_bundled_ssh`), or from WSL.
 
 Pulling everything groups runs locally by tag/timestamp:
 ``models/<tag>/<tag>_gpuN_runM/`` (``rank_runs`` scans that layout);
@@ -19,9 +21,10 @@ folders without a ``_gpuN_runM`` suffix land flat in ``models/<name>/``.
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Dict
 
 _LOCAL_MODELS_DIR = Path('models')  # relative to the working directory (the repo root)
@@ -86,21 +89,62 @@ def _resolve_server(server: str) -> tuple[str, str, str, str]:
     )
 
 
-def _build_ssh_arg(port: str, identity_file: str) -> str:
+def _bundled_ssh() -> Path | None:
+    '''
+    On Windows, the ssh.exe that ships next to the rsync on PATH, or None.
+
+    cwRsync (``choco install rsync``) is a Cygwin build. It can't drive
+    Windows' own OpenSSH client (System32\\OpenSSH, usually first on PATH):
+    the remote rsync starts but no data gets through ("connection unexpectedly
+    closed (0 bytes received so far)", exit code 12). Its bundled ssh.exe
+    works. Chocolatey puts a shim in ``chocolatey\\bin`` and the real files in
+    ``chocolatey\\lib\\rsync\\tools\\bin``.
+    '''
+    rsync = shutil.which('rsync')
+    if os.name != 'nt' or rsync is None:
+        return None
+    rsync_dir = Path(rsync).parent
+    for folder in (rsync_dir, rsync_dir.parent / 'lib' / 'rsync' / 'tools' / 'bin'):
+        if (folder / 'ssh.exe').is_file():
+            return folder / 'ssh.exe'
+    return None
+
+
+def _cygwin_path(path) -> str:
+    '''An absolute Windows path in Cygwin form: C:\\Users\\me -> /cygdrive/c/Users/me.'''
+    path = PureWindowsPath(path)
+    return '/'.join([f'/cygdrive/{path.drive[0].lower()}', *path.parts[1:]])
+
+
+def _build_ssh_arg(port: str, identity_file: str, ssh_exe: Path | None = None) -> str:
     '''
     Build the `-e` argument for rsync that invokes ssh with throughput-tuned
     options. Disables compression (model files are already binary/compressed)
     and tags the connection for throughput-optimized routing.
+
+    With *ssh_exe* (a Cygwin ssh, from :func:`_bundled_ssh`), the ssh, key and
+    the Windows known_hosts are given as Cygwin paths: that ssh reads ``~`` as
+    its own Cygwin home, not the Windows one.
     '''
+    if ssh_exe is None:
+        ssh = f'ssh -p {port} -i {identity_file} '
+    else:
+        key = Path(identity_file).expanduser().resolve()
+        known_hosts = Path.home() / '.ssh' / 'known_hosts'
+        ssh = (
+            f'{shlex.quote(_cygwin_path(ssh_exe))} -p {port} '
+            f'-i {shlex.quote(_cygwin_path(key))} '
+            f'-o UserKnownHostsFile={shlex.quote(_cygwin_path(known_hosts))} '
+        )
     return (
-        f'ssh -p {port} -i {identity_file} '
+        ssh +
         '-o Compression=no '
         '-o IPQoS=throughput '
         '-o ServerAliveInterval=30'
     )
 
 
-def _rsync_base(port: str, identity_file: str) -> list[str]:
+def _rsync_base(port: str, identity_file: str, ssh_exe: Path | None = None) -> list[str]:
     '''
     Standard rsync invocation:
       -a  archive (preserve perms/times)
@@ -114,7 +158,7 @@ def _rsync_base(port: str, identity_file: str) -> list[str]:
     '''
     return [
         'rsync', '-ahP', '--inplace', '--no-o', '--no-g',
-        '-e', _build_ssh_arg(port, identity_file),
+        '-e', _build_ssh_arg(port, identity_file, ssh_exe),
     ]
 
 
@@ -165,16 +209,20 @@ def rsync_transfer(
 
     # Strip leading "models/" if the user accidentally includes it,
     # since _LOCAL_MODELS_DIR / remote_models_dir already point to the models dir.
+    # Backslashes (PowerShell tab completion gives .\models\<run>\) become slashes.
     if folder:
+        folder = folder.replace('\\', '/').removeprefix('./')
         folder = folder.removeprefix('models/')
         folder = folder.strip('/')
 
+    # Local paths go to rsync with forward slashes: a Cygwin rsync (cwRsync)
+    # reads a backslash as part of the file name.
     if folder:
         remote_path = f'{remote_models_dir}/{folder}/'
-        local_path = str(_LOCAL_MODELS_DIR / folder)
+        local_path = (_LOCAL_MODELS_DIR / folder).as_posix()
     else:
         remote_path = f'{remote_models_dir}/'
-        local_path = str(_LOCAL_MODELS_DIR) + '/'
+        local_path = _LOCAL_MODELS_DIR.as_posix() + '/'
 
     # Check before contacting the remote (a push would otherwise create an
     # empty remote folder first).
@@ -184,12 +232,15 @@ def rsync_transfer(
     if shutil.which('rsync') is None:
         raise RuntimeError(
             'rsync not found on this machine. Install it locally (it ships with '
-            'macOS and most Linux distributions; on Windows run this from WSL) '
-            'and retry.'
+            'macOS and most Linux distributions; on Windows install cwRsync with '
+            '`choco install rsync`, or run this from WSL) and retry.'
         )
 
     ssh_base = ['ssh', '-p', port, '-i', identity_file, f'{user}@{hostname}']
-    rsync_base = _rsync_base(port, identity_file)
+    ssh_exe = _bundled_ssh()
+    if ssh_exe is not None:
+        print(f"Using the ssh that ships with rsync: {ssh_exe}")
+    rsync_base = _rsync_base(port, identity_file, ssh_exe)
 
     _ensure_remote_rsync(ssh_base)
 
@@ -232,7 +283,7 @@ def rsync_transfer(
                 local_dir = _LOCAL_MODELS_DIR if entry == prefix else _LOCAL_MODELS_DIR / prefix
                 os.makedirs(local_dir, exist_ok=True)
                 remote_spec = f'{user}@{hostname}:{remote_models_dir}/{entry}'
-                cmd = rsync_base + [remote_spec, str(local_dir) + '/']
+                cmd = rsync_base + [remote_spec, local_dir.as_posix() + '/']
                 print(f"Running: {' '.join(cmd)}")
                 subprocess.run(cmd, check=True)
 
@@ -247,7 +298,7 @@ def rsync_transfer(
 
         if folder:
             local_dir = Path(local_path)
-            files = sorted(str(f) for f in local_dir.iterdir() if f.is_file())
+            files = sorted(f.as_posix() for f in local_dir.iterdir() if f.is_file())
             if not files:
                 print("No files found in local directory.")
                 return
