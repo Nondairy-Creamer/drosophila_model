@@ -12,11 +12,12 @@
   <em>Predicted optic flow to a randomly rotating filtered natural scene</em>
 </p>
 
-Train your own models of the *Drosophila* nervous system in PyTorch. Each model
-is a recurrent network whose neurons and signed synapses come from the FlyWire
-connectome; only per-cell-type parameters, such as gains, time constants and
-input filters, are learned. By default you train the right optic lobe to report
-optic flow and ego-motion from visual input.
+This repository is for specifying and training models of the *Drosophila*
+nervous system in PyTorch. Each model is a recurrent network whose neurons and
+signed synapses come from the FlyWire connectome; only per-cell-type parameters,
+such as gains, time constants and input filters, are learned. The default
+configuration trains the right optic lobe to report optic flow and ego-motion
+from visual input.
 
 ## Setup
 
