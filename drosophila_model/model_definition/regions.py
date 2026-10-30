@@ -358,6 +358,8 @@ class OpticLobeRegion(RegionView):
     # (accessory medulla) is deliberately left out, so cells whose only
     # optic-lobe synapses are in AME are not claimed.
     neuropils = ['ME', 'LO', 'LOP', 'LA']
+    # Same as config_default.toml; used when a model is built without the key.
+    intrinsic = True
     # Anatomy-prior sign corrections. C2 and C3 are GABAergic (so the
     # bulk-NT classifier signs them negative) but their contacts onto L1
     # and L2 in the lamina are functionally excitatory — flip them back
@@ -378,7 +380,7 @@ class OpticLobeRegion(RegionView):
         'T4a', 'T4b', 'T4c', 'T4d',
         'T5a', 'T5b', 'T5c', 'T5d',
         'Tm1', 'Tm2', 'Tm3', 'Tm4',
-        'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+        'Tm9', 'Tm16', 'Tm20',
     ]
 
     def _load_extras(self, extras_dir: Path, opts: dict) -> None:

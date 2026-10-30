@@ -103,6 +103,7 @@ synapse_count_threshold = 2
 # OpticLobeRegion._load_extras as `opts` (unknown keys raise).
 [model.regions.optic_lobe]
 side                = 'right'            # the only supported value
+intrinsic           = true
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
@@ -113,7 +114,7 @@ readout_neurons     = [                  # cell types the hex-grid readouts deco
     'T4a', 'T4b', 'T4c', 'T4d',
     'T5a', 'T5b', 'T5c', 'T5d',
     'Tm1', 'Tm2', 'Tm3', 'Tm4',
-    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+    'Tm9', 'Tm16', 'Tm20',
 ]
 
 [model.regions.optic_lobe.regularizer_parameters]
@@ -125,9 +126,9 @@ takes a `{region_name: {'neuropils': [...], 'side': 'right'|'left'|'both',
 'intrinsic': bool}}` mapping. `count_threshold` applies to the total synapse
 count of a neuron pair, summed over neuropils; a pair that reaches it is an
 above-threshold connection in every neuropil where it has synapses. With
-`intrinsic = false` (default) a neuron is claimed if it has at least one
-above-threshold connection (as pre or post) in any of the region's resolved
-neuropils; with `intrinsic = true` only if all of its above-threshold
+`intrinsic = false` a neuron is claimed if it has at least one above-threshold
+connection (as pre or post) in any of the region's resolved neuropils; with
+`intrinsic = true` (the optic-lobe default) only if all of its above-threshold
 connections lie inside them. Synapses FlyWire assigns to no neuropil
 (`UNASGD`, mostly in the gaps between neighbouring neuropils) don't count as
 outside: otherwise a single stray one drops a cell, which removed 15-35% of
@@ -316,7 +317,7 @@ Region-owned configuration (sits in `region_kwargs['<area>']`, i.e.
 |---|---|---|---|
 | any | `side` | class `default_side` (`'right'` for `optic_lobe`, else `'both'`) | Hemisphere(s) of the bilateral neuropils to load |
 | any | `neuropils` | class `neuropils` (`optic_lobe`: `ME`, `LO`, `LOP`, `LA`) | Neuropils that claim neurons for this region |
-| any | `intrinsic` | `false` | Membership stringency (see above) |
+| any | `intrinsic` | class `intrinsic` (`optic_lobe`: `true`, else `false`) | Membership stringency (see above) |
 | any | `neurons_to_exclude` | class `default_neurons_to_exclude` (`optic_lobe`: `R1-6`, `R7`, `R8`) | Cell types stripped from this region before preprocessing |
 | any | `input_neurons` / `output_neurons` | class defaults (`optic_lobe`: `L1`/`L2`/`L3` in, `T4a-d`/`T5a-d` out) | `predict` defaults |
 | any | `sign_overrides` | class `sign_overrides` (`optic_lobe`: `C2`/`C3` → `L1`/`L2` flipped) | `(pre, post, factor)` list applied after NT signing |

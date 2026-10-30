@@ -42,11 +42,11 @@ use_connectome_subset = []
 [model.regions.optic_lobe]
 # Only 'right' is supported: the baked column geometry/ids are right-eye only.
 side                = 'right'
-# Membership stringency. false (default): a neuron joins this region if it
-# has >=1 above-threshold (synapse_count_threshold) connection in the
-# region's neuropils. true: only neurons whose every above-threshold
-# connection lies within the region (much more restrictive).
-intrinsic           = false
+# Membership stringency. false: a neuron joins this region if it has >=1
+# above-threshold (synapse_count_threshold) connection in the region's
+# neuropils. true: only neurons whose every above-threshold connection lies
+# within the region (much more restrictive).
+intrinsic           = true
 use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
@@ -57,7 +57,7 @@ readout_neurons     = [
     'T4a', 'T4b', 'T4c', 'T4d',
     'T5a', 'T5b', 'T5c', 'T5d',
     'Tm1', 'Tm2', 'Tm3', 'Tm4',
-    'Tm9', 'Tm16', 'Tm20', 'Tm28', 'Tm30',
+    'Tm9', 'Tm16', 'Tm20',
 ]
 
 [model.regions.optic_lobe.regularizer_parameters]
