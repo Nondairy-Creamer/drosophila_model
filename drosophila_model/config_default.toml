@@ -56,7 +56,9 @@ use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
-readouts            = ['FlowConv2Readout']
+# FlowConv2Readout (with the divisive denominator) left 2 of 5 seeds stuck at
+# flow_loss 1; the no-denominator version trained on every seed.
+readouts            = ['FlowConv2NoDenomReadout']
 readout_neurons     = [
     'T1', 'T2', 'T2a', 'T3',
     'T4a', 'T4b', 'T4c', 'T4d',

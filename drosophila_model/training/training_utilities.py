@@ -53,7 +53,8 @@ def load_processed_stimulus(config, device=None, dtype=None, split='train'):
     note, when loading the test split; it is an error only if none of the
     requested types has one.
 
-    Each file must have been baked at ``config['model']['dt']``, and a list of
+    Each file must have been baked at ``config['model']['dt']`` and the
+    ``[data].shared`` ``stim_time`` / ``pre_stim_time``, and a list of
     types must share one example shape (time steps x columns); a clear error
     asking for a re-bake is raised otherwise.
 
@@ -103,6 +104,15 @@ def load_processed_stimulus(config, device=None, dtype=None, split='train'):
                 f"{training_path} was baked at dt={baked_dt} but [model].dt is "
                 f"{config['model']['dt']}. Re-bake it with the current config."
             )
+        baked_config = data.get('stimulus_config') or {}
+        shared = config.get('data', {}).get('shared', {})
+        for key in ('stim_time', 'pre_stim_time'):
+            if key in baked_config and key in shared and not np.isclose(baked_config[key], shared[key]):
+                raise ValueError(
+                    f"{training_path} was baked with {key}={baked_config[key]} but "
+                    f"[data].shared.{key} is {shared[key]}. Re-bake it with: "
+                    f"python -m drosophila_model.data_handling.create_training_data {stim_type}"
+                )
         num_eyes_set.add(data['num_eyes'])
         eye_offsets.add(tuple(data['eye_offset']) if data['eye_offset'] is not None else None)
         stim_list.append(data['stimulus'].to(device=device, dtype=dtype))

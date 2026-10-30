@@ -190,10 +190,10 @@ How a run is shaped:
   `CurrentDivisiveDynamics`, `ConductanceDynamics`, `CellAnnDynamics`
   (per-neuron ANN on the connectome; depth `[model].cell_ann_depth`) or
   `ArbitraryDynamics` (connectome-free all-to-all cell-type baseline).
-- **Readouts** (`[model.regions.optic_lobe].readouts`): `FlowConv2Readout`
-  (default), `FlowConv3Readout`, `FlowLinearReadout`, `FlowNeuronReadout`,
-  `MotionMagReadout`, `MotionMagConv2Readout`. Regularizers: `L1Reg`, `L2Reg`,
-  `SigmaReg`.
+- **Readouts** (`[model.regions.optic_lobe].readouts`):
+  `FlowConv2NoDenomReadout` (default), `FlowConv2Readout`, `FlowConv3Readout`,
+  `FlowLinearReadout`, `FlowNeuronReadout`, `MotionMagReadout`,
+  `MotionMagConv2Readout`. Regularizers: `L1Reg`, `L2Reg`, `SigmaReg`.
 - **Sparsity / size:**
   - `[model].synapse_count_threshold` drops weak connections: neuron pairs
     whose total synapse count (summed over neuropils) is below it.

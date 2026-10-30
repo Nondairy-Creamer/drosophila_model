@@ -292,6 +292,28 @@ class FlowConv2Readout(HexGridReadout):
         )
 
 
+class FlowConv2NoDenomReadout(HexGridReadout):
+    """``FlowConv2Readout`` without the denominator: the last layer's two
+    channels are the flow.
+
+    The default. With the denominator, numerator and denominator can grow
+    together without changing the prediction; in some seeds both grew while
+    the prediction stayed near zero, and training never left flow_loss 1.
+    """
+
+    output_extra_dims = (2,)
+    eye_asymmetric = True
+    predicts_flow = True
+    zero_init = True
+
+    def __init__(self, *, readout_neurons=None, **kwargs):
+        super().__init__(
+            neurons_to_decode=readout_neurons,
+            num_channels=[8, 2], conv_sizes=[5, 5], use_denominator=False,
+            **kwargs,
+        )
+
+
 class FlowConv3Readout(HexGridReadout):
     """Three-layer hex-grid conv decoder producing 2-D optic flow."""
 

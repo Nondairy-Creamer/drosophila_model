@@ -69,7 +69,7 @@ torch.nn.Module
 ├── Readouts (readouts.py, built per region from [model.regions.<area>].readouts)
 │   ├── HexGridReadout        Base: stacked HexGridConv layers over per-column
 │   │   │                        features of the readout_neurons
-│   │   ├── FlowLinearReadout, FlowConv2Readout, FlowConv3Readout   (2-D flow)
+│   │   ├── FlowLinearReadout, FlowConv2NoDenomReadout, FlowConv2Readout, FlowConv3Readout   (2-D flow)
 │   │   └── MotionMagReadout, MotionMagConv2Readout                 (|flow|)
 │   ├── FlowNeuronReadout     2-D flow from weighted T4/T5 firing rates
 │   └── Regularizer           training_only: L1Reg, L2Reg, SigmaReg,
@@ -109,7 +109,7 @@ use_input_conv      = true
 conv_size_x         = 7
 input_pre_conv_size = 5
 num_temporal_modes  = 4
-readouts            = ['FlowConv2Readout']
+readouts            = ['FlowConv2NoDenomReadout']
 readout_neurons     = [                  # cell types the hex-grid readouts decode
     'T1', 'T2', 'T2a', 'T3',
     'T4a', 'T4b', 'T4c', 'T4d',
@@ -324,7 +324,7 @@ Region-owned configuration (sits in `region_kwargs['<area>']`, i.e.
 | any | `neurons_to_exclude` | class `default_neurons_to_exclude` (`optic_lobe`: `R1-6`, `R7`, `R8`) | Cell types stripped from this region before preprocessing |
 | any | `input_neurons` / `output_neurons` | class defaults (`optic_lobe`: `L1`/`L2`/`L3` in, `T4a-d`/`T5a-d` out) | `predict` defaults |
 | any | `sign_overrides` | class `sign_overrides` (`optic_lobe`: `C2`/`C3` → `L1`/`L2` flipped) | `(pre, post, factor)` list applied after NT signing |
-| any | `readouts` | class `default_readouts` (`optic_lobe`: `['FlowConv2Readout']`) | Readout / regularizer class names from `readouts.py` |
+| any | `readouts` | class `default_readouts` (`optic_lobe`: `['FlowConv2NoDenomReadout']`) | Readout / regularizer class names from `readouts.py` |
 | any | `readout_neurons` | class `default_readout_neurons` | Cell types the hex-grid readouts decode |
 | any | `regularizer_parameters` | `{}` | Only `input_layer_l1` (weight of the auto-built `DecoderWeightL1Reg`) |
 | `optic_lobe` | `use_input_conv` | `True` | Build + apply the input-conv stack (HexGridConv pre-filter + contrast norm + TemporalLRU) |
@@ -657,7 +657,8 @@ firing rates at every time step of `predict`; its output lands in
 
 | Readout | Output | Architecture |
 |---|---|---|
-| `FlowConv2Readout` (default) | 2-D flow | Two hex-grid conv layers (8 then 3 channels, size 5); the first two channels are divided by softplus of the third |
+| `FlowConv2NoDenomReadout` (default) | 2-D flow | Two hex-grid conv layers (8 then 2 channels, size 5) |
+| `FlowConv2Readout` | 2-D flow | Two hex-grid conv layers (8 then 3 channels, size 5); the first two channels are divided by softplus of the third. Numerator and denominator can grow together without changing the prediction; in 2 of 5 seeds both grew while the prediction stayed near zero, and training never left `flow_loss` 1 |
 | `FlowConv3Readout` | 2-D flow | Three layers (8, 6, 3 channels, size 5), same denominator |
 | `FlowLinearReadout` | 2-D flow | One layer (2 channels, size 3) |
 | `FlowNeuronReadout` | 2-D flow | Eight positive weights combining T4a–d / T5a–d firing rates per column |
@@ -673,7 +674,7 @@ through `HexGridConv` layers with softplus between them. Flow readouts set
 motion-magnitude readouts set `predicts_motion_mag` (used by `motion_mag`).
 The hex-grid flow readouts also set `zero_init`: a newly built model zeroes
 their last layer after the parameter-init noise (`zero_init_readouts`, with
-the denominator channel's bias set so softplus gives 1), so training starts
+any denominator channel's bias set so softplus gives 1), so training starts
 from zero predicted flow (`flow_loss` = 1) instead of a large first-step
 gradient that would otherwise sit in Adam's second-moment estimate.
 

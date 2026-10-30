@@ -372,7 +372,7 @@ class OpticLobeRegion(RegionView):
     ]
     # Readouts that produce column-aligned visual outputs (same as
     # config_default.toml; used when a model is built without a readouts list).
-    default_readouts = ['FlowConv2Readout']
+    default_readouts = ['FlowConv2NoDenomReadout']
     default_readout_neurons = [
         'T1', 'T2', 'T2a', 'T3',
         'T4a', 'T4b', 'T4c', 'T4d',
