@@ -125,8 +125,7 @@ Natural Scenes
 ## License
 
 The code is released under the MIT License (see [LICENSE](LICENSE)).
-The license does not cover the data, which keep the licenses listed above,
-or the images in `docs/media/`.
+The license does not cover the data or the images in `docs/media/`.
 
 ## More detail
 
